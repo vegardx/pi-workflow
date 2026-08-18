@@ -3,11 +3,13 @@
 `pi-workflow` is a custom workflow engine for Pi. It schedules tasks and owns
 workflow state while delegating all physical agent execution to pi-subagent.
 
-## Current phase
+## Contract discipline
 
-The repository is documentation-first. Do not implement runtime behavior until
-the glossary, contracts, state transitions, authority model, persistence, and
-acceptance criteria are explicit.
+- Treat the glossary and public contracts as the source of truth for terminology
+  and ownership.
+- Update contracts, state transitions, authority rules, persistence, and
+  acceptance coverage when behavior changes.
+- Do not claim behavior that is not implemented and validated.
 
 ## Design rules
 
