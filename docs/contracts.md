@@ -401,7 +401,9 @@ type WorkflowTaskStatus =
 	| "invalidated";
 ```
 
-`cleanup-blocked` is terminal and never degraded success.
+`cleanup-blocked` is an action-required blocked state: ordinary scheduling has
+stopped, and only explicit reconciliation or release may transition it to a
+proved terminal outcome. It is never degraded success.
 `completed-degraded` requires every required task and required finalizer to
 succeed while one or more optional tasks or advisory finalizers failed; all
 degradations remain visible.

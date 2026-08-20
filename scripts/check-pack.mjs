@@ -73,7 +73,7 @@ try {
 		[
 			"--input-type=module",
 			"--eval",
-			'const workflow = await import("@vegardx/pi-workflow"); const subagent = await import("@vegardx/pi-subagent"); const provider = await import("@vegardx/pi-subagent/service-provider"); if (workflow.WORKFLOW_RUNTIME_CONTRACT.schema !== "pi-workflow-runtime" || !workflow.isCompatibleSubagentContract(subagent.SUBAGENT_RUNTIME_CONTRACT) || typeof provider.acquireSubagentService !== "function") throw new Error("packed exports are unavailable or incompatible");',
+			'const workflow = await import("@vegardx/pi-workflow"); const subagent = await import("@vegardx/pi-subagent"); const provider = await import("@vegardx/pi-subagent/service-provider"); if (workflow.WORKFLOW_RUNTIME_CONTRACT.schema !== "pi-workflow-runtime" || !workflow.isCompatibleSubagentContract(subagent.SUBAGENT_RUNTIME_CONTRACT) || typeof provider.acquireSubagentService !== "function" || typeof workflow.WorkflowRunJournal?.open !== "function" || typeof workflow.acquireWorkflowRunLease !== "function") throw new Error("packed exports are unavailable or incompatible");',
 		],
 		{ cwd: project, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
 	);
