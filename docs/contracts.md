@@ -4,7 +4,9 @@ The examples in this document are design contracts, not implemented APIs.
 
 ## Static definition
 
-A saved workflow default-exports one object produced by `defineWorkflow`:
+A saved workflow uses a `.workflow.ts`, `.workflow.mts`, `.workflow.js`, or
+`.workflow.mjs` filename and default-exports one object produced by
+`defineWorkflow`:
 
 ```ts
 export default defineWorkflow({
@@ -51,6 +53,13 @@ type WorkflowReturn<T> = T | TaskHandle<T> | ArtifactHandle<T>;
 
 Inputs are validated before a run is created. The final value is validated and
 committed as a workflow-owned artifact before the run completes.
+
+Contract revision 1 identities cover the complete definition module but not a
+helper dependency graph. Static imports are limited to
+`@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
+CommonJS require, and TypeScript import assignment is rejected rather than
+silently omitted from source identity. Bundle-contained helper provenance is
+added before support tasks or multi-file definitions ship.
 
 ## Authoring handles
 
