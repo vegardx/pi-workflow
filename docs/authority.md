@@ -3,49 +3,77 @@
 ## Principles
 
 - Workflow definitions request capabilities; they do not implement authority.
-- Subagent authority is bounded by the selected agent definition and the
-  workflow task grant.
+- The scheduler executes only persisted, validated task declarations.
+- Subagent authority is bounded by the selected agent definition and workflow
+  task grant.
 - Project workflows are trusted code only after Pi project trust.
 - Dynamic workflow code is never trusted merely because it runs in a VM.
 - Support tasks are trusted local code and must be bundle-contained.
 - Worktree and sandbox requirements fail closed.
-- Publication, pushing, and PR creation are outside this runtime.
+- Publication, push, pull requests, merge, release, and deployment are outside
+  this runtime.
 
 ## Effective agent-task grant
 
 ```text
 workflow definition request
-  ∩ workflow policy
+  ∩ workflow runtime policy
   ∩ agent definition ceiling
   ∩ SubagentService capabilities
   ∩ project trust
-  = subagent request
+  = subagent preflight request
 ```
 
-The workflow runtime calls the versioned subagent `preflight` operation and
-persists its resolved launch-plan identity before idempotent launch. It does not
-infer authority from prompts or tool names after launch.
+The workflow runtime persists the exact resolved preflight identity before
+idempotent launch. It does not infer authority from prompts, task names, model
+output, or tool names after launch.
+
+## Service authority
+
+The `pi-subagent` extension owns service creation and shutdown. `pi-workflow`
+acquires it through Pi's process-local event bus and the public typed provider
+export. Provider discovery is composition among trusted extensions, not an
+authorization boundary.
+
+Workflow binds an owner client to its durable run identity. Model input cannot
+choose that owner. Missing, duplicate, or incompatible providers fail before a
+run starts. Workflow cannot replace the provider, access its private stores, or
+construct a fallback service.
 
 ## Static workflow trust
 
 User-global and package workflows are trusted according to their installation
 source. Project workflows load only when Pi marks the project trusted.
 
-A trusted workflow can still make dangerous requests; runtime policy and human
-checkpoints remain applicable.
+Static workflow code executes with extension-process authority. The bounded
+`WorkflowContext` reduces coupling but is not a sandbox. Runtime policy and
+human checkpoints still apply to dangerous task requests from trusted code.
+
+## Handles and graph validation
+
+Task and artifact handles are opaque capabilities scoped to one workflow run.
+The materializer rejects foreign-run handles, unknown producers, duplicate
+keys, cycles in the currently known graph, undeclared artifact reads, and
+requests exceeding policy limits.
+
+An order dependency grants readiness ordering only. A data dependency must name
+a verified artifact handle. The scheduler never passes all predecessor output
+implicitly.
 
 ## Dynamic workflow host API
 
-Dynamic code receives only bounded operations such as `agent`, `parallel`,
-`phase`, `artifact`, and `checkpoint`. It receives no direct filesystem,
-process, environment, network, module import, extension, store, or credential
-object.
+Dynamic code receives only bounded operations such as task declaration, result
+barriers, phases, artifacts, and checkpoints. Calls cross RPC and are validated
+by the same host materializer used by static workflows.
 
-Host operations validate task limits, stable keys, capabilities, and budget.
+Dynamic code receives no direct filesystem, process, environment, network,
+module import, extension, scheduler, store, credential, or `SubagentService`
+object. The worker-thread VM is not an OS security boundary.
 
 ## Deterministic support tasks
 
-Support helpers must be explicit bundle-relative modules with declared input and
-output schemas. Their source identity is included in task/replay identity. They
-run with extension-process authority and are therefore trusted code, not a
-sandbox substitute.
+Support helpers are explicit bundle-relative modules with declared input and
+output schemas. Their source identity is included in task and replay identity.
+They run with extension-process authority and are trusted code, not a sandbox
+substitute. Project-local helpers require the same project trust as their
+workflow definition.

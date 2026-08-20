@@ -2,22 +2,40 @@
 
 Custom workflow runtime for [Pi](https://pi.dev).
 
-This repository is in the contract-definition phase. It does not yet ship a
-working extension.
+This repository is in the implementation-ready contract phase. It does not yet
+ship a working extension.
 
 ## Goal
 
 Provide one reusable workflow engine with:
 
-- trusted TypeScript workflows and a later bounded dynamic mode;
-- explicit stages, stable tasks, parallelism, pipelines, and fan-out/fan-in;
+- trusted TypeScript workflow authoring and a later bounded dynamic frontend;
+- typed task/artifact handles that materialize a declarative durable graph;
+- stable tasks, explicit order/data dependencies, parallelism, pipelines, and
+  bounded fan-out/fan-in;
 - schema-validated agent results and deterministic support tasks;
-- append-only lifecycle state, resume, retry, replay, and reconciliation;
-- fail-closed checkpoints, cleanup finalizers, and bounded UI;
-- child execution delegated to one typed `SubagentService`.
+- append-only lifecycle state, leases, fencing, resume, retry, replay, and
+  reconciliation;
+- fail-closed persistence, required finalizers, and bounded UI;
+- physical child execution delegated to the exact extension-owned
+  `SubagentService`.
 
-`pi-workflow` owns orchestration. It does not spawn private child runtimes,
-implement publication, or define Maestro delivery policy.
+```text
+TypeScript effects
+      ↓
+validated TaskSpec graph
+      ↓
+journal + scheduler + recovery
+      ↓
+shared pi-subagent service
+```
+
+Workflows without result-dependent branches can materialize their complete DAG
+before execution. Data-dependent workflows materialize the same graph
+incrementally across explicit result barriers.
+
+`pi-workflow` owns orchestration. It does not spawn private child runtimes or
+own publication, push, pull-request, merge, release, or deployment policy.
 
 ## Documentation
 
@@ -36,7 +54,10 @@ implement publication, or define Maestro delivery policy.
 ## Dependency
 
 [`pi-subagent`](https://github.com/vegardx/pi-subagent) owns every physical
-agent run and attempt. Workflow consumes its versioned service capability.
+agent run and attempt. Its extension registers a lazy provider on Pi's event bus.
+Workflow acquires that exact service through the public typed provider export,
+checks the exact runtime contract, and never constructs or shuts down a second
+execution service.
 
 ## License
 

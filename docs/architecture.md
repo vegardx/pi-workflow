@@ -2,40 +2,51 @@
 
 ## Boundary
 
-`pi-workflow` owns orchestration and durable workflow state. Physical agent
-execution belongs exclusively to `pi-subagent`.
+`pi-workflow` owns authoring interpretation, orchestration, and durable workflow
+state. Physical agent execution belongs exclusively to `pi-subagent`.
 
 ```mermaid
 graph TD
-    Extension[Pi workflow extension]
-    Registry[Workflow registry]
-    Service[WorkflowService]
-    Compiler[Definition compiler]
+    Static[Trusted static TypeScript]
+    Dynamic[Bounded dynamic TypeScript later]
+    Materializer[Effect materializer]
+    Graph[Validated durable task graph]
     Scheduler[Scheduler]
-    Store[Journal and artifact store]
-    Subagents[SubagentService]
+    Journal[Journal and artifacts]
+    Broker[pi-subagent service provider]
+    Service[Extension-owned SubagentService]
     UI[Widget and inspector]
 
-    Extension --> Service
-    Service --> Registry
-    Service --> Compiler
-    Compiler --> Scheduler
-    Scheduler --> Store
-    Scheduler --> Subagents
-    Store --> UI
+    Static --> Materializer
+    Dynamic --> Materializer
+    Materializer --> Graph
+    Graph --> Journal
+    Graph --> Scheduler
+    Scheduler --> Broker
+    Broker --> Service
+    Journal --> UI
 ```
+
+Publication, push, pull requests, merge, release, and deployment are outside
+this runtime.
 
 ## Layers
 
-1. **Extension adapter** registers workflow tools, commands, and UI.
-2. **Registry** discovers definitions using Pi's effective agent directory.
-3. **Definition runtime** exposes the trusted TypeScript authoring API.
-4. **Compiler** binds source, input, policy, and resource identities.
-5. **Scheduler** owns task readiness, concurrency, cancellation, and finalizers.
-6. **Effect interpreter** materializes stable-keyed operations while the trusted workflow function runs.
-7. **Executors** dispatch agent tasks or deterministic support tasks.
-8. **Store** owns events, snapshots, artifacts, leases, and replay records.
-9. **UI** is a projection of persisted state, never the state owner.
+1. **Extension adapter** registers workflow tools, commands, lifecycle hooks,
+   and UI projections.
+2. **Registry** discovers definitions using Pi's effective agent directory and
+   project trust.
+3. **Authoring frontend** exposes typed task and artifact handles to trusted
+   static TypeScript.
+4. **Effect materializer** validates stable-keyed declarations and commits
+   declarative task records.
+5. **Scheduler** owns readiness, bounded concurrency, cancellation, budgets,
+   and finalization.
+6. **Executors** dispatch agent tasks through the shared service or run trusted
+   deterministic support tasks.
+7. **Store** owns events, snapshots, artifacts, leases, fencing, and replay
+   records.
+8. **UI** projects persisted state and never owns lifecycle authority.
 
 ## Definition roots
 
@@ -48,27 +59,73 @@ Name resolution is deterministic and provenance-aware:
 5. built-in workflows
 
 Project roots require Pi project trust. Package roots register through a typed
-service API; paths are not hardcoded in the workflow engine.
+workflow API; consumer paths are not hardcoded in the engine.
 
 ## Static workflows
 
 Saved workflows are trusted TypeScript modules default-exporting one
-`defineWorkflow({ meta, run })` object. They receive a bounded
-`WorkflowContext`; internal services, stores, and Pi extension objects are not
-exposed.
+`defineWorkflow` object. Input and output schemas are mandatory. The module
+receives a bounded `WorkflowContext`; stores, scheduler internals, Pi extension
+objects, credentials, and `SubagentService` are not exposed.
 
-Durable resume re-executes `run` from its entry point. Stable-keyed context
-operations are effects resolved from the journal or executed live. JavaScript
-continuations are never serialized.
+Effect calls return non-thenable task and artifact handles. The effect
+materializer lowers each declaration into a validated `TaskSpec`. An explicit
+`ctx.result` barrier waits for concrete data when orchestration control flow
+requires it.
 
-## Dynamic workflows
+A workflow can therefore produce:
 
-Dynamic workflow support is a later layer over the same host operations. A
-worker-thread VM supplies determinism and a narrow RPC surface. It is not an OS
-security boundary. Every host operation performs normal authority checks.
+- a complete DAG when it declares handle dependencies before requesting values;
+- an incrementally discovered DAG when later declarations depend on concrete
+  earlier results.
+
+The scheduler operates on the same declarative records in both cases.
+
+## Durable execution
+
+A run is durable from its first executable task. Before any child launch the
+runtime has persisted:
+
+- definition and input identity;
+- workflow run creation;
+- scheduler lease and fencing generation;
+- materialized task declaration;
+- task-execution generation;
+- exact subagent preflight identity;
+- launch intent and deterministic operation ID.
+
+Resume reconstructs state from the append-only journal and re-executes the
+workflow function from its entry point. Matching effects replay or reconcile.
+JavaScript continuations are never serialized.
 
 ## Subagent integration
 
-The workflow extension obtains one compatible `SubagentService` capability at
-startup. Absence or incompatibility fails before a workflow starts. It never
-loads or instantiates another subagent implementation.
+The `pi-subagent` extension registers one lazy provider on Pi's process-local
+event bus. `pi-workflow` acquires that provider through
+`@vegardx/pi-subagent/service-provider`, validates the exact runtime contract,
+and obtains the same service instance used by the standalone subagent tool.
+
+Workflow never:
+
+- constructs a second `SubagentService`;
+- starts Gondolin or a Pi child session directly;
+- accesses subagent stores behind the service;
+- shuts down the provider or service;
+- treats a run ID as bearer authorization.
+
+Each workflow run obtains an owner-bound client. Missing, duplicate, or
+incompatible providers fail before workflow work starts.
+
+## Dynamic workflows
+
+Dynamic workflows are a later authoring frontend over the same materializer.
+Their code runs in a bounded worker-thread VM and calls host operations through
+RPC. The host validates every requested task before committing it to the graph.
+
+Dynamic code receives no direct filesystem, environment, process, credential,
+network, module, store, extension, scheduler, or subagent object. The VM is a
+determinism and API boundary, not an OS security boundary.
+
+Recovery persists the approved source and digest, starts a fresh VM, re-executes
+from entry, and replays matching effects through the same interpreter used for
+static workflows.
