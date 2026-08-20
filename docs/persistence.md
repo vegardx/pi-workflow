@@ -31,10 +31,15 @@ Lifecycle events are append-only, versioned, and the source of truth. `run.json`
 is a bounded projection rebuilt from events. Corrupt or future-version records
 are isolated and fail closed.
 
-Each run has a single-writer lease with a monotonic fencing generation carried
-by every workflow state write and workflow-owned effect. Reclamation requires
-proof that the prior owner process is absent in addition to heartbeat expiry, so
-a live stale scheduler cannot coexist with a replacement owner. Subagent calls
+Each run has a single-writer lease backed by an OS-owned localhost listener.
+Every workflow state write and workflow-owned effect carries its monotonic
+fencing generation. The OS releases ownership when the process dies; a live
+owner keeps the listener and prevents replacement. The persisted lease record
+is observational and supplies the next generation, not proof of liveness.
+Lease ports are deterministic from run identity; a collision or unrelated local
+listener fails safe as temporary unavailability rather than selecting another
+port without shared authority.
+Subagent calls
 use their owner binding and stable operation IDs because the current public
 service does not accept a caller fencing token. Every external side effect still
 requires durable intent followed by a durable receipt.

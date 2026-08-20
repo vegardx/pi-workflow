@@ -32,3 +32,25 @@ export {
 	type WorkflowTaskStatus,
 	WorkflowTaskStatusSchema,
 } from "./contracts.js";
+export {
+	InvalidWorkflowRunTransitionError,
+	InvalidWorkflowTaskTransitionError,
+	transitionWorkflowRunStatus,
+	transitionWorkflowTaskStatus,
+} from "./lifecycle.js";
+export {
+	type WorkflowJournalEvent,
+	WorkflowJournalEventSchema,
+	WorkflowRunJournal,
+	type WorkflowRunSnapshot,
+	WorkflowRunSnapshotSchema,
+} from "./persistence/journal.js";
+export {
+	acquireWorkflowRunLease,
+	WorkflowPersistenceCorruptionError,
+	type WorkflowRunLease,
+	WorkflowRunLeaseFencedError,
+	type WorkflowRunLeaseRecord,
+	WorkflowRunLeaseRecordSchema,
+	WorkflowRunLeaseUnavailableError,
+} from "./persistence/run-lease.js";
