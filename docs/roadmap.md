@@ -1,72 +1,87 @@
 # Roadmap
 
-## Phase 0 — contracts
+## Phase 0 — implementation-ready contracts
 
-- glossary and ownership boundary;
-- workflow/run/task identity;
-- static definition API;
-- SubagentService compatibility contract;
-- authority model and project trust;
+- TypeScript handle authoring API;
+- declarative materialized task records;
+- complete versus incremental DAG semantics;
+- workflow/run/task/execution identity;
+- shared pi-subagent service-provider boundary;
+- authority and project trust;
 - run/task state machines;
-- persistence, replay, and failure taxonomy;
-- acceptance-test inventory.
+- journal, lease, fencing, replay, and failure contracts;
+- first-slice acceptance inventory.
 
-## Phase 1 — static workflow MVP
+## Phase 1 — durable static vertical slice
 
-Unit development uses a fake SubagentService matching the documented contract.
-Packed integration waits for a pi-subagent release exposing all required
-features.
+The first executable workflow is durable. Unit development uses a fake
+`SubagentService`; packed acceptance uses the provider exported by a compatible
+pi-subagent release.
 
-- TypeScript workflow discovery via `getAgentDir()` and project roots;
-- package root registration;
-- workflow list and validation;
-- sequential agent tasks;
-- exact model/tool requests through SubagentService;
-- strict structured outputs;
-- foreground cancellation and result.
+- package, build, lint, test, and pack scaffolding;
+- public schemas and versioned runtime contract;
+- trusted TypeScript definition and schema discovery;
+- deterministic definition and input identity;
+- append-only run journal and snapshot reducer;
+- single-writer lease and fencing generation;
+- one stable-keyed read-only structured-output agent task;
+- task handle, materialization, and explicit result barrier;
+- shared service acquisition and exact compatibility check;
+- owner binding, preflight, persisted launch intent, and idempotent launch;
+- status, wait, stop, and reconciliation;
+- workflow-owned artifact import and required subagent release;
+- process-restart recovery and effect replay;
+- packed local macOS Apple Silicon qualification.
 
-## Phase 2 — orchestration
+## Phase 2 — static orchestration
 
-- parallel and settled parallel;
-- pipelines and bounded fan-out;
-- stages and progress events;
-- deterministic support tasks;
-- nested static workflows with bounded depth;
-- concurrency, task, token, and time limits.
+- multiple sequential task declarations;
+- pi-subagent handoff-export contract and workflow-owned worktree artifacts
+  before enabling writer tasks;
+- complete DAG materialization through handles;
+- parallel and settled result barriers;
+- bounded fan-out and fan-in;
+- pipeline authoring helpers;
+- phases and structured progress events;
+- run/task concurrency, token, cost, and time budgets;
+- deterministic bundle-contained support tasks;
+- nested static workflows with bounded depth.
 
-## Phase 3 — durability
+## Phase 3 — durable control
 
-- journal and bounded snapshots;
-- run leases;
-- status, logs, wait, and stop;
-- retry and resume;
-- replay identity and invalidation;
-- subagent/workspace reconciliation;
-- required finalizers;
-- checkpoints.
+- explicit retry policies and task-execution generations;
+- interrupted-child resume;
+- replay identity and transitive invalidation;
+- required and advisory finalizers;
+- checkpoints and immutable decisions;
+- richer logs and reconciliation controls;
+- retention and pin coordination.
 
 ## Phase 4 — product surface
 
 - persistent widget and inspector;
-- packed integration tests with pi-subagent;
+- complete workflow command/tool surface;
 - workflow authoring skill;
+- packed integration matrix with pi-subagent;
 - first stable static-workflow API.
 
 ## Phase 5 — dynamic workflows
 
-- worker-thread VM;
-- bounded host API;
+- worker-thread VM and bounded RPC host API;
+- shared TaskSpec materializer;
 - generated-source review and approval;
-- stable task and budget enforcement;
-- dynamic recovery rules.
+- stable key, dependency, and budget enforcement;
+- incremental graph materialization from concrete results;
+- fresh-VM recovery through source re-execution and effect replay.
 
-## Initial non-goals
+## Non-goals
 
-- private subagent runtime;
-- publication and PR policy;
-- generated web wrappers;
-- web source caching;
+- private or fallback subagent runtime;
+- publication, push, pull-request, merge, release, or deployment policy;
+- generated web wrappers or web-source caching;
 - schedules;
 - unbounded recursive workflows;
 - arbitrary dynamic imports;
-- distributed or cross-machine workers.
+- distributed or cross-machine workers;
+- worker-thread VM security-boundary claims;
+- multiple public authoring frontends in the initial release.
