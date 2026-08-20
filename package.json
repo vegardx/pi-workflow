@@ -31,6 +31,12 @@
 	"engines": {
 		"node": ">=23.6.0"
 	},
+	"dependencies": {
+		"@babel/parser": "7.29.0",
+		"ajv": "8.20.0",
+		"ajv-formats": "3.0.1",
+		"jiti": "2.7.0"
+	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": ">=0.84.2 <0.85",
 		"@vegardx/pi-subagent": "0.9.0",

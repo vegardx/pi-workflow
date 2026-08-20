@@ -26,9 +26,13 @@ for (let depth = 0; depth < 16; depth++) {
 		Type.Record(Type.String(), JsonValueSchema),
 	]);
 }
-const JsonSchemaDocumentSchema = Type.Record(Type.String(), JsonValueSchema, {
-	additionalProperties: false,
-});
+export const JsonSchemaDocumentSchema = Type.Record(
+	Type.String(),
+	JsonValueSchema,
+	{
+		additionalProperties: false,
+	},
+);
 const ResourceNameSchema = Type.String({
 	pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
 	minLength: 1,

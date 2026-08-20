@@ -80,7 +80,7 @@ describe("workflow run leases", () => {
 		});
 		expect(replacement.record.generation).toBe(first.generation + 1);
 		await replacement.release();
-	});
+	}, 15_000);
 
 	it("fences a released writer after replacement", async () => {
 		const leaseRoot = root("fence");

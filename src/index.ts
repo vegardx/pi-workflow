@@ -5,6 +5,7 @@ export {
 	AgentTaskSpecSchema,
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
+	JsonSchemaDocumentSchema,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
 	type ReplayPolicy,
@@ -33,6 +34,18 @@ export {
 	WorkflowTaskStatusSchema,
 } from "./contracts.js";
 export {
+	type AgentTaskAuthoringRequest,
+	type ArtifactHandle,
+	defineWorkflow,
+	isWorkflowDefinition,
+	type TaskHandle,
+	type WorkflowContext,
+	type WorkflowDefinition,
+	type WorkflowDefinitionOptions,
+	type WorkflowMeta,
+	type WorkflowReturn,
+} from "./definition.js";
+export {
 	InvalidWorkflowRunTransitionError,
 	InvalidWorkflowTaskTransitionError,
 	transitionWorkflowRunStatus,
@@ -54,3 +67,12 @@ export {
 	WorkflowRunLeaseRecordSchema,
 	WorkflowRunLeaseUnavailableError,
 } from "./persistence/run-lease.js";
+export {
+	type DiscoveredWorkflow,
+	discoverWorkflows,
+	type WorkflowDefinitionIdentity,
+	WorkflowDefinitionLoadError,
+	WorkflowDefinitionTrustError,
+	type WorkflowRoot,
+	type WorkflowRootScope,
+} from "./registry.js";
