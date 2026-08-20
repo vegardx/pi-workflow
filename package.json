@@ -1,0 +1,48 @@
+{
+	"name": "@vegardx/pi-workflow",
+	"version": "0.1.0",
+	"description": "Durable workflow runtime for Pi.",
+	"type": "module",
+	"license": "MIT",
+	"files": [
+		"dist",
+		"docs",
+		"README.md",
+		"LICENSE"
+	],
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"prepare": "npm run build",
+		"check": "biome check . && tsc --noEmit && vitest run && npm run pack:check",
+		"lint": "biome check .",
+		"lint:fix": "biome check --write .",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"pack:check": "node scripts/check-pack.mjs"
+	},
+	"engines": {
+		"node": ">=23.6.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.84.2 <0.85",
+		"@vegardx/pi-subagent": "0.9.0",
+		"typebox": ">=1.3.14 <2"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.8",
+		"@earendil-works/pi-coding-agent": "0.84.2",
+		"@types/node": "24.13.3",
+		"@vegardx/pi-subagent": "file:../pi-subagent",
+		"typebox": "1.3.14",
+		"typescript": "7.0.2",
+		"vitest": "4.1.10"
+	}
+}
