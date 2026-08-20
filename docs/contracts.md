@@ -268,9 +268,10 @@ launch it:
 7. persists the launch receipt.
 
 After uncertain launch outcome it calls `findByOperation` before any new launch.
-Structured output remains subagent-owned at execution time. Workflow revalidates
-and imports the value and every downstream artifact into workflow-owned storage
-before task completion.
+Structured output remains subagent-owned at execution time. Workflow accepts
+only JSON-serializable output-schema documents within the runtime's bounded
+16-level schema-value depth, then revalidates and imports the value and every
+downstream artifact into workflow-owned storage before task completion.
 
 ## Identity hierarchy
 

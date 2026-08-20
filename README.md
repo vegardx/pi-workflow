@@ -59,6 +59,16 @@ Workflow acquires that exact service through the public typed provider export,
 checks the exact runtime contract, and never constructs or shuts down a second
 execution service.
 
+## Development
+
+Until `@vegardx/pi-subagent` is published, development resolves it from the
+sibling `../pi-subagent` checkout. CI checks out the exact qualified commit and
+builds it before running:
+
+```text
+npm run check
+```
+
 ## License
 
 MIT

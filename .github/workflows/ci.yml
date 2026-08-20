@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: pi-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vegardx/pi-subagent
+          ref: 317793f90260f801cac4bb55124eccd5ca83cc7b
+          path: pi-subagent
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: |
+            pi-workflow/package-lock.json
+            pi-subagent/package-lock.json
+      - run: npm ci
+        working-directory: pi-subagent
+      - run: npm run build
+        working-directory: pi-subagent
+      - run: npm ci
+        working-directory: pi-workflow
+      - run: npm run check
+        working-directory: pi-workflow
+      - run: npm audit --audit-level=low
+        working-directory: pi-workflow

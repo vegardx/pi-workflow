@@ -1,0 +1,6 @@
+.github/
+.pi/
+src/
+test/
+scripts/
+*.log
