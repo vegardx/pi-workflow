@@ -20,6 +20,8 @@ export {
 	TaskRefSchema,
 	WORKFLOW_CONTRACT_REVISION,
 	WORKFLOW_RUNTIME_CONTRACT,
+	type WorkflowArtifactHandleRef,
+	WorkflowArtifactHandleRefSchema,
 	type WorkflowArtifactRef,
 	WorkflowArtifactRefSchema,
 	type WorkflowRunId,
@@ -46,11 +48,28 @@ export {
 	type WorkflowReturn,
 } from "./definition.js";
 export {
+	type WorkflowBarrierProjection,
+	WorkflowBarrierProjectionSchema,
+	type WorkflowEventInput,
+	WorkflowEventInputSchema,
+	type WorkflowEventType,
+	type WorkflowStateProjection,
+	WorkflowStateProjectionSchema,
+	type WorkflowTaskProjection,
+	WorkflowTaskProjectionSchema,
+} from "./events.js";
+export {
 	InvalidWorkflowRunTransitionError,
 	InvalidWorkflowTaskTransitionError,
 	transitionWorkflowRunStatus,
 	transitionWorkflowTaskStatus,
 } from "./lifecycle.js";
+export {
+	type MaterializationCommit,
+	WorkflowMaterializationError,
+	WorkflowTaskMaterializer,
+	type WorkflowTaskMaterializerOptions,
+} from "./materializer.js";
 export {
 	type WorkflowJournalEvent,
 	WorkflowJournalEventSchema,
@@ -67,6 +86,11 @@ export {
 	WorkflowRunLeaseRecordSchema,
 	WorkflowRunLeaseUnavailableError,
 } from "./persistence/run-lease.js";
+export {
+	rebuildWorkflowSnapshot,
+	reduceWorkflowEvents,
+	WorkflowEventReductionError,
+} from "./reducer.js";
 export {
 	type DiscoveredWorkflow,
 	discoverWorkflows,

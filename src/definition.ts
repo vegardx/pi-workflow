@@ -15,7 +15,7 @@ import {
 	type TaskDisposition,
 	type TaskKey,
 	type TaskRef,
-	type WorkflowArtifactRef,
+	type WorkflowArtifactHandleRef,
 	type WorkflowRunId,
 } from "./contracts.js";
 
@@ -41,7 +41,7 @@ const WorkflowMetaSchema = Type.Object(
 export type WorkflowMeta = Static<typeof WorkflowMetaSchema>;
 
 export interface ArtifactHandle<T> {
-	readonly ref: WorkflowArtifactRef;
+	readonly ref: WorkflowArtifactHandleRef;
 	readonly [artifactHandleBrand]: T;
 }
 
@@ -49,6 +49,21 @@ export interface TaskHandle<T> {
 	readonly ref: TaskRef;
 	readonly output: ArtifactHandle<T>;
 	readonly [taskHandleBrand]: T;
+}
+
+export function createTaskHandle<T>(
+	ref: TaskRef,
+	outputRef: WorkflowArtifactHandleRef,
+): TaskHandle<T> {
+	const output = Object.freeze({
+		ref: Object.freeze({ ...outputRef }),
+		[artifactHandleBrand]: undefined as T,
+	});
+	return Object.freeze({
+		ref: Object.freeze({ ...ref }),
+		output,
+		[taskHandleBrand]: undefined as T,
+	});
 }
 
 export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
@@ -119,7 +134,10 @@ function deepFreeze<T>(value: T): T {
 	return Object.freeze(value);
 }
 
-function validatedJsonSchema(value: unknown, label: string): TSchema {
+export function validateJsonSchemaDocument(
+	value: unknown,
+	label: string,
+): TSchema {
 	if (!Value.Check(JsonSchemaDocumentSchema, value)) {
 		throw new Error(`${label} must be a bounded JSON-serializable schema`);
 	}
@@ -153,11 +171,11 @@ export function defineWorkflow<
 	if (!Value.Check(WorkflowMetaSchema, options.meta)) {
 		throw new Error("invalid workflow metadata");
 	}
-	const inputSchema = validatedJsonSchema(
+	const inputSchema = validateJsonSchemaDocument(
 		options.inputSchema,
 		"workflow input schema",
 	);
-	const outputSchema = validatedJsonSchema(
+	const outputSchema = validateJsonSchemaDocument(
 		options.outputSchema,
 		"workflow output schema",
 	);
@@ -186,8 +204,11 @@ export function isWorkflowDefinition(
 		return false;
 	}
 	try {
-		validatedJsonSchema(definition.inputSchema, "workflow input schema");
-		validatedJsonSchema(definition.outputSchema, "workflow output schema");
+		validateJsonSchemaDocument(definition.inputSchema, "workflow input schema");
+		validateJsonSchemaDocument(
+			definition.outputSchema,
+			"workflow output schema",
+		);
 		return true;
 	} catch {
 		return false;

@@ -146,22 +146,33 @@ describe("workflow run leases", () => {
 			"workflow_journal",
 			first,
 		);
-		await journal.append("created", {});
+		const runCreated = {
+			definitionIdentitySha256: "a".repeat(64),
+			inputSha256: "b".repeat(64),
+		};
+		await journal.append("run-created", runCreated);
 		await first.release();
 		const second = await acquireWorkflowRunLease({
 			storeRoot: base,
 			runId: "workflow_journal",
 			ownerId: "second",
 		});
-		await expect(journal.append("stale", {})).rejects.toBeInstanceOf(
-			WorkflowRunLeaseFencedError,
-		);
+		await expect(
+			journal.append("run-created", runCreated),
+		).rejects.toBeInstanceOf(WorkflowRunLeaseFencedError);
 		const adopted = await WorkflowRunJournal.open(
 			base,
 			"workflow_journal",
 			second,
 		);
-		expect((await adopted.append("adopted", {})).sequence).toBe(2);
+		expect(
+			(
+				await adopted.append("run-status-changed", {
+					from: "created",
+					to: "running",
+				})
+			).sequence,
+		).toBe(2);
 		await second.release();
 	});
 });

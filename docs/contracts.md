@@ -74,7 +74,11 @@ interface TaskHandle<T> {
 }
 
 interface ArtifactHandle<T> {
-	readonly ref: ArtifactRef;
+	readonly ref: {
+		runId: WorkflowRunId;
+		producerTaskId: WorkflowTaskId;
+		output: "result";
+	};
 }
 ```
 
@@ -149,6 +153,8 @@ interface MaterializedTask {
 	spec: TaskSpec;
 	definitionIdentity: string;
 	materializationSequence: number;
+	materializationEpoch: number;
+	epochPosition: number;
 }
 ```
 
@@ -157,9 +163,11 @@ fan-out create explicit child namespaces. Order dependencies use `after`; data
 dependencies use named artifact `inputs`. Consuming an artifact implies order,
 but order alone never grants data access.
 
-A materialization transaction validates keys, dependency ownership, schemas,
-limits, and authority before appending task-declared events. A scheduler may
-execute only committed declarations.
+A materialization epoch validates keys, dependency ownership, schemas, limits,
+and authority before appending ordered `task-declared` events followed by one
+`barrier-reached` commit marker. A scheduler may execute only declarations in
+an epoch closed by that marker. A crash between declarations and the marker
+leaves a replayable but non-executable prefix.
 
 ## Complete and incremental DAGs
 

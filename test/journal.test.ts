@@ -8,12 +8,17 @@ import {
 	WorkflowPersistenceCorruptionError,
 	type WorkflowRunLease,
 } from "../src/persistence/run-lease.js";
+import { rebuildWorkflowSnapshot } from "../src/reducer.js";
 
 function fixtureRoot(name: string): string {
 	return path.resolve(".pi", "test-journal", `${name}-${randomUUID()}`);
 }
 
 const leases = new Set<WorkflowRunLease>();
+const runCreated = {
+	definitionIdentitySha256: "a".repeat(64),
+	inputSha256: "b".repeat(64),
+};
 
 async function openJournal(root: string, runId: `workflow_${string}`) {
 	const lease = await acquireWorkflowRunLease({
@@ -37,10 +42,22 @@ describe("workflow run journal", () => {
 	it("serializes appends with owner and fencing evidence", async () => {
 		const root = fixtureRoot("append");
 		const { journal, lease } = await openJournal(root, "workflow_abc123");
+		const inputs = [
+			{ type: "run-created", data: runCreated },
+			{
+				type: "run-status-changed",
+				data: { from: "created", to: "running" },
+			},
+			...Array.from({ length: 8 }, (_, index) => ({
+				type: "run-status-changed" as const,
+				data:
+					index % 2 === 0
+						? ({ from: "running", to: "waiting" } as const)
+						: ({ from: "waiting", to: "running" } as const),
+			})),
+		] as const;
 		const events = await Promise.all(
-			Array.from({ length: 10 }, (_, index) =>
-				journal.append("observed", { index }),
-			),
+			inputs.map((input) => journal.appendEvent(input)),
 		);
 		expect(events.map((event) => event.sequence)).toEqual([
 			1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
@@ -62,8 +79,11 @@ describe("workflow run journal", () => {
 			first.lease,
 		);
 		const events = await Promise.all([
-			first.journal.append("first", {}),
-			second.append("second", {}),
+			first.journal.append("run-created", runCreated),
+			second.append("run-status-changed", {
+				from: "created",
+				to: "running",
+			}),
 		]);
 		expect(events.map((event) => event.sequence)).toEqual([1, 2]);
 		expect(await first.journal.readEvents()).toHaveLength(2);
@@ -72,14 +92,21 @@ describe("workflow run journal", () => {
 	it("repairs one torn tail and rejects interior corruption", async () => {
 		const root = fixtureRoot("torn");
 		const first = await openJournal(root, "workflow_torn");
-		await first.journal.append("created", {});
+		await first.journal.append("run-created", runCreated);
 		await appendFile(first.journal.journalPath, Buffer.from([0xe2]));
 		await first.lease.release();
 		leases.delete(first.lease);
 
 		const recovered = await openJournal(root, "workflow_torn");
 		expect(await recovered.journal.readEvents()).toHaveLength(1);
-		expect((await recovered.journal.append("continued", {})).sequence).toBe(2);
+		expect(
+			(
+				await recovered.journal.append("run-status-changed", {
+					from: "created",
+					to: "running",
+				})
+			).sequence,
+		).toBe(2);
 		await appendFile(recovered.journal.journalPath, "{broken}\n");
 		await recovered.lease.release();
 		leases.delete(recovered.lease);
@@ -91,7 +118,7 @@ describe("workflow run journal", () => {
 	it("rejects owner changes without a new fencing generation", async () => {
 		const root = fixtureRoot("fencing");
 		const first = await openJournal(root, "workflow_fencing");
-		const event = await first.journal.append("created", {});
+		const event = await first.journal.append("run-created", runCreated);
 		await appendFile(
 			first.journal.journalPath,
 			`${JSON.stringify({
@@ -113,13 +140,21 @@ describe("workflow run journal", () => {
 			fixtureRoot("snapshot"),
 			"workflow_snapshot",
 		);
-		await journal.append("created", {});
-		await journal.writeSnapshot({ status: "created" });
-		expect(await journal.readSnapshot()).toMatchObject({
+		await journal.append("run-created", runCreated);
+		await rebuildWorkflowSnapshot(journal);
+		const snapshot = await journal.readSnapshot();
+		expect(snapshot).toMatchObject({
 			runId: "workflow_snapshot",
 			lastSequence: 1,
-			state: { status: "created" },
+			state: { status: "created", currentEpoch: 1 },
 		});
+		if (!snapshot) throw new Error("missing snapshot");
+		await expect(
+			journal.writeSnapshot({
+				...structuredClone(snapshot.state),
+				status: "running",
+			}),
+		).rejects.toThrow("does not match journal reduction");
 		const invalid = JSON.parse(
 			await readFile(journal.snapshotPath, "utf8"),
 		) as { contractRevision: number };
@@ -133,12 +168,15 @@ describe("workflow run journal", () => {
 	it("rejects snapshots claiming events from a newer lease generation", async () => {
 		const root = fixtureRoot("snapshot-fence");
 		const first = await openJournal(root, "workflow_snapshotfence");
-		await first.journal.append("first", {});
-		await first.journal.writeSnapshot({ status: "running" });
+		await first.journal.append("run-created", runCreated);
+		await rebuildWorkflowSnapshot(first.journal);
 		await first.lease.release();
 		leases.delete(first.lease);
 		const second = await openJournal(root, "workflow_snapshotfence");
-		await second.journal.append("second", {});
+		await second.journal.append("run-status-changed", {
+			from: "created",
+			to: "running",
+		});
 		const snapshot = JSON.parse(
 			await readFile(second.journal.snapshotPath, "utf8"),
 		) as { lastSequence: number };
@@ -157,18 +195,21 @@ describe("workflow run journal", () => {
 			fixtureRoot("bounds"),
 			"workflow_bounds",
 		);
-		await expect(journal.append("undefined", undefined)).rejects.toThrow(
-			"not losslessly JSON-serializable",
-		);
-		await expect(journal.writeSnapshot(undefined)).rejects.toThrow(
-			"not losslessly JSON-serializable",
+		await expect(
+			journal.append("run-created", undefined as never),
+		).rejects.toThrow("invalid workflow journal event");
+		await expect(journal.writeSnapshot(undefined as never)).rejects.toThrow(
+			"invalid workflow run snapshot",
 		);
 		await expect(
-			journal.append("lossy", { omitted: undefined }),
-		).rejects.toThrow("not losslessly JSON-serializable");
+			journal.append("run-created", { omitted: undefined } as never),
+		).rejects.toThrow("invalid workflow journal event");
 		await expect(
-			journal.append("large", { value: "x".repeat(70 * 1024) }),
-		).rejects.toThrow("workflow journal event exceeds size limit");
+			journal.append("run-created", {
+				...runCreated,
+				value: "x".repeat(70 * 1024),
+			} as never),
+		).rejects.toThrow("invalid workflow journal event");
 		expect(await journal.readEvents()).toEqual([]);
 	});
 });
