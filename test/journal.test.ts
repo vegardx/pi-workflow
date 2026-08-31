@@ -115,6 +115,41 @@ describe("workflow run journal", () => {
 		);
 	});
 
+	it("rejects a complete read while a valid UTF-8 tail is incomplete", async () => {
+		const { journal } = await openJournal(
+			fixtureRoot("active-tail"),
+			"workflow_activetail",
+		);
+		await journal.append("run-created", runCreated);
+		await appendFile(journal.journalPath, '{"schema"');
+		await expect(journal.readEvents()).rejects.toThrow(
+			"incomplete trailing record",
+		);
+	});
+
+	it("does not repair a tail before validating journal fencing", async () => {
+		const root = fixtureRoot("repair-fencing");
+		const first = await openJournal(root, "workflow_repairfencing");
+		const event = await first.journal.append("run-created", runCreated);
+		const newer = {
+			...event,
+			sequence: 2,
+			eventId: randomUUID(),
+			fencingGeneration: event.fencingGeneration + 1,
+			type: "run-status-changed",
+			data: { from: "created", to: "running" },
+		};
+		await appendFile(
+			first.journal.journalPath,
+			`${JSON.stringify(newer)}\n{"partial"`,
+		);
+		const before = (await stat(first.journal.journalPath)).size;
+		await expect(
+			WorkflowRunJournal.open(root, "workflow_repairfencing", first.lease),
+		).rejects.toThrow("older than journal fencing evidence");
+		expect((await stat(first.journal.journalPath)).size).toBe(before);
+	});
+
 	it("rejects owner changes without a new fencing generation", async () => {
 		const root = fixtureRoot("fencing");
 		const first = await openJournal(root, "workflow_fencing");
@@ -163,6 +198,20 @@ describe("workflow run journal", () => {
 		await expect(journal.readSnapshot()).rejects.toBeInstanceOf(
 			WorkflowPersistenceCorruptionError,
 		);
+	});
+
+	it("does not return a snapshot that omits the durable journal tail", async () => {
+		const { journal } = await openJournal(
+			fixtureRoot("stale-snapshot"),
+			"workflow_stalesnapshot",
+		);
+		await journal.append("run-created", runCreated);
+		await rebuildWorkflowSnapshot(journal);
+		await journal.append("run-status-changed", {
+			from: "created",
+			to: "running",
+		});
+		expect(await journal.readSnapshot()).toBeUndefined();
 	});
 
 	it("rejects snapshots claiming events from a newer lease generation", async () => {

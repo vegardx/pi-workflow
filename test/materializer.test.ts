@@ -121,6 +121,20 @@ describe("workflow task materializer", () => {
 		expect(declaration.data.task.spec.after).toEqual([first.ref]);
 	});
 
+	it("retains control dependencies across an empty barrier", () => {
+		const runtime = materializer();
+		const first = runtime.agent("first", request());
+		runtime.closeEpoch("result", [first]);
+		runtime.closeEpoch("results", []);
+		const second = runtime.agent("second", request("Continue"));
+		const commit = runtime.closeEpoch("final", [second]);
+		const declaration = commit.events[0];
+		if (declaration?.type !== "task-declared") {
+			throw new Error("missing declaration");
+		}
+		expect(declaration.data.task.spec.after).toEqual([first.ref]);
+	});
+
 	it("replays an exact ordered epoch without producing new events", () => {
 		const initial = materializer();
 		const answer = initial.agent("answer", request());
@@ -158,6 +172,23 @@ describe("workflow task materializer", () => {
 		finalRuntime.closeEpoch("final", [answer]);
 		expect(() => finalRuntime.agent("later", request())).toThrow(
 			"final materialization barrier",
+		);
+	});
+
+	it("rejects an epoch that cannot fit in the durable projection", () => {
+		const runtime = materializer();
+		const largeRequest = {
+			...request(),
+			workspace: {
+				mode: "read-only" as const,
+				cwd: `/${"x".repeat(4095)}`,
+			},
+		};
+		for (let index = 0; index < 256; index += 1) {
+			runtime.agent(`task-${index}` as `task-${number}`, largeRequest);
+		}
+		expect(() => runtime.closeEpoch("final", [])).toThrow(
+			"durable state bounds",
 		);
 	});
 

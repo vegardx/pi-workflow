@@ -220,10 +220,13 @@ function parseJournal(
 	content: string,
 	runId: WorkflowRunId,
 ): WorkflowJournalEvent[] {
-	const hasTerminalNewline = content.endsWith("\n");
-	const lines = content.split("\n");
-	if (hasTerminalNewline) lines.pop();
-	else lines.pop();
+	if (content.length > 0 && !content.endsWith("\n")) {
+		throw new WorkflowPersistenceCorruptionError(
+			"workflow journal has an incomplete trailing record",
+		);
+	}
+	const lines = content.length === 0 ? [] : content.split("\n");
+	lines.pop();
 	const events: WorkflowJournalEvent[] = [];
 	for (const [index, line] of lines.entries()) {
 		if (!line) {
@@ -382,6 +385,18 @@ export class WorkflowRunJournal {
 						"workflow journal",
 					);
 					events = parseJournal(content, runId);
+					const latest = events.at(-1);
+					if (
+						latest &&
+						(lease.record.generation < latest.fencingGeneration ||
+							(lease.record.generation === latest.fencingGeneration &&
+								(lease.record.ownerId !== latest.ownerId ||
+									lease.record.leaseId !== latest.leaseId)))
+					) {
+						throw new WorkflowPersistenceCorruptionError(
+							"workflow run lease is older than journal fencing evidence",
+						);
+					}
 					await repairTornTail(journalPath, completeBytes, buffer.byteLength);
 					await chmod(journalPath, 0o600);
 					const handle = await open(journalPath, "r");
@@ -401,18 +416,6 @@ export class WorkflowRunJournal {
 							{ cause: error },
 						);
 					}
-				}
-				const latest = events.at(-1);
-				if (
-					latest &&
-					(lease.record.generation < latest.fencingGeneration ||
-						(lease.record.generation === latest.fencingGeneration &&
-							(lease.record.ownerId !== latest.ownerId ||
-								lease.record.leaseId !== latest.leaseId)))
-				) {
-					throw new WorkflowPersistenceCorruptionError(
-						"workflow run lease is older than journal fencing evidence",
-					);
 				}
 				if (coordinator && events.length < coordinator.sequence) {
 					throw new WorkflowPersistenceCorruptionError(
@@ -695,6 +698,7 @@ export class WorkflowRunJournal {
 					"workflow run snapshot diverges from journal reduction",
 				);
 			}
+			if (snapshot.lastSequence < this.coordinator.sequence) return undefined;
 			return snapshot;
 		} catch (error) {
 			if (error instanceof WorkflowPersistenceCorruptionError) throw error;

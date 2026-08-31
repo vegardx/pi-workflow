@@ -21,10 +21,13 @@ import {
 	validateJsonSchemaDocument,
 } from "./definition.js";
 import {
+	MAX_WORKFLOW_EVENT_INPUT_BYTES,
+	MAX_WORKFLOW_STATE_BYTES,
 	type WorkflowBarrierProjection,
 	type WorkflowEventInput,
 	WorkflowEventInputSchema,
 	type WorkflowStateProjection,
+	WorkflowStateProjectionSchema,
 } from "./events.js";
 
 const MAX_MATERIALIZED_TASKS = 256;
@@ -117,6 +120,7 @@ export class WorkflowTaskMaterializer {
 	private readonly namespace: readonly TaskKey[];
 	private readonly runId: WorkflowRunId;
 	private readonly seen = new Map<string, MaterializedAgentTask>();
+	private projectedState: WorkflowStateProjection;
 	private readonly uncommitted: MaterializedAgentTask[] = [];
 	private readonly controlAfter = new Map<string, TaskRef>();
 	private epoch = 1;
@@ -168,6 +172,19 @@ export class WorkflowTaskMaterializer {
 		this.expectedBarriers = new Map(
 			(previous?.barriers ?? []).map((barrier) => [barrier.epoch, barrier]),
 		);
+		this.projectedState = previous
+			? structuredClone(previous)
+			: {
+					runId: this.runId,
+					definitionIdentitySha256: this.definitionIdentitySha256,
+					inputSha256: this.inputSha256,
+					status: "created",
+					currentEpoch: 1,
+					lastSequence: 1,
+					tasks: {},
+					artifacts: {},
+					barriers: [],
+				};
 	}
 
 	agent<TOutputSchema extends TSchema>(
@@ -362,9 +379,11 @@ export class WorkflowTaskMaterializer {
 					"cannot extend an already committed materialization epoch",
 				);
 			}
-			this.controlAfter.clear();
-			for (const taskId of taskIds) {
-				this.controlAfter.set(taskId, { runId: this.runId, taskId });
+			if (taskIds.length > 0) {
+				this.controlAfter.clear();
+				for (const taskId of taskIds) {
+					this.controlAfter.set(taskId, { runId: this.runId, taskId });
+				}
 			}
 			if (kind === "final") this.finalClosed = true;
 			const epoch = this.epoch;
@@ -384,14 +403,58 @@ export class WorkflowTaskMaterializer {
 			type: "barrier-reached",
 			data: { epoch: this.epoch, kind, taskIds },
 		});
-		if (events.some((event) => !Value.Check(WorkflowEventInputSchema, event))) {
+		if (
+			events.some(
+				(event) =>
+					!Value.Check(WorkflowEventInputSchema, event) ||
+					Buffer.byteLength(canonicalJson(event)) >
+						MAX_WORKFLOW_EVENT_INPUT_BYTES,
+			)
+		) {
 			throw new WorkflowMaterializationError(
-				"materialized epoch exceeds event schema bounds",
+				"materialized epoch exceeds event schema or persistence bounds",
 			);
 		}
-		this.controlAfter.clear();
-		for (const taskId of taskIds) {
-			this.controlAfter.set(taskId, { runId: this.runId, taskId });
+		const projected = structuredClone(this.projectedState);
+		if (projected.currentEpoch !== this.epoch) {
+			throw new WorkflowMaterializationError(
+				"persisted projection epoch does not match materialization replay",
+			);
+		}
+		for (const task of this.uncommitted) {
+			projected.tasks[task.id] = {
+				task: structuredClone(task),
+				status: "pending",
+				committed: false,
+			};
+		}
+		for (const task of Object.values(projected.tasks)) {
+			if (task.task.materializationEpoch === this.epoch) {
+				task.committed = true;
+			}
+		}
+		projected.lastSequence += events.length;
+		projected.barriers.push({
+			epoch: this.epoch,
+			kind,
+			taskIds: [...taskIds],
+			sequence: projected.lastSequence,
+		});
+		projected.currentEpoch += 1;
+		if (
+			!Value.Check(WorkflowStateProjectionSchema, projected) ||
+			Buffer.byteLength(canonicalJson(projected)) > MAX_WORKFLOW_STATE_BYTES
+		) {
+			throw new WorkflowMaterializationError(
+				"materialized epoch exceeds durable state bounds",
+			);
+		}
+		this.projectedState = projected;
+		if (taskIds.length > 0) {
+			this.controlAfter.clear();
+			for (const taskId of taskIds) {
+				this.controlAfter.set(taskId, { runId: this.runId, taskId });
+			}
 		}
 		if (kind === "final") this.finalClosed = true;
 		this.uncommitted.length = 0;

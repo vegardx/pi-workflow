@@ -31,9 +31,9 @@ Lifecycle events are append-only, versioned, and the source of truth. Revision
 1 accepts only `run-created`, `task-declared`, `artifact-declared`,
 `barrier-reached`, `task-status-changed`, `task-invalidated`, and
 `run-status-changed`. `run.json` is a bounded typed projection rebuilt from
-those events and is accepted only when it exactly equals reduction of its
-covered journal prefix. Unknown, divergent, corrupt, or future-version records
-fail closed.
+those events and is returned only when it exactly equals reduction of the
+complete current journal. A valid older snapshot is ignored until rebuilt.
+Unknown, divergent, corrupt, or future-version records fail closed.
 
 Each run has a single-writer lease backed by an OS-owned localhost listener.
 Every workflow state write and workflow-owned effect carries its monotonic
@@ -71,8 +71,10 @@ runtime contract revision
 
 On re-execution, declarations are compared in ordered epochs separated by
 result barriers. Each declaration records its global materialization sequence,
-epoch, and position within that epoch. The still-valid ordered prefix must
-match exactly. A new suffix
+epoch, and position within that epoch. Materialization rejects epochs whose
+individual events or resulting projection exceed persistence bounds before any
+of that epoch is appended. The still-valid ordered prefix must match exactly. A
+new suffix
 may extend the last reached path. Explicit re-execution that replaces a concrete result transactionally
 invalidates its downstream epochs before a different branch can materialize;
 those prior records become abandoned history. The current reducer validates and

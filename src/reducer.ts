@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
 import type { WorkflowTaskId } from "./contracts.js";
 import {
+	MAX_WORKFLOW_STATE_BYTES,
 	type WorkflowEventInput,
 	WorkflowEventInputSchema,
 	type WorkflowStateProjection,
@@ -20,8 +21,6 @@ import type {
 	WorkflowRunJournal,
 	WorkflowRunSnapshot,
 } from "./persistence/journal.js";
-
-export const MAX_WORKFLOW_STATE_BYTES = 900 * 1024;
 
 export class WorkflowEventReductionError extends Error {
 	constructor(
@@ -86,7 +85,7 @@ function applyEvent(
 				event.sequence,
 			);
 		case "task-declared": {
-			const task = input.data.task;
+			const task = structuredClone(input.data.task);
 			if (state.barriers.some((barrier) => barrier.kind === "final")) {
 				fail("task declaration follows the final barrier", event.sequence);
 			}
@@ -143,6 +142,12 @@ function applyEvent(
 			if (task.epochPosition !== epochTaskCount + 1) {
 				fail("task epoch position is not contiguous", event.sequence);
 			}
+			const orderedDependencies = [...task.spec.after].sort((left, right) =>
+				left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0,
+			);
+			if (!isDeepStrictEqual(task.spec.after, orderedDependencies)) {
+				fail("task order dependencies are not canonical", event.sequence);
+			}
 			const explicitDependencies = new Set(
 				task.spec.after.map((dependency) => {
 					if (
@@ -172,7 +177,7 @@ function applyEvent(
 			break;
 		}
 		case "artifact-declared": {
-			const artifact = input.data.artifact;
+			const artifact = structuredClone(input.data.artifact);
 			if (artifact.runId !== state.runId) {
 				fail("artifact belongs to another run", event.sequence);
 			}
@@ -227,11 +232,25 @@ function applyEvent(
 					task.committed = true;
 				}
 			}
-			state.barriers.push({ ...input.data, sequence: event.sequence });
+			state.barriers.push({
+				...input.data,
+				taskIds: [...input.data.taskIds],
+				sequence: event.sequence,
+			});
 			state.currentEpoch += 1;
 			break;
 		}
 		case "task-status-changed": {
+			if (
+				state.status === "completed" ||
+				state.status === "completed-degraded" ||
+				state.status === "cancelled"
+			) {
+				fail(
+					"terminal workflow run may not change task status",
+					event.sequence,
+				);
+			}
 			const task = state.tasks[input.data.taskId];
 			if (!task) fail("task status target is unknown", event.sequence);
 			if (!task.committed) {
@@ -301,6 +320,9 @@ function applyEvent(
 			for (const taskId of actual) {
 				const task = state.tasks[taskId];
 				if (!task) fail("invalidation target is unknown", event.sequence);
+				if (!task.committed) {
+					fail("uncommitted task may not be invalidated", event.sequence);
+				}
 				try {
 					task.status = transitionWorkflowTaskStatus(
 						task.status,
@@ -319,6 +341,18 @@ function applyEvent(
 			if (state.status !== input.data.from) {
 				fail("run status source does not match projection", event.sequence);
 			}
+			let nextStatus: WorkflowStateProjection["status"];
+			try {
+				nextStatus = transitionWorkflowRunStatus(
+					input.data.from,
+					input.data.to,
+				);
+			} catch (error) {
+				throw new WorkflowEventReductionError(
+					(error as Error).message,
+					event.sequence,
+				);
+			}
 			if (
 				input.data.to === "finalizing" &&
 				(!state.barriers.some((barrier) => barrier.kind === "final") ||
@@ -332,6 +366,13 @@ function applyEvent(
 					"run finalized before its required work completed",
 					event.sequence,
 				);
+			}
+			if (
+				(input.data.to === "completed" ||
+					input.data.to === "completed-degraded") &&
+				!state.barriers.some((barrier) => barrier.kind === "final")
+			) {
+				fail("run completed without a final barrier", event.sequence);
 			}
 			if (
 				(input.data.to === "completed" ||
@@ -374,17 +415,7 @@ function applyEvent(
 					event.sequence,
 				);
 			}
-			try {
-				state.status = transitionWorkflowRunStatus(
-					input.data.from,
-					input.data.to,
-				);
-			} catch (error) {
-				throw new WorkflowEventReductionError(
-					(error as Error).message,
-					event.sequence,
-				);
-			}
+			state.status = nextStatus;
 		}
 	}
 	state.lastSequence = event.sequence;

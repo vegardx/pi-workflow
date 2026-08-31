@@ -197,7 +197,10 @@ export const AgentTaskSpecSchema = Type.Object(
 		key: TaskKeySchema,
 		kind: Type.Literal("agent"),
 		disposition: TaskDispositionSchema,
-		after: Type.Array(TaskRefSchema, { maxItems: 256 }),
+		after: Type.Array(TaskRefSchema, {
+			maxItems: 256,
+			uniqueItems: true,
+		}),
 		inputs: TaskInputsSchema,
 		replay: ReplayPolicySchema,
 		request: AgentTaskRequestSchema,
