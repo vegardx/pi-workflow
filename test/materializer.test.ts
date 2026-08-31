@@ -192,6 +192,28 @@ describe("workflow task materializer", () => {
 		);
 	});
 
+	it("does not resume materialization for a terminal run", () => {
+		const terminal = reduceWorkflowEvents(
+			records([
+				{
+					type: "run-status-changed",
+					data: { from: "created", to: "running" },
+				},
+				{
+					type: "run-status-changed",
+					data: { from: "running", to: "stopping" },
+				},
+				{
+					type: "run-status-changed",
+					data: { from: "stopping", to: "cancelled" },
+				},
+			]),
+		);
+		expect(() => materializer(terminal)).toThrow(
+			"terminal workflow run may not materialize",
+		);
+	});
+
 	it("fails closed on changed or duplicate declarations", () => {
 		const initial = materializer();
 		const answer = initial.agent("answer", request());
