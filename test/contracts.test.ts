@@ -16,6 +16,7 @@ function artifactRef() {
 		id: `artifact_${sha}`,
 		runId: "workflow_abc123",
 		producerTaskId: "task_abc123",
+		output: "result" as const,
 		sha256: sha,
 		bytes: 2,
 		mediaType: "application/json",
@@ -93,6 +94,8 @@ describe("workflow contracts", () => {
 			spec: agentTaskSpec(),
 			definitionIdentitySha256: sha,
 			materializationSequence: 1,
+			materializationEpoch: 1,
+			epochPosition: 1,
 		};
 		expect(Value.Check(MaterializedAgentTaskSchema, task)).toBe(true);
 	});

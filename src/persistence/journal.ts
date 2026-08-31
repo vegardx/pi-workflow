@@ -11,6 +11,13 @@ import {
 	WorkflowRunIdSchema,
 } from "../contracts.js";
 import {
+	type WorkflowEventInput,
+	WorkflowEventInputSchema,
+	type WorkflowEventType,
+	type WorkflowStateProjection,
+	WorkflowStateProjectionSchema,
+} from "../events.js";
+import {
 	WorkflowPersistenceCorruptionError,
 	type WorkflowRunLease,
 } from "./run-lease.js";
@@ -55,7 +62,7 @@ export const WorkflowRunSnapshotSchema = Type.Object(
 			minimum: 0,
 			maximum: Number.MAX_SAFE_INTEGER,
 		}),
-		state: Type.Unknown(),
+		state: WorkflowStateProjectionSchema,
 	},
 	{ additionalProperties: false },
 );
@@ -242,6 +249,15 @@ function parseJournal(
 				`invalid workflow journal schema at line ${index + 1}`,
 			);
 		}
+		const payload = {
+			type: (value as WorkflowJournalEvent).type,
+			data: (value as WorkflowJournalEvent).data,
+		};
+		if (!Value.Check(WorkflowEventInputSchema, payload)) {
+			throw new WorkflowPersistenceCorruptionError(
+				`unknown or invalid workflow event at line ${index + 1}`,
+			);
+		}
 		if (JSON.stringify(value) !== line) {
 			throw new WorkflowPersistenceCorruptionError(
 				`non-canonical workflow journal record at line ${index + 1}`,
@@ -375,6 +391,17 @@ export class WorkflowRunJournal {
 						await handle.close();
 					}
 				}
+				if (events.length > 0) {
+					const { reduceWorkflowEvents } = await import("../reducer.js");
+					try {
+						reduceWorkflowEvents(events);
+					} catch (error) {
+						throw new WorkflowPersistenceCorruptionError(
+							"workflow journal violates run invariants",
+							{ cause: error },
+						);
+					}
+				}
 				const latest = events.at(-1);
 				if (
 					latest &&
@@ -435,7 +462,14 @@ export class WorkflowRunJournal {
 		return result;
 	}
 
-	append(type: string, data: unknown): Promise<WorkflowJournalEvent> {
+	appendEvent(input: WorkflowEventInput): Promise<WorkflowJournalEvent> {
+		return this.append(input.type, input.data as never);
+	}
+
+	append<T extends WorkflowEventType>(
+		type: T,
+		data: Extract<WorkflowEventInput, { type: T }>["data"],
+	): Promise<WorkflowJournalEvent> {
 		return this.lease.withCurrent(() =>
 			this.enqueue(async () => {
 				const event: WorkflowJournalEvent = {
@@ -451,12 +485,24 @@ export class WorkflowRunJournal {
 					type,
 					data,
 				};
-				if (!Value.Check(WorkflowJournalEventSchema, event)) {
+				if (
+					!Value.Check(WorkflowJournalEventSchema, event) ||
+					!Value.Check(WorkflowEventInputSchema, { type, data })
+				) {
 					throw new Error("invalid workflow journal event");
 				}
 				const roundTrip = jsonRoundTrip(event, "workflow journal event");
 				if (!Value.Check(WorkflowJournalEventSchema, roundTrip.value)) {
 					throw new Error("invalid JSON-roundtripped workflow journal event");
+				}
+				const existingEvents = await this.readEventsUncoordinated();
+				const { reduceWorkflowEvents } = await import("../reducer.js");
+				try {
+					reduceWorkflowEvents([...existingEvents, roundTrip.value]);
+				} catch (error) {
+					throw new Error("workflow journal event violates run invariants", {
+						cause: error,
+					});
 				}
 				const line = `${roundTrip.json}\n`;
 				const lineBytes = Buffer.byteLength(line);
@@ -538,9 +584,23 @@ export class WorkflowRunJournal {
 		});
 	}
 
-	writeSnapshot(state: unknown): Promise<WorkflowRunSnapshot> {
+	writeSnapshot(state: WorkflowStateProjection): Promise<WorkflowRunSnapshot> {
 		return this.lease.withCurrent(() =>
 			this.enqueue(async () => {
+				if (!Value.Check(WorkflowStateProjectionSchema, state)) {
+					throw new Error("invalid workflow run snapshot state");
+				}
+				const events = await this.readEventsUncoordinated();
+				const { reduceWorkflowEvents } = await import("../reducer.js");
+				const rebuilt = reduceWorkflowEvents(events);
+				if (
+					state.lastSequence !== this.coordinator.sequence ||
+					!isDeepStrictEqual(state, rebuilt)
+				) {
+					throw new Error(
+						"workflow run snapshot state does not match journal reduction",
+					);
+				}
 				const snapshot: WorkflowRunSnapshot = {
 					schema: "pi-workflow-snapshot",
 					contractRevision: WORKFLOW_CONTRACT_REVISION,
@@ -604,6 +664,7 @@ export class WorkflowRunJournal {
 					: events[snapshot.lastSequence - 1];
 			if (
 				snapshot.runId !== this.runId ||
+				snapshot.state.lastSequence !== snapshot.lastSequence ||
 				snapshot.lastSequence > this.coordinator.sequence ||
 				snapshot.fencingGeneration > this.lease.record.generation ||
 				(snapshot.fencingGeneration === this.lease.record.generation &&
@@ -617,6 +678,21 @@ export class WorkflowRunJournal {
 			) {
 				throw new WorkflowPersistenceCorruptionError(
 					"workflow run snapshot identity, sequence, or fencing mismatch",
+				);
+			}
+			const { reduceWorkflowEvents } = await import("../reducer.js");
+			let rebuilt: WorkflowStateProjection;
+			try {
+				rebuilt = reduceWorkflowEvents(events.slice(0, snapshot.lastSequence));
+			} catch (error) {
+				throw new WorkflowPersistenceCorruptionError(
+					"workflow run snapshot covers an invalid journal projection",
+					{ cause: error },
+				);
+			}
+			if (!isDeepStrictEqual(snapshot.state, rebuilt)) {
+				throw new WorkflowPersistenceCorruptionError(
+					"workflow run snapshot diverges from journal reduction",
 				);
 			}
 			return snapshot;

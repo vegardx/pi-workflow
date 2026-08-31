@@ -27,9 +27,13 @@ ordinary diagnostics.
 
 ## Journal and snapshot
 
-Lifecycle events are append-only, versioned, and the source of truth. `run.json`
-is a bounded projection rebuilt from events. Corrupt or future-version records
-are isolated and fail closed.
+Lifecycle events are append-only, versioned, and the source of truth. Revision
+1 accepts only `run-created`, `task-declared`, `artifact-declared`,
+`barrier-reached`, `task-status-changed`, `task-invalidated`, and
+`run-status-changed`. `run.json` is a bounded typed projection rebuilt from
+those events and is accepted only when it exactly equals reduction of its
+covered journal prefix. Unknown, divergent, corrupt, or future-version records
+fail closed.
 
 Each run has a single-writer lease backed by an OS-owned localhost listener.
 Every workflow state write and workflow-owned effect carries its monotonic
@@ -66,10 +70,15 @@ runtime contract revision
 ```
 
 On re-execution, declarations are compared in ordered epochs separated by
-result barriers. The still-valid ordered prefix must match exactly. A new suffix
+result barriers. Each declaration records its global materialization sequence,
+epoch, and position within that epoch. The still-valid ordered prefix must
+match exactly. A new suffix
 may extend the last reached path. Explicit re-execution that replaces a concrete result transactionally
 invalidates its downstream epochs before a different branch can materialize;
-those prior records become abandoned history. Duplicate keys, ambiguous
+those prior records become abandoned history. The current reducer validates and
+records exact transitive invalidation, while materializer replay of invalidated
+state remains unavailable until task-execution generations land in phase 3.
+Duplicate keys, ambiguous
 matches, changed requests, or insertion/removal/reordering inside a valid prefix
 fail closed.
 

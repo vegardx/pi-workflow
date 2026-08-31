@@ -120,11 +120,24 @@ export const TaskRefSchema = Type.Object(
 );
 export type TaskRef = Static<typeof TaskRefSchema>;
 
+export const WorkflowArtifactHandleRefSchema = Type.Object(
+	{
+		runId: WorkflowRunIdSchema,
+		producerTaskId: WorkflowTaskIdSchema,
+		output: Type.Literal("result"),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowArtifactHandleRef = Static<
+	typeof WorkflowArtifactHandleRefSchema
+>;
+
 export const WorkflowArtifactRefSchema = Type.Object(
 	{
 		id: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
 		runId: WorkflowRunIdSchema,
 		producerTaskId: Type.Optional(WorkflowTaskIdSchema),
+		output: Type.Optional(Type.Literal("result")),
 		sha256: Sha256Schema,
 		bytes: Type.Integer({ minimum: 0, maximum: 16 * 1024 * 1024 }),
 		mediaType: Type.String({
@@ -170,10 +183,14 @@ export const AgentTaskRequestSchema = Type.Object(
 );
 export type AgentTaskRequest = Static<typeof AgentTaskRequestSchema>;
 
-const TaskInputsSchema = Type.Record(TaskKeySchema, WorkflowArtifactRefSchema, {
-	additionalProperties: false,
-	maxProperties: 64,
-});
+const TaskInputsSchema = Type.Record(
+	TaskKeySchema,
+	WorkflowArtifactHandleRefSchema,
+	{
+		additionalProperties: false,
+		maxProperties: 64,
+	},
+);
 
 export const AgentTaskSpecSchema = Type.Object(
 	{
@@ -198,6 +215,8 @@ export const MaterializedAgentTaskSchema = Type.Object(
 		spec: AgentTaskSpecSchema,
 		definitionIdentitySha256: Sha256Schema,
 		materializationSequence: Type.Integer({ minimum: 1 }),
+		materializationEpoch: Type.Integer({ minimum: 1 }),
+		epochPosition: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
 );
@@ -230,7 +249,7 @@ export type WorkflowRuntimeContract = Static<
 
 const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 	schema: "pi-subagent-runtime",
-	contractRevision: 1,
+	contractRevision: 4,
 	features: Object.freeze({
 		nativeSessionBackend: true,
 		gondolinSandbox: true,
@@ -250,6 +269,7 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		publicNetworkEgress: true,
 		explicitResources: true,
 		ambientExtensionsControl: true,
+		hostBrokeredTools: true,
 	}),
 });
 
