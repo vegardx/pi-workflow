@@ -8,6 +8,9 @@ import {
 	WorkflowTaskStatusSchema,
 } from "./contracts.js";
 
+export const MAX_WORKFLOW_EVENT_INPUT_BYTES = 60 * 1024;
+export const MAX_WORKFLOW_STATE_BYTES = 900 * 1024;
+
 const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 
 const RunCreatedEventSchema = Type.Object(

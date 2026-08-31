@@ -128,6 +128,30 @@ describe("workflow event reducer", () => {
 		).toThrow("uncommitted task");
 	});
 
+	it("rejects invalidation of an uncommitted declaration", () => {
+		const { first, commit } = committedGraph();
+		const declaration = commit.events[0];
+		if (declaration?.type !== "task-declared") {
+			throw new Error("missing task declaration");
+		}
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					declaration,
+					{
+						type: "task-invalidated",
+						data: {
+							causeTaskId: first.ref.taskId,
+							taskIds: [first.ref.taskId],
+							reason: "re-execute",
+						},
+					},
+				]),
+			),
+		).toThrow("uncommitted task");
+	});
+
 	it("requires invalidation to cover the exact transitive closure", () => {
 		const { first, second, commit } = committedGraph();
 		const base = [runCreated(), ...commit.events] as WorkflowEventInput[];
@@ -161,6 +185,71 @@ describe("workflow event reducer", () => {
 		);
 		expect(state.tasks[first.ref.taskId]?.status).toBe("invalidated");
 		expect(state.tasks[second.ref.taskId]?.status).toBe("invalidated");
+	});
+
+	it("does not change task status after terminal run completion", () => {
+		const { first, commit } = committedGraph();
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					...commit.events,
+					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "running", to: "stopping" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "stopping", to: "cancelled" },
+					},
+					{
+						type: "task-status-changed",
+						data: {
+							taskId: first.ref.taskId,
+							from: "pending",
+							to: "cancelled",
+						},
+					},
+				]),
+			),
+		).toThrow("terminal workflow run");
+	});
+
+	it("requires a final barrier on every completion path", () => {
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "running", to: "cleanup-blocked" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "cleanup-blocked", to: "completed" },
+					},
+				]),
+			),
+		).toThrow("without a final barrier");
+	});
+
+	it("does not freeze caller-owned event payloads", () => {
+		const { commit } = committedGraph();
+		const inputs = structuredClone([runCreated(), ...commit.events]);
+		reduceWorkflowEvents(journalEvents(inputs));
+		const declaration = inputs[1];
+		if (declaration?.type !== "task-declared") {
+			throw new Error("missing task declaration");
+		}
+		expect(Object.isFrozen(declaration.data.task)).toBe(false);
 	});
 
 	it("rejects missing creation and invalid lifecycle transitions", () => {

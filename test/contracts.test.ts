@@ -118,6 +118,20 @@ describe("workflow contracts", () => {
 		).toBe(false);
 	});
 
+	it("rejects duplicate order dependencies", () => {
+		const spec = agentTaskSpec();
+		const dependency = {
+			runId: "workflow_abc123",
+			taskId: "task_abc123",
+		};
+		expect(
+			Value.Check(AgentTaskSpecSchema, {
+				...spec,
+				after: [dependency, dependency],
+			}),
+		).toBe(false);
+	});
+
 	it("rejects invalid named input keys", () => {
 		expect(
 			Value.Check(AgentTaskSpecSchema, {
