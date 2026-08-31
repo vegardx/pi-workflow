@@ -86,6 +86,13 @@ function applyEvent(
 			);
 		case "task-declared": {
 			const task = structuredClone(input.data.task);
+			if (
+				state.status === "completed" ||
+				state.status === "completed-degraded" ||
+				state.status === "cancelled"
+			) {
+				fail("terminal workflow run may not declare tasks", event.sequence);
+			}
 			if (state.barriers.some((barrier) => barrier.kind === "final")) {
 				fail("task declaration follows the final barrier", event.sequence);
 			}
@@ -193,11 +200,14 @@ function applyEvent(
 					event.sequence,
 				);
 			}
-			if (
-				artifact.producerTaskId !== undefined &&
-				!state.tasks[artifact.producerTaskId]
-			) {
-				fail("artifact producer is unknown", event.sequence);
+			if (artifact.producerTaskId !== undefined) {
+				const producer = state.tasks[artifact.producerTaskId];
+				if (!producer) {
+					fail("artifact producer is unknown", event.sequence);
+				}
+				if (!producer.committed) {
+					fail("artifact producer is not committed", event.sequence);
+				}
 			}
 			if (
 				artifact.producerTaskId !== undefined &&
@@ -213,6 +223,13 @@ function applyEvent(
 			break;
 		}
 		case "barrier-reached": {
+			if (
+				state.status === "completed" ||
+				state.status === "completed-degraded" ||
+				state.status === "cancelled"
+			) {
+				fail("terminal workflow run may not reach a barrier", event.sequence);
+			}
 			if (input.data.epoch !== state.currentEpoch) {
 				fail("barrier does not close the current epoch", event.sequence);
 			}

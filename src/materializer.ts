@@ -143,6 +143,16 @@ export class WorkflowTaskMaterializer {
 		const previous = options.previousState;
 		if (
 			previous &&
+			(previous.status === "completed" ||
+				previous.status === "completed-degraded" ||
+				previous.status === "cancelled")
+		) {
+			throw new WorkflowMaterializationError(
+				"terminal workflow run may not materialize tasks",
+			);
+		}
+		if (
+			previous &&
 			(previous.runId !== this.runId ||
 				previous.definitionIdentitySha256 !== this.definitionIdentitySha256 ||
 				previous.inputSha256 !== this.inputSha256)

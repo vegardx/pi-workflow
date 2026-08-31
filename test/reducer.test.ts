@@ -128,6 +128,37 @@ describe("workflow event reducer", () => {
 		).toThrow("uncommitted task");
 	});
 
+	it("rejects artifacts from an uncommitted producer", () => {
+		const { first, commit } = committedGraph();
+		const declaration = commit.events[0];
+		if (declaration?.type !== "task-declared") {
+			throw new Error("missing task declaration");
+		}
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					declaration,
+					{
+						type: "artifact-declared",
+						data: {
+							artifact: {
+								id: `artifact_${"c".repeat(64)}`,
+								runId: "workflow_reducer",
+								producerTaskId: first.ref.taskId,
+								output: "result",
+								sha256: "d".repeat(64),
+								bytes: 2,
+								mediaType: "application/json",
+								schemaSha256: "e".repeat(64),
+							},
+						},
+					},
+				]),
+			),
+		).toThrow("producer is not committed");
+	});
+
 	it("rejects invalidation of an uncommitted declaration", () => {
 		const { first, commit } = committedGraph();
 		const declaration = commit.events[0];
@@ -185,6 +216,34 @@ describe("workflow event reducer", () => {
 		);
 		expect(state.tasks[first.ref.taskId]?.status).toBe("invalidated");
 		expect(state.tasks[second.ref.taskId]?.status).toBe("invalidated");
+	});
+
+	it("does not declare or commit tasks after cancellation", () => {
+		const { commit } = committedGraph();
+		const declaration = commit.events[0];
+		if (declaration?.type !== "task-declared") {
+			throw new Error("missing task declaration");
+		}
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "running", to: "stopping" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "stopping", to: "cancelled" },
+					},
+					declaration,
+				]),
+			),
+		).toThrow("terminal workflow run may not declare tasks");
 	});
 
 	it("does not change task status after terminal run completion", () => {
