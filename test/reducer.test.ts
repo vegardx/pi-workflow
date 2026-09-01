@@ -246,8 +246,8 @@ describe("workflow event reducer", () => {
 		).toThrow("terminal workflow run may not declare tasks");
 	});
 
-	it("does not change task status after terminal run completion", () => {
-		const { first, commit } = committedGraph();
+	it("does not cancel a run while committed tasks remain unsettled", () => {
+		const { commit } = committedGraph();
 		expect(() =>
 			reduceWorkflowEvents(
 				journalEvents([
@@ -265,12 +265,52 @@ describe("workflow event reducer", () => {
 						type: "run-status-changed",
 						data: { from: "stopping", to: "cancelled" },
 					},
+				]),
+			),
+		).toThrow("tasks remain unsettled");
+	});
+
+	it("does not change task status after terminal run completion", () => {
+		const { first, second, commit } = committedGraph();
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					...commit.events,
+					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "running", to: "stopping" },
+					},
 					{
 						type: "task-status-changed",
 						data: {
 							taskId: first.ref.taskId,
 							from: "pending",
 							to: "cancelled",
+						},
+					},
+					{
+						type: "task-status-changed",
+						data: {
+							taskId: second.ref.taskId,
+							from: "pending",
+							to: "cancelled",
+						},
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "stopping", to: "cancelled" },
+					},
+					{
+						type: "task-status-changed",
+						data: {
+							taskId: first.ref.taskId,
+							from: "cancelled",
+							to: "invalidated",
 						},
 					},
 				]),
