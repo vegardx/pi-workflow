@@ -184,6 +184,13 @@ function applyEvent(
 			break;
 		}
 		case "artifact-declared": {
+			if (
+				state.status === "completed" ||
+				state.status === "completed-degraded" ||
+				state.status === "cancelled"
+			) {
+				fail("terminal workflow run may not declare artifacts", event.sequence);
+			}
 			const artifact = structuredClone(input.data.artifact);
 			if (artifact.runId !== state.runId) {
 				fail("artifact belongs to another run", event.sequence);
@@ -408,7 +415,14 @@ function applyEvent(
 					task.status !== "failed" &&
 					task.status !== "cancelled",
 			);
-			if (input.data.to === "cancelled" && unsettledTasks) {
+			const uncancelledTasks = Object.values(state.tasks).some(
+				(task) =>
+					task.status !== "completed" &&
+					task.status !== "failed" &&
+					task.status !== "cancelled" &&
+					task.status !== "invalidated",
+			);
+			if (input.data.to === "cancelled" && uncancelledTasks) {
 				fail("run cancelled while tasks remain unsettled", event.sequence);
 			}
 			if (
@@ -449,6 +463,18 @@ function deepFreeze<T>(value: T): T {
 	return Object.freeze(value);
 }
 
+function assertValidState(
+	state: WorkflowStateProjection,
+	sequence: number,
+): void {
+	if (!Value.Check(WorkflowStateProjectionSchema, state)) {
+		fail("reduced workflow state is invalid", sequence);
+	}
+	if (Buffer.byteLength(JSON.stringify(state)) > MAX_WORKFLOW_STATE_BYTES) {
+		fail("reduced workflow state exceeds snapshot bound", sequence);
+	}
+}
+
 export function reduceWorkflowEvents(
 	events: readonly WorkflowJournalEvent[],
 ): WorkflowStateProjection {
@@ -476,6 +502,7 @@ export function reduceWorkflowEvents(
 		artifacts: {},
 		barriers: [],
 	};
+	assertValidState(state, 1);
 	for (const event of events.slice(1)) {
 		if (
 			event.runId !== state.runId ||
@@ -494,13 +521,7 @@ export function reduceWorkflowEvents(
 			);
 		}
 		applyEvent(state, event, input as WorkflowEventInput);
-	}
-	const lastSequence = state.lastSequence;
-	if (!Value.Check(WorkflowStateProjectionSchema, state)) {
-		fail("reduced workflow state is invalid", lastSequence);
-	}
-	if (Buffer.byteLength(JSON.stringify(state)) > MAX_WORKFLOW_STATE_BYTES) {
-		fail("reduced workflow state exceeds snapshot bound", lastSequence);
+		assertValidState(state, event.sequence);
 	}
 	return deepFreeze(state);
 }

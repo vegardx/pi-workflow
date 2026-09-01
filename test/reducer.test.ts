@@ -246,6 +246,41 @@ describe("workflow event reducer", () => {
 		).toThrow("terminal workflow run may not declare tasks");
 	});
 
+	it("does not declare artifacts after cancellation", () => {
+		expect(() =>
+			reduceWorkflowEvents(
+				journalEvents([
+					runCreated(),
+					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "running", to: "stopping" },
+					},
+					{
+						type: "run-status-changed",
+						data: { from: "stopping", to: "cancelled" },
+					},
+					{
+						type: "artifact-declared",
+						data: {
+							artifact: {
+								id: `artifact_${"c".repeat(64)}`,
+								runId: "workflow_reducer",
+								sha256: "d".repeat(64),
+								bytes: 2,
+								mediaType: "application/json",
+								schemaSha256: "e".repeat(64),
+							},
+						},
+					},
+				]),
+			),
+		).toThrow("terminal workflow run may not declare artifacts");
+	});
+
 	it("does not cancel a run while committed tasks remain unsettled", () => {
 		const { commit } = committedGraph();
 		expect(() =>
@@ -268,6 +303,37 @@ describe("workflow event reducer", () => {
 				]),
 			),
 		).toThrow("tasks remain unsettled");
+	});
+
+	it("allows cancellation after tasks are invalidated", () => {
+		const { first, second, commit } = committedGraph();
+		const state = reduceWorkflowEvents(
+			journalEvents([
+				runCreated(),
+				...commit.events,
+				{
+					type: "run-status-changed",
+					data: { from: "created", to: "running" },
+				},
+				{
+					type: "task-invalidated",
+					data: {
+						causeTaskId: first.ref.taskId,
+						taskIds: [first.ref.taskId, second.ref.taskId],
+						reason: "re-execute",
+					},
+				},
+				{
+					type: "run-status-changed",
+					data: { from: "running", to: "stopping" },
+				},
+				{
+					type: "run-status-changed",
+					data: { from: "stopping", to: "cancelled" },
+				},
+			]),
+		);
+		expect(state.status).toBe("cancelled");
 	});
 
 	it("does not change task status after terminal run completion", () => {
