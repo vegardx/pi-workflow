@@ -525,6 +525,7 @@ export class WorkflowRunJournal {
 						);
 					}
 				}
+				await this.lease.assertCurrent();
 				let handle: Awaited<ReturnType<typeof open>> | undefined;
 				try {
 					handle = await open(
@@ -621,6 +622,7 @@ export class WorkflowRunJournal {
 				if (!Value.Check(WorkflowRunSnapshotSchema, roundTrip.value)) {
 					throw new Error("invalid JSON-roundtripped workflow run snapshot");
 				}
+				await this.lease.assertCurrent();
 				try {
 					await writeAtomic(this.snapshotPath, `${roundTrip.json}\n`);
 				} catch (error) {
