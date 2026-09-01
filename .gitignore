@@ -3,3 +3,4 @@ dist/
 coverage/
 .pi/agent/
 *.log
+worklog.md
