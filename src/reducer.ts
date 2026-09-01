@@ -408,6 +408,9 @@ function applyEvent(
 					task.status !== "failed" &&
 					task.status !== "cancelled",
 			);
+			if (input.data.to === "cancelled" && unsettledTasks) {
+				fail("run cancelled while tasks remain unsettled", event.sequence);
+			}
 			if (
 				(input.data.to === "completed" ||
 					input.data.to === "completed-degraded") &&
