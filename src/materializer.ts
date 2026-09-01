@@ -438,6 +438,14 @@ export class WorkflowTaskMaterializer {
 				committed: false,
 			};
 		}
+		if (
+			!Value.Check(WorkflowStateProjectionSchema, projected) ||
+			Buffer.byteLength(canonicalJson(projected)) > MAX_WORKFLOW_STATE_BYTES
+		) {
+			throw new WorkflowMaterializationError(
+				"materialized epoch declaration prefix exceeds durable state bounds",
+			);
+		}
 		for (const task of Object.values(projected.tasks)) {
 			if (task.task.materializationEpoch === this.epoch) {
 				task.committed = true;
