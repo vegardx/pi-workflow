@@ -399,7 +399,10 @@ function applyEvent(
 			if (
 				(projection.phase !== "created" &&
 					projection.phase !== "preflighted") ||
-				input.data.operationId !== projection.execution.operationId
+				input.data.operationId !== projection.execution.operationId ||
+				(projection.preflight !== undefined &&
+					Date.parse(projection.preflight.expiresAt) >
+						Date.parse(event.timestamp))
 			) {
 				fail("task execution preflight is out of order", event.sequence);
 			}
@@ -420,7 +423,8 @@ function applyEvent(
 				!preflight ||
 				input.data.operationId !== projection.execution.operationId ||
 				input.data.preflightId !== preflight.preflightId ||
-				input.data.planIdentitySha256 !== preflight.planIdentitySha256
+				input.data.planIdentitySha256 !== preflight.planIdentitySha256 ||
+				Date.parse(preflight.expiresAt) <= Date.parse(event.timestamp)
 			) {
 				fail("task execution launch intent is out of order", event.sequence);
 			}
@@ -447,6 +451,23 @@ function applyEvent(
 				sequence: event.sequence,
 			};
 			projection.phase = "launch-uncertain";
+			break;
+		}
+		case "task-execution-launch-absent": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (
+				projection.phase !== "launch-uncertain" ||
+				input.data.operationId !== projection.execution.operationId
+			) {
+				fail("absent task launch evidence is out of order", event.sequence);
+			}
+			const { executionId: _executionId, ...launchAbsent } = input.data;
+			projection.launchAbsent = { ...launchAbsent, sequence: event.sequence };
+			projection.phase = "launch-absent";
 			break;
 		}
 		case "task-execution-launch-receipted": {
@@ -517,8 +538,13 @@ function applyEvent(
 			);
 			const observation = projection.observation;
 			const artifact = state.artifacts[input.data.artifactId];
+			const recoversArtifactImport =
+				projection.phase === "terminal" &&
+				projection.terminal?.outcome === "cleanup-blocked" &&
+				projection.terminal.evidence.kind === "workflow" &&
+				projection.terminal.evidence.stage === "artifact-import";
 			if (
-				projection.phase !== "observed" ||
+				(projection.phase !== "observed" && !recoversArtifactImport) ||
 				!observation ||
 				observation.status !== "completed" ||
 				input.data.subagentRunId !== observation.subagentRunId ||
@@ -528,6 +554,7 @@ function applyEvent(
 			) {
 				fail("task execution artifact import is invalid", event.sequence);
 			}
+			if (recoversArtifactImport) delete projection.terminal;
 			const { executionId: _executionId, ...artifactImport } = input.data;
 			projection.artifactImport = {
 				...artifactImport,
@@ -536,7 +563,7 @@ function applyEvent(
 			projection.phase = "artifact-imported";
 			break;
 		}
-		case "task-execution-released": {
+		case "task-execution-release-intended": {
 			const projection = executionProjection(
 				state,
 				input.data.executionId,
@@ -544,12 +571,44 @@ function applyEvent(
 			);
 			const receipt = projection.launchReceipt;
 			const observation = projection.observation;
+			const recoversRelease =
+				projection.phase === "terminal" &&
+				projection.terminal?.outcome === "cleanup-blocked" &&
+				projection.terminal.evidence.kind === "workflow" &&
+				projection.terminal.evidence.stage === "release";
+			const expectedPhase =
+				observation?.status === "completed" ? "artifact-imported" : "observed";
 			if (
-				(projection.phase !== "observed" &&
-					projection.phase !== "artifact-imported") ||
+				(projection.phase !== expectedPhase && !recoversRelease) ||
 				!receipt ||
 				!observation ||
 				input.data.subagentRunId !== receipt.subagentRunId ||
+				!isTerminalSubagentStatus(observation.status)
+			) {
+				fail("task execution release intent is invalid", event.sequence);
+			}
+			if (recoversRelease) delete projection.terminal;
+			const { executionId: _executionId, ...releaseIntent } = input.data;
+			projection.releaseIntent = {
+				...releaseIntent,
+				sequence: event.sequence,
+			};
+			projection.phase = "release-intended";
+			break;
+		}
+		case "task-execution-released": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const intent = projection.releaseIntent;
+			const observation = projection.observation;
+			if (
+				projection.phase !== "release-intended" ||
+				!intent ||
+				!observation ||
+				input.data.subagentRunId !== intent.subagentRunId ||
 				input.data.status !== observation.status ||
 				!isTerminalSubagentStatus(input.data.status)
 			) {
@@ -626,20 +685,19 @@ function applyEvent(
 						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
 					(input.data.outcome !== "failed" &&
 						input.data.outcome !== "cleanup-blocked") ||
+					(input.data.outcome === "cleanup-blocked" &&
+						evidence.stage !== "artifact-import" &&
+						evidence.stage !== "release") ||
 					(evidence.stage === "preflight" && projection.phase !== "created") ||
 					(evidence.stage === "launch" &&
 						projection.phase !== "preflighted" &&
 						projection.phase !== "launch-intended") ||
 					(evidence.stage === "reconciliation" &&
-						projection.phase !== "launch-uncertain" &&
-						projection.phase !== "launched" &&
-						projection.phase !== "observed") ||
+						projection.phase !== "launch-absent") ||
 					(evidence.stage === "artifact-import" &&
 						projection.phase !== "observed") ||
 					(evidence.stage === "release" &&
-						projection.phase !== "observed" &&
-						projection.phase !== "artifact-imported" &&
-						projection.phase !== "released")
+						projection.phase !== "release-intended")
 				) {
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
@@ -923,13 +981,20 @@ export function reduceWorkflowEvents(
 		barriers: [],
 	};
 	assertValidState(state, 1);
+	let previousTimestamp = Date.parse(first.timestamp);
+	if (!Number.isFinite(previousTimestamp)) {
+		fail("first event timestamp is invalid", 1);
+	}
 	for (const event of events.slice(1)) {
+		const timestamp = Date.parse(event.timestamp);
 		if (
 			event.runId !== state.runId ||
-			event.sequence !== state.lastSequence + 1
+			event.sequence !== state.lastSequence + 1 ||
+			!Number.isFinite(timestamp) ||
+			timestamp < previousTimestamp
 		) {
 			fail(
-				"event run identity or sequence does not match projection",
+				"event run identity, sequence, or timestamp does not match projection",
 				event.sequence,
 			);
 		}
@@ -942,6 +1007,7 @@ export function reduceWorkflowEvents(
 		}
 		applyEvent(state, event, input as WorkflowEventInput);
 		assertValidState(state, event.sequence);
+		previousTimestamp = timestamp;
 	}
 	return deepFreeze(state);
 }

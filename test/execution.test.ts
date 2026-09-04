@@ -182,6 +182,29 @@ function artifact(taskId: WorkflowTaskId): WorkflowArtifactRef {
 	};
 }
 
+function releaseEvents(
+	record: TaskExecutionRecord,
+	status: "completed" | "failed" | "cleanup-blocked",
+): WorkflowEventInput[] {
+	return [
+		{
+			type: "task-execution-release-intended",
+			data: {
+				executionId: record.id,
+				subagentRunId: "run_child",
+			},
+		},
+		{
+			type: "task-execution-released",
+			data: {
+				executionId: record.id,
+				subagentRunId: "run_child",
+				status,
+			},
+		},
+	];
+}
+
 function completedEvidence() {
 	return {
 		kind: "subagent" as const,
@@ -282,14 +305,7 @@ describe("task execution persistence", () => {
 					sourceResultSha256: resultSha256,
 				},
 			},
-			{
-				type: "task-execution-released",
-				data: {
-					executionId: setup.execution.id,
-					subagentRunId: "run_child",
-					status: "completed",
-				},
-			},
+			...releaseEvents(setup.execution, "completed"),
 			{
 				type: "task-execution-terminal",
 				data: {
@@ -323,6 +339,10 @@ describe("task execution persistence", () => {
 		if (first?.type !== "task-execution-preflighted") {
 			throw new Error("missing preflight event");
 		}
+		const expired: WorkflowEventInput = {
+			...first,
+			data: { ...first.data, expiresAt: "2026-09-01T00:00:00.000Z" },
+		};
 		const replacement: WorkflowEventInput = {
 			type: "task-execution-preflighted",
 			data: {
@@ -331,10 +351,20 @@ describe("task execution persistence", () => {
 				expiresAt: "2026-09-01T02:00:00.000Z",
 			},
 		};
+		expect(() =>
+			reduceWorkflowEvents(records([...setup.events, first, replacement])),
+		).toThrow("preflight is out of order");
+		const expiredIntent = preflightEvents(setup.execution)[1];
+		if (expiredIntent?.type !== "task-execution-launch-intended") {
+			throw new Error("missing launch intent");
+		}
+		expect(() =>
+			reduceWorkflowEvents(records([...setup.events, expired, expiredIntent])),
+		).toThrow("launch intent is out of order");
 		const state = reduceWorkflowEvents(
 			records([
 				...setup.events,
-				first,
+				expired,
 				replacement,
 				{
 					type: "task-execution-launch-intended",
@@ -386,6 +416,58 @@ describe("task execution persistence", () => {
 		});
 	});
 
+	it("requires durable operation absence before uncertain launch failure", () => {
+		const setup = setupEvents();
+		const uncertain: WorkflowEventInput = {
+			type: "task-execution-launch-uncertain",
+			data: {
+				executionId: setup.execution.id,
+				operationId: setup.execution.operationId,
+				reason: "timeout",
+			},
+		};
+		const terminal: WorkflowEventInput = {
+			type: "task-execution-terminal",
+			data: {
+				executionId: setup.execution.id,
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "reconciliation",
+					failureSha256: deriveWorkflowFailureSha256(
+						"reconciliation",
+						"operation is absent",
+					),
+					message: "operation is absent",
+				},
+			},
+		};
+		const prefix = [
+			...setup.events,
+			...preflightEvents(setup.execution),
+			uncertain,
+		];
+		expect(() => reduceWorkflowEvents(records([...prefix, terminal]))).toThrow(
+			"workflow terminal evidence is inconsistent",
+		);
+		const state = reduceWorkflowEvents(
+			records([
+				...prefix,
+				{
+					type: "task-execution-launch-absent",
+					data: {
+						executionId: setup.execution.id,
+						operationId: setup.execution.operationId,
+					},
+				},
+				terminal,
+			]),
+		);
+		expect(state.executions[setup.execution.id]?.terminal?.outcome).toBe(
+			"failed",
+		);
+	});
+
 	it("completes when the first child observation is already terminal", () => {
 		const setup = setupEvents();
 		const output = artifact(setup.taskId);
@@ -421,14 +503,7 @@ describe("task execution persistence", () => {
 					sourceResultSha256: resultSha256,
 				},
 			},
-			{
-				type: "task-execution-released",
-				data: {
-					executionId: setup.execution.id,
-					subagentRunId: "run_child",
-					status: "completed",
-				},
-			},
+			...releaseEvents(setup.execution, "completed"),
 			{
 				type: "task-execution-terminal",
 				data: {
@@ -482,14 +557,7 @@ describe("task execution persistence", () => {
 					status: "cleanup-blocked",
 				},
 			},
-			{
-				type: "task-execution-released",
-				data: {
-					executionId: setup.execution.id,
-					subagentRunId: "run_child",
-					status: "cleanup-blocked",
-				},
-			},
+			...releaseEvents(setup.execution, "cleanup-blocked"),
 			{
 				type: "task-execution-terminal",
 				data: {
@@ -526,14 +594,7 @@ describe("task execution persistence", () => {
 					status: "failed",
 				},
 			},
-			{
-				type: "task-execution-released",
-				data: {
-					executionId: setup.execution.id,
-					subagentRunId: "run_child",
-					status: "failed",
-				},
-			},
+			...releaseEvents(setup.execution, "failed"),
 			{
 				type: "task-execution-terminal",
 				data: {
