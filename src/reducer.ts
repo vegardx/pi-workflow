@@ -688,6 +688,9 @@ function applyEvent(
 					(input.data.outcome === "cleanup-blocked" &&
 						evidence.stage !== "artifact-import" &&
 						evidence.stage !== "release") ||
+					(input.data.outcome === "failed" &&
+						(evidence.stage === "artifact-import" ||
+							evidence.stage === "release")) ||
 					(evidence.stage === "preflight" && projection.phase !== "created") ||
 					(evidence.stage === "launch" &&
 						projection.phase !== "preflighted" &&
