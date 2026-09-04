@@ -396,18 +396,29 @@ function applyEvent(
 				input.data.executionId,
 				event.sequence,
 			);
+			const previousPreflight = projection.preflight;
+			const replacesPreflight = projection.phase === "preflighted";
 			if (
-				(projection.phase !== "created" &&
-					projection.phase !== "preflighted") ||
+				(projection.phase !== "created" && !replacesPreflight) ||
 				input.data.operationId !== projection.execution.operationId ||
-				(projection.preflight !== undefined &&
-					Date.parse(projection.preflight.expiresAt) >
-						Date.parse(event.timestamp))
+				(!replacesPreflight &&
+					input.data.supersedesPreflightId !== undefined) ||
+				(replacesPreflight &&
+					(!previousPreflight ||
+						input.data.supersedesPreflightId !==
+							previousPreflight.preflightId ||
+						(Date.parse(previousPreflight.expiresAt) >
+							Date.parse(event.timestamp) &&
+							event.fencingGeneration <= previousPreflight.fencingGeneration)))
 			) {
 				fail("task execution preflight is out of order", event.sequence);
 			}
 			const { executionId: _executionId, ...preflight } = input.data;
-			projection.preflight = { ...preflight, sequence: event.sequence };
+			projection.preflight = {
+				...preflight,
+				fencingGeneration: event.fencingGeneration,
+				sequence: event.sequence,
+			};
 			projection.phase = "preflighted";
 			break;
 		}
@@ -691,7 +702,9 @@ function applyEvent(
 					(input.data.outcome === "failed" &&
 						(evidence.stage === "artifact-import" ||
 							evidence.stage === "release")) ||
-					(evidence.stage === "preflight" && projection.phase !== "created") ||
+					(evidence.stage === "preflight" &&
+						projection.phase !== "created" &&
+						projection.phase !== "preflighted") ||
 					(evidence.stage === "launch" &&
 						projection.phase !== "preflighted" &&
 						projection.phase !== "launch-intended") ||

@@ -295,8 +295,12 @@ artifact and its digest. Task lifecycle transitions remain separate events and
 may consume terminal execution evidence only after that evidence is durable.
 
 After uncertain launch outcome it calls `findByOperation` before any new launch.
-A terminal no-child failure requires durable operation-absence evidence; an
-uncertain launch alone can never terminalize the execution. Structured output
+The same recovery runs when restart finds durable launch intent without a
+receipt. A recovered receipt is persisted without calling launch again. A
+terminal no-child failure requires durable operation-absence evidence; an
+uncertain launch alone can never terminalize the execution. Preflight grants
+may be reused only within their unexpired workflow fencing generation, because
+the subagent service intentionally keeps grants in process memory. Structured output
 remains subagent-owned at execution time. Workflow accepts
 only JSON-serializable output-schema documents within the runtime's bounded
 16-level schema-value depth, then revalidates and imports the value and every
