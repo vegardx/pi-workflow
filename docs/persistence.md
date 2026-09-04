@@ -29,11 +29,11 @@ ordinary diagnostics.
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
 1 accepts only the declared run, task, artifact, barrier, and task-execution
-events. Task-execution evidence records generation creation, preflight, launch
-intent, uncertain launch, launch receipt, child observation, artifact import,
-release, and terminal outcome in that order. `run.json` is a bounded typed
-projection rebuilt from
-those events and is returned only when it exactly equals reduction of the
+events. Task-execution evidence records generation creation, the latest
+preflight before launch intent, uncertain launch, launch receipt, child
+observation, artifact import, release, and terminal outcome in that order. An
+expired preflight may be replaced only before launch intent is persisted.
+`run.json` is a bounded typed projection rebuilt from those events and is returned only when it exactly equals reduction of the
 complete current journal. A valid older snapshot is ignored until rebuilt.
 Unknown, divergent, corrupt, or future-version records fail closed.
 
@@ -98,13 +98,13 @@ contains:
 - budget allocation and cumulative usage baseline;
 - one subagent operation ID and preflight identity;
 - initial launch intent and receipt;
-- every child retry/resume attempt and control receipt;
+- the initial child attempt in Phase 1;
 - imported artifacts;
 - terminal classification.
 
-Subagent retry and resume add attempts to the existing task execution. A new
-execution generation requires a new preflight, operation ID, launch intent, and
-subagent run.
+Phase 3 adds subagent retry/resume attempts and control receipts to the existing
+task execution. A new execution generation requires a new preflight, operation
+ID, launch intent, and subagent run.
 
 No persisted `running` field proves that a scheduler or child still exists.
 

@@ -75,6 +75,7 @@ export {
 	WorkflowTaskProjectionSchema,
 } from "./events.js";
 export {
+	deriveJsonValueSha256,
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,

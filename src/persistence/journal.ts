@@ -11,6 +11,7 @@ import {
 	WorkflowRunIdSchema,
 } from "../contracts.js";
 import {
+	MAX_WORKFLOW_EVENT_INPUT_BYTES,
 	type WorkflowEventInput,
 	WorkflowEventInputSchema,
 	type WorkflowEventType,
@@ -256,9 +257,13 @@ function parseJournal(
 			type: (value as WorkflowJournalEvent).type,
 			data: (value as WorkflowJournalEvent).data,
 		};
-		if (!Value.Check(WorkflowEventInputSchema, payload)) {
+		if (
+			!Value.Check(WorkflowEventInputSchema, payload) ||
+			Buffer.byteLength(JSON.stringify(payload)) >
+				MAX_WORKFLOW_EVENT_INPUT_BYTES
+		) {
 			throw new WorkflowPersistenceCorruptionError(
-				`unknown or invalid workflow event at line ${index + 1}`,
+				`unknown, invalid, or oversized workflow event at line ${index + 1}`,
 			);
 		}
 		if (JSON.stringify(value) !== line) {
@@ -488,9 +493,12 @@ export class WorkflowRunJournal {
 					type,
 					data,
 				};
+				const input = { type, data };
 				if (
 					!Value.Check(WorkflowJournalEventSchema, event) ||
-					!Value.Check(WorkflowEventInputSchema, { type, data })
+					!Value.Check(WorkflowEventInputSchema, input) ||
+					Buffer.byteLength(JSON.stringify(input)) >
+						MAX_WORKFLOW_EVENT_INPUT_BYTES
 				) {
 					throw new Error("invalid workflow journal event");
 				}

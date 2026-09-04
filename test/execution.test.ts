@@ -9,6 +9,7 @@ import type {
 } from "../src/contracts.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import {
+	deriveJsonValueSha256,
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
@@ -177,7 +178,7 @@ function artifact(taskId: WorkflowTaskId): WorkflowArtifactRef {
 		sha256: structuredOutputSha256,
 		bytes: 18,
 		mediaType: "application/json",
-		schemaSha256: "1".repeat(64),
+		schemaSha256: deriveJsonValueSha256(request().outputSchema),
 	};
 }
 
@@ -316,6 +317,41 @@ describe("task execution persistence", () => {
 		);
 	});
 
+	it("replaces an expired preflight before launch intent", () => {
+		const setup = setupEvents();
+		const first = preflightEvents(setup.execution)[0];
+		if (first?.type !== "task-execution-preflighted") {
+			throw new Error("missing preflight event");
+		}
+		const replacement: WorkflowEventInput = {
+			type: "task-execution-preflighted",
+			data: {
+				...first.data,
+				preflightId: "preflight-2",
+				expiresAt: "2026-09-01T02:00:00.000Z",
+			},
+		};
+		const state = reduceWorkflowEvents(
+			records([
+				...setup.events,
+				first,
+				replacement,
+				{
+					type: "task-execution-launch-intended",
+					data: {
+						executionId: setup.execution.id,
+						operationId: setup.execution.operationId,
+						preflightId: "preflight-2",
+						planIdentitySha256,
+					},
+				},
+			]),
+		);
+		expect(state.executions[setup.execution.id]?.preflight?.preflightId).toBe(
+			"preflight-2",
+		);
+	});
+
 	it("recovers an uncertain launch with the same operation identity", () => {
 		const setup = setupEvents();
 		const events: WorkflowEventInput[] = [
@@ -350,6 +386,190 @@ describe("task execution persistence", () => {
 		});
 	});
 
+	it("completes when the first child observation is already terminal", () => {
+		const setup = setupEvents();
+		const output = artifact(setup.taskId);
+		const events: WorkflowEventInput[] = [
+			...setup.events,
+			...preflightEvents(setup.execution),
+			{
+				type: "task-execution-launch-receipted",
+				data: {
+					executionId: setup.execution.id,
+					operationId: setup.execution.operationId,
+					subagentRunId: "run_child",
+					subagentAttemptId: "attempt_child",
+					status: "completed",
+				},
+			},
+			{
+				type: "task-execution-child-observed",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					subagentAttemptId: "attempt_child",
+					status: "completed",
+				},
+			},
+			{ type: "artifact-declared", data: { artifact: output } },
+			{
+				type: "task-execution-artifact-imported",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					artifactId: output.id,
+					sourceResultSha256: resultSha256,
+				},
+			},
+			{
+				type: "task-execution-released",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					status: "completed",
+				},
+			},
+			{
+				type: "task-execution-terminal",
+				data: {
+					executionId: setup.execution.id,
+					outcome: "completed",
+					evidence: completedEvidence(),
+				},
+			},
+			{
+				type: "task-status-changed",
+				data: { taskId: setup.taskId, from: "ready", to: "completed" },
+			},
+		];
+		const state = reduceWorkflowEvents(records(events));
+		expect(state.tasks[setup.taskId]?.status).toBe("completed");
+	});
+
+	it("replaces cleanup-blocked evidence after reconciliation", () => {
+		const setup = setupEvents();
+		const failure = {
+			code: "sandbox-cleanup" as const,
+			origin: "sandbox" as const,
+			retry: "reconcile" as const,
+			message: "cleanup is not yet proved",
+			guidance: "Reconcile the child.",
+		};
+		const usage = completedEvidence().usage;
+		const events: WorkflowEventInput[] = [
+			...setup.events,
+			...preflightEvents(setup.execution),
+			{
+				type: "task-execution-launch-receipted",
+				data: {
+					executionId: setup.execution.id,
+					operationId: setup.execution.operationId,
+					subagentRunId: "run_child",
+					subagentAttemptId: "attempt_child",
+					status: "active",
+				},
+			},
+			{
+				type: "task-status-changed",
+				data: { taskId: setup.taskId, from: "ready", to: "running" },
+			},
+			{
+				type: "task-execution-child-observed",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					subagentAttemptId: "attempt_child",
+					status: "cleanup-blocked",
+				},
+			},
+			{
+				type: "task-execution-released",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					status: "cleanup-blocked",
+				},
+			},
+			{
+				type: "task-execution-terminal",
+				data: {
+					executionId: setup.execution.id,
+					outcome: "cleanup-blocked",
+					evidence: {
+						kind: "subagent",
+						resultSha256,
+						status: "cleanup-blocked",
+						usage,
+						usageComplete: true,
+						runtimeMs: 1000,
+						failure,
+						sandboxCleanup: "blocked",
+						workspaceCleanup: "not-needed",
+						truncated: false,
+					},
+				},
+			},
+			{
+				type: "task-status-changed",
+				data: {
+					taskId: setup.taskId,
+					from: "running",
+					to: "cleanup-blocked",
+				},
+			},
+			{
+				type: "task-execution-child-observed",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					subagentAttemptId: "attempt_child",
+					status: "failed",
+				},
+			},
+			{
+				type: "task-execution-released",
+				data: {
+					executionId: setup.execution.id,
+					subagentRunId: "run_child",
+					status: "failed",
+				},
+			},
+			{
+				type: "task-execution-terminal",
+				data: {
+					executionId: setup.execution.id,
+					outcome: "failed",
+					evidence: {
+						kind: "subagent",
+						resultSha256: "3".repeat(64),
+						status: "failed",
+						usage,
+						usageComplete: true,
+						runtimeMs: 1200,
+						failure: { ...failure, code: "sandbox-launch", retry: "never" },
+						sandboxCleanup: "proved",
+						workspaceCleanup: "not-needed",
+						truncated: false,
+					},
+				},
+			},
+			{
+				type: "task-status-changed",
+				data: {
+					taskId: setup.taskId,
+					from: "cleanup-blocked",
+					to: "failed",
+				},
+			},
+		];
+		const state = reduceWorkflowEvents(records(events));
+		expect(state.executions[setup.execution.id]?.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { kind: "subagent", status: "failed" },
+		});
+		expect(state.tasks[setup.taskId]?.status).toBe("failed");
+	});
+
 	it("terminalizes a preflight failure without a child identity", () => {
 		const setup = setupEvents();
 		const events: WorkflowEventInput[] = [
@@ -362,7 +582,10 @@ describe("task execution persistence", () => {
 					evidence: {
 						kind: "workflow",
 						stage: "preflight",
-						failureSha256: "2".repeat(64),
+						failureSha256: deriveWorkflowFailureSha256(
+							"preflight",
+							"agent is unavailable",
+						),
 						message: "agent is unavailable",
 					},
 				},
@@ -378,6 +601,78 @@ describe("task execution persistence", () => {
 			evidence: { kind: "workflow", stage: "preflight" },
 		});
 		expect(state.tasks[setup.taskId]?.status).toBe("failed");
+	});
+
+	it("does not bind one subagent run to two task executions", () => {
+		const materializer = new WorkflowTaskMaterializer({
+			runId: "workflow_execution",
+			definitionIdentitySha256,
+			inputSha256,
+		});
+		const first = materializer.agent("first", request());
+		const second = materializer.agent("second", request());
+		const commit = materializer.closeEpoch("final", [first, second]);
+		const declarations = commit.events.filter(
+			(event) => event.type === "task-declared",
+		);
+		const firstDeclaration = declarations[0];
+		const secondDeclaration = declarations[1];
+		if (
+			firstDeclaration?.type !== "task-declared" ||
+			secondDeclaration?.type !== "task-declared"
+		) {
+			throw new Error("missing task declarations");
+		}
+		const firstExecution = execution(
+			first.ref.taskId,
+			firstDeclaration.data.task.spec.identitySha256,
+		);
+		const secondExecution = execution(
+			second.ref.taskId,
+			secondDeclaration.data.task.spec.identitySha256,
+		);
+		const receipt = (record: TaskExecutionRecord): WorkflowEventInput => ({
+			type: "task-execution-launch-receipted",
+			data: {
+				executionId: record.id,
+				operationId: record.operationId,
+				subagentRunId: "run_shared",
+				subagentAttemptId: "attempt_shared",
+				status: "active",
+			},
+		});
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					runCreated(),
+					...commit.events,
+					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
+						type: "task-status-changed",
+						data: { taskId: first.ref.taskId, from: "pending", to: "ready" },
+					},
+					{
+						type: "task-status-changed",
+						data: { taskId: second.ref.taskId, from: "pending", to: "ready" },
+					},
+					{
+						type: "task-execution-created",
+						data: { execution: firstExecution },
+					},
+					...preflightEvents(firstExecution),
+					receipt(firstExecution),
+					{
+						type: "task-execution-created",
+						data: { execution: secondExecution },
+					},
+					...preflightEvents(secondExecution),
+					receipt(secondExecution),
+				]),
+			),
+		).toThrow("launch receipt is out of order");
 	});
 
 	it("rejects missing intent, changed identities, and duplicate evidence", () => {

@@ -309,10 +309,10 @@ Workflow definition
           Subagent attempt
 ```
 
-When the existing subagent failure permits retry, workflow calls the owner
-client's `retry` on the same subagent run and records the fresh attempt and VM
-under the same task execution. Resume behaves likewise through subagent
-`resume`. Re-execution after dependency invalidation is neither retry nor
+Phase 3 retry control will call the owner client's `retry` on the same subagent
+run and record the fresh attempt and VM under the same task execution. Resume
+will behave likewise through subagent `resume`. Re-execution after dependency
+invalidation is neither retry nor
 resume: it creates a new task-execution generation and a new preflight,
 idempotent operation ID, and subagent run. Every identity and relationship is
 persisted explicitly.
