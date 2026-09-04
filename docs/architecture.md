@@ -113,8 +113,12 @@ Workflow never:
 - shuts down the provider or service;
 - treats a run ID as bearer authorization.
 
-Each workflow run obtains an owner-bound client. Missing, duplicate, or
-incompatible providers fail before workflow work starts.
+Each workflow run obtains an owner-bound client. The workflow adapter reacquires
+the provider before each owner binding, pins the first service object for the
+lifetime of that extension runtime, and rejects provider removal or service
+replacement. It returns only the owner client, never the service or its shutdown
+method. Missing, duplicate, malformed, or incompatible providers fail before
+workflow work starts.
 
 ## Dynamic workflows
 

@@ -35,10 +35,13 @@ acquires it through Pi's process-local event bus and the public typed provider
 export. Provider discovery is composition among trusted extensions, not an
 authorization boundary.
 
-Workflow binds an owner client to its durable run identity. Model input cannot
-choose that owner. Missing, duplicate, or incompatible providers fail before a
-run starts. Workflow cannot replace the provider, access its private stores, or
-construct a fallback service.
+Workflow binds an owner client to its durable run identity as
+`pi-workflow:<workflow-run-id>`. Model input cannot choose that owner. The
+session-scoped adapter pins the exact first service object and reacquires before
+each binding, so missing, duplicate, removed, replaced, malformed, or
+incompatible providers fail before a run starts. The binding exposes only the
+owner client. Workflow cannot shut down or replace the provider, access its
+private stores, or construct a fallback service.
 
 ## Static workflow trust
 

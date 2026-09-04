@@ -123,3 +123,10 @@ export {
 	type WorkflowRoot,
 	type WorkflowRootScope,
 } from "./registry.js";
+export {
+	createWorkflowSubagentProvider,
+	type WorkflowSubagentBinding,
+	type WorkflowSubagentProvider,
+	WorkflowSubagentProviderError,
+	type WorkflowSubagentProviderErrorCode,
+} from "./subagent-provider.js";
