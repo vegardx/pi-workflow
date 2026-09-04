@@ -30,8 +30,9 @@ ordinary diagnostics.
 Lifecycle events are append-only, versioned, and the source of truth. Revision
 1 accepts only the declared run, task, artifact, barrier, and task-execution
 events. Task-execution evidence records generation creation, the latest
-preflight before launch intent, uncertain launch, launch receipt, child
-observation, artifact import, release, and terminal outcome in that order. An
+preflight before launch intent, uncertain launch and reconciled absence or a
+launch receipt, child observation, artifact import, release intent and receipt,
+and terminal outcome in that order. An
 expired preflight may be replaced only before launch intent is persisted.
 `run.json` is a bounded typed projection rebuilt from those events and is returned only when it exactly equals reduction of the
 complete current journal. A valid older snapshot is ignored until rebuilt.
@@ -48,7 +49,8 @@ port without shared authority.
 Subagent calls
 use their owner binding and stable operation IDs because the current public
 service does not accept a caller fencing token. Every external side effect still
-requires durable intent followed by a durable receipt.
+requires durable intent followed by a durable receipt. In particular, child
+release cannot run before `task-execution-release-intended` is durable.
 
 Events carry schema version, sequence number, event ID, timestamp, owner, and
 fencing generation. Appends and snapshots use crash-safe write, fsync, and

@@ -138,6 +138,20 @@ const TaskExecutionLaunchUncertainEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const TaskExecutionLaunchAbsentEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-launch-absent"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				operationId: SubagentOperationIdSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskExecutionLaunchReceiptedEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-launch-receipted"),
@@ -180,6 +194,20 @@ const TaskExecutionArtifactImportedEventSchema = Type.Object(
 				subagentRunId: SubagentRunIdSchema,
 				artifactId: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
 				sourceResultSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionReleaseIntendedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-release-intended"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
 			},
 			{ additionalProperties: false },
 		),
@@ -276,9 +304,11 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionPreflightedEventSchema,
 	TaskExecutionLaunchIntendedEventSchema,
 	TaskExecutionLaunchUncertainEventSchema,
+	TaskExecutionLaunchAbsentEventSchema,
 	TaskExecutionLaunchReceiptedEventSchema,
 	TaskExecutionChildObservedEventSchema,
 	TaskExecutionArtifactImportedEventSchema,
+	TaskExecutionReleaseIntendedEventSchema,
 	TaskExecutionReleasedEventSchema,
 	TaskExecutionTerminalEventSchema,
 	TaskStatusChangedEventSchema,
@@ -306,9 +336,11 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("preflighted"),
 	Type.Literal("launch-intended"),
 	Type.Literal("launch-uncertain"),
+	Type.Literal("launch-absent"),
 	Type.Literal("launched"),
 	Type.Literal("observed"),
 	Type.Literal("artifact-imported"),
+	Type.Literal("release-intended"),
 	Type.Literal("released"),
 	Type.Literal("terminal"),
 ]);
@@ -338,6 +370,14 @@ const SequencedLaunchUncertainSchema = Type.Object(
 	{
 		operationId: SubagentOperationIdSchema,
 		reason: Type.String({ minLength: 1, maxLength: 4096 }),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedLaunchAbsentSchema = Type.Object(
+	{
+		operationId: SubagentOperationIdSchema,
 		sequence: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
@@ -374,6 +414,14 @@ const SequencedArtifactImportSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const SequencedReleaseIntentSchema = Type.Object(
+	{
+		subagentRunId: SubagentRunIdSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 const SequencedReleaseSchema = Type.Object(
 	{
 		subagentRunId: SubagentRunIdSchema,
@@ -400,9 +448,11 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		preflight: Type.Optional(SequencedPreflightSchema),
 		launchIntent: Type.Optional(SequencedLaunchIntentSchema),
 		launchUncertain: Type.Optional(SequencedLaunchUncertainSchema),
+		launchAbsent: Type.Optional(SequencedLaunchAbsentSchema),
 		launchReceipt: Type.Optional(SequencedLaunchReceiptSchema),
 		observation: Type.Optional(SequencedChildObservationSchema),
 		artifactImport: Type.Optional(SequencedArtifactImportSchema),
+		releaseIntent: Type.Optional(SequencedReleaseIntentSchema),
 		release: Type.Optional(SequencedReleaseSchema),
 		terminal: Type.Optional(SequencedTerminalSchema),
 	},

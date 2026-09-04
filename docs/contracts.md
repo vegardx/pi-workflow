@@ -293,7 +293,9 @@ artifact and its digest. Task lifecycle transitions remain separate events and
 may consume terminal execution evidence only after that evidence is durable.
 
 After uncertain launch outcome it calls `findByOperation` before any new launch.
-Structured output remains subagent-owned at execution time. Workflow accepts
+A terminal no-child failure requires durable operation-absence evidence; an
+uncertain launch alone can never terminalize the execution. Structured output
+remains subagent-owned at execution time. Workflow accepts
 only JSON-serializable output-schema documents within the runtime's bounded
 16-level schema-value depth, then revalidates and imports the value and every
 downstream artifact into workflow-owned storage before task completion.
@@ -328,7 +330,8 @@ Subagent terminal outcomes map using both primary status and cleanup evidence:
 | any retained, blocked, or unknown required cleanup | `cleanup-blocked`; preserve the observed subagent status/failure as evidence, block dependents, and mark the run cleanup-blocked |
 
 `cleanup-blocked` remains until subagent reconciliation/release proves cleanup
-and returns a new result that can be mapped normally. Workflow does not infer a
+and returns a new result that can be mapped normally. Release itself is an
+idempotent external effect with durable intent and receipt. Workflow does not infer a
 hidden primary status from a subagent `cleanup-blocked` result.
 
 ## Workflow service
