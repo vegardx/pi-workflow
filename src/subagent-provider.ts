@@ -65,15 +65,43 @@ function hasMethods<T extends object>(
 	methods: readonly (keyof T)[],
 ): value is T {
 	if (typeof value !== "object" || value === null) return false;
-	return methods.every(
-		(method) => typeof value[method as keyof object] === "function",
-	);
+	try {
+		return methods.every(
+			(method) => typeof value[method as keyof object] === "function",
+		);
+	} catch {
+		return false;
+	}
+}
+
+function restrictClient(client: SubagentClient): SubagentClient {
+	return Object.freeze({
+		preflight: client.preflight.bind(client),
+		launch: client.launch.bind(client),
+		findByOperation: client.findByOperation.bind(client),
+		status: client.status.bind(client),
+		listRuns: client.listRuns.bind(client),
+		logs: client.logs.bind(client),
+		wait: client.wait.bind(client),
+		interrupt: client.interrupt.bind(client),
+		steer: client.steer.bind(client),
+		followUp: client.followUp.bind(client),
+		retry: client.retry.bind(client),
+		resume: client.resume.bind(client),
+		reconcile: client.reconcile.bind(client),
+		release: client.release.bind(client),
+		abandon: client.abandon.bind(client),
+		pin: client.pin.bind(client),
+		unpin: client.unpin.bind(client),
+		exportArtifact: client.exportArtifact.bind(client),
+	});
 }
 
 export type WorkflowSubagentProviderErrorCode =
 	| "missing"
 	| "duplicate"
 	| "incompatible"
+	| "validation"
 	| "acquisition"
 	| "replaced";
 
@@ -114,7 +142,7 @@ export function createWorkflowSubagentProvider(
 	): Promise<WorkflowSubagentBinding> {
 		if (!Value.Check(WorkflowRunIdSchema, workflowRunId)) {
 			throw new WorkflowSubagentProviderError(
-				"incompatible",
+				"validation",
 				"Invalid workflow run identity for subagent owner binding.",
 			);
 		}
@@ -174,10 +202,20 @@ export function createWorkflowSubagentProvider(
 				"The pi-subagent service returned an invalid owner client.",
 			);
 		}
+		let restrictedClient: SubagentClient;
+		try {
+			restrictedClient = restrictClient(client);
+		} catch (error) {
+			throw new WorkflowSubagentProviderError(
+				"incompatible",
+				"The pi-subagent owner client could not be capability-restricted.",
+				{ cause: error },
+			);
+		}
 		return Object.freeze({
 			workflowRunId,
 			ownerId: registration.id,
-			client,
+			client: restrictedClient,
 		});
 	}
 

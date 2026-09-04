@@ -39,8 +39,11 @@ Workflow binds an owner client to its durable run identity as
 `pi-workflow:<workflow-run-id>`. Model input cannot choose that owner. The
 session-scoped adapter pins the exact first service object and reacquires before
 each binding, so missing, duplicate, removed, replaced, malformed, or
-incompatible providers fail before a run starts. The binding exposes only the
-owner client. Workflow cannot shut down or replace the provider, access its
+incompatible providers fail before a run starts. The upstream provider is also
+revalidated after asynchronous acquisition. The binding exposes a
+capability-restricted wrapper containing exactly the owner-client methods, so
+extra provider properties such as shutdown cannot cross the adapter. Workflow
+cannot shut down or replace the provider, access its
 private stores, or construct a fallback service.
 
 ## Static workflow trust
