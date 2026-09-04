@@ -270,8 +270,10 @@ identity. Unsupported media types or values exceeding the projection limit fail
 before child launch. Future file or directory mounts require a new explicit
 subagent contract and cannot silently use this projection.
 
-Workflow derives a deterministic subagent operation ID from workflow run ID,
-task ID, and task-execution generation. One agent task execution corresponds to
+Workflow derives deterministic task-execution and subagent operation IDs from
+workflow run ID, task ID, and task-execution generation. Generation 1 is the
+only executable generation in the initial slice; later generations require the
+transactional invalidation contract. One agent task execution corresponds to
 one subagent run and may contain multiple subagent attempts. Before its initial
 launch it:
 
@@ -283,6 +285,12 @@ launch it:
 5. persists launch intent;
 6. launches with the exact preflight identity;
 7. persists the launch receipt.
+
+The journal stores bounded terminal evidence and a digest of the complete child
+result, not model output, structured values, session paths, or subagent-private
+store paths. Imported structured output is represented by a workflow-owned
+artifact and its digest. Task lifecycle transitions remain separate events and
+may consume terminal execution evidence only after that evidence is durable.
 
 After uncertain launch outcome it calls `findByOperation` before any new launch.
 Structured output remains subagent-owned at execution time. Workflow accepts

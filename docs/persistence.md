@@ -28,9 +28,11 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-1 accepts only `run-created`, `task-declared`, `artifact-declared`,
-`barrier-reached`, `task-status-changed`, `task-invalidated`, and
-`run-status-changed`. `run.json` is a bounded typed projection rebuilt from
+1 accepts only the declared run, task, artifact, barrier, and task-execution
+events. Task-execution evidence records generation creation, preflight, launch
+intent, uncertain launch, launch receipt, child observation, artifact import,
+release, and terminal outcome in that order. `run.json` is a bounded typed
+projection rebuilt from
 those events and is returned only when it exactly equals reduction of the
 complete current journal. A valid older snapshot is ignored until rebuilt.
 Unknown, divergent, corrupt, or future-version records fail closed.
@@ -87,7 +89,9 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Each agent-task execution generation owns one subagent run and
+invalidation. Revision 1 currently admits generation 1 only; later generations
+remain unavailable until transactional invalidation lands. Each agent-task
+execution generation owns one subagent run and
 contains:
 
 - generation number and task identity;

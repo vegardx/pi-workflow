@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
-import type { WorkflowTaskId } from "./contracts.js";
+import type {
+	TaskExecutionId,
+	TaskExecutionOutcome,
+	WorkflowTaskId,
+} from "./contracts.js";
 import {
 	MAX_WORKFLOW_STATE_BYTES,
 	type WorkflowEventInput,
@@ -8,6 +12,10 @@ import {
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
 } from "./events.js";
+import {
+	deriveSubagentOperationId,
+	deriveTaskExecutionId,
+} from "./execution.js";
 import {
 	transitionWorkflowRunStatus,
 	transitionWorkflowTaskStatus,
@@ -73,11 +81,69 @@ function transitiveDependents(
 	return selected;
 }
 
+function executionProjection(
+	state: WorkflowStateProjection,
+	executionId: TaskExecutionId,
+	sequence: number,
+) {
+	const execution = state.executions[executionId];
+	if (!execution) fail("task execution is unknown", sequence);
+	return execution;
+}
+
+function isTerminalSubagentStatus(status: string): boolean {
+	return (
+		status === "completed" ||
+		status === "failed" ||
+		status === "cancelled" ||
+		status === "abandoned" ||
+		status === "interrupted" ||
+		status === "cleanup-blocked"
+	);
+}
+
+function cleanupProved(value: "proved" | "not-needed" | string): boolean {
+	return value === "proved" || value === "not-needed";
+}
+
+function observedStatusCanFollow(previous: string, next: string): boolean {
+	if (previous === next || isTerminalSubagentStatus(previous)) return false;
+	if (previous === "queued") return true;
+	if (previous === "active") return next !== "queued";
+	if (previous === "stopping") {
+		return next === "cancelled" || next === "cleanup-blocked";
+	}
+	return false;
+}
+
+function subagentOutcome(status: string): TaskExecutionOutcome | undefined {
+	switch (status) {
+		case "completed":
+		case "failed":
+		case "cancelled":
+		case "interrupted":
+		case "cleanup-blocked":
+			return status;
+		case "abandoned":
+			return "cancelled";
+		default:
+			return undefined;
+	}
+}
+
 function applyEvent(
 	state: WorkflowStateProjection,
 	event: WorkflowJournalEvent,
 	input: WorkflowEventInput,
 ): void {
+	if (
+		input.type.startsWith("task-execution-") &&
+		(state.status === "completed" ||
+			state.status === "completed-degraded" ||
+			state.status === "cancelled")
+	) {
+		fail("terminal workflow run may not change task execution", event.sequence);
+	}
 	switch (input.type) {
 		case "run-created":
 			throw new WorkflowEventReductionError(
@@ -264,6 +330,299 @@ function applyEvent(
 			state.currentEpoch += 1;
 			break;
 		}
+		case "task-execution-created": {
+			const execution = structuredClone(input.data.execution);
+			const task = state.tasks[execution.taskId];
+			if (!task?.committed) {
+				fail("task execution target is unknown or uncommitted", event.sequence);
+			}
+			if (task.status !== "ready") {
+				fail("task execution requires a ready task", event.sequence);
+			}
+			if (
+				execution.runId !== state.runId ||
+				execution.taskIdentitySha256 !== task.task.spec.identitySha256
+			) {
+				fail("task execution identity does not match its task", event.sequence);
+			}
+			const previousGenerations = Object.values(state.executions).filter(
+				(candidate) => candidate.execution.taskId === execution.taskId,
+			);
+			const expectedGeneration = previousGenerations.length + 1;
+			if (
+				execution.generation !== expectedGeneration ||
+				execution.generation !== 1
+			) {
+				fail(
+					"task execution generation is unavailable or not contiguous",
+					event.sequence,
+				);
+			}
+			if (
+				execution.id !==
+					deriveTaskExecutionId(
+						state.runId,
+						execution.taskId,
+						execution.generation,
+					) ||
+				execution.operationId !==
+					deriveSubagentOperationId(
+						state.runId,
+						execution.taskId,
+						execution.generation,
+					)
+			) {
+				fail(
+					"task execution identifiers are not deterministic",
+					event.sequence,
+				);
+			}
+			if (state.executions[execution.id] || task.currentExecutionId) {
+				fail("task execution is duplicate or already current", event.sequence);
+			}
+			state.executions[execution.id] = {
+				execution,
+				phase: "created",
+				createdSequence: event.sequence,
+			};
+			task.currentExecutionId = execution.id;
+			break;
+		}
+		case "task-execution-preflighted": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (
+				projection.phase !== "created" ||
+				input.data.operationId !== projection.execution.operationId
+			) {
+				fail("task execution preflight is out of order", event.sequence);
+			}
+			const { executionId: _executionId, ...preflight } = input.data;
+			projection.preflight = { ...preflight, sequence: event.sequence };
+			projection.phase = "preflighted";
+			break;
+		}
+		case "task-execution-launch-intended": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const preflight = projection.preflight;
+			if (
+				projection.phase !== "preflighted" ||
+				!preflight ||
+				input.data.operationId !== projection.execution.operationId ||
+				input.data.preflightId !== preflight.preflightId ||
+				input.data.planIdentitySha256 !== preflight.planIdentitySha256
+			) {
+				fail("task execution launch intent is out of order", event.sequence);
+			}
+			const { executionId: _executionId, ...launchIntent } = input.data;
+			projection.launchIntent = { ...launchIntent, sequence: event.sequence };
+			projection.phase = "launch-intended";
+			break;
+		}
+		case "task-execution-launch-uncertain": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (
+				projection.phase !== "launch-intended" ||
+				input.data.operationId !== projection.execution.operationId
+			) {
+				fail("uncertain task launch is out of order", event.sequence);
+			}
+			const { executionId: _executionId, ...launchUncertain } = input.data;
+			projection.launchUncertain = {
+				...launchUncertain,
+				sequence: event.sequence,
+			};
+			projection.phase = "launch-uncertain";
+			break;
+		}
+		case "task-execution-launch-receipted": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (
+				(projection.phase !== "launch-intended" &&
+					projection.phase !== "launch-uncertain") ||
+				input.data.operationId !== projection.execution.operationId
+			) {
+				fail("task execution launch receipt is out of order", event.sequence);
+			}
+			const { executionId: _executionId, ...launchReceipt } = input.data;
+			projection.launchReceipt = { ...launchReceipt, sequence: event.sequence };
+			projection.phase = "launched";
+			break;
+		}
+		case "task-execution-child-observed": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const receipt = projection.launchReceipt;
+			const previousObservation = projection.observation;
+			const previousStatus = previousObservation?.status ?? receipt?.status;
+			if (
+				(projection.phase !== "launched" && projection.phase !== "observed") ||
+				!receipt ||
+				input.data.subagentRunId !== receipt.subagentRunId ||
+				input.data.subagentAttemptId !== receipt.subagentAttemptId ||
+				!previousStatus ||
+				(previousObservation
+					? !observedStatusCanFollow(previousStatus, input.data.status)
+					: input.data.status !== previousStatus &&
+						!observedStatusCanFollow(previousStatus, input.data.status))
+			) {
+				fail("task execution child observation is invalid", event.sequence);
+			}
+			const { executionId: _executionId, ...observation } = input.data;
+			projection.observation = { ...observation, sequence: event.sequence };
+			projection.phase = "observed";
+			break;
+		}
+		case "task-execution-artifact-imported": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const observation = projection.observation;
+			const artifact = state.artifacts[input.data.artifactId];
+			if (
+				projection.phase !== "observed" ||
+				!observation ||
+				observation.status !== "completed" ||
+				input.data.subagentRunId !== observation.subagentRunId ||
+				!artifact ||
+				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.output !== "result"
+			) {
+				fail("task execution artifact import is invalid", event.sequence);
+			}
+			const { executionId: _executionId, ...artifactImport } = input.data;
+			projection.artifactImport = {
+				...artifactImport,
+				sequence: event.sequence,
+			};
+			projection.phase = "artifact-imported";
+			break;
+		}
+		case "task-execution-released": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const receipt = projection.launchReceipt;
+			if (
+				(projection.phase !== "observed" &&
+					projection.phase !== "artifact-imported") ||
+				!receipt ||
+				input.data.subagentRunId !== receipt.subagentRunId ||
+				!isTerminalSubagentStatus(input.data.status)
+			) {
+				fail("task execution release is invalid", event.sequence);
+			}
+			const { executionId: _executionId, ...release } = input.data;
+			projection.release = { ...release, sequence: event.sequence };
+			projection.phase = "released";
+			break;
+		}
+		case "task-execution-terminal": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (projection.phase === "terminal") {
+				fail("task execution terminal evidence is duplicate", event.sequence);
+			}
+			const task = state.tasks[projection.execution.taskId];
+			if (
+				!task ||
+				task.currentExecutionId !== projection.execution.id ||
+				task.status === "completed" ||
+				task.status === "failed" ||
+				task.status === "cancelled" ||
+				task.status === "invalidated"
+			) {
+				fail("task execution terminal target is not active", event.sequence);
+			}
+			const evidence = structuredClone(input.data.evidence);
+			if (evidence.kind === "subagent") {
+				const observation = projection.observation;
+				const expectedOutcome = subagentOutcome(evidence.status);
+				const cleanupIsProved =
+					cleanupProved(evidence.sandboxCleanup) &&
+					cleanupProved(evidence.workspaceCleanup);
+				if (
+					!observation ||
+					observation.status !== evidence.status ||
+					!expectedOutcome ||
+					expectedOutcome !== input.data.outcome ||
+					(evidence.status === "completed" &&
+						(!cleanupIsProved ||
+							evidence.failure !== undefined ||
+							evidence.structuredOutputSha256 === undefined ||
+							projection.artifactImport === undefined ||
+							projection.release?.status !== "completed" ||
+							projection.artifactImport.sourceResultSha256 !==
+								evidence.resultSha256)) ||
+					(evidence.status === "cleanup-blocked" &&
+						(cleanupIsProved || evidence.failure === undefined)) ||
+					(evidence.status !== "completed" &&
+						evidence.status !== "cleanup-blocked" &&
+						(!cleanupIsProved || evidence.failure === undefined)) ||
+					(evidence.status === "abandoned" &&
+						(evidence.failure?.code !== "operator-abandoned" ||
+							evidence.failure.origin !== "operator" ||
+							evidence.failure.retry !== "never" ||
+							evidence.output !== undefined ||
+							evidence.structuredOutputSha256 !== undefined))
+				) {
+					fail("subagent terminal evidence is inconsistent", event.sequence);
+				}
+			} else {
+				if (
+					(input.data.outcome !== "failed" &&
+						input.data.outcome !== "cleanup-blocked") ||
+					(evidence.stage === "preflight" && projection.phase !== "created") ||
+					(evidence.stage === "launch" &&
+						projection.phase !== "preflighted" &&
+						projection.phase !== "launch-intended") ||
+					(evidence.stage === "reconciliation" &&
+						projection.phase !== "launch-uncertain" &&
+						projection.phase !== "launched" &&
+						projection.phase !== "observed") ||
+					(evidence.stage === "artifact-import" &&
+						projection.phase !== "observed") ||
+					(evidence.stage === "release" &&
+						projection.phase !== "observed" &&
+						projection.phase !== "artifact-imported" &&
+						projection.phase !== "released")
+				) {
+					fail("workflow terminal evidence is inconsistent", event.sequence);
+				}
+			}
+			projection.terminal = {
+				outcome: input.data.outcome,
+				evidence,
+				sequence: event.sequence,
+			};
+			projection.phase = "terminal";
+			break;
+		}
 		case "task-status-changed": {
 			if (
 				state.status === "completed" ||
@@ -282,6 +641,37 @@ function applyEvent(
 			}
 			if (task.status !== input.data.from) {
 				fail("task status source does not match projection", event.sequence);
+			}
+			const execution = task.currentExecutionId
+				? state.executions[task.currentExecutionId]
+				: undefined;
+			if (input.data.to === "running") {
+				const childStatus =
+					execution?.observation?.status ?? execution?.launchReceipt?.status;
+				if (!execution || childStatus !== "active") {
+					fail(
+						"task became running without an active execution",
+						event.sequence,
+					);
+				}
+			}
+			const terminalOutcome =
+				input.data.to === "completed" ||
+				input.data.to === "failed" ||
+				input.data.to === "cancelled" ||
+				input.data.to === "interrupted" ||
+				input.data.to === "cleanup-blocked"
+					? input.data.to
+					: undefined;
+			if (
+				terminalOutcome &&
+				(input.data.to !== "cancelled" || execution) &&
+				execution?.terminal?.outcome !== terminalOutcome
+			) {
+				fail(
+					"task terminal status lacks matching execution evidence",
+					event.sequence,
+				);
 			}
 			if (
 				input.data.to === "ready" &&
@@ -499,6 +889,7 @@ export function reduceWorkflowEvents(
 		currentEpoch: 1,
 		lastSequence: 1,
 		tasks: {},
+		executions: {},
 		artifacts: {},
 		barriers: [],
 	};

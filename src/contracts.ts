@@ -3,8 +3,15 @@ import {
 	DelegatedTaskSchema,
 	ExactModelRequestSchema,
 	RunLimitsSchema,
+	ArtifactRefSchema as SubagentArtifactRefSchema,
+	AttemptIdSchema as SubagentAttemptIdSchema,
+	ClassifiedFailureSchema as SubagentClassifiedFailureSchema,
+	CleanupOutcomeSchema as SubagentCleanupOutcomeSchema,
+	RunIdSchema as SubagentRunIdSchema,
+	RunStatusSchema as SubagentRunStatusSchema,
 	type SubagentRuntimeContract,
 	SubagentRuntimeContractSchema,
+	UsageSchema as SubagentUsageSchema,
 } from "@vegardx/pi-subagent";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -59,6 +66,19 @@ export const TaskExecutionIdSchema = Type.String({
 	maxLength: 128,
 });
 export type TaskExecutionId = Static<typeof TaskExecutionIdSchema>;
+
+export const TaskExecutionGenerationSchema = Type.Integer({
+	minimum: 1,
+	maximum: Number.MAX_SAFE_INTEGER,
+});
+export type TaskExecutionGeneration = Static<
+	typeof TaskExecutionGenerationSchema
+>;
+
+export const SubagentOperationIdSchema = Type.String({
+	pattern: "^workflow-op_[a-f0-9]{64}$",
+});
+export type SubagentOperationId = Static<typeof SubagentOperationIdSchema>;
 
 export const TaskKeySchema = Type.String({
 	pattern: "^[a-z][a-z0-9-]*$",
@@ -224,6 +244,85 @@ export const MaterializedAgentTaskSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type MaterializedAgentTask = Static<typeof MaterializedAgentTaskSchema>;
+
+export const TaskExecutionRecordSchema = Type.Object(
+	{
+		id: TaskExecutionIdSchema,
+		runId: WorkflowRunIdSchema,
+		taskId: WorkflowTaskIdSchema,
+		generation: TaskExecutionGenerationSchema,
+		taskIdentitySha256: Sha256Schema,
+		operationId: SubagentOperationIdSchema,
+	},
+	{ additionalProperties: false },
+);
+export type TaskExecutionRecord = Static<typeof TaskExecutionRecordSchema>;
+
+export const SubagentTerminalEvidenceSchema = Type.Object(
+	{
+		kind: Type.Literal("subagent"),
+		resultSha256: Sha256Schema,
+		status: SubagentRunStatusSchema,
+		usage: SubagentUsageSchema,
+		usageComplete: Type.Boolean(),
+		runtimeMs: Type.Integer({
+			minimum: 0,
+			maximum: Number.MAX_SAFE_INTEGER,
+		}),
+		failure: Type.Optional(SubagentClassifiedFailureSchema),
+		sandboxCleanup: SubagentCleanupOutcomeSchema,
+		workspaceCleanup: SubagentCleanupOutcomeSchema,
+		truncated: Type.Boolean(),
+		output: Type.Optional(SubagentArtifactRefSchema),
+		structuredOutputSha256: Type.Optional(Sha256Schema),
+	},
+	{ additionalProperties: false },
+);
+export type SubagentTerminalEvidence = Static<
+	typeof SubagentTerminalEvidenceSchema
+>;
+
+export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
+	{
+		kind: Type.Literal("workflow"),
+		stage: Type.Union([
+			Type.Literal("preflight"),
+			Type.Literal("launch"),
+			Type.Literal("reconciliation"),
+			Type.Literal("artifact-import"),
+			Type.Literal("release"),
+		]),
+		failureSha256: Sha256Schema,
+		message: Type.String({ minLength: 1, maxLength: 4096 }),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowExecutionFailureEvidence = Static<
+	typeof WorkflowExecutionFailureEvidenceSchema
+>;
+
+export const TaskExecutionTerminalEvidenceSchema = Type.Union([
+	SubagentTerminalEvidenceSchema,
+	WorkflowExecutionFailureEvidenceSchema,
+]);
+export type TaskExecutionTerminalEvidence = Static<
+	typeof TaskExecutionTerminalEvidenceSchema
+>;
+
+export const TaskExecutionOutcomeSchema = Type.Union([
+	Type.Literal("completed"),
+	Type.Literal("failed"),
+	Type.Literal("cancelled"),
+	Type.Literal("interrupted"),
+	Type.Literal("cleanup-blocked"),
+]);
+export type TaskExecutionOutcome = Static<typeof TaskExecutionOutcomeSchema>;
+
+export {
+	SubagentAttemptIdSchema,
+	SubagentRunIdSchema,
+	SubagentRunStatusSchema,
+};
 
 export const WorkflowRuntimeContractSchema = Type.Object(
 	{
