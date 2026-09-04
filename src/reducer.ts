@@ -13,8 +13,10 @@ import {
 	WorkflowStateProjectionSchema,
 } from "./events.js";
 import {
+	deriveJsonValueSha256,
 	deriveSubagentOperationId,
 	deriveTaskExecutionId,
+	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import {
 	transitionWorkflowRunStatus,
@@ -395,7 +397,8 @@ function applyEvent(
 				event.sequence,
 			);
 			if (
-				projection.phase !== "created" ||
+				(projection.phase !== "created" &&
+					projection.phase !== "preflighted") ||
 				input.data.operationId !== projection.execution.operationId
 			) {
 				fail("task execution preflight is out of order", event.sequence);
@@ -455,7 +458,12 @@ function applyEvent(
 			if (
 				(projection.phase !== "launch-intended" &&
 					projection.phase !== "launch-uncertain") ||
-				input.data.operationId !== projection.execution.operationId
+				input.data.operationId !== projection.execution.operationId ||
+				Object.values(state.executions).some(
+					(candidate) =>
+						candidate.execution.id !== projection.execution.id &&
+						candidate.launchReceipt?.subagentRunId === input.data.subagentRunId,
+				)
 			) {
 				fail("task execution launch receipt is out of order", event.sequence);
 			}
@@ -473,19 +481,29 @@ function applyEvent(
 			const receipt = projection.launchReceipt;
 			const previousObservation = projection.observation;
 			const previousStatus = previousObservation?.status ?? receipt?.status;
+			const reconcilesCleanup =
+				projection.phase === "terminal" &&
+				projection.terminal?.outcome === "cleanup-blocked" &&
+				previousStatus === "cleanup-blocked" &&
+				isTerminalSubagentStatus(input.data.status) &&
+				input.data.status !== "cleanup-blocked";
 			if (
-				(projection.phase !== "launched" && projection.phase !== "observed") ||
+				(projection.phase !== "launched" &&
+					projection.phase !== "observed" &&
+					!reconcilesCleanup) ||
 				!receipt ||
 				input.data.subagentRunId !== receipt.subagentRunId ||
 				input.data.subagentAttemptId !== receipt.subagentAttemptId ||
 				!previousStatus ||
-				(previousObservation
-					? !observedStatusCanFollow(previousStatus, input.data.status)
-					: input.data.status !== previousStatus &&
-						!observedStatusCanFollow(previousStatus, input.data.status))
+				(!reconcilesCleanup &&
+					(previousObservation
+						? !observedStatusCanFollow(previousStatus, input.data.status)
+						: input.data.status !== previousStatus &&
+							!observedStatusCanFollow(previousStatus, input.data.status)))
 			) {
 				fail("task execution child observation is invalid", event.sequence);
 			}
+			if (reconcilesCleanup) delete projection.terminal;
 			const { executionId: _executionId, ...observation } = input.data;
 			projection.observation = { ...observation, sequence: event.sequence };
 			projection.phase = "observed";
@@ -525,11 +543,14 @@ function applyEvent(
 				event.sequence,
 			);
 			const receipt = projection.launchReceipt;
+			const observation = projection.observation;
 			if (
 				(projection.phase !== "observed" &&
 					projection.phase !== "artifact-imported") ||
 				!receipt ||
+				!observation ||
 				input.data.subagentRunId !== receipt.subagentRunId ||
+				input.data.status !== observation.status ||
 				!isTerminalSubagentStatus(input.data.status)
 			) {
 				fail("task execution release is invalid", event.sequence);
@@ -563,6 +584,9 @@ function applyEvent(
 			if (evidence.kind === "subagent") {
 				const observation = projection.observation;
 				const expectedOutcome = subagentOutcome(evidence.status);
+				const importedArtifact = projection.artifactImport
+					? state.artifacts[projection.artifactImport.artifactId]
+					: undefined;
 				const cleanupIsProved =
 					cleanupProved(evidence.sandboxCleanup) &&
 					cleanupProved(evidence.workspaceCleanup);
@@ -571,12 +595,15 @@ function applyEvent(
 					observation.status !== evidence.status ||
 					!expectedOutcome ||
 					expectedOutcome !== input.data.outcome ||
+					projection.release?.status !== evidence.status ||
 					(evidence.status === "completed" &&
 						(!cleanupIsProved ||
 							evidence.failure !== undefined ||
 							evidence.structuredOutputSha256 === undefined ||
 							projection.artifactImport === undefined ||
-							projection.release?.status !== "completed" ||
+							importedArtifact?.sha256 !== evidence.structuredOutputSha256 ||
+							importedArtifact.schemaSha256 !==
+								deriveJsonValueSha256(task.task.spec.request.outputSchema) ||
 							projection.artifactImport.sourceResultSha256 !==
 								evidence.resultSha256)) ||
 					(evidence.status === "cleanup-blocked" &&
@@ -595,6 +622,8 @@ function applyEvent(
 				}
 			} else {
 				if (
+					evidence.failureSha256 !==
+						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
 					(input.data.outcome !== "failed" &&
 						input.data.outcome !== "cleanup-blocked") ||
 					(evidence.stage === "preflight" && projection.phase !== "created") ||

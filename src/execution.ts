@@ -38,6 +38,10 @@ export function deriveSubagentOperationId(
 	})}`;
 }
 
+export function deriveJsonValueSha256(value: unknown): string {
+	return canonicalSha256(value);
+}
+
 export function deriveSubagentResultSha256(result: RunResult): string {
 	if (!isRunResult(result)) throw new Error("invalid subagent result");
 	const serialized = JSON.stringify(result);

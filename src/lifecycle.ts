@@ -46,7 +46,16 @@ const TASK_TRANSITIONS: Readonly<
 	Record<WorkflowTaskStatus, ReadonlySet<WorkflowTaskStatus>>
 > = {
 	pending: new Set(["ready", "blocked", "cancelled", "invalidated"]),
-	ready: new Set(["running", "failed", "blocked", "cancelled", "invalidated"]),
+	ready: new Set([
+		"running",
+		"completed",
+		"failed",
+		"interrupted",
+		"cleanup-blocked",
+		"blocked",
+		"cancelled",
+		"invalidated",
+	]),
 	running: new Set([
 		"waiting",
 		"completed",
