@@ -454,6 +454,10 @@ export class WorkflowRunJournal {
 		);
 	}
 
+	get fencingGeneration(): number {
+		return this.lease.record.generation;
+	}
+
 	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this.coordinator.tail.then(async () => {
 			if (this.coordinator.uncertain) {

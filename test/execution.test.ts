@@ -349,6 +349,7 @@ describe("task execution persistence", () => {
 				...first.data,
 				preflightId: "preflight-2",
 				expiresAt: "2026-09-01T02:00:00.000Z",
+				supersedesPreflightId: "preflight-1",
 			},
 		};
 		expect(() =>

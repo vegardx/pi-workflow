@@ -130,3 +130,10 @@ export {
 	WorkflowSubagentProviderError,
 	type WorkflowSubagentProviderErrorCode,
 } from "./subagent-provider.js";
+export {
+	createWorkflowTaskLauncher,
+	WorkflowTaskLaunchError,
+	type WorkflowTaskLauncher,
+	type WorkflowTaskLauncherOptions,
+	type WorkflowTaskLaunchOutcome,
+} from "./task-launcher.js";

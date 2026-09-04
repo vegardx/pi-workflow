@@ -33,7 +33,9 @@ events. Task-execution evidence records generation creation, the latest
 preflight before launch intent, uncertain launch and reconciled absence or a
 launch receipt, child observation, artifact import, release intent and receipt,
 and terminal outcome in that order. An
-expired preflight may be replaced only before launch intent is persisted.
+expired preflight may be replaced only before launch intent is persisted. A
+preflight from an older workflow fencing generation is also replaced because
+pi-subagent preflight grants are intentionally process-local.
 `run.json` is a bounded typed projection rebuilt from those events and is returned only when it exactly equals reduction of the
 complete current journal. A valid older snapshot is ignored until rebuilt.
 Unknown, divergent, corrupt, or future-version records fail closed.

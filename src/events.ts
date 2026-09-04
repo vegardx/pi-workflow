@@ -100,6 +100,9 @@ const TaskExecutionPreflightedEventSchema = Type.Object(
 				preflightId: Type.String({ minLength: 1, maxLength: 128 }),
 				planIdentitySha256: Sha256Schema,
 				expiresAt: Type.String({ format: "date-time" }),
+				supersedesPreflightId: Type.Optional(
+					Type.String({ minLength: 1, maxLength: 128 }),
+				),
 			},
 			{ additionalProperties: false },
 		),
@@ -351,6 +354,13 @@ const SequencedPreflightSchema = Type.Object(
 		preflightId: Type.String({ minLength: 1, maxLength: 128 }),
 		planIdentitySha256: Sha256Schema,
 		expiresAt: Type.String({ format: "date-time" }),
+		supersedesPreflightId: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 128 }),
+		),
+		fencingGeneration: Type.Integer({
+			minimum: 1,
+			maximum: Number.MAX_SAFE_INTEGER,
+		}),
 		sequence: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
