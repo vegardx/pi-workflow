@@ -229,7 +229,9 @@ require a later explicit contract.
 ## Agent tasks
 
 The initial agent-task request is explicitly lowered into the current public
-`pi-subagent` request. Workflow-only dependency, disposition, and replay fields
+`pi-subagent` request. Phase 1 accepts only fresh context. Fork context remains
+unavailable until workflow persists and replays the authorized parent session
+identity required by the subagent owner contract. Workflow-only dependency, disposition, and replay fields
 are consumed by the materializer; the adapter derives the required operation ID
 and concrete delegated context. It does not forward unknown fields or invent
 background execution or arbitrary child extensions unsupported by the service.
@@ -238,7 +240,7 @@ background execution or arbitrary child extensions unsupported by the service.
 interface AgentTask<T> extends TaskRequestBase {
 	agent: string;
 	task: DelegatedTask;
-	contextMode: "fresh" | "fork";
+	contextMode: "fresh";
 	model?: ExactModelRequest;
 	tools: string[];
 	preloadSkills: string[];

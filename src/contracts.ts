@@ -175,7 +175,7 @@ export const AgentTaskRequestSchema = Type.Object(
 	{
 		agent: ResourceNameSchema,
 		task: DelegatedTaskSchema,
-		contextMode: Type.Union([Type.Literal("fresh"), Type.Literal("fork")]),
+		contextMode: Type.Literal("fresh"),
 		model: Type.Optional(ExactModelRequestSchema),
 		tools: Type.Array(ResourceNameSchema, {
 			maxItems: 64,

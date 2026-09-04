@@ -69,7 +69,7 @@ export function createTaskHandle<T>(
 export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
 	readonly agent: string;
 	readonly task: DelegatedTask;
-	readonly contextMode: "fresh" | "fork";
+	readonly contextMode: "fresh";
 	readonly model?: ExactModelRequest;
 	readonly tools: readonly string[];
 	readonly preloadSkills: readonly string[];

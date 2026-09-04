@@ -141,6 +141,16 @@ describe("workflow contracts", () => {
 		).toBe(false);
 	});
 
+	it("rejects fork context until durable parent authorization ships", () => {
+		const spec = agentTaskSpec();
+		expect(
+			Value.Check(AgentTaskSpecSchema, {
+				...spec,
+				request: { ...spec.request, contextMode: "fork" },
+			}),
+		).toBe(false);
+	});
+
 	it("rejects worktree requests while the capability is unavailable", () => {
 		const spec = agentTaskSpec();
 		expect(

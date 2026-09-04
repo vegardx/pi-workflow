@@ -10,10 +10,7 @@ import {
 } from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { describe, expect, it, vi } from "vitest";
-import {
-	createWorkflowSubagentProvider,
-	WorkflowSubagentProviderError,
-} from "../src/subagent-provider.js";
+import { createWorkflowSubagentProvider } from "../src/subagent-provider.js";
 
 const context = {} as ExtensionContext;
 
@@ -95,9 +92,10 @@ describe("workflow subagent provider", () => {
 			workflowRunId: "workflow_second",
 		});
 		expect(first.ownerId).toBe("pi-workflow:workflow_first");
-		expect(second.client).toBe(first.client);
+		expect(second.client).not.toBe(first.client);
 		expect("service" in first).toBe(false);
 		expect("shutdown" in first).toBe(false);
+		expect("shutdown" in first.client).toBe(false);
 		expect(shared.shutdown).not.toHaveBeenCalled();
 	});
 
@@ -124,6 +122,18 @@ describe("workflow subagent provider", () => {
 		).rejects.toMatchObject({ code: "incompatible" });
 	});
 
+	it("removes undeclared authority from an overpowered owner client", async () => {
+		const events = createEventBus();
+		const shutdown = vi.fn();
+		const overpowered = Object.assign(client(), { shutdown });
+		registerSubagentServiceProvider(events, async () => service(overpowered));
+		const binding = await createWorkflowSubagentProvider(events, context).bind(
+			"workflow_restricted",
+		);
+		expect("shutdown" in binding.client).toBe(false);
+		expect(shutdown).not.toHaveBeenCalled();
+	});
+
 	it("rejects malformed services and owner clients", async () => {
 		const badServiceEvents = createEventBus();
 		registerSubagentServiceProvider(
@@ -145,6 +155,28 @@ describe("workflow subagent provider", () => {
 				"workflow_badclient",
 			),
 		).rejects.toMatchObject({ code: "incompatible" });
+	});
+
+	it("rejects provider removal while acquisition is pending", async () => {
+		const events = createEventBus();
+		let resolveService: ((value: SubagentService) => void) | undefined;
+		let started: (() => void) | undefined;
+		const acquisitionStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const pending = new Promise<SubagentService>((resolve) => {
+			resolveService = resolve;
+		});
+		const unregister = registerSubagentServiceProvider(events, async () => {
+			started?.();
+			return pending;
+		});
+		const provider = createWorkflowSubagentProvider(events, context);
+		const binding = provider.bind("workflow_pending");
+		await acquisitionStarted;
+		unregister();
+		resolveService?.(service());
+		await expect(binding).rejects.toMatchObject({ code: "missing" });
 	});
 
 	it("detects provider removal and compatible service replacement", async () => {
@@ -200,9 +232,9 @@ describe("workflow subagent provider", () => {
 		registerSubagentServiceProvider(events, acquire);
 		const provider = createWorkflowSubagentProvider(events, context);
 
-		await expect(provider.bind("invalid" as never)).rejects.toBeInstanceOf(
-			WorkflowSubagentProviderError,
-		);
+		await expect(provider.bind("invalid" as never)).rejects.toMatchObject({
+			code: "validation",
+		});
 		expect(acquire).not.toHaveBeenCalled();
 	});
 
@@ -217,7 +249,7 @@ describe("workflow subagent provider", () => {
 			provider.bind("workflow_concurrentone"),
 			provider.bind("workflow_concurrenttwo"),
 		]);
-		expect(first.client).toBe(second.client);
+		expect(first.client).not.toBe(second.client);
 		expect(acquire).toHaveBeenCalledTimes(2);
 	});
 });
