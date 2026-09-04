@@ -192,6 +192,7 @@ export class WorkflowTaskMaterializer {
 					currentEpoch: 1,
 					lastSequence: 1,
 					tasks: {},
+					executions: {},
 					artifacts: {},
 					barriers: [],
 				};

@@ -1,6 +1,14 @@
 import { type Static, Type } from "typebox";
 import {
 	MaterializedAgentTaskSchema,
+	SubagentAttemptIdSchema,
+	SubagentOperationIdSchema,
+	SubagentRunIdSchema,
+	SubagentRunStatusSchema,
+	TaskExecutionIdSchema,
+	TaskExecutionOutcomeSchema,
+	TaskExecutionRecordSchema,
+	TaskExecutionTerminalEvidenceSchema,
 	WorkflowArtifactRefSchema,
 	WorkflowRunIdSchema,
 	WorkflowRunStatusSchema,
@@ -71,6 +79,144 @@ const BarrierReachedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const TaskExecutionCreatedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-created"),
+		data: Type.Object(
+			{ execution: TaskExecutionRecordSchema },
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionPreflightedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-preflighted"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				operationId: SubagentOperationIdSchema,
+				preflightId: Type.String({ minLength: 1, maxLength: 128 }),
+				planIdentitySha256: Sha256Schema,
+				expiresAt: Type.String({ format: "date-time" }),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionLaunchIntendedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-launch-intended"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				operationId: SubagentOperationIdSchema,
+				preflightId: Type.String({ minLength: 1, maxLength: 128 }),
+				planIdentitySha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionLaunchUncertainEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-launch-uncertain"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				operationId: SubagentOperationIdSchema,
+				reason: Type.String({ minLength: 1, maxLength: 4096 }),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionLaunchReceiptedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-launch-receipted"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				operationId: SubagentOperationIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				subagentAttemptId: SubagentAttemptIdSchema,
+				status: SubagentRunStatusSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionChildObservedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-child-observed"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				subagentAttemptId: SubagentAttemptIdSchema,
+				status: SubagentRunStatusSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionArtifactImportedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-artifact-imported"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				artifactId: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
+				sourceResultSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionReleasedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-released"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				status: SubagentRunStatusSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionTerminalEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-terminal"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				outcome: TaskExecutionOutcomeSchema,
+				evidence: TaskExecutionTerminalEvidenceSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskStatusChangedEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-status-changed"),
@@ -126,6 +272,15 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskDeclaredEventSchema,
 	ArtifactDeclaredEventSchema,
 	BarrierReachedEventSchema,
+	TaskExecutionCreatedEventSchema,
+	TaskExecutionPreflightedEventSchema,
+	TaskExecutionLaunchIntendedEventSchema,
+	TaskExecutionLaunchUncertainEventSchema,
+	TaskExecutionLaunchReceiptedEventSchema,
+	TaskExecutionChildObservedEventSchema,
+	TaskExecutionArtifactImportedEventSchema,
+	TaskExecutionReleasedEventSchema,
+	TaskExecutionTerminalEventSchema,
 	TaskStatusChangedEventSchema,
 	TaskInvalidatedEventSchema,
 	RunStatusChangedEventSchema,
@@ -138,11 +293,123 @@ export const WorkflowTaskProjectionSchema = Type.Object(
 		task: MaterializedAgentTaskSchema,
 		status: WorkflowTaskStatusSchema,
 		committed: Type.Boolean(),
+		currentExecutionId: Type.Optional(TaskExecutionIdSchema),
 	},
 	{ additionalProperties: false },
 );
 export type WorkflowTaskProjection = Static<
 	typeof WorkflowTaskProjectionSchema
+>;
+
+const TaskExecutionPhaseSchema = Type.Union([
+	Type.Literal("created"),
+	Type.Literal("preflighted"),
+	Type.Literal("launch-intended"),
+	Type.Literal("launch-uncertain"),
+	Type.Literal("launched"),
+	Type.Literal("observed"),
+	Type.Literal("artifact-imported"),
+	Type.Literal("released"),
+	Type.Literal("terminal"),
+]);
+
+const SequencedPreflightSchema = Type.Object(
+	{
+		operationId: SubagentOperationIdSchema,
+		preflightId: Type.String({ minLength: 1, maxLength: 128 }),
+		planIdentitySha256: Sha256Schema,
+		expiresAt: Type.String({ format: "date-time" }),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedLaunchIntentSchema = Type.Object(
+	{
+		operationId: SubagentOperationIdSchema,
+		preflightId: Type.String({ minLength: 1, maxLength: 128 }),
+		planIdentitySha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedLaunchUncertainSchema = Type.Object(
+	{
+		operationId: SubagentOperationIdSchema,
+		reason: Type.String({ minLength: 1, maxLength: 4096 }),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedLaunchReceiptSchema = Type.Object(
+	{
+		operationId: SubagentOperationIdSchema,
+		subagentRunId: SubagentRunIdSchema,
+		subagentAttemptId: SubagentAttemptIdSchema,
+		status: SubagentRunStatusSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedChildObservationSchema = Type.Object(
+	{
+		subagentRunId: SubagentRunIdSchema,
+		subagentAttemptId: SubagentAttemptIdSchema,
+		status: SubagentRunStatusSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedArtifactImportSchema = Type.Object(
+	{
+		subagentRunId: SubagentRunIdSchema,
+		artifactId: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
+		sourceResultSha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedReleaseSchema = Type.Object(
+	{
+		subagentRunId: SubagentRunIdSchema,
+		status: SubagentRunStatusSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedTerminalSchema = Type.Object(
+	{
+		outcome: TaskExecutionOutcomeSchema,
+		evidence: TaskExecutionTerminalEvidenceSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const TaskExecutionProjectionSchema = Type.Object(
+	{
+		execution: TaskExecutionRecordSchema,
+		phase: TaskExecutionPhaseSchema,
+		createdSequence: Type.Integer({ minimum: 1 }),
+		preflight: Type.Optional(SequencedPreflightSchema),
+		launchIntent: Type.Optional(SequencedLaunchIntentSchema),
+		launchUncertain: Type.Optional(SequencedLaunchUncertainSchema),
+		launchReceipt: Type.Optional(SequencedLaunchReceiptSchema),
+		observation: Type.Optional(SequencedChildObservationSchema),
+		artifactImport: Type.Optional(SequencedArtifactImportSchema),
+		release: Type.Optional(SequencedReleaseSchema),
+		terminal: Type.Optional(SequencedTerminalSchema),
+	},
+	{ additionalProperties: false },
+);
+export type TaskExecutionProjection = Static<
+	typeof TaskExecutionProjectionSchema
 >;
 
 export const WorkflowBarrierProjectionSchema = Type.Object(
@@ -177,6 +444,11 @@ export const WorkflowStateProjectionSchema = Type.Object(
 			additionalProperties: false,
 			maxProperties: 256,
 		}),
+		executions: Type.Record(
+			TaskExecutionIdSchema,
+			TaskExecutionProjectionSchema,
+			{ additionalProperties: false, maxProperties: 4096 },
+		),
 		artifacts: Type.Record(
 			Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
 			WorkflowArtifactRefSchema,

@@ -10,10 +10,22 @@ export {
 	MaterializedAgentTaskSchema,
 	type ReplayPolicy,
 	ReplayPolicySchema,
+	type SubagentOperationId,
+	SubagentOperationIdSchema,
+	type SubagentTerminalEvidence,
+	SubagentTerminalEvidenceSchema,
 	type TaskDisposition,
 	TaskDispositionSchema,
+	type TaskExecutionGeneration,
+	TaskExecutionGenerationSchema,
 	type TaskExecutionId,
 	TaskExecutionIdSchema,
+	type TaskExecutionOutcome,
+	TaskExecutionOutcomeSchema,
+	type TaskExecutionRecord,
+	TaskExecutionRecordSchema,
+	type TaskExecutionTerminalEvidence,
+	TaskExecutionTerminalEvidenceSchema,
 	type TaskKey,
 	TaskKeySchema,
 	type TaskRef,
@@ -24,6 +36,8 @@ export {
 	WorkflowArtifactHandleRefSchema,
 	type WorkflowArtifactRef,
 	WorkflowArtifactRefSchema,
+	type WorkflowExecutionFailureEvidence,
+	WorkflowExecutionFailureEvidenceSchema,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
 	type WorkflowRunStatus,
@@ -48,6 +62,8 @@ export {
 	type WorkflowReturn,
 } from "./definition.js";
 export {
+	type TaskExecutionProjection,
+	TaskExecutionProjectionSchema,
 	type WorkflowBarrierProjection,
 	WorkflowBarrierProjectionSchema,
 	type WorkflowEventInput,
@@ -58,6 +74,12 @@ export {
 	type WorkflowTaskProjection,
 	WorkflowTaskProjectionSchema,
 } from "./events.js";
+export {
+	deriveSubagentOperationId,
+	deriveSubagentResultSha256,
+	deriveTaskExecutionId,
+	deriveWorkflowFailureSha256,
+} from "./execution.js";
 export {
 	InvalidWorkflowRunTransitionError,
 	InvalidWorkflowTaskTransitionError,
