@@ -5,6 +5,7 @@ import {
 	SubagentOperationIdSchema,
 	SubagentRunIdSchema,
 	SubagentRunStatusSchema,
+	SubagentTerminalEvidenceSchema,
 	TaskExecutionIdSchema,
 	TaskExecutionOutcomeSchema,
 	TaskExecutionRecordSchema,
@@ -190,6 +191,20 @@ const TaskExecutionChildObservedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const TaskExecutionChildSettledEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-child-settled"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				evidence: SubagentTerminalEvidenceSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskExecutionArtifactImportedEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-artifact-imported"),
@@ -312,6 +327,7 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionLaunchAbsentEventSchema,
 	TaskExecutionLaunchReceiptedEventSchema,
 	TaskExecutionChildObservedEventSchema,
+	TaskExecutionChildSettledEventSchema,
 	TaskExecutionArtifactImportedEventSchema,
 	TaskExecutionReleaseIntendedEventSchema,
 	TaskExecutionReleasedEventSchema,
@@ -344,6 +360,7 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("launch-absent"),
 	Type.Literal("launched"),
 	Type.Literal("observed"),
+	Type.Literal("settled"),
 	Type.Literal("artifact-imported"),
 	Type.Literal("release-intended"),
 	Type.Literal("released"),
@@ -418,6 +435,14 @@ const SequencedChildObservationSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const SequencedSettlementSchema = Type.Object(
+	{
+		evidence: SubagentTerminalEvidenceSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 const SequencedArtifactImportSchema = Type.Object(
 	{
 		subagentRunId: SubagentRunIdSchema,
@@ -465,6 +490,7 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		launchAbsent: Type.Optional(SequencedLaunchAbsentSchema),
 		launchReceipt: Type.Optional(SequencedLaunchReceiptSchema),
 		observation: Type.Optional(SequencedChildObservationSchema),
+		settlement: Type.Optional(SequencedSettlementSchema),
 		artifactImport: Type.Optional(SequencedArtifactImportSchema),
 		releaseIntent: Type.Optional(SequencedReleaseIntentSchema),
 		release: Type.Optional(SequencedReleaseSchema),

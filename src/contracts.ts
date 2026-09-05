@@ -289,6 +289,7 @@ export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
 			Type.Literal("preflight"),
 			Type.Literal("launch"),
 			Type.Literal("reconciliation"),
+			Type.Literal("stop"),
 			Type.Literal("artifact-import"),
 			Type.Literal("release"),
 		]),

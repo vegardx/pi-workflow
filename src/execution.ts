@@ -57,6 +57,7 @@ export function deriveWorkflowFailureSha256(
 		| "preflight"
 		| "launch"
 		| "reconciliation"
+		| "stop"
 		| "artifact-import"
 		| "release",
 	message: string,

@@ -3,6 +3,7 @@ import path from "node:path";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type {
+	SubagentTerminalEvidence,
 	TaskExecutionRecord,
 	WorkflowArtifactRef,
 	WorkflowTaskId,
@@ -171,6 +172,16 @@ function preflightEvents(record: TaskExecutionRecord): WorkflowEventInput[] {
 	];
 }
 
+function settlement(
+	record: TaskExecutionRecord,
+	evidence: SubagentTerminalEvidence,
+): WorkflowEventInput {
+	return {
+		type: "task-execution-child-settled",
+		data: { executionId: record.id, evidence },
+	};
+}
+
 function artifact(taskId: WorkflowTaskId): WorkflowArtifactRef {
 	return {
 		id: `artifact_${"f".repeat(64)}`,
@@ -297,6 +308,7 @@ describe("task execution persistence", () => {
 					status: "completed",
 				},
 			},
+			settlement(setup.execution, completedEvidence()),
 			{ type: "artifact-declared", data: { artifact: output } },
 			{
 				type: "task-execution-artifact-imported",
@@ -496,6 +508,7 @@ describe("task execution persistence", () => {
 					status: "completed",
 				},
 			},
+			settlement(setup.execution, completedEvidence()),
 			{ type: "artifact-declared", data: { artifact: output } },
 			{
 				type: "task-execution-artifact-imported",
@@ -534,6 +547,30 @@ describe("task execution persistence", () => {
 			guidance: "Reconcile the child.",
 		};
 		const usage = completedEvidence().usage;
+		const cleanupEvidence: SubagentTerminalEvidence = {
+			kind: "subagent",
+			resultSha256,
+			status: "cleanup-blocked",
+			usage,
+			usageComplete: true,
+			runtimeMs: 1000,
+			failure,
+			sandboxCleanup: "blocked",
+			workspaceCleanup: "not-needed",
+			truncated: false,
+		};
+		const failedEvidence: SubagentTerminalEvidence = {
+			kind: "subagent",
+			resultSha256: "3".repeat(64),
+			status: "failed",
+			usage,
+			usageComplete: true,
+			runtimeMs: 1200,
+			failure: { ...failure, code: "sandbox-launch", retry: "never" },
+			sandboxCleanup: "proved",
+			workspaceCleanup: "not-needed",
+			truncated: false,
+		};
 		const events: WorkflowEventInput[] = [
 			...setup.events,
 			...preflightEvents(setup.execution),
@@ -560,24 +597,14 @@ describe("task execution persistence", () => {
 					status: "cleanup-blocked",
 				},
 			},
+			settlement(setup.execution, cleanupEvidence),
 			...releaseEvents(setup.execution, "cleanup-blocked"),
 			{
 				type: "task-execution-terminal",
 				data: {
 					executionId: setup.execution.id,
 					outcome: "cleanup-blocked",
-					evidence: {
-						kind: "subagent",
-						resultSha256,
-						status: "cleanup-blocked",
-						usage,
-						usageComplete: true,
-						runtimeMs: 1000,
-						failure,
-						sandboxCleanup: "blocked",
-						workspaceCleanup: "not-needed",
-						truncated: false,
-					},
+					evidence: cleanupEvidence,
 				},
 			},
 			{
@@ -597,24 +624,14 @@ describe("task execution persistence", () => {
 					status: "failed",
 				},
 			},
+			settlement(setup.execution, failedEvidence),
 			...releaseEvents(setup.execution, "failed"),
 			{
 				type: "task-execution-terminal",
 				data: {
 					executionId: setup.execution.id,
 					outcome: "failed",
-					evidence: {
-						kind: "subagent",
-						resultSha256: "3".repeat(64),
-						status: "failed",
-						usage,
-						usageComplete: true,
-						runtimeMs: 1200,
-						failure: { ...failure, code: "sandbox-launch", retry: "never" },
-						sandboxCleanup: "proved",
-						workspaceCleanup: "not-needed",
-						truncated: false,
-					},
+					evidence: failedEvidence,
 				},
 			},
 			{

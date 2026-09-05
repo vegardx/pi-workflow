@@ -23,6 +23,13 @@ describe("workflow lifecycle", () => {
 		);
 	});
 
+	it("represents launched queued and stopping tasks", () => {
+		expect(transitionWorkflowTaskStatus("ready", "waiting")).toBe("waiting");
+		expect(transitionWorkflowTaskStatus("ready", "cancelling")).toBe(
+			"cancelling",
+		);
+	});
+
 	it("allows task retry attempts without replacing task identity", () => {
 		expect(transitionWorkflowTaskStatus("failed", "running")).toBe("running");
 		expect(transitionWorkflowTaskStatus("interrupted", "running")).toBe(
