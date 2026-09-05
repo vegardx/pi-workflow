@@ -458,6 +458,10 @@ export class WorkflowRunJournal {
 		return this.lease.record.generation;
 	}
 
+	withCurrent<T>(operation: () => Promise<T>): Promise<T> {
+		return this.lease.withCurrent(operation);
+	}
+
 	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this.coordinator.tail.then(async () => {
 			if (this.coordinator.uncertain) {

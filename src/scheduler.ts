@@ -27,6 +27,7 @@ import {
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
+import type { WorkflowTaskFinalizer } from "./task-finalizer.js";
 import {
 	createWorkflowTaskLauncher,
 	type WorkflowTaskLauncher,
@@ -84,6 +85,7 @@ export interface WorkflowSequentialSchedulerOptions {
 	readonly journal: WorkflowRunJournal;
 	readonly binding: WorkflowSubagentBinding;
 	readonly launcher?: WorkflowTaskLauncher;
+	readonly finalizer?: WorkflowTaskFinalizer;
 }
 
 export class WorkflowSchedulerError extends Error {
@@ -222,7 +224,7 @@ function validateReceipt(
 export function createWorkflowSequentialScheduler(
 	options: WorkflowSequentialSchedulerOptions,
 ): WorkflowSequentialScheduler {
-	const { binding, journal } = options;
+	const { binding, finalizer, journal } = options;
 	const launcher =
 		options.launcher ?? createWorkflowTaskLauncher({ binding, journal });
 	const coordinationKey = journal.directory;
@@ -668,13 +670,36 @@ export function createWorkflowSequentialScheduler(
 		});
 	}
 
+	async function continueAfterFinalization(
+		settled: WorkflowSchedulerOutcome,
+	): Promise<WorkflowSchedulerOutcome> {
+		if (settled.state !== "awaiting-finalization" || !finalizer) return settled;
+		const finalized = await finalizer.finalize(settled.taskId);
+		if (
+			finalized.runStatus === "failed" ||
+			finalized.runStatus === "cancelled" ||
+			finalized.runStatus === "interrupted" ||
+			finalized.runStatus === "cleanup-blocked" ||
+			finalized.runStatus === "completed" ||
+			finalized.runStatus === "completed-degraded"
+		) {
+			return { state: "terminal", runStatus: finalized.runStatus };
+		}
+		return drive();
+	}
+
 	async function drive(): Promise<WorkflowSchedulerOutcome> {
 		const prepared = await mutate(prepare);
 		if (prepared.state === "stopping") {
 			return stop("Resume persisted workflow stop intent.");
 		}
+		if (prepared.state === "awaiting-finalization") {
+			return continueAfterFinalization(prepared);
+		}
 		if (prepared.state !== "wait") return prepared;
-		return settle(prepared.taskId, prepared.receipt);
+		return continueAfterFinalization(
+			await settle(prepared.taskId, prepared.receipt),
+		);
 	}
 
 	async function stop(reason: string): Promise<WorkflowSchedulerOutcome> {
@@ -828,8 +853,13 @@ export function createWorkflowSequentialScheduler(
 				receipt,
 			} as const;
 		});
+		if (prepared.state === "awaiting-finalization") {
+			return continueAfterFinalization(prepared);
+		}
 		if (prepared.state !== "wait") return prepared;
-		return settle(prepared.taskId, prepared.receipt);
+		return continueAfterFinalization(
+			await settle(prepared.taskId, prepared.receipt),
+		);
 	}
 
 	return Object.freeze({ drive, stop });

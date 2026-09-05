@@ -17,6 +17,7 @@ import {
 	deriveJsonValueSha256,
 	deriveSubagentOperationId,
 	deriveTaskExecutionId,
+	deriveWorkflowArtifactId,
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import {
@@ -310,6 +311,19 @@ function applyEvent(
 				if (!producer.committed) {
 					fail("artifact producer is not committed", event.sequence);
 				}
+				if (
+					artifact.output !== undefined &&
+					artifact.id !==
+						deriveWorkflowArtifactId({
+							runId: artifact.runId,
+							producerTaskId: artifact.producerTaskId,
+							output: artifact.output,
+							schemaSha256: artifact.schemaSha256,
+							sha256: artifact.sha256,
+						})
+				) {
+					fail("artifact identity is not deterministic", event.sequence);
+				}
 			}
 			if (
 				artifact.producerTaskId !== undefined &&
@@ -550,15 +564,23 @@ function applyEvent(
 				previousStatus === "cleanup-blocked" &&
 				isTerminalSubagentStatus(input.data.status) &&
 				input.data.status !== "cleanup-blocked";
+			const reconcilesRelease =
+				projection.phase === "released" &&
+				previousStatus === "cleanup-blocked" &&
+				projection.release?.status === input.data.status &&
+				isTerminalSubagentStatus(input.data.status) &&
+				input.data.status !== "cleanup-blocked";
 			if (
 				(projection.phase !== "launched" &&
 					projection.phase !== "observed" &&
-					!reconcilesCleanup) ||
+					!reconcilesCleanup &&
+					!reconcilesRelease) ||
 				!receipt ||
 				input.data.subagentRunId !== receipt.subagentRunId ||
 				input.data.subagentAttemptId !== receipt.subagentAttemptId ||
 				!previousStatus ||
 				(!reconcilesCleanup &&
+					!reconcilesRelease &&
 					(previousObservation
 						? !observedStatusCanFollow(previousStatus, input.data.status)
 						: input.data.status !== previousStatus &&
@@ -590,7 +612,8 @@ function applyEvent(
 				fail("task execution child settlement is invalid", event.sequence);
 			}
 			projection.settlement = { evidence, sequence: event.sequence };
-			projection.phase = "settled";
+			projection.phase =
+				projection.release?.status === evidence.status ? "released" : "settled";
 			break;
 		}
 		case "task-execution-artifact-imported": {
@@ -672,7 +695,9 @@ function applyEvent(
 				!intent ||
 				!observation ||
 				input.data.subagentRunId !== intent.subagentRunId ||
-				input.data.status !== observation.status ||
+				(input.data.status !== observation.status &&
+					(observation.status !== "cleanup-blocked" ||
+						input.data.status === "cleanup-blocked")) ||
 				!isTerminalSubagentStatus(input.data.status)
 			) {
 				fail("task execution release is invalid", event.sequence);

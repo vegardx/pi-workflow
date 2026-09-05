@@ -11,6 +11,7 @@ import {
 } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkflowArtifactStore } from "../src/artifact-store.js";
 import type { TaskRef } from "../src/contracts.js";
 import type { TaskHandle } from "../src/definition.js";
 import {
@@ -30,6 +31,7 @@ import {
 	WorkflowSchedulerError,
 } from "../src/scheduler.js";
 import type { WorkflowSubagentBinding } from "../src/subagent-provider.js";
+import { createWorkflowTaskFinalizer } from "../src/task-finalizer.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
 const inputSha256 = "b".repeat(64);
@@ -353,6 +355,37 @@ describe("durable sequential scheduler", () => {
 			state: "awaiting-finalization",
 			outcome: "completed",
 		});
+	});
+
+	it("finalizes a settled task before selecting more work", async () => {
+		const { journal, tasks } = await fixture();
+		const ownerClient = client({
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "completed" as const,
+			})),
+		});
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			artifacts,
+			binding: binding(ownerClient),
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			finalizer,
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("completed");
+		expect(ownerClient.wait).toHaveBeenCalledTimes(2);
+		expect(ownerClient.release).toHaveBeenCalledOnce();
 	});
 
 	it("replays a settled task without relaunching or waiting again", async () => {
