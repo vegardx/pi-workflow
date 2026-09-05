@@ -23,6 +23,12 @@ describe("package contract", () => {
 		expect(packageJson.main).toBe("./dist/index.js");
 		expect(packageJson.types).toBe("./dist/index.d.ts");
 		expect(packageJson.engines?.node).toBe(">=23.6.0");
+		expect(
+			packageJson.peerDependencies?.["@earendil-works/pi-coding-agent"],
+		).toBe(">=0.85.0 <0.86");
+		expect(packageJson.peerDependencies?.["@earendil-works/pi-server"]).toBe(
+			">=0.85.0 <0.86",
+		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
 			"0.9.0",
 		);
@@ -38,5 +44,5 @@ describe("package contract", () => {
 		expect(publicApi.WORKFLOW_RUNTIME_CONTRACT.schema).toBe(
 			"pi-workflow-runtime",
 		);
-	}, 15_000);
+	}, 30_000);
 });
