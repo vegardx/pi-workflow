@@ -124,6 +124,13 @@ export {
 	type WorkflowRootScope,
 } from "./registry.js";
 export {
+	createWorkflowSequentialScheduler,
+	WorkflowSchedulerError,
+	type WorkflowSchedulerOutcome,
+	type WorkflowSequentialScheduler,
+	type WorkflowSequentialSchedulerOptions,
+} from "./scheduler.js";
+export {
 	createWorkflowSubagentProvider,
 	type WorkflowSubagentBinding,
 	type WorkflowSubagentProvider,

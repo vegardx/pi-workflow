@@ -31,8 +31,8 @@ Lifecycle events are append-only, versioned, and the source of truth. Revision
 1 accepts only the declared run, task, artifact, barrier, and task-execution
 events. Task-execution evidence records generation creation, the latest
 preflight before launch intent, uncertain launch and reconciled absence or a
-launch receipt, child observation, artifact import, release intent and receipt,
-and terminal outcome in that order. An
+launch receipt, child observation, bounded terminal child settlement, artifact
+import, release intent and receipt, and terminal outcome in that order. An
 expired preflight may be replaced only before launch intent is persisted. A
 preflight from an older workflow fencing generation is also replaced because
 pi-subagent preflight grants are intentionally process-local.
@@ -111,6 +111,14 @@ task execution. A new execution generation requires a new preflight, operation
 ID, launch intent, and subagent run.
 
 No persisted `running` field proves that a scheduler or child still exists.
+The sequential scheduler reselects work from the journal after every restart.
+Scheduler mutations are serialized process-wide per canonical run directory, in
+addition to lease fencing and journal append serialization. It persists
+readiness before launch and stores a bounded child settlement digest,
+status, usage, cleanup, failure, and artifact-reference projection without raw
+model output, session paths, or JavaScript promises. Completed child settlement
+waits for workflow-owned artifact import; every terminal settlement waits for
+required child release before task terminalization.
 
 ## Replay identity
 

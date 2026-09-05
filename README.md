@@ -2,8 +2,8 @@
 
 Custom workflow runtime for [Pi](https://pi.dev).
 
-This repository is in the implementation-ready contract phase. It does not yet
-ship a working extension.
+This repository is implementing its first durable static execution slice. It
+does not yet ship a working extension.
 
 ## Goal
 

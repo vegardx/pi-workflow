@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
 import type {
+	SubagentTerminalEvidence,
 	TaskExecutionId,
 	TaskExecutionOutcome,
 	WorkflowTaskId,
@@ -116,6 +117,32 @@ function observedStatusCanFollow(previous: string, next: string): boolean {
 		return next === "cancelled" || next === "cleanup-blocked";
 	}
 	return false;
+}
+
+function validSubagentSettlement(evidence: SubagentTerminalEvidence): boolean {
+	const cleanupIsProved =
+		cleanupProved(evidence.sandboxCleanup) &&
+		cleanupProved(evidence.workspaceCleanup);
+	if (evidence.status === "completed") {
+		return (
+			cleanupIsProved &&
+			evidence.failure === undefined &&
+			evidence.structuredOutputSha256 !== undefined
+		);
+	}
+	if (!evidence.failure) return false;
+	if (evidence.status === "cleanup-blocked") return !cleanupIsProved;
+	if (evidence.status === "abandoned") {
+		return (
+			cleanupIsProved &&
+			evidence.failure.code === "operator-abandoned" &&
+			evidence.failure.origin === "operator" &&
+			evidence.failure.retry === "never" &&
+			evidence.output === undefined &&
+			evidence.structuredOutputSha256 === undefined
+		);
+	}
+	return cleanupIsProved;
 }
 
 function subagentOutcome(status: string): TaskExecutionOutcome | undefined {
@@ -545,6 +572,27 @@ function applyEvent(
 			projection.phase = "observed";
 			break;
 		}
+		case "task-execution-child-settled": {
+			const projection = executionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const observation = projection.observation;
+			const evidence = structuredClone(input.data.evidence);
+			if (
+				projection.phase !== "observed" ||
+				!observation ||
+				!isTerminalSubagentStatus(observation.status) ||
+				observation.status !== evidence.status ||
+				!validSubagentSettlement(evidence)
+			) {
+				fail("task execution child settlement is invalid", event.sequence);
+			}
+			projection.settlement = { evidence, sequence: event.sequence };
+			projection.phase = "settled";
+			break;
+		}
 		case "task-execution-artifact-imported": {
 			const projection = executionProjection(
 				state,
@@ -559,7 +607,7 @@ function applyEvent(
 				projection.terminal.evidence.kind === "workflow" &&
 				projection.terminal.evidence.stage === "artifact-import";
 			if (
-				(projection.phase !== "observed" && !recoversArtifactImport) ||
+				(projection.phase !== "settled" && !recoversArtifactImport) ||
 				!observation ||
 				observation.status !== "completed" ||
 				input.data.subagentRunId !== observation.subagentRunId ||
@@ -592,7 +640,7 @@ function applyEvent(
 				projection.terminal.evidence.kind === "workflow" &&
 				projection.terminal.evidence.stage === "release";
 			const expectedPhase =
-				observation?.status === "completed" ? "artifact-imported" : "observed";
+				observation?.status === "completed" ? "artifact-imported" : "settled";
 			if (
 				(projection.phase !== expectedPhase && !recoversRelease) ||
 				!receipt ||
@@ -661,36 +709,22 @@ function applyEvent(
 				const importedArtifact = projection.artifactImport
 					? state.artifacts[projection.artifactImport.artifactId]
 					: undefined;
-				const cleanupIsProved =
-					cleanupProved(evidence.sandboxCleanup) &&
-					cleanupProved(evidence.workspaceCleanup);
 				if (
+					projection.phase !== "released" ||
 					!observation ||
 					observation.status !== evidence.status ||
+					!projection.settlement ||
+					!isDeepStrictEqual(projection.settlement.evidence, evidence) ||
 					!expectedOutcome ||
 					expectedOutcome !== input.data.outcome ||
 					projection.release?.status !== evidence.status ||
 					(evidence.status === "completed" &&
-						(!cleanupIsProved ||
-							evidence.failure !== undefined ||
-							evidence.structuredOutputSha256 === undefined ||
-							projection.artifactImport === undefined ||
+						(projection.artifactImport === undefined ||
 							importedArtifact?.sha256 !== evidence.structuredOutputSha256 ||
-							importedArtifact.schemaSha256 !==
+							importedArtifact?.schemaSha256 !==
 								deriveJsonValueSha256(task.task.spec.request.outputSchema) ||
 							projection.artifactImport.sourceResultSha256 !==
-								evidence.resultSha256)) ||
-					(evidence.status === "cleanup-blocked" &&
-						(cleanupIsProved || evidence.failure === undefined)) ||
-					(evidence.status !== "completed" &&
-						evidence.status !== "cleanup-blocked" &&
-						(!cleanupIsProved || evidence.failure === undefined)) ||
-					(evidence.status === "abandoned" &&
-						(evidence.failure?.code !== "operator-abandoned" ||
-							evidence.failure.origin !== "operator" ||
-							evidence.failure.retry !== "never" ||
-							evidence.output !== undefined ||
-							evidence.structuredOutputSha256 !== undefined))
+								evidence.resultSha256))
 				) {
 					fail("subagent terminal evidence is inconsistent", event.sequence);
 				}
@@ -698,14 +732,17 @@ function applyEvent(
 				if (
 					evidence.failureSha256 !==
 						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
-					(input.data.outcome !== "failed" &&
-						input.data.outcome !== "cleanup-blocked") ||
 					(input.data.outcome === "cleanup-blocked" &&
 						evidence.stage !== "artifact-import" &&
 						evidence.stage !== "release") ||
+					(input.data.outcome === "cancelled" && evidence.stage !== "stop") ||
 					(input.data.outcome === "failed" &&
-						(evidence.stage === "artifact-import" ||
+						(evidence.stage === "stop" ||
+							evidence.stage === "artifact-import" ||
 							evidence.stage === "release")) ||
+					(input.data.outcome !== "failed" &&
+						input.data.outcome !== "cancelled" &&
+						input.data.outcome !== "cleanup-blocked") ||
 					(evidence.stage === "preflight" &&
 						projection.phase !== "created" &&
 						projection.phase !== "preflighted") ||
@@ -714,8 +751,11 @@ function applyEvent(
 						projection.phase !== "launch-intended") ||
 					(evidence.stage === "reconciliation" &&
 						projection.phase !== "launch-absent") ||
+					(evidence.stage === "stop" &&
+						projection.phase !== "created" &&
+						projection.phase !== "preflighted") ||
 					(evidence.stage === "artifact-import" &&
-						projection.phase !== "observed") ||
+						projection.phase !== "settled") ||
 					(evidence.stage === "release" &&
 						projection.phase !== "release-intended")
 				) {
@@ -761,6 +801,21 @@ function applyEvent(
 						event.sequence,
 					);
 				}
+			}
+			if (input.data.to === "waiting" && !execution?.launchReceipt) {
+				fail(
+					"task became waiting without a launched execution",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.to === "cancelling" &&
+				(state.status !== "stopping" || !execution?.launchReceipt)
+			) {
+				fail(
+					"task began cancellation without stop intent and a launched execution",
+					event.sequence,
+				);
 			}
 			const terminalOutcome =
 				input.data.to === "completed" ||

@@ -48,6 +48,8 @@ const TASK_TRANSITIONS: Readonly<
 	pending: new Set(["ready", "blocked", "cancelled", "invalidated"]),
 	ready: new Set([
 		"running",
+		"waiting",
+		"cancelling",
 		"completed",
 		"failed",
 		"interrupted",

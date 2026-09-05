@@ -289,11 +289,21 @@ launch it:
 6. launches with the exact preflight identity;
 7. persists the launch receipt.
 
-The journal stores bounded terminal evidence and a digest of the complete child
-result, not model output, structured values, session paths, or subagent-private
-store paths. Imported structured output is represented by a workflow-owned
-artifact and its digest. Task lifecycle transitions remain separate events and
-may consume terminal execution evidence only after that evidence is durable.
+The sequential scheduler selects committed tasks in materialization order and
+persists readiness before calling the launcher. It runs at most one child at a
+time. Active children map tasks to `running`; queued or terminal children awaiting
+required finalization map tasks to `waiting`; durable workflow stop intent maps
+the active task to `cancelling` before interruption. Failed dependencies map
+pending dependents to `blocked`.
+
+The journal stores bounded child-settlement evidence and a digest of the complete
+child result, not model output, structured values, session paths, or
+subagent-private store paths. Imported structured output is represented by a
+workflow-owned artifact and its digest. Child settlement alone does not complete
+a task: completed children still require artifact import, and every terminal
+child requires release before terminal execution and task events may be
+committed. Task lifecycle transitions remain separate events and may consume
+terminal execution evidence only after that evidence is durable.
 
 After uncertain launch outcome it calls `findByOperation` before any new launch.
 The same recovery runs when restart finds durable launch intent without a
@@ -335,6 +345,13 @@ Subagent terminal outcomes map using both primary status and cleanup evidence:
 | `cancelled` with cleanup proved/not-needed | `cancelled` |
 | `interrupted` with cleanup proved/not-needed | `interrupted` |
 | any retained, blocked, or unknown required cleanup | `cleanup-blocked`; preserve the observed subagent status/failure as evidence, block dependents, and mark the run cleanup-blocked |
+
+Stop writes run and task cancellation intent before calling the owner client's
+`interrupt`. A restart that finds `stopping` retries the idempotent interruption
+and waits for terminal child evidence; it never infers cancellation from a lost
+in-memory wait. A task execution that was created or preflighted but has no
+launch intent is terminalized as cancelled without launching. An uncertain
+launch is reconciled through its operation ID before interruption.
 
 `cleanup-blocked` remains until subagent reconciliation/release proves cleanup
 and returns a new result that can be mapped normally. Release itself is an
