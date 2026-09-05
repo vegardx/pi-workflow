@@ -492,6 +492,22 @@ describe("workflow task launcher", () => {
 		expect(state.tasks[taskId]?.status).toBe("ready");
 	});
 
+	it("rejects a client binding with a forged workflow owner", async () => {
+		const { journal, taskId } = await readyJournal();
+		const ownerClient = client();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: {
+				...binding(ownerClient),
+				ownerId: "pi-workflow:workflow_other",
+			},
+		});
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "validation",
+		});
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+	});
+
 	it("serializes concurrent launch requests", async () => {
 		const { journal, taskId } = await readyJournal();
 		const receipt: RunReceipt = {

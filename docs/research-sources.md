@@ -6,7 +6,7 @@ must cite a pinned snapshot before source is adapted.
 | Project | Repository | Snapshot | License | Focus |
 | --- | --- | --- | --- | --- |
 | Pi | <https://github.com/earendil-works/pi-mono> | installed `@earendil-works/pi-coding-agent` 0.84.2 | MIT | SDK, RPC, resources, models, sessions |
-| vegardx/pi-subagent | <https://github.com/vegardx/pi-subagent> | `15eb17e24c69ebae416553cd5eb312cc220f7eed` | MIT | public runtime contract plus owned journal, lease, fencing, and crash-safe persistence patterns |
+| vegardx/pi-subagent | <https://github.com/vegardx/pi-subagent> | `d5eb018882e22d89572e4043b0440b5e78193f15` | MIT | public runtime contract plus owned journal, lease, fencing, and crash-safe persistence patterns |
 | pi-subagent | <https://github.com/AgwaB/pi-subagent> | `34cdcb04ec94e35d030b2dd77df7aede841b9f8d` | MIT | execution substrate and recovery |
 | pi-workflow | <https://github.com/AgwaB/pi-workflow> | `aed281903a07cfa59e54277bb66de9e6c3f865ab` | MIT | artifact graph, leases, invalidation |
 | pi-workflow-engine | <https://github.com/timbrinded/pi-workflow-engine> | `b594e32a5f3eb07e12593022a856bb21bdaf4ded` | MIT | typed workflow, replay identity, structured output, worktrees |
