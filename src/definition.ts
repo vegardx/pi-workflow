@@ -51,6 +51,24 @@ export interface TaskHandle<T> {
 	readonly [taskHandleBrand]: T;
 }
 
+export function isTaskHandle(value: unknown): value is TaskHandle<unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Object.hasOwn(value, taskHandleBrand)
+	);
+}
+
+export function isArtifactHandle(
+	value: unknown,
+): value is ArtifactHandle<unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Object.hasOwn(value, artifactHandleBrand)
+	);
+}
+
 export function createTaskHandle<T>(
 	ref: TaskRef,
 	outputRef: WorkflowArtifactHandleRef,

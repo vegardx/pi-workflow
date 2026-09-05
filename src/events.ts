@@ -36,6 +36,21 @@ const RunCreatedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const WorkflowEffectEventSchema = Type.Object(
+	{
+		type: Type.Literal("workflow-effect"),
+		data: Type.Object(
+			{
+				ordinal: Type.Integer({ minimum: 1, maximum: 4096 }),
+				kind: Type.Union([Type.Literal("phase"), Type.Literal("log")]),
+				value: Type.String({ minLength: 1, maxLength: 4096 }),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskDeclaredEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-declared"),
@@ -300,6 +315,17 @@ const TaskInvalidatedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const RunOutputCommittedEventSchema = Type.Object(
+	{
+		type: Type.Literal("run-output-committed"),
+		data: Type.Object(
+			{ artifactId: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }) },
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const RunStatusChangedEventSchema = Type.Object(
 	{
 		type: Type.Literal("run-status-changed"),
@@ -317,6 +343,7 @@ const RunStatusChangedEventSchema = Type.Object(
 
 export const WorkflowEventInputSchema = Type.Union([
 	RunCreatedEventSchema,
+	WorkflowEffectEventSchema,
 	TaskDeclaredEventSchema,
 	ArtifactDeclaredEventSchema,
 	BarrierReachedEventSchema,
@@ -334,6 +361,7 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionTerminalEventSchema,
 	TaskStatusChangedEventSchema,
 	TaskInvalidatedEventSchema,
+	RunOutputCommittedEventSchema,
 	RunStatusChangedEventSchema,
 ]);
 export type WorkflowEventInput = Static<typeof WorkflowEventInputSchema>;
@@ -522,6 +550,16 @@ export type WorkflowBarrierProjection = Static<
 	typeof WorkflowBarrierProjectionSchema
 >;
 
+const WorkflowEffectProjectionSchema = Type.Object(
+	{
+		ordinal: Type.Integer({ minimum: 1, maximum: 4096 }),
+		kind: Type.Union([Type.Literal("phase"), Type.Literal("log")]),
+		value: Type.String({ minLength: 1, maxLength: 4096 }),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const WorkflowStateProjectionSchema = Type.Object(
 	{
 		runId: WorkflowRunIdSchema,
@@ -529,6 +567,7 @@ export const WorkflowStateProjectionSchema = Type.Object(
 		inputSha256: Sha256Schema,
 		status: WorkflowRunStatusSchema,
 		currentEpoch: Type.Integer({ minimum: 1 }),
+		effects: Type.Array(WorkflowEffectProjectionSchema, { maxItems: 4096 }),
 		lastSequence: Type.Integer({ minimum: 1 }),
 		tasks: Type.Record(WorkflowTaskIdSchema, WorkflowTaskProjectionSchema, {
 			additionalProperties: false,
@@ -545,6 +584,9 @@ export const WorkflowStateProjectionSchema = Type.Object(
 			{ additionalProperties: false, maxProperties: 4096 },
 		),
 		barriers: Type.Array(WorkflowBarrierProjectionSchema, { maxItems: 4096 }),
+		outputArtifactId: Type.Optional(
+			Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
+		),
 	},
 	{ additionalProperties: false },
 );

@@ -185,11 +185,19 @@ export class WorkflowArtifactStore {
 		value: unknown,
 		metadata: {
 			runId: WorkflowArtifactRef["runId"];
-			producerTaskId: NonNullable<WorkflowArtifactRef["producerTaskId"]>;
-			output: "result";
+			producerTaskId?: NonNullable<WorkflowArtifactRef["producerTaskId"]>;
+			output?: "result";
 			schemaSha256: string;
 		},
 	): Promise<WorkflowArtifactRef> {
+		if (
+			(metadata.producerTaskId === undefined) !==
+			(metadata.output === undefined)
+		) {
+			throw new WorkflowArtifactStoreError(
+				"artifact producer and output must appear together",
+			);
+		}
 		const content = canonicalArtifactJson(value);
 		const predecessor = artifactMutations.get(this.root) ?? Promise.resolve();
 		const operation = predecessor.then(() =>
@@ -203,8 +211,12 @@ export class WorkflowArtifactStore {
 				const ref: WorkflowArtifactRef = {
 					id: deriveWorkflowArtifactId({ ...metadata, sha256: digest }),
 					runId: metadata.runId,
-					producerTaskId: metadata.producerTaskId,
-					output: metadata.output,
+					...(metadata.producerTaskId === undefined
+						? {}
+						: {
+								producerTaskId: metadata.producerTaskId,
+								output: metadata.output,
+							}),
 					sha256: digest,
 					bytes: content.byteLength,
 					mediaType: "application/json",
@@ -270,13 +282,15 @@ export class WorkflowArtifactStore {
 		if (
 			!Value.Check(WorkflowArtifactRefSchema, ref) ||
 			ref.runId !== this.journal.runId ||
-			ref.producerTaskId === undefined ||
-			ref.output !== "result" ||
 			ref.id !==
 				deriveWorkflowArtifactId({
 					runId: ref.runId,
-					producerTaskId: ref.producerTaskId,
-					output: ref.output,
+					...(ref.producerTaskId === undefined
+						? {}
+						: {
+								producerTaskId: ref.producerTaskId,
+								output: ref.output,
+							}),
 					schemaSha256: ref.schemaSha256,
 					sha256: ref.sha256,
 				}) ||

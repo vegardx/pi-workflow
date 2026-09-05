@@ -1,6 +1,9 @@
 # Contracts
 
-The examples in this document are design contracts, not implemented APIs.
+This document defines the target contracts. The exported static definition,
+materializer, sequential scheduler, task finalizer, artifact store, and static
+source runtime implement the current Phase 1 subset; later interfaces remain
+design contracts.
 
 ## Static definition
 
@@ -52,7 +55,10 @@ type WorkflowReturn<T> = T | TaskHandle<T> | ArtifactHandle<T>;
 ```
 
 Inputs are validated before a run is created. The final value is validated and
-committed as a workflow-owned artifact before the run completes.
+committed as a provenance-bound workflow-owned artifact through a durable
+`run-output-committed` event before the run completes. Restart from a persisted
+output commit finishes the terminal run transition without reevaluating or
+rewriting the output.
 
 Contract revision 1 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
@@ -95,9 +101,9 @@ return review;
 ```
 
 `ctx.result(handle)` persists all currently materialized nodes, allows the
-scheduler to run until the selected task settles, revalidates its artifact, and
-returns the concrete value. `ctx.results(handles)` is the bounded multi-task
-barrier. Merely constructing a handle never starts work synchronously in the
+scheduler to run until the selected task settles and finalizes, revalidates its
+workflow-owned artifact, and returns an immutable concrete value.
+`ctx.results(handles)` is the bounded multi-task barrier. Merely constructing a handle never starts work synchronously in the
 workflow function.
 
 ## Workflow context
@@ -222,8 +228,11 @@ newly evaluated branch may then materialize a different suffix while the old
 suffix remains abandoned history. Duplicate keys and changed requests for an
 existing key always fail.
 
-JavaScript continuations are never serialized. Version 1 refuses resume when
-the workflow source identity changed. More selective source-change policies
+JavaScript continuations are never serialized. The static runtime invokes the
+workflow function from entry on every drive, matches phase/log effects and
+materialization barriers against their persisted ordered prefix, and replays
+completed result artifacts as concrete immutable values. Version 1 refuses
+resume when the workflow source identity changed. More selective source-change policies
 require a later explicit contract.
 
 ## Agent tasks

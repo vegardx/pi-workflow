@@ -60,6 +60,8 @@ export {
 	type AgentTaskAuthoringRequest,
 	type ArtifactHandle,
 	defineWorkflow,
+	isArtifactHandle,
+	isTaskHandle,
 	isWorkflowDefinition,
 	type TaskHandle,
 	type WorkflowContext,
@@ -138,6 +140,13 @@ export {
 	type WorkflowSequentialScheduler,
 	type WorkflowSequentialSchedulerOptions,
 } from "./scheduler.js";
+export {
+	createStaticWorkflowRuntime,
+	type StaticWorkflowRunResult,
+	type StaticWorkflowRuntime,
+	StaticWorkflowRuntimeError,
+	type StaticWorkflowRuntimeOptions,
+} from "./static-runtime.js";
 export {
 	createWorkflowSubagentProvider,
 	type WorkflowSubagentBinding,

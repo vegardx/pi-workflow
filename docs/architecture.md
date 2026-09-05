@@ -105,8 +105,11 @@ persists release intent before invoking the owner client. Only a durable release
 receipt permits terminal execution and task evidence.
 
 Resume reconstructs state from the append-only journal and re-executes the
-workflow function from its entry point. Matching effects replay or reconcile.
-JavaScript continuations are never serialized.
+workflow function from its entry point. Matching task, result, phase, and log
+effects replay or reconcile. Concrete result effects are loaded only from
+schema- and digest-verified workflow-owned artifacts. The final return value is
+validated and committed as a separate workflow output artifact before run
+completion. JavaScript continuations are never serialized.
 
 ## Subagent integration
 

@@ -55,11 +55,14 @@ export function deriveSubagentResultSha256(result: RunResult): string {
 
 export function deriveWorkflowArtifactId(input: {
 	runId: WorkflowRunId;
-	producerTaskId: WorkflowTaskId;
-	output: "result";
+	producerTaskId?: WorkflowTaskId;
+	output?: "result";
 	schemaSha256: string;
 	sha256: string;
 }): WorkflowArtifactRef["id"] {
+	if ((input.producerTaskId === undefined) !== (input.output === undefined)) {
+		throw new Error("artifact producer and output must appear together");
+	}
 	return `artifact_${sha256({
 		output: input.output,
 		producerTaskId: input.producerTaskId,

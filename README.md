@@ -2,8 +2,8 @@
 
 Custom workflow runtime for [Pi](https://pi.dev).
 
-This repository is implementing its first durable static execution slice. It
-does not yet ship a working extension.
+This repository contains the durable static execution core and is implementing
+its Pi service and extension surface. It does not yet ship a working extension.
 
 ## Goal
 

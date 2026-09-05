@@ -28,8 +28,8 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-1 accepts only the declared run, task, artifact, barrier, and task-execution
-events. Task-execution evidence records generation creation, the latest
+1 accepts only the declared run, workflow phase/log effect, task, artifact,
+barrier, output-commit, and task-execution events. Task-execution evidence records generation creation, the latest
 preflight before launch intent, uncertain launch and reconciled absence or a
 launch receipt, child observation, bounded terminal child settlement, artifact
 import, release intent and receipt, and terminal outcome in that order. An
@@ -76,7 +76,9 @@ runtime contract revision
 ```
 
 On re-execution, declarations are compared in ordered epochs separated by
-result barriers. Each declaration records its global materialization sequence,
+result barriers. Bounded phase and log effects are matched by ordinal and
+barrier position; changed, inserted, removed, or barrier-crossing replay effects
+fail closed. Each declaration records its global materialization sequence,
 epoch, and position within that epoch. Materialization rejects epochs whose
 individual events or resulting projection exceed persistence bounds before any
 of that epoch is appended. The still-valid ordered prefix must match exactly. A
@@ -186,7 +188,10 @@ the workflow lease. Reads revalidate metadata, canonical encoding, size, and
 content digest. Artifact identity separately binds run, producer task, output
 name, schema digest, and content digest. A blob written before its declaration
 is a safe recoverable orphan; restart deterministically reuses it before
-persisting declaration and import evidence.
+persisting declaration and import evidence. The final workflow output uses the
+same store without a task producer and is bound to the definition output schema.
+Run completion requires a durable output-artifact commit; a crash after that
+commit resumes only the final status transition.
 
 Subagent artifacts are attempt evidence. Workflow imports every artifact needed
 for downstream execution, result delivery, resume, or replay using owner and
