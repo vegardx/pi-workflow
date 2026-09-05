@@ -192,6 +192,31 @@ async function append(
 	await journal.appendEvent(input);
 }
 
+async function failTask(
+	journal: WorkflowRunJournal,
+	execution: TaskExecutionProjection,
+	message: string,
+): Promise<void> {
+	const current = await state(journal);
+	const task = current.tasks[execution.execution.taskId];
+	if (!task) {
+		throw new WorkflowTaskLaunchError(
+			"validation",
+			"Workflow task disappeared while terminalizing launch failure.",
+		);
+	}
+	if (task.status === "failed") return;
+	await append(journal, {
+		type: "task-status-changed",
+		data: {
+			taskId: task.task.id,
+			from: task.status,
+			to: "failed",
+			reason: message,
+		},
+	});
+}
+
 async function terminalizeWorkflowFailure(
 	journal: WorkflowRunJournal,
 	execution: TaskExecutionProjection,
@@ -211,23 +236,7 @@ async function terminalizeWorkflowFailure(
 			},
 		},
 	});
-	const current = await state(journal);
-	const task = current.tasks[execution.execution.taskId];
-	if (!task) {
-		throw new WorkflowTaskLaunchError(
-			stage,
-			"Workflow task disappeared while terminalizing launch failure.",
-		);
-	}
-	await append(journal, {
-		type: "task-status-changed",
-		data: {
-			taskId: task.task.id,
-			from: task.status,
-			to: "failed",
-			reason: message,
-		},
-	});
+	await failTask(journal, execution, message);
 }
 
 export function createWorkflowTaskLauncher(
@@ -284,7 +293,17 @@ export function createWorkflowTaskLauncher(
 				{ cause: error },
 			);
 		}
-		if (receipt) return persistReceipt(execution, receipt);
+		if (receipt) {
+			try {
+				return await persistReceipt(execution, receipt);
+			} catch (error) {
+				throw new WorkflowTaskLaunchError(
+					"reconciliation",
+					"Recovered subagent launch receipt is invalid or could not be persisted.",
+					{ cause: error },
+				);
+			}
+		}
 
 		await append(journal, {
 			type: "task-execution-launch-absent",
@@ -333,10 +352,10 @@ export function createWorkflowTaskLauncher(
 
 		let current = await state(journal);
 		const task = current.tasks[taskId];
-		if (!task?.committed || task.status !== "ready") {
+		if (!task?.committed) {
 			throw new WorkflowTaskLaunchError(
 				"validation",
-				"Workflow task is not committed and ready for launch.",
+				"Workflow task is not committed for launch.",
 			);
 		}
 		if (task.task.spec.kind !== "agent") {
@@ -349,6 +368,47 @@ export function createWorkflowTaskLauncher(
 		let execution = task.currentExecutionId
 			? current.executions[task.currentExecutionId]
 			: undefined;
+		const existingReceipt = execution ? launchReceipt(execution) : undefined;
+		if (execution && existingReceipt) {
+			return {
+				state: "already-launched",
+				executionId: execution.execution.id,
+				receipt: existingReceipt,
+			};
+		}
+		if (execution?.phase === "launch-absent") {
+			const message =
+				"No subagent run exists for the persisted launch operation.";
+			await terminalizeWorkflowFailure(
+				journal,
+				execution,
+				"reconciliation",
+				message,
+			);
+			return { state: "absent", executionId: execution.execution.id };
+		}
+		if (execution?.phase === "terminal") {
+			if (
+				execution.terminal?.outcome === "failed" &&
+				task.status !== "failed"
+			) {
+				const evidence = execution.terminal.evidence;
+				await failTask(
+					journal,
+					execution,
+					evidence.kind === "workflow"
+						? evidence.message
+						: "Subagent execution failed.",
+				);
+			}
+			return { state: "terminal", executionId: execution.execution.id };
+		}
+		if (task.status !== "ready") {
+			throw new WorkflowTaskLaunchError(
+				"validation",
+				"Workflow task is not ready for launch.",
+			);
+		}
 		if (!execution) {
 			const record = executionRecord(current, task.task);
 			lowerRequest(task.task, record.operationId);
@@ -364,17 +424,6 @@ export function createWorkflowTaskLauncher(
 				"validation",
 				"Workflow task execution could not be created.",
 			);
-		}
-		const existingReceipt = launchReceipt(execution);
-		if (existingReceipt) {
-			return {
-				state: "already-launched",
-				executionId: execution.execution.id,
-				receipt: existingReceipt,
-			};
-		}
-		if (execution.phase === "terminal" || execution.phase === "launch-absent") {
-			return { state: "terminal", executionId: execution.execution.id };
 		}
 		if (execution.phase === "launch-intended") {
 			await append(journal, {
@@ -429,6 +478,8 @@ export function createWorkflowTaskLauncher(
 					operationId: execution.execution.operationId,
 					preflightId: freshPreflight.preflightId,
 					planIdentitySha256: freshPreflight.identitySha256,
+					plannedSubagentRunId: freshPreflight.launchPlan.runId,
+					plannedSubagentAttemptId: freshPreflight.launchPlan.attemptId,
 					expiresAt: freshPreflight.expiresAt,
 					...(execution.preflight
 						? { supersedesPreflightId: execution.preflight.preflightId }

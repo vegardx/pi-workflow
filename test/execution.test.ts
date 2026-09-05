@@ -154,6 +154,8 @@ function preflightEvents(record: TaskExecutionRecord): WorkflowEventInput[] {
 				operationId: record.operationId,
 				preflightId: "preflight-1",
 				planIdentitySha256,
+				plannedSubagentRunId: "run_child",
+				plannedSubagentAttemptId: "attempt_child",
 				expiresAt: "2026-09-01T01:00:00.000Z",
 			},
 		},

@@ -243,6 +243,8 @@ async function primePreflight(
 		operationId,
 		preflightId: "preflight-persisted",
 		planIdentitySha256: hash,
+		plannedSubagentRunId: "run_launcher",
+		plannedSubagentAttemptId: "attempt_launcher",
 		expiresAt: "2099-01-01T00:00:00.000Z",
 	});
 	return { executionId, operationId };
@@ -400,8 +402,8 @@ describe("workflow task launcher", () => {
 		const { journal, taskId } = await readyJournal();
 		await primeLaunchIntent(journal, taskId);
 		const receipt: RunReceipt = {
-			runId: "run_recovered",
-			attemptId: "attempt_recovered",
+			runId: "run_launcher",
+			attemptId: "attempt_launcher",
 			status: "active",
 		};
 		const launch = vi.fn();
@@ -417,6 +419,29 @@ describe("workflow task launcher", () => {
 		});
 		expect(launch).not.toHaveBeenCalled();
 		expect(findByOperation).toHaveBeenCalledOnce();
+	});
+
+	it("rejects a recovered receipt for another planned child", async () => {
+		const { journal, taskId } = await readyJournal();
+		await primeLaunchIntent(journal, taskId);
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					findByOperation: vi.fn(async () => ({
+						runId: "run_other",
+						attemptId: "attempt_other",
+						status: "active" as const,
+					})),
+				}),
+			),
+		});
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "reconciliation",
+		});
+		expect(
+			Object.values((await projection(journal)).executions)[0]?.phase,
+		).toBe("launch-uncertain");
 	});
 
 	it("terminalizes only after operation lookup proves launch absence", async () => {
@@ -443,6 +468,61 @@ describe("workflow task launcher", () => {
 			},
 		});
 		expect(state.tasks[taskId]?.status).toBe("failed");
+	});
+
+	it("finishes terminalization after a crash following absence evidence", async () => {
+		const { journal, taskId } = await readyJournal();
+		await primeLaunchIntent(journal, taskId);
+		const current = await projection(journal);
+		const execution = Object.values(current.executions)[0];
+		if (!execution) throw new Error("missing execution");
+		await journal.append("task-execution-launch-uncertain", {
+			executionId: execution.execution.id,
+			operationId: execution.execution.operationId,
+			reason: "receipt missing after crash",
+		});
+		await journal.append("task-execution-launch-absent", {
+			executionId: execution.execution.id,
+			operationId: execution.execution.operationId,
+		});
+		const ownerClient = client();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(ownerClient),
+		});
+
+		await expect(launcher.launch(taskId)).resolves.toMatchObject({
+			state: "absent",
+		});
+		const settled = await projection(journal);
+		expect(settled.executions[execution.execution.id]?.phase).toBe("terminal");
+		expect(settled.tasks[taskId]?.status).toBe("failed");
+		expect(ownerClient.findByOperation).not.toHaveBeenCalled();
+	});
+
+	it("finishes task failure after a crash following terminal evidence", async () => {
+		const { journal, taskId } = await readyJournal();
+		const { executionId } = await primePreflight(journal, taskId);
+		const message = "Subagent preflight failed before launch.";
+		await journal.append("task-execution-terminal", {
+			executionId,
+			outcome: "failed",
+			evidence: {
+				kind: "workflow",
+				stage: "preflight",
+				failureSha256: canonicalSha256({ message, stage: "preflight" }),
+				message,
+			},
+		});
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(client()),
+		});
+
+		await expect(launcher.launch(taskId)).resolves.toMatchObject({
+			state: "terminal",
+		});
+		expect((await projection(journal)).tasks[taskId]?.status).toBe("failed");
 	});
 
 	it("persists a preflight failure before failing the task", async () => {

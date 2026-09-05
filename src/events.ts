@@ -99,6 +99,8 @@ const TaskExecutionPreflightedEventSchema = Type.Object(
 				operationId: SubagentOperationIdSchema,
 				preflightId: Type.String({ minLength: 1, maxLength: 128 }),
 				planIdentitySha256: Sha256Schema,
+				plannedSubagentRunId: SubagentRunIdSchema,
+				plannedSubagentAttemptId: SubagentAttemptIdSchema,
 				expiresAt: Type.String({ format: "date-time" }),
 				supersedesPreflightId: Type.Optional(
 					Type.String({ minLength: 1, maxLength: 128 }),
@@ -353,6 +355,8 @@ const SequencedPreflightSchema = Type.Object(
 		operationId: SubagentOperationIdSchema,
 		preflightId: Type.String({ minLength: 1, maxLength: 128 }),
 		planIdentitySha256: Sha256Schema,
+		plannedSubagentRunId: SubagentRunIdSchema,
+		plannedSubagentAttemptId: SubagentAttemptIdSchema,
 		expiresAt: Type.String({ format: "date-time" }),
 		supersedesPreflightId: Type.Optional(
 			Type.String({ minLength: 1, maxLength: 128 }),
