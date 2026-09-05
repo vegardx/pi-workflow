@@ -192,7 +192,7 @@ describe("workflow task materializer", () => {
 		);
 	});
 
-	it("does not resume materialization for a terminal run", () => {
+	it("does not resume materialization for a cancelled run", () => {
 		const terminal = reduceWorkflowEvents(
 			records([
 				{
@@ -210,7 +210,7 @@ describe("workflow task materializer", () => {
 			]),
 		);
 		expect(() => materializer(terminal)).toThrow(
-			"terminal workflow run may not materialize",
+			"cancelled workflow run may not materialize",
 		);
 	});
 

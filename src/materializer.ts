@@ -121,6 +121,7 @@ export class WorkflowTaskMaterializer {
 	private readonly runId: WorkflowRunId;
 	private readonly seen = new Map<string, MaterializedAgentTask>();
 	private projectedState: WorkflowStateProjection;
+	private readonly replayOnly: boolean;
 	private readonly uncommitted: MaterializedAgentTask[] = [];
 	private readonly controlAfter = new Map<string, TaskRef>();
 	private epoch = 1;
@@ -141,14 +142,9 @@ export class WorkflowTaskMaterializer {
 			throw new WorkflowMaterializationError("invalid materializer identity");
 		}
 		const previous = options.previousState;
-		if (
-			previous &&
-			(previous.status === "completed" ||
-				previous.status === "completed-degraded" ||
-				previous.status === "cancelled")
-		) {
+		if (previous?.status === "cancelled") {
 			throw new WorkflowMaterializationError(
-				"terminal workflow run may not materialize tasks",
+				"cancelled workflow run may not materialize tasks",
 			);
 		}
 		if (
@@ -171,6 +167,9 @@ export class WorkflowTaskMaterializer {
 				"invalidated materialization requires execution-generation support",
 			);
 		}
+		this.replayOnly =
+			previous?.status === "completed" ||
+			previous?.status === "completed-degraded";
 		this.expectedTasks = previous
 			? Object.values(previous.tasks)
 					.map((projection) => projection.task)
@@ -190,6 +189,7 @@ export class WorkflowTaskMaterializer {
 					inputSha256: this.inputSha256,
 					status: "created",
 					currentEpoch: 1,
+					effects: [],
 					lastSequence: 1,
 					tasks: {},
 					executions: {},
@@ -320,6 +320,11 @@ export class WorkflowTaskMaterializer {
 			throw new WorkflowMaterializationError("invalid materialized agent task");
 		}
 		const expected = this.expectedTasks[this.sequence];
+		if (!expected && this.replayOnly) {
+			throw new WorkflowMaterializationError(
+				"completed workflow materialization may only replay its exact prefix",
+			);
+		}
 		if (expected && !isDeepStrictEqual(task, expected)) {
 			throw new WorkflowMaterializationError(
 				"task declaration does not match the persisted ordered prefix",
@@ -404,6 +409,11 @@ export class WorkflowTaskMaterializer {
 		if (this.epoch <= this.expectedBarriers.size) {
 			throw new WorkflowMaterializationError(
 				"materialization barrier removed from persisted prefix",
+			);
+		}
+		if (this.replayOnly) {
+			throw new WorkflowMaterializationError(
+				"completed workflow materialization may not append a barrier",
 			);
 		}
 		const events: WorkflowEventInput[] = this.uncommitted.map((task) => ({

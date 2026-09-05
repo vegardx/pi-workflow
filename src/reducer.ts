@@ -180,6 +180,23 @@ function applyEvent(
 				"duplicate run-created event",
 				event.sequence,
 			);
+		case "workflow-effect": {
+			if (
+				state.status === "completed" ||
+				state.status === "completed-degraded" ||
+				state.status === "cancelled"
+			) {
+				fail("terminal workflow run may not append effects", event.sequence);
+			}
+			if (input.data.ordinal !== state.effects.length + 1) {
+				fail("workflow effect ordinal is not contiguous", event.sequence);
+			}
+			if (input.data.kind === "phase" && input.data.value.length > 128) {
+				fail("workflow phase exceeds length limit", event.sequence);
+			}
+			state.effects.push({ ...input.data, sequence: event.sequence });
+			break;
+		}
 		case "task-declared": {
 			const task = structuredClone(input.data.task);
 			if (
@@ -324,6 +341,15 @@ function applyEvent(
 				) {
 					fail("artifact identity is not deterministic", event.sequence);
 				}
+			} else if (
+				artifact.id !==
+				deriveWorkflowArtifactId({
+					runId: artifact.runId,
+					schemaSha256: artifact.schemaSha256,
+					sha256: artifact.sha256,
+				})
+			) {
+				fail("artifact identity is not deterministic", event.sequence);
 			}
 			if (
 				artifact.producerTaskId !== undefined &&
@@ -938,6 +964,20 @@ function applyEvent(
 			}
 			break;
 		}
+		case "run-output-committed": {
+			const artifact = state.artifacts[input.data.artifactId];
+			if (
+				state.status !== "finalizing" ||
+				state.outputArtifactId !== undefined ||
+				!artifact ||
+				artifact.producerTaskId !== undefined ||
+				artifact.output !== undefined
+			) {
+				fail("workflow output commit is invalid", event.sequence);
+			}
+			state.outputArtifactId = artifact.id;
+			break;
+		}
 		case "run-status-changed": {
 			if (state.status !== input.data.from) {
 				fail("run status source does not match projection", event.sequence);
@@ -971,9 +1011,13 @@ function applyEvent(
 			if (
 				(input.data.to === "completed" ||
 					input.data.to === "completed-degraded") &&
-				!state.barriers.some((barrier) => barrier.kind === "final")
+				(!state.barriers.some((barrier) => barrier.kind === "final") ||
+					state.outputArtifactId === undefined)
 			) {
-				fail("run completed without a final barrier", event.sequence);
+				fail(
+					"run completed without a final barrier and output",
+					event.sequence,
+				);
 			}
 			if (
 				(input.data.to === "completed" ||
@@ -1074,6 +1118,7 @@ export function reduceWorkflowEvents(
 		inputSha256: firstInput.data.inputSha256,
 		status: "created",
 		currentEpoch: 1,
+		effects: [],
 		lastSequence: 1,
 		tasks: {},
 		executions: {},
