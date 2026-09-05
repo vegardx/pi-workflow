@@ -16,7 +16,16 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
+		},
+		"./extension": {
+			"types": "./dist/extension.d.ts",
+			"import": "./dist/extension.js"
 		}
+	},
+	"pi": {
+		"extensions": [
+			"./dist/extension.js"
+		]
 	},
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",

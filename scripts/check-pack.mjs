@@ -33,6 +33,8 @@ try {
 	for (const required of [
 		"LICENSE",
 		"README.md",
+		"dist/extension.d.ts",
+		"dist/extension.js",
 		"dist/index.d.ts",
 		"dist/index.js",
 		"package.json",
@@ -73,7 +75,7 @@ try {
 		[
 			"--input-type=module",
 			"--eval",
-			'const workflow = await import("@vegardx/pi-workflow"); const subagent = await import("@vegardx/pi-subagent"); const provider = await import("@vegardx/pi-subagent/service-provider"); if (workflow.WORKFLOW_RUNTIME_CONTRACT.schema !== "pi-workflow-runtime" || !workflow.isCompatibleSubagentContract(subagent.SUBAGENT_RUNTIME_CONTRACT) || typeof provider.acquireSubagentService !== "function" || typeof workflow.WorkflowRunJournal?.open !== "function" || typeof workflow.acquireWorkflowRunLease !== "function" || typeof workflow.createWorkflowSubagentProvider !== "function" || typeof workflow.createWorkflowTaskLauncher !== "function" || typeof workflow.createWorkflowSequentialScheduler !== "function" || typeof workflow.WorkflowArtifactStore?.open !== "function" || typeof workflow.createWorkflowTaskFinalizer !== "function" || typeof workflow.createStaticWorkflowRuntime !== "function") throw new Error("packed exports are unavailable or incompatible");',
+			'const workflow = await import("@vegardx/pi-workflow"); const extension = await import("@vegardx/pi-workflow/extension"); const subagent = await import("@vegardx/pi-subagent"); const provider = await import("@vegardx/pi-subagent/service-provider"); const manifest = JSON.parse(await (await import("node:fs/promises")).readFile("node_modules/@vegardx/pi-workflow/package.json", "utf8")); if (workflow.WORKFLOW_RUNTIME_CONTRACT.schema !== "pi-workflow-runtime" || !workflow.isCompatibleSubagentContract(subagent.SUBAGENT_RUNTIME_CONTRACT) || typeof provider.acquireSubagentService !== "function" || typeof workflow.WorkflowRunJournal?.open !== "function" || typeof workflow.acquireWorkflowRunLease !== "function" || typeof workflow.createWorkflowSubagentProvider !== "function" || typeof workflow.createWorkflowTaskLauncher !== "function" || typeof workflow.createWorkflowSequentialScheduler !== "function" || typeof workflow.WorkflowArtifactStore?.open !== "function" || typeof workflow.createWorkflowTaskFinalizer !== "function" || typeof workflow.createStaticWorkflowRuntime !== "function" || typeof workflow.createWorkflowService !== "function" || typeof extension.default !== "function" || manifest.pi?.extensions?.[0] !== "./dist/extension.js") throw new Error("packed exports are unavailable or incompatible");',
 		],
 		{ cwd: project, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
 	);

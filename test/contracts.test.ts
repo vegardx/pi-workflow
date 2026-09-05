@@ -66,6 +66,12 @@ describe("workflow contracts", () => {
 			SUBAGENT_RUNTIME_CONTRACT,
 		);
 		expect(isWorkflowRuntimeContract(WORKFLOW_RUNTIME_CONTRACT)).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features).toMatchObject({
+			staticWorkflows: true,
+			durableRuns: true,
+			replay: true,
+			resume: false,
+		});
 	});
 
 	it("keeps the compatibility baseline immutable", () => {

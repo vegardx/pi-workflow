@@ -134,12 +134,28 @@ export {
 	type WorkflowRootScope,
 } from "./registry.js";
 export {
+	type WorkflowRunRecord,
+	WorkflowRunRecordError,
+	WorkflowRunRecordSchema,
+	WorkflowRunRecordStore,
+} from "./run-record.js";
+export {
 	createWorkflowSequentialScheduler,
 	WorkflowSchedulerError,
 	type WorkflowSchedulerOutcome,
 	type WorkflowSequentialScheduler,
 	type WorkflowSequentialSchedulerOptions,
 } from "./scheduler.js";
+export {
+	createWorkflowService,
+	type WorkflowDefinitionSummary,
+	type WorkflowService,
+	WorkflowServiceError,
+	type WorkflowServiceOptions,
+	type WorkflowServiceRunReceipt,
+	type WorkflowServiceRunView,
+	type WorkflowValidationResult,
+} from "./service.js";
 export {
 	createStaticWorkflowRuntime,
 	type StaticWorkflowRunResult,

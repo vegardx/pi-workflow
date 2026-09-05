@@ -32,8 +32,9 @@ this runtime.
 
 ## Layers
 
-1. **Extension adapter** registers workflow tools, commands, lifecycle hooks,
-   and UI projections.
+1. **Extension adapter** registers the current list, validate, run, status,
+   wait, stop, and reconcile tools plus compact status commands and session
+   shutdown draining.
 2. **Registry** discovers definitions using Pi's effective agent directory and
    project trust.
 3. **Authoring frontend** exposes typed task and artifact handles to trusted
@@ -132,6 +133,22 @@ lifetime of that extension runtime, and rejects provider removal or service
 replacement. It returns only the owner client, never the service or its shutdown
 method. Missing, duplicate, malformed, or incompatible providers fail before
 workflow work starts.
+
+## Workflow service
+
+The session-scoped service discovers definitions under current trust, validates
+input before creating a run, and acquires the exact shared subagent owner client
+before durable workflow state exists. An immutable private run record binds the
+project root, definition name/path/source/identity, input, and creation time for
+restart reconstruction.
+
+Each owned run composes one fenced journal, workflow artifact store, launcher,
+finalizer, sequential scheduler, and static source runtime. Completed runs keep
+their workflow lease until session shutdown so concurrent status, wait, stop,
+and terminal projection cannot race lease release. A replacement session can
+reacquire the lease and reconstruct nonterminal work from the run record and
+journal. Status and output are always journal/artifact projections; in-memory
+promises are only wait notifications.
 
 ## Dynamic workflows
 
