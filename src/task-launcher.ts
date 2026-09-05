@@ -321,7 +321,10 @@ export function createWorkflowTaskLauncher(
 				"Invalid workflow task identity.",
 			);
 		}
-		if (binding.workflowRunId !== journal.runId) {
+		if (
+			binding.workflowRunId !== journal.runId ||
+			binding.ownerId !== `pi-workflow:${journal.runId}`
+		) {
 			throw new WorkflowTaskLaunchError(
 				"validation",
 				"Subagent owner binding does not match the workflow journal.",
