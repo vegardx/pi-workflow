@@ -97,9 +97,12 @@ runtime has persisted:
 The initial scheduler is deliberately sequential. It derives readiness and
 failed-dependency blocking from committed journal state, persists task readiness
 before launch, and persists bounded terminal child evidence after `wait`. It
-does not treat an in-memory wait promise as authority. Artifact import and child
-release remain required later phases of the same execution lifecycle, so child
-settlement alone cannot complete a task.
+does not treat an in-memory wait promise as authority. Artifact import and child release are required later phases of the same
+execution lifecycle, so child settlement alone cannot complete a task. The
+workflow store imports schema-validated structured output as canonical JSON,
+binds its provenance into artifact identity, persists import evidence, and then
+persists release intent before invoking the owner client. Only a durable release
+receipt permits terminal execution and task evidence.
 
 Resume reconstructs state from the append-only journal and re-executes the
 workflow function from its entry point. Matching effects replay or reconcile.

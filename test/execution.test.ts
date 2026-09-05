@@ -14,6 +14,7 @@ import {
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
+	deriveWorkflowArtifactId,
 	deriveWorkflowFailureSha256,
 } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
@@ -183,15 +184,18 @@ function settlement(
 }
 
 function artifact(taskId: WorkflowTaskId): WorkflowArtifactRef {
-	return {
-		id: `artifact_${"f".repeat(64)}`,
-		runId: "workflow_execution",
+	const input = {
+		runId: "workflow_execution" as const,
 		producerTaskId: taskId,
-		output: "result",
+		output: "result" as const,
 		sha256: structuredOutputSha256,
+		schemaSha256: deriveJsonValueSha256(request().outputSchema),
+	};
+	return {
+		id: deriveWorkflowArtifactId(input),
+		...input,
 		bytes: 18,
 		mediaType: "application/json",
-		schemaSha256: deriveJsonValueSha256(request().outputSchema),
 	};
 }
 
@@ -276,6 +280,23 @@ describe("task execution persistence", () => {
 		);
 		expect(deriveWorkflowFailureSha256("preflight", "missing agent")).not.toBe(
 			deriveWorkflowFailureSha256("launch", "missing agent"),
+		);
+		expect(
+			deriveWorkflowArtifactId({
+				runId: "workflow_execution",
+				producerTaskId: "task_one",
+				output: "result",
+				schemaSha256: planIdentitySha256,
+				sha256: planIdentitySha256,
+			}),
+		).not.toBe(
+			deriveWorkflowArtifactId({
+				runId: "workflow_execution",
+				producerTaskId: "task_two",
+				output: "result",
+				schemaSha256: planIdentitySha256,
+				sha256: planIdentitySha256,
+			}),
 		);
 	});
 

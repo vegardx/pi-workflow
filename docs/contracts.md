@@ -298,11 +298,12 @@ pending dependents to `blocked`.
 
 The journal stores bounded child-settlement evidence and a digest of the complete
 child result, not model output, structured values, session paths, or
-subagent-private store paths. Imported structured output is represented by a
-workflow-owned artifact and its digest. Child settlement alone does not complete
-a task: completed children still require artifact import, and every terminal
-child requires release before terminal execution and task events may be
-committed. Task lifecycle transitions remain separate events and may consume
+subagent-private store paths. Imported structured output is represented by a canonical JSON workflow-owned
+artifact. Its artifact identity binds the workflow run, producer task, output
+name, schema digest, and content digest, so equal JSON from different producers
+does not alias provenance. Child settlement alone does not complete a task:
+completed children still require artifact import, and every terminal child
+requires release before terminal execution and task events may be committed. Task lifecycle transitions remain separate events and may consume
 terminal execution evidence only after that evidence is durable.
 
 After uncertain launch outcome it calls `findByOperation` before any new launch.
@@ -354,9 +355,12 @@ launch intent is terminalized as cancelled without launching. An uncertain
 launch is reconciled through its operation ID before interruption.
 
 `cleanup-blocked` remains until subagent reconciliation/release proves cleanup
-and returns a new result that can be mapped normally. Release itself is an
-idempotent external effect with durable intent and receipt. Workflow does not infer a
-hidden primary status from a subagent `cleanup-blocked` result.
+and returns a new result that can be mapped normally. Release itself is an idempotent external effect with durable intent and receipt.
+A crash after release intent retries release; a crash after its receipt resumes
+from the receipt. If release proves cleanup and changes `cleanup-blocked` to a
+terminal primary status, workflow persists the release receipt before replacing
+its child observation and settlement evidence. Workflow does not infer a hidden
+primary status from a subagent `cleanup-blocked` result.
 
 ## Workflow service
 

@@ -179,6 +179,15 @@ cumulative budget usage.
 
 ## Artifact ownership
 
+Workflow result artifacts are canonical JSON blobs under the private run
+artifact directory. Writes are content-addressed, bounded per blob and per run,
+serialized process-wide, written through fsync and atomic rename, and fenced by
+the workflow lease. Reads revalidate metadata, canonical encoding, size, and
+content digest. Artifact identity separately binds run, producer task, output
+name, schema digest, and content digest. A blob written before its declaration
+is a safe recoverable orphan; restart deterministically reuses it before
+persisting declaration and import evidence.
+
 Subagent artifacts are attempt evidence. Workflow imports every artifact needed
 for downstream execution, result delivery, resume, or replay using owner and
 digest verification. Workflow retention never depends on an unpinned subagent

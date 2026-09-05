@@ -1,4 +1,11 @@
 export {
+	canonicalArtifactJson,
+	MAX_WORKFLOW_ARTIFACT_BYTES,
+	MAX_WORKFLOW_ARTIFACT_STORE_BYTES,
+	WorkflowArtifactStore,
+	WorkflowArtifactStoreError,
+} from "./artifact-store.js";
+export {
 	type AgentTaskRequest,
 	AgentTaskRequestSchema,
 	type AgentTaskSpec,
@@ -79,6 +86,7 @@ export {
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
+	deriveWorkflowArtifactId,
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 export {
@@ -137,6 +145,13 @@ export {
 	WorkflowSubagentProviderError,
 	type WorkflowSubagentProviderErrorCode,
 } from "./subagent-provider.js";
+export {
+	createWorkflowTaskFinalizer,
+	WorkflowTaskFinalizationError,
+	type WorkflowTaskFinalizationOutcome,
+	type WorkflowTaskFinalizer,
+	type WorkflowTaskFinalizerOptions,
+} from "./task-finalizer.js";
 export {
 	createWorkflowTaskLauncher,
 	WorkflowTaskLaunchError,

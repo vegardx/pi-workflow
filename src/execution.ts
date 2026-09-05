@@ -9,6 +9,7 @@ import type {
 	SubagentOperationId,
 	TaskExecutionGeneration,
 	TaskExecutionId,
+	WorkflowArtifactRef,
 	WorkflowRunId,
 	WorkflowTaskId,
 } from "./contracts.js";
@@ -50,6 +51,22 @@ export function deriveSubagentResultSha256(result: RunResult): string {
 		throw new Error("subagent result is not losslessly JSON-serializable");
 	}
 	return canonicalSha256(roundTrip);
+}
+
+export function deriveWorkflowArtifactId(input: {
+	runId: WorkflowRunId;
+	producerTaskId: WorkflowTaskId;
+	output: "result";
+	schemaSha256: string;
+	sha256: string;
+}): WorkflowArtifactRef["id"] {
+	return `artifact_${sha256({
+		output: input.output,
+		producerTaskId: input.producerTaskId,
+		runId: input.runId,
+		schemaSha256: input.schemaSha256,
+		sha256: input.sha256,
+	})}`;
 }
 
 export function deriveWorkflowFailureSha256(
