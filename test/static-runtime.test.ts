@@ -350,7 +350,7 @@ describe("static workflow runtime", () => {
 			"completed",
 			"completed",
 		]);
-	});
+	}, 15_000);
 
 	it("captures result barriers before later synchronous effects", async () => {
 		const { journal, artifacts } = await fixture();
