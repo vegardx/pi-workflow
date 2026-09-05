@@ -292,8 +292,9 @@ launch it:
    `@vegardx/pi-subagent/service-provider`;
 2. checks the exact runtime contract revision and required feature values;
 3. binds an owner client to the workflow run;
-4. calls preflight and persists the resolved launch-plan identity plus planned
-   subagent run and initial-attempt identities;
+4. calls preflight, validates tools, skills, and context scopes as canonical
+   unique grants rather than order-sensitive arrays, and persists the resolved
+   launch-plan identity plus planned subagent run and initial-attempt identities;
 5. persists launch intent;
 6. launches with the exact preflight identity;
 7. persists the launch receipt.

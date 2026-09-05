@@ -83,9 +83,9 @@ function launchPlan(
 			request.model ??
 			({ provider: "test", id: "model", thinking: "low" } as const),
 		cwd: "/workspace" as const,
-		tools: [...request.tools],
-		preloadSkills: [...request.preloadSkills],
-		contextScopes: [...request.contextScopes],
+		tools: [...request.tools].sort(),
+		preloadSkills: [...request.preloadSkills].sort(),
+		contextScopes: [...request.contextScopes].sort(),
 		resources: [
 			{
 				kind: "agent" as const,

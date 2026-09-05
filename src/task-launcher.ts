@@ -86,6 +86,13 @@ function isRunReceipt(value: unknown): value is RunReceipt {
 	);
 }
 
+function sameStringSet(
+	left: readonly string[],
+	right: readonly string[],
+): boolean {
+	return isDeepStrictEqual([...left].sort(), [...right].sort());
+}
+
 function validatePreflight(
 	preflight: SubagentPreflight,
 	request: ReturnType<typeof lowerRequest>,
@@ -108,15 +115,9 @@ function validatePreflight(
 		preflight.launchPlan.agent !== request.agent ||
 		!isDeepStrictEqual(preflight.launchPlan.task, request.task) ||
 		preflight.launchPlan.contextMode !== request.contextMode ||
-		!isDeepStrictEqual(preflight.launchPlan.tools, request.tools) ||
-		!isDeepStrictEqual(
-			preflight.launchPlan.preloadSkills,
-			request.preloadSkills,
-		) ||
-		!isDeepStrictEqual(
-			preflight.launchPlan.contextScopes,
-			request.contextScopes,
-		) ||
+		!sameStringSet(preflight.launchPlan.tools, request.tools) ||
+		!sameStringSet(preflight.launchPlan.preloadSkills, request.preloadSkills) ||
+		!sameStringSet(preflight.launchPlan.contextScopes, request.contextScopes) ||
 		preflight.launchPlan.workspace.mode !== request.workspace.mode ||
 		!isDeepStrictEqual(
 			preflight.launchPlan.outputSchema,
