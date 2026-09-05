@@ -3,7 +3,8 @@
 ## Storage
 
 ```text
-<cwd>/.pi/workflow-runs/<run-id>/
+<cwd>/.pi/workflow/runs/<run-id>/
+  service.json
   run.json
   events.jsonl
   definition/
@@ -20,7 +21,10 @@ A bounded global pointer index may live under:
 ```
 
 Directories are mode `0700`; sensitive files are mode `0600`. Prompts, logs,
-checkpoint values, context, artifacts, and results are bounded.
+checkpoint values, context, artifacts, and results are bounded. `service.json`
+is an immutable bounded private record containing the exact workflow definition
+provenance, project root, input, and creation identity needed for restart
+reconstruction. It is written before workflow source starts.
 Credential-shaped metadata is redacted. Source-derived sensitive content that
 must be retained is stored as private artifact data, not copied into indexes or
 ordinary diagnostics.
@@ -152,6 +156,16 @@ Default policy:
 - live-branch mutation: not supported by the workflow task contract;
 - external web/service tasks: replay disabled unless evidence is captured as an
   immutable declared artifact.
+
+## Service reconstruction
+
+The workflow service resolves run IDs only through existing regular run
+directories and never creates state while answering an unknown status request.
+It reacquires run fencing, validates `service.json`, rediscovers the exact
+trusted definition path and source identity, reacquires the shared subagent owner
+client, and composes the same durable runtime. Provider binding happens before
+new run state is created. Completed status and output reads need no subagent
+acquisition.
 
 ## Resume
 

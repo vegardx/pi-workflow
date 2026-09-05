@@ -378,9 +378,16 @@ export function createWorkflowTaskFinalizer(
 	): Promise<void> {
 		const current = await state();
 		if (
-			terminalOutcome === "cleanup-blocked" &&
-			current.status !== "cleanup-blocked"
+			current.status === "completed" ||
+			current.status === "completed-degraded" ||
+			current.status === "failed" ||
+			current.status === "cancelled" ||
+			current.status === "interrupted" ||
+			current.status === "cleanup-blocked"
 		) {
+			return;
+		}
+		if (terminalOutcome === "cleanup-blocked") {
 			await append({
 				type: "run-status-changed",
 				data: {
@@ -394,7 +401,6 @@ export function createWorkflowTaskFinalizer(
 		if (
 			task.task.spec.disposition === "required" &&
 			(terminalOutcome === "failed" || terminalOutcome === "cancelled") &&
-			current.status !== "failed" &&
 			current.status !== "stopping"
 		) {
 			await append({
@@ -410,7 +416,6 @@ export function createWorkflowTaskFinalizer(
 		if (
 			task.task.spec.disposition === "required" &&
 			terminalOutcome === "interrupted" &&
-			current.status !== "interrupted" &&
 			current.status !== "stopping"
 		) {
 			await append({

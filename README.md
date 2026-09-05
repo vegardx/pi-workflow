@@ -2,8 +2,9 @@
 
 Custom workflow runtime for [Pi](https://pi.dev).
 
-This repository contains the durable static execution core and is implementing
-its Pi service and extension surface. It does not yet ship a working extension.
+This repository contains the durable static execution core and Pi extension for
+trusted read-only workflows. Dynamic workflows, writer tasks, retry/resume, and
+polished UI remain unavailable.
 
 ## Goal
 
@@ -58,6 +59,20 @@ agent run and attempt. Its extension registers a lazy provider on Pi's event bus
 Workflow acquires that exact service through the public typed provider export,
 checks the exact runtime contract, and never constructs or shuts down a second
 execution service.
+
+## Pi tools
+
+The packaged extension registers:
+
+```text
+workflow_list      workflow_validate  workflow_run
+workflow_status    workflow_wait      workflow_stop
+workflow_reconcile
+```
+
+`workflow_run` returns a durable run ID immediately. Use `workflow_wait` for the
+bounded result or `workflow_stop` to persist stop intent and drain active child
+work.
 
 ## Development
 

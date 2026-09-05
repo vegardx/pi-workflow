@@ -394,8 +394,13 @@ interface WorkflowServiceV1 {
 }
 ```
 
-The first vertical slice may expose only list, validate, run, status, wait, stop,
-and reconcile, but their persisted semantics must already match this contract.
+The current extension exposes list, validate, run, status, wait, stop, and
+reconcile. `run` validates trust, definition, input, and the shared subagent
+provider before creating durable state, then returns a run ID immediately.
+`status` is a journal projection, `wait` reconstructs nonterminal work after
+restart, and `stop` persists run/task intent before delegated interruption.
+Retry, explicit interrupted-run resume, logs, and polished inspection remain
+later contract work.
 
 ## Checkpoints
 
