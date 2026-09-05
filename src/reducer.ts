@@ -491,6 +491,10 @@ function applyEvent(
 				(projection.phase !== "launch-intended" &&
 					projection.phase !== "launch-uncertain") ||
 				input.data.operationId !== projection.execution.operationId ||
+				input.data.subagentRunId !==
+					projection.preflight?.plannedSubagentRunId ||
+				input.data.subagentAttemptId !==
+					projection.preflight?.plannedSubagentAttemptId ||
 				Object.values(state.executions).some(
 					(candidate) =>
 						candidate.execution.id !== projection.execution.id &&
