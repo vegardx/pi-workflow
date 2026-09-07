@@ -242,6 +242,9 @@ function schedulerFor(
 				outcome: "completed",
 			};
 		},
+		async reconcile() {
+			throw new Error("fake workflow has no cleanup-blocked task");
+		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;
 		},
