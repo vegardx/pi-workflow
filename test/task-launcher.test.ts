@@ -392,7 +392,14 @@ async function readyJournalWithInput() {
 		from: "pending",
 		to: "ready",
 	});
-	return { artifact, artifacts, consumerId: consumer.ref.taskId, journal };
+	return {
+		artifact,
+		artifacts,
+		consumerId: consumer.ref.taskId,
+		journal,
+		lease,
+		root,
+	};
 }
 
 async function projection(journal: WorkflowRunJournal) {
@@ -505,8 +512,22 @@ describe("workflow task launcher", () => {
 		expect(launch).toHaveBeenCalledOnce();
 	});
 
-	it("binds verified workflow artifacts into delegated context", async () => {
-		const { artifacts, consumerId, journal } = await readyJournalWithInput();
+	it("reopens and binds verified artifacts into delegated context", async () => {
+		const setup = await readyJournalWithInput();
+		await setup.lease.release();
+		leases.delete(setup.lease);
+		const replacement = await acquireWorkflowRunLease({
+			storeRoot: setup.root,
+			runId: "workflow_launcher",
+			ownerId: "launcher-input-restart",
+		});
+		leases.add(replacement);
+		const journal = await WorkflowRunJournal.open(
+			setup.root,
+			"workflow_launcher",
+			replacement,
+		);
+		const artifacts = await WorkflowArtifactStore.open({ journal });
 		const preflightCall = vi.fn(async (input: SubagentRequest) =>
 			preflight(input, "pi-workflow:workflow_launcher"),
 		);
@@ -525,7 +546,7 @@ describe("workflow task launcher", () => {
 			),
 		});
 
-		await expect(launcher.launch(consumerId)).resolves.toMatchObject({
+		await expect(launcher.launch(setup.consumerId)).resolves.toMatchObject({
 			state: "launched",
 		});
 		const delegated = preflightCall.mock.calls[0]?.[0];
