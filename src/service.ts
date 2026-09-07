@@ -257,7 +257,11 @@ export async function createWorkflowService(
 			lease,
 		);
 		const artifacts = await WorkflowArtifactStore.open({ journal });
-		const launcher = createWorkflowTaskLauncher({ journal, binding });
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding,
+			artifacts,
+		});
 		const finalizer = createWorkflowTaskFinalizer({
 			journal,
 			binding,

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
 	AgentLaunchPlanSchema,
@@ -6,10 +7,16 @@ import {
 	type RunReceipt,
 	RunStatusSchema,
 	type SubagentPreflight,
+	type SubagentRequest,
 	SubagentRequestSchema,
 	verifyLaunchPlanIdentity,
 } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
+import {
+	projectWorkflowArtifactInputs,
+	validateWorkflowTaskContext,
+} from "./artifact-input.js";
+import { WorkflowArtifactStore } from "./artifact-store.js";
 import {
 	type MaterializedAgentTask,
 	type TaskExecutionRecord,
@@ -59,6 +66,7 @@ export interface WorkflowTaskLauncher {
 export interface WorkflowTaskLauncherOptions {
 	readonly journal: WorkflowRunJournal;
 	readonly binding: WorkflowSubagentBinding;
+	readonly artifacts?: WorkflowArtifactStore;
 }
 
 function launchReceipt(
@@ -95,7 +103,7 @@ function sameStringSet(
 
 function validatePreflight(
 	preflight: SubagentPreflight,
-	request: ReturnType<typeof lowerRequest>,
+	request: SubagentRequest,
 	ownerId: string,
 ): void {
 	if (
@@ -134,17 +142,32 @@ function validatePreflight(
 	}
 }
 
-function lowerRequest(task: MaterializedAgentTask, operationId: string) {
-	if (Object.keys(task.spec.inputs).length > 0) {
+async function lowerRequest(
+	task: MaterializedAgentTask,
+	operationId: string,
+	current: WorkflowStateProjection,
+	artifacts?: WorkflowArtifactStore,
+): Promise<SubagentRequest> {
+	const hasInputs = Object.keys(task.spec.inputs).length > 0;
+	if (hasInputs && !artifacts) {
 		throw new WorkflowTaskLaunchError(
 			"validation",
-			"Artifact-backed task inputs are unavailable until workflow artifact projection ships.",
+			"Workflow artifact store is unavailable for task input projection.",
 		);
 	}
+	const projected =
+		hasInputs && artifacts
+			? await projectWorkflowArtifactInputs({ task, state: current, artifacts })
+			: [];
+	const context = [...task.spec.request.task.context, ...projected];
+	validateWorkflowTaskContext(context);
 	const request = {
 		operationId,
 		agent: task.spec.request.agent,
-		task: structuredClone(task.spec.request.task),
+		task: {
+			...structuredClone(task.spec.request.task),
+			context,
+		},
 		contextMode: task.spec.request.contextMode,
 		...(task.spec.request.model === undefined
 			? {}
@@ -244,7 +267,26 @@ export function createWorkflowTaskLauncher(
 	options: WorkflowTaskLauncherOptions,
 ): WorkflowTaskLauncher {
 	const { binding, journal } = options;
+	const configuredArtifacts = options.artifacts;
+	if (
+		configuredArtifacts &&
+		(configuredArtifacts.runId !== journal.runId ||
+			path.dirname(configuredArtifacts.root) !== journal.directory)
+	) {
+		throw new WorkflowTaskLaunchError(
+			"validation",
+			"Workflow artifact store does not match the workflow journal.",
+		);
+	}
+	let artifactStore: Promise<WorkflowArtifactStore> | undefined;
 	let tail = Promise.resolve();
+
+	function artifactsFor(task: MaterializedAgentTask) {
+		if (Object.keys(task.spec.inputs).length === 0) return undefined;
+		if (configuredArtifacts) return Promise.resolve(configuredArtifacts);
+		artifactStore ??= WorkflowArtifactStore.open({ journal });
+		return artifactStore;
+	}
 
 	async function persistReceipt(
 		execution: TaskExecutionProjection,
@@ -412,7 +454,6 @@ export function createWorkflowTaskLauncher(
 		}
 		if (!execution) {
 			const record = executionRecord(current, task.task);
-			lowerRequest(task.task, record.operationId);
 			await append(journal, {
 				type: "task-execution-created",
 				data: { execution: record },
@@ -448,7 +489,27 @@ export function createWorkflowTaskLauncher(
 			);
 		}
 
-		const request = lowerRequest(task.task, execution.execution.operationId);
+		let request: SubagentRequest;
+		try {
+			request = await lowerRequest(
+				task.task,
+				execution.execution.operationId,
+				current,
+				await artifactsFor(task.task),
+			);
+		} catch (error) {
+			const message =
+				"Workflow task input projection failed before subagent preflight.";
+			await terminalizeWorkflowFailure(
+				journal,
+				execution,
+				"preflight",
+				message,
+			);
+			throw new WorkflowTaskLaunchError("preflight", message, {
+				cause: error,
+			});
+		}
 		let preflightId = execution.preflight?.preflightId;
 		let planIdentitySha256 = execution.preflight?.planIdentitySha256;
 		let freshPreflight: SubagentPreflight | undefined;
