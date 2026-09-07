@@ -36,7 +36,10 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "./subagent-provider.js";
-import { createWorkflowTaskFinalizer } from "./task-finalizer.js";
+import {
+	createWorkflowTaskFinalizer,
+	type WorkflowTaskFinalizer,
+} from "./task-finalizer.js";
 import { createWorkflowTaskLauncher } from "./task-launcher.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -111,7 +114,9 @@ type OwnedRun = {
 	artifacts: WorkflowArtifactStore;
 	binding: WorkflowSubagentBinding;
 	scheduler: WorkflowSequentialScheduler;
+	finalizer: WorkflowTaskFinalizer;
 	drive: Promise<void>;
+	restart(): Promise<void>;
 	settled: boolean;
 	view?: WorkflowServiceRunView;
 	failure?: Error;
@@ -280,30 +285,40 @@ export async function createWorkflowService(
 			artifacts,
 			binding,
 			scheduler,
+			finalizer,
 			drive: Promise.resolve(),
+			restart: async () => undefined,
 			settled: false,
 		};
-		ownedRun.drive = Promise.resolve()
-			.then(() => runtime.drive())
-			.then(() => undefined)
-			.catch((error: unknown) => {
-				ownedRun.failure =
-					error instanceof Error
-						? error
-						: new Error("unknown workflow failure");
-			})
-			.finally(async () => {
-				try {
-					ownedRun.view = await viewFrom(record, journal, artifacts);
-				} catch (error) {
-					ownedRun.failure ??=
+		const startDrive = () => {
+			ownedRun.settled = false;
+			delete ownedRun.failure;
+			delete ownedRun.view;
+			ownedRun.drive = Promise.resolve()
+				.then(() => runtime.drive())
+				.then(() => undefined)
+				.catch((error: unknown) => {
+					ownedRun.failure =
 						error instanceof Error
 							? error
-							: new Error("workflow projection failed");
-				} finally {
-					ownedRun.settled = true;
-				}
-			});
+							: new Error("unknown workflow failure");
+				})
+				.finally(async () => {
+					try {
+						ownedRun.view = await viewFrom(record, journal, artifacts);
+					} catch (error) {
+						ownedRun.failure ??=
+							error instanceof Error
+								? error
+								: new Error("workflow projection failed");
+					} finally {
+						ownedRun.settled = true;
+					}
+				});
+			return ownedRun.drive;
+		};
+		ownedRun.restart = startDrive;
+		startDrive();
 		return ownedRun;
 	}
 
@@ -570,7 +585,40 @@ export async function createWorkflowService(
 			}
 			const run = await resume(runIdValue);
 			await run.drive;
-			const view = await statusCurrent(runIdValue);
+			let view = await statusCurrent(runIdValue);
+			if (view.status === "cleanup-blocked") {
+				const state = reduceWorkflowEvents(await run.journal.readEvents());
+				const task = Object.values(state.tasks).find(
+					(candidate) => candidate.status === "cleanup-blocked",
+				);
+				if (!task) {
+					throw new WorkflowServiceError(
+						"execution",
+						"Cleanup-blocked workflow has no blocked task.",
+					);
+				}
+				const execution = task.currentExecutionId
+					? state.executions[task.currentExecutionId]
+					: undefined;
+				if (
+					execution?.phase === "terminal" &&
+					execution.terminal?.outcome === "cleanup-blocked"
+				) {
+					await run.scheduler.reconcile(task.task.id);
+				} else if (execution?.settlement) {
+					await run.finalizer.finalize(task.task.id);
+				} else {
+					throw new WorkflowServiceError(
+						"execution",
+						"Cleanup-blocked task has no reconcilable execution evidence.",
+					);
+				}
+				view = await statusCurrent(runIdValue);
+				if (view.status === "running" || view.status === "waiting") {
+					await run.restart();
+					view = await statusCurrent(runIdValue);
+				}
+			}
 			if (run.failure && !isTerminalStatus(view.status)) {
 				throw new WorkflowServiceError(
 					"execution",

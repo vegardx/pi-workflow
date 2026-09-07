@@ -364,8 +364,12 @@ in-memory wait. A task execution that was created or preflighted but has no
 launch intent is terminalized as cancelled without launching. An uncertain
 launch is reconciled through its operation ID before interruption.
 
-`cleanup-blocked` remains until subagent reconciliation/release proves cleanup
-and returns a new result that can be mapped normally. Release itself is an idempotent external effect with durable intent and receipt.
+`cleanup-blocked` remains until explicit workflow reconciliation calls the
+owner client's subagent reconciliation, persists any replacement child
+observation and settlement, and repeats release against that exact result.
+A cleanup reconciliation that yields `interrupted` remains action-required
+because Phase 1 does not authorize automatic child resume or abandonment; it
+cannot be reported as success or ordinary failure. Release itself is an idempotent external effect with durable intent and receipt.
 A crash after release intent retries release; a crash after its receipt resumes
 from the receipt. If release proves cleanup and changes `cleanup-blocked` to a
 terminal primary status, workflow persists the release receipt before replacing

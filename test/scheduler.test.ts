@@ -155,7 +155,9 @@ function preflight(requestValue: SubagentRequest): SubagentPreflight {
 	};
 }
 
-function result(status: "completed" | "failed" | "cancelled"): RunResult {
+function result(
+	status: "completed" | "failed" | "cancelled" | "cleanup-blocked",
+): RunResult {
 	const failure =
 		status === "completed"
 			? undefined
@@ -163,11 +165,25 @@ function result(status: "completed" | "failed" | "cancelled"): RunResult {
 					code:
 						status === "cancelled"
 							? ("cancellation" as const)
-							: ("tool" as const),
+							: status === "cleanup-blocked"
+								? ("sandbox-cleanup" as const)
+								: ("tool" as const),
 					origin:
-						status === "cancelled" ? ("operator" as const) : ("tool" as const),
-					retry: "never" as const,
-					message: status === "cancelled" ? "cancelled" : "tool failed",
+						status === "cancelled"
+							? ("operator" as const)
+							: status === "cleanup-blocked"
+								? ("sandbox" as const)
+								: ("tool" as const),
+					retry:
+						status === "cleanup-blocked"
+							? ("reconcile" as const)
+							: ("never" as const),
+					message:
+						status === "cancelled"
+							? "cancelled"
+							: status === "cleanup-blocked"
+								? "cleanup blocked"
+								: "tool failed",
 					guidance: "Inspect the result.",
 				};
 	return {
@@ -185,7 +201,7 @@ function result(status: "completed" | "failed" | "cancelled"): RunResult {
 		usageComplete: true,
 		runtimeMs: 1000,
 		...(failure ? { failure } : {}),
-		sandboxCleanup: "proved",
+		sandboxCleanup: status === "cleanup-blocked" ? "blocked" : "proved",
 		workspaceCleanup: "not-needed",
 		truncated: false,
 	};
@@ -500,6 +516,62 @@ describe("durable sequential scheduler", () => {
 				settled.tasks[tasks[0]?.ref.taskId ?? ""]?.currentExecutionId ?? ""
 			]?.settlement?.evidence.status,
 		).toBe("cancelled");
+	});
+
+	it("reconciles cleanup-blocked child evidence and finalizes again", async () => {
+		const { journal, tasks } = await fixture();
+		const wait = vi
+			.fn()
+			.mockResolvedValueOnce(executionResult(result("cleanup-blocked")))
+			.mockResolvedValueOnce(executionResult(result("failed")));
+		const release = vi
+			.fn()
+			.mockResolvedValueOnce({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "cleanup-blocked" as const,
+			})
+			.mockResolvedValueOnce({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "failed" as const,
+			});
+		const ownerClient = client({
+			wait,
+			release,
+			reconcile: vi.fn(async () => ({
+				run: {
+					runId: "run_scheduler",
+					attemptId: "attempt_scheduler",
+					status: "failed" as const,
+				},
+				sandboxProcess: "absent" as const,
+				workspace: "not-needed" as const,
+			})),
+		});
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			artifacts,
+			binding: binding(ownerClient),
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			finalizer,
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "terminal",
+			runStatus: "cleanup-blocked",
+		});
+		await expect(
+			scheduler.reconcile(tasks[0]?.ref.taskId ?? ""),
+		).resolves.toMatchObject({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		expect(ownerClient.reconcile).toHaveBeenCalledOnce();
+		expect(release).toHaveBeenCalledTimes(2);
 	});
 
 	it("cancels an unstarted graph without acquiring a child", async () => {

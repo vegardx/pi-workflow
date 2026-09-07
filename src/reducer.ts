@@ -760,24 +760,34 @@ function applyEvent(
 				const importedArtifact = projection.artifactImport
 					? state.artifacts[projection.artifactImport.artifactId]
 					: undefined;
+				if (projection.phase !== "released") {
+					fail("subagent terminal evidence precedes release", event.sequence);
+				}
+				if (!observation || observation.status !== evidence.status) {
+					fail("subagent terminal observation does not match", event.sequence);
+				}
 				if (
-					projection.phase !== "released" ||
-					!observation ||
-					observation.status !== evidence.status ||
 					!projection.settlement ||
-					!isDeepStrictEqual(projection.settlement.evidence, evidence) ||
-					!expectedOutcome ||
-					expectedOutcome !== input.data.outcome ||
-					projection.release?.status !== evidence.status ||
-					(evidence.status === "completed" &&
-						(projection.artifactImport === undefined ||
-							importedArtifact?.sha256 !== evidence.structuredOutputSha256 ||
-							importedArtifact?.schemaSha256 !==
-								deriveJsonValueSha256(task.task.spec.request.outputSchema) ||
-							projection.artifactImport.sourceResultSha256 !==
-								evidence.resultSha256))
+					!isDeepStrictEqual(projection.settlement.evidence, evidence)
 				) {
-					fail("subagent terminal evidence is inconsistent", event.sequence);
+					fail("subagent terminal settlement does not match", event.sequence);
+				}
+				if (!expectedOutcome || expectedOutcome !== input.data.outcome) {
+					fail("subagent terminal outcome does not match", event.sequence);
+				}
+				if (projection.release?.status !== evidence.status) {
+					fail("subagent terminal release does not match", event.sequence);
+				}
+				if (
+					evidence.status === "completed" &&
+					(projection.artifactImport === undefined ||
+						importedArtifact?.sha256 !== evidence.structuredOutputSha256 ||
+						importedArtifact?.schemaSha256 !==
+							deriveJsonValueSha256(task.task.spec.request.outputSchema) ||
+						projection.artifactImport.sourceResultSha256 !==
+							evidence.resultSha256)
+				) {
+					fail("subagent terminal artifact does not match", event.sequence);
 				}
 			} else {
 				if (

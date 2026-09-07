@@ -377,13 +377,30 @@ export function createWorkflowTaskFinalizer(
 		terminalOutcome: TaskExecutionOutcome,
 	): Promise<void> {
 		const current = await state();
+		if (current.status === "cleanup-blocked") {
+			if (terminalOutcome === "cleanup-blocked") return;
+			const recoveredStatus =
+				terminalOutcome === "completed"
+					? "running"
+					: terminalOutcome === "interrupted"
+						? "interrupted"
+						: "failed";
+			await append({
+				type: "run-status-changed",
+				data: {
+					from: "cleanup-blocked",
+					to: recoveredStatus,
+					reason: "Child cleanup reconciliation produced terminal evidence.",
+				},
+			});
+			return;
+		}
 		if (
 			current.status === "completed" ||
 			current.status === "completed-degraded" ||
 			current.status === "failed" ||
 			current.status === "cancelled" ||
-			current.status === "interrupted" ||
-			current.status === "cleanup-blocked"
+			current.status === "interrupted"
 		) {
 			return;
 		}
@@ -520,8 +537,23 @@ export function createWorkflowTaskFinalizer(
 			({ task, execution } = selected(current, taskId));
 		}
 
-		const child = receipt(execution);
-		if (!execution.releaseIntent) {
+		let child = receipt(execution);
+		if (
+			execution.phase === "released" &&
+			execution.release?.status !== execution.settlement.evidence.status
+		) {
+			({ task, execution } = await reconcileReleasedStatus(
+				taskId,
+				execution,
+				child,
+			));
+			child = receipt(execution);
+		}
+		const replaceRelease =
+			execution.release !== undefined &&
+			execution.release.status !== execution.settlement.evidence.status;
+		const releaseRequired = !execution.release || replaceRelease;
+		if (!execution.releaseIntent || replaceRelease) {
 			await append({
 				type: "task-execution-release-intended",
 				data: {
@@ -532,7 +564,7 @@ export function createWorkflowTaskFinalizer(
 			current = await state();
 			({ task, execution } = selected(current, taskId));
 		}
-		if (!execution.release) {
+		if (releaseRequired) {
 			let released: RunReceipt;
 			try {
 				released = await binding.client.release(child.runId);
