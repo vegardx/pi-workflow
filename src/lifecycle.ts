@@ -33,6 +33,7 @@ const RUN_TRANSITIONS: Readonly<
 	cancelled: new Set(),
 	interrupted: new Set(["running", "stopping"]),
 	"cleanup-blocked": new Set([
+		"running",
 		"finalizing",
 		"completed",
 		"completed-degraded",

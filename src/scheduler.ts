@@ -78,6 +78,7 @@ export type WorkflowSchedulerOutcome =
 
 export interface WorkflowSequentialScheduler {
 	drive(): Promise<WorkflowSchedulerOutcome>;
+	reconcile(taskId: WorkflowTaskId): Promise<WorkflowSchedulerOutcome>;
 	stop(reason: string): Promise<WorkflowSchedulerOutcome>;
 }
 
@@ -630,8 +631,12 @@ export function createWorkflowSequentialScheduler(
 				);
 			}
 			validateReceipt(terminalReceipt, persisted, "observation");
+			const reconcilesCleanup =
+				execution.phase === "terminal" &&
+				execution.terminal?.outcome === "cleanup-blocked";
 			if (
 				execution.settlement &&
+				!reconcilesCleanup &&
 				!isDeepStrictEqual(execution.settlement.evidence, evidence)
 			) {
 				throw new WorkflowSchedulerError(
@@ -651,7 +656,7 @@ export function createWorkflowSequentialScheduler(
 						"Workflow execution disappeared after child observation.",
 					);
 				}
-				if (!execution.settlement) {
+				if (!execution.settlement || reconcilesCleanup) {
 					await append({
 						type: "task-execution-child-settled",
 						data: { executionId: execution.execution.id, evidence },
@@ -697,6 +702,48 @@ export function createWorkflowSequentialScheduler(
 			return continueAfterFinalization(prepared);
 		}
 		if (prepared.state !== "wait") return prepared;
+		return continueAfterFinalization(
+			await settle(prepared.taskId, prepared.receipt),
+		);
+	}
+
+	async function reconcile(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowSchedulerOutcome> {
+		const prepared = await mutate(async () => {
+			const current = await state();
+			if (current.status !== "cleanup-blocked") {
+				throw new WorkflowSchedulerError(
+					"validation",
+					"Workflow run is not cleanup-blocked.",
+				);
+			}
+			const task = current.tasks[taskId];
+			const execution = task ? executionFor(current, task) : undefined;
+			const child = execution ? receiptFor(execution) : undefined;
+			if (
+				task?.status !== "cleanup-blocked" ||
+				execution?.phase !== "terminal" ||
+				execution.terminal?.outcome !== "cleanup-blocked" ||
+				!child
+			) {
+				throw new WorkflowSchedulerError(
+					"validation",
+					"Workflow task has no cleanup-blocked child to reconcile.",
+				);
+			}
+			const result = await binding.client.reconcile(child.runId);
+			if (
+				result.run.runId !== child.runId ||
+				result.run.attemptId !== child.attemptId
+			) {
+				throw new WorkflowSchedulerError(
+					"observation",
+					"Subagent reconciliation returned another child identity.",
+				);
+			}
+			return { taskId, receipt: child };
+		});
 		return continueAfterFinalization(
 			await settle(prepared.taskId, prepared.receipt),
 		);
@@ -862,5 +909,5 @@ export function createWorkflowSequentialScheduler(
 		);
 	}
 
-	return Object.freeze({ drive, stop });
+	return Object.freeze({ drive, reconcile, stop });
 }
