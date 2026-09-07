@@ -52,6 +52,7 @@ own publication, push, pull-request, merge, release, or deployment policy.
 - [Research source ledger](docs/research-sources.md)
 - [Roadmap](docs/roadmap.md)
 - [macOS arm64 Phase 1 qualification](docs/qualification/macos-arm64-phase1.md)
+- [macOS arm64 artifact pipeline qualification](docs/qualification/macos-arm64-artifact-pipeline.md)
 
 ## Dependency
 
