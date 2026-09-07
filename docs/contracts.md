@@ -273,13 +273,19 @@ A run may become `completed-degraded` only after every required task and
 required finalizer succeeds while an optional task or advisory finalizer failed.
 
 `pi-subagent` accepts delegated context strings, not workflow artifact handles.
-Before agent preflight, workflow exports each declared input from its own store,
-revalidates its schema and digest, and appends a deterministic bounded context
-entry containing the input name, media type, digest, and canonical JSON or text
-value. The resulting concrete `DelegatedTask` is part of preflight and replay
-identity. Unsupported media types or values exceeding the projection limit fail
-before child launch. Future file or directory mounts require a new explicit
-subagent contract and cannot silently use this projection.
+Before agent preflight, workflow resolves each named input from its own store,
+requires the producer task to be complete, revalidates run and producer
+provenance, schema identity, canonical encoding, size, content digest, and the
+concrete value against the producer output schema. Inputs are sorted by name and
+appended after author-supplied context as deterministic canonical JSON
+envelopes containing the input name, `application/json` media type, digest,
+untrusted-data handling marker, and value. Each context entry is at most 16 KiB;
+the complete delegated context is at most 64 entries and 512 KiB. Projection
+failure is durably terminalized before subagent preflight. The resulting
+concrete `DelegatedTask` participates in the subagent launch-plan identity.
+Unsupported media types or values exceeding the projection limit fail before
+child launch. Future file or directory mounts require a new explicit subagent
+contract and cannot silently use this projection.
 
 Workflow derives deterministic task-execution and subagent operation IDs from
 workflow run ID, task ID, and task-execution generation. Generation 1 is the

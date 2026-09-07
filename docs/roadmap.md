@@ -35,7 +35,7 @@ pi-subagent release.
 
 ## Phase 2 — static orchestration
 
-- multiple sequential task declarations;
+- workflow-owned artifact projection between sequential read-only tasks;
 - pi-subagent handoff-export contract and workflow-owned worktree artifacts
   before enabling writer tasks;
 - complete DAG materialization through handles;

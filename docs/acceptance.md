@@ -88,7 +88,10 @@ An in-memory-only successful drive does not satisfy the first slice.
 - every initial agent task uses a terminating output schema;
 - invalid or replayed structured values are rejected;
 - support helpers are bundle-contained, trust-gated, and schema-validated;
-- required artifact inputs are verified before execution;
+- required artifact inputs are resolved only from the workflow-owned store,
+  revalidated against producer provenance, digest, canonical encoding, and
+  output schema, and projected as deterministic bounded untrusted context before
+  subagent preflight;
 - model prose is never parsed as control-plane JSON.
 
 ## Persistence and recovery

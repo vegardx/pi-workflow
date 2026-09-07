@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
 	type RunReceipt,
+	type RunResult,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentPreflight,
@@ -11,8 +13,11 @@ import {
 } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkflowArtifactStore } from "../src/artifact-store.js";
 import {
+	deriveJsonValueSha256,
 	deriveSubagentOperationId,
+	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
 } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
@@ -206,6 +211,190 @@ async function readyJournal() {
 	return { journal, lease, taskId: task.ref.taskId, root };
 }
 
+async function readyJournalWithInput() {
+	const root = path.resolve(
+		".pi",
+		"test-task-launcher-input",
+		`run-${randomUUID()}`,
+	);
+	const lease = await acquireWorkflowRunLease({
+		storeRoot: root,
+		runId: "workflow_launcher",
+		ownerId: "launcher-input-test",
+	});
+	leases.add(lease);
+	const journal = await WorkflowRunJournal.open(
+		root,
+		"workflow_launcher",
+		lease,
+	);
+	await journal.append("run-created", {
+		definitionIdentitySha256,
+		inputSha256,
+	});
+	const materializer = new WorkflowTaskMaterializer({
+		runId: "workflow_launcher",
+		definitionIdentitySha256,
+		inputSha256,
+	});
+	const producer = materializer.agent("producer", request());
+	const consumer = materializer.agent("consumer", {
+		...request(),
+		task: {
+			...request().task,
+			goal: "Use the producer result",
+			context: ["Existing context"],
+		},
+		inputs: { research: producer.output },
+	});
+	const commit = materializer.closeEpoch("final", [consumer]);
+	for (const event of commit.events) {
+		await journal.appendEvent(event);
+	}
+	const producerDeclaration = commit.events.find(
+		(event) =>
+			event.type === "task-declared" &&
+			event.data.task.id === producer.ref.taskId,
+	);
+	if (producerDeclaration?.type !== "task-declared") {
+		throw new Error("missing producer declaration");
+	}
+	const producerTask = producerDeclaration.data.task;
+	await journal.append("run-status-changed", {
+		from: "created",
+		to: "running",
+	});
+	await journal.append("task-status-changed", {
+		taskId: producer.ref.taskId,
+		from: "pending",
+		to: "ready",
+	});
+	const generation = 1;
+	const executionId = deriveTaskExecutionId(
+		"workflow_launcher",
+		producer.ref.taskId,
+		generation,
+	);
+	const operationId = deriveSubagentOperationId(
+		"workflow_launcher",
+		producer.ref.taskId,
+		generation,
+	);
+	await journal.append("task-execution-created", {
+		execution: {
+			id: executionId,
+			runId: "workflow_launcher",
+			taskId: producer.ref.taskId,
+			generation,
+			taskIdentitySha256: producerTask.spec.identitySha256,
+			operationId,
+		},
+	});
+	await journal.append("task-execution-preflighted", {
+		executionId,
+		operationId,
+		preflightId: "preflight-producer",
+		planIdentitySha256: hash,
+		plannedSubagentRunId: "run_producer",
+		plannedSubagentAttemptId: "attempt_producer",
+		expiresAt: "2099-01-01T00:00:00.000Z",
+	});
+	await journal.append("task-execution-launch-intended", {
+		executionId,
+		operationId,
+		preflightId: "preflight-producer",
+		planIdentitySha256: hash,
+	});
+	await journal.append("task-execution-launch-receipted", {
+		executionId,
+		operationId,
+		subagentRunId: "run_producer",
+		subagentAttemptId: "attempt_producer",
+		status: "completed",
+	});
+	await journal.append("task-execution-child-observed", {
+		executionId,
+		subagentRunId: "run_producer",
+		subagentAttemptId: "attempt_producer",
+		status: "completed",
+	});
+	const structuredOutput = { answer: "producer value" };
+	const result: RunResult = {
+		runId: "run_producer",
+		status: "completed",
+		structuredOutput,
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: 0,
+		},
+		usageComplete: true,
+		runtimeMs: 100,
+		sandboxCleanup: "proved",
+		workspaceCleanup: "not-needed",
+		truncated: false,
+	};
+	const resultSha256 = deriveSubagentResultSha256(result);
+	const evidence = {
+		kind: "subagent" as const,
+		resultSha256,
+		status: "completed" as const,
+		usage: structuredClone(result.usage),
+		usageComplete: true,
+		runtimeMs: 100,
+		sandboxCleanup: "proved" as const,
+		workspaceCleanup: "not-needed" as const,
+		truncated: false,
+		structuredOutputSha256: deriveJsonValueSha256(structuredOutput),
+	};
+	await journal.append("task-execution-child-settled", {
+		executionId,
+		evidence,
+	});
+	const artifacts = await WorkflowArtifactStore.open({ journal });
+	const artifact = await artifacts.putJson(structuredOutput, {
+		runId: "workflow_launcher",
+		producerTaskId: producer.ref.taskId,
+		output: "result",
+		schemaSha256: deriveJsonValueSha256(producerTask.spec.request.outputSchema),
+	});
+	await journal.append("artifact-declared", { artifact });
+	await journal.append("task-execution-artifact-imported", {
+		executionId,
+		subagentRunId: "run_producer",
+		artifactId: artifact.id,
+		sourceResultSha256: resultSha256,
+	});
+	await journal.append("task-execution-release-intended", {
+		executionId,
+		subagentRunId: "run_producer",
+	});
+	await journal.append("task-execution-released", {
+		executionId,
+		subagentRunId: "run_producer",
+		status: "completed",
+	});
+	await journal.append("task-execution-terminal", {
+		executionId,
+		outcome: "completed",
+		evidence,
+	});
+	await journal.append("task-status-changed", {
+		taskId: producer.ref.taskId,
+		from: "ready",
+		to: "completed",
+	});
+	await journal.append("task-status-changed", {
+		taskId: consumer.ref.taskId,
+		from: "pending",
+		to: "ready",
+	});
+	return { artifact, artifacts, consumerId: consumer.ref.taskId, journal };
+}
+
 async function projection(journal: WorkflowRunJournal) {
 	return reduceWorkflowEvents(await journal.readEvents());
 }
@@ -314,6 +503,76 @@ describe("workflow task launcher", () => {
 		});
 		expect(preflightCall).toHaveBeenCalledOnce();
 		expect(launch).toHaveBeenCalledOnce();
+	});
+
+	it("binds verified workflow artifacts into delegated context", async () => {
+		const { artifacts, consumerId, journal } = await readyJournalWithInput();
+		const preflightCall = vi.fn(async (input: SubagentRequest) =>
+			preflight(input, "pi-workflow:workflow_launcher"),
+		);
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			artifacts,
+			binding: binding(
+				client({
+					preflight: preflightCall,
+					launch: vi.fn(async () => ({
+						runId: "run_launcher",
+						attemptId: "attempt_launcher",
+						status: "active" as const,
+					})),
+				}),
+			),
+		});
+
+		await expect(launcher.launch(consumerId)).resolves.toMatchObject({
+			state: "launched",
+		});
+		const delegated = preflightCall.mock.calls[0]?.[0];
+		expect(delegated?.task.context[0]).toBe("Existing context");
+		const projected = JSON.parse(delegated?.task.context[1] ?? "null");
+		expect(projected).toMatchObject({
+			kind: "pi-workflow-artifact-input",
+			name: "research",
+			mediaType: "application/json",
+			value: { answer: "producer value" },
+		});
+		expect(projected.sha256).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	it("durably fails before preflight when an input artifact is corrupt", async () => {
+		const { artifact, artifacts, consumerId, journal } =
+			await readyJournalWithInput();
+		await writeFile(
+			path.join(artifacts.root, `${artifact.sha256}.json`),
+			"corrupt",
+		);
+		const preflightCall = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			artifacts,
+			binding: binding(client({ preflight: preflightCall })),
+		});
+
+		await expect(launcher.launch(consumerId)).rejects.toMatchObject({
+			stage: "preflight",
+		});
+		expect(preflightCall).not.toHaveBeenCalled();
+		const current = await projection(journal);
+		const task = current.tasks[consumerId];
+		const execution = task?.currentExecutionId
+			? current.executions[task.currentExecutionId]
+			: undefined;
+		expect(task?.status).toBe("failed");
+		expect(execution?.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: {
+				kind: "workflow",
+				stage: "preflight",
+				message:
+					"Workflow task input projection failed before subagent preflight.",
+			},
+		});
 	});
 
 	it("recovers a launch call that loses its receipt", async () => {

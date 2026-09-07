@@ -200,9 +200,13 @@ artifact directory. Writes are content-addressed, bounded per blob and per run,
 serialized process-wide, written through fsync and atomic rename, and fenced by
 the workflow lease. Reads revalidate metadata, canonical encoding, size, and
 content digest. Artifact identity separately binds run, producer task, output
-name, schema digest, and content digest. A blob written before its declaration
-is a safe recoverable orphan; restart deterministically reuses it before
-persisting declaration and import evidence. The final workflow output uses the
+name, schema digest, and content digest. Before downstream preflight, each
+explicitly named input is reread from this store and checked against its handle,
+producer task, producer output schema, and journaled artifact reference. The
+canonical value is projected into a bounded delegated context envelope; store
+paths are never forwarded. A blob written before its declaration is a safe
+recoverable orphan; restart deterministically reuses it before persisting
+declaration and import evidence. The final workflow output uses the
 same store without a task producer and is bound to the definition output schema.
 Run completion requires a durable output-artifact commit; a crash after that
 commit resumes only the final status transition.

@@ -103,7 +103,12 @@ execution lifecycle, so child settlement alone cannot complete a task. The
 workflow store imports schema-validated structured output as canonical JSON,
 binds its provenance into artifact identity, persists import evidence, and then
 persists release intent before invoking the owner client. Only a durable release
-receipt permits terminal execution and task evidence.
+receipt permits terminal execution and task evidence. A downstream agent task
+resolves only its explicitly named input handles. The launcher reads those
+workflow-owned blobs through the fenced artifact store, revalidates provenance,
+digest, canonical encoding, and producer schema, and embeds bounded untrusted
+JSON envelopes into the concrete delegated context before subagent preflight.
+Artifact paths and unrelated predecessor outputs are never exposed.
 
 Resume reconstructs state from the append-only journal and re-executes the
 workflow function from its entry point. Matching task, result, phase, and log
