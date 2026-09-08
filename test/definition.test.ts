@@ -15,6 +15,7 @@ describe("workflow definitions", () => {
 		expect(isWorkflowDefinition(definition)).toBe(true);
 		expect(Object.isFrozen(definition)).toBe(true);
 		expect(Object.isFrozen(definition.meta)).toBe(true);
+		expect(definition.meta.concurrency).toBe(4);
 		expect(Object.isFrozen(definition.inputSchema)).toBe(true);
 		expect(Object.isFrozen(definition.outputSchema)).toBe(true);
 	});
@@ -34,6 +35,36 @@ describe("workflow definitions", () => {
 	});
 
 	it("rejects invalid metadata and non-JSON schemas", () => {
+		expect(
+			defineWorkflow({
+				meta: {
+					name: "bounded",
+					description: "Bounded",
+					version: 1,
+					concurrency: 16,
+				},
+				inputSchema: Type.Object({}),
+				outputSchema: Type.Object({}),
+				run() {
+					return {};
+				},
+			}).meta.concurrency,
+		).toBe(16);
+		expect(() =>
+			defineWorkflow({
+				meta: {
+					name: "too-concurrent",
+					description: "Invalid",
+					version: 1,
+					concurrency: 17,
+				},
+				inputSchema: Type.Object({}),
+				outputSchema: Type.Object({}),
+				run() {
+					return {};
+				},
+			}),
+		).toThrow("invalid workflow metadata");
 		expect(() =>
 			defineWorkflow({
 				meta: { name: "Invalid Name", description: "Invalid", version: 1 },

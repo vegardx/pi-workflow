@@ -8,6 +8,7 @@ import * as addFormatsModule from "ajv-formats";
 import { Value } from "typebox/value";
 import { WorkflowArtifactStore } from "./artifact-store.js";
 import {
+	MAX_WORKFLOW_CONCURRENCY,
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
@@ -48,6 +49,7 @@ export type WorkflowDefinitionSummary = {
 	readonly name: string;
 	readonly description: string;
 	readonly version: number;
+	readonly concurrency: number;
 	readonly scope: DiscoveredWorkflow["scope"];
 	readonly source: string;
 	readonly path: string;
@@ -89,6 +91,7 @@ export interface WorkflowServiceOptions {
 	readonly storeRoot: string;
 	readonly projectTrusted: () => boolean;
 	readonly subagents: WorkflowSubagentProvider;
+	readonly maxConcurrency?: number;
 }
 
 export class WorkflowServiceError extends Error {
@@ -127,6 +130,7 @@ function summary(workflow: DiscoveredWorkflow): WorkflowDefinitionSummary {
 		name: workflow.definition.meta.name,
 		description: workflow.definition.meta.description,
 		version: workflow.definition.meta.version,
+		concurrency: workflow.definition.meta.concurrency,
 		scope: workflow.scope,
 		source: workflow.source,
 		path: workflow.path,
@@ -189,6 +193,17 @@ function runId(): WorkflowRunId {
 export async function createWorkflowService(
 	options: WorkflowServiceOptions,
 ): Promise<WorkflowService> {
+	const maxConcurrency = options.maxConcurrency ?? MAX_WORKFLOW_CONCURRENCY;
+	if (
+		!Number.isSafeInteger(maxConcurrency) ||
+		maxConcurrency < 1 ||
+		maxConcurrency > MAX_WORKFLOW_CONCURRENCY
+	) {
+		throw new WorkflowServiceError(
+			"validation",
+			"Workflow service concurrency limit is invalid.",
+		);
+	}
 	const cwd = await realpath(options.cwd);
 	const storeRoot = path.resolve(options.storeRoot);
 	const roots: WorkflowRoot[] = [];
@@ -532,6 +547,10 @@ export async function createWorkflowService(
 						definitionPath: workflow.path,
 						definitionIdentitySha256: workflow.identity.identitySha256,
 						definitionSourceSha256: workflow.identity.sourceSha256,
+						concurrency: Math.min(
+							workflow.definition.meta.concurrency,
+							maxConcurrency,
+						),
 						cwd,
 						input: JSON.parse(JSON.stringify(input)) as unknown,
 						createdAt: new Date().toISOString(),

@@ -15,7 +15,7 @@ function fixture(name: string): string {
 function moduleSource(name: string, extra = ""): string {
 	return `${extra}\nexport default {
   schema: "pi-workflow-definition",
-  meta: { name: ${JSON.stringify(name)}, description: "Test workflow", version: 1 },
+  meta: { name: ${JSON.stringify(name)}, description: "Test workflow", version: 1, concurrency: 4 },
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   outputSchema: { type: "object", properties: {}, additionalProperties: false },
   async run() { return {}; }

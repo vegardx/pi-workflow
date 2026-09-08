@@ -10,9 +10,11 @@ export {
 	AgentTaskRequestSchema,
 	type AgentTaskSpec,
 	AgentTaskSpecSchema,
+	DEFAULT_WORKFLOW_CONCURRENCY,
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
 	JsonSchemaDocumentSchema,
+	MAX_WORKFLOW_CONCURRENCY,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
 	type ReplayPolicy,
@@ -68,6 +70,7 @@ export {
 	type WorkflowDefinition,
 	type WorkflowDefinitionOptions,
 	type WorkflowMeta,
+	type WorkflowMetaInput,
 	type WorkflowReturn,
 } from "./definition.js";
 export {

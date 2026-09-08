@@ -188,14 +188,14 @@ function assertSupportedImports(source: string, filePath: string): void {
 				!ALLOWED_STATIC_IMPORTS.has(sourceNode.value)
 			) {
 				throw new WorkflowDefinitionLoadError(
-					`workflow import ${sourceNode.value} is not identity-bound by contract revision 1`,
+					`workflow import ${sourceNode.value} is not identity-bound by contract revision ${WORKFLOW_CONTRACT_REVISION}`,
 					filePath,
 				);
 			}
 		}
 		if (type === "ImportExpression") {
 			throw new WorkflowDefinitionLoadError(
-				"dynamic workflow imports are not supported by contract revision 1",
+				`dynamic workflow imports are not supported by contract revision ${WORKFLOW_CONTRACT_REVISION}`,
 				filePath,
 			);
 		}
@@ -205,14 +205,14 @@ function assertSupportedImports(source: string, filePath: string): void {
 				| undefined;
 			if (callee?.type === "Import" || callee?.name === "require") {
 				throw new WorkflowDefinitionLoadError(
-					"dynamic imports and CommonJS require are not supported by contract revision 1",
+					`dynamic imports and CommonJS require are not supported by contract revision ${WORKFLOW_CONTRACT_REVISION}`,
 					filePath,
 				);
 			}
 		}
 		if (type === "TSImportEqualsDeclaration") {
 			throw new WorkflowDefinitionLoadError(
-				"TypeScript import assignment is not supported by contract revision 1",
+				`TypeScript import assignment is not supported by contract revision ${WORKFLOW_CONTRACT_REVISION}`,
 				filePath,
 			);
 		}

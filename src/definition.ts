@@ -10,7 +10,9 @@ import * as addFormatsModule from "ajv-formats";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
+	DEFAULT_WORKFLOW_CONCURRENCY,
 	JsonSchemaDocumentSchema,
+	MAX_WORKFLOW_CONCURRENCY,
 	type ReplayPolicy,
 	type TaskDisposition,
 	type TaskKey,
@@ -26,7 +28,7 @@ const artifactHandleBrand: unique symbol = Symbol(
 	"pi-workflow-artifact-handle",
 );
 
-const WorkflowMetaSchema = Type.Object(
+const WorkflowMetaInputSchema = Type.Object(
 	{
 		name: Type.String({
 			pattern: "^[a-z][a-z0-9-]*$",
@@ -35,9 +37,24 @@ const WorkflowMetaSchema = Type.Object(
 		}),
 		description: Type.String({ minLength: 1, maxLength: 1024 }),
 		version: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		concurrency: Type.Optional(
+			Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_CONCURRENCY }),
+		),
 	},
 	{ additionalProperties: false },
 );
+
+const WorkflowMetaSchema = Type.Object(
+	{
+		...WorkflowMetaInputSchema.properties,
+		concurrency: Type.Integer({
+			minimum: 1,
+			maximum: MAX_WORKFLOW_CONCURRENCY,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowMetaInput = Static<typeof WorkflowMetaInputSchema>;
 export type WorkflowMeta = Static<typeof WorkflowMetaSchema>;
 
 export interface ArtifactHandle<T> {
@@ -136,7 +153,7 @@ export interface WorkflowDefinitionOptions<
 	TInputSchema extends TSchema,
 	TOutputSchema extends TSchema,
 > {
-	readonly meta: WorkflowMeta;
+	readonly meta: WorkflowMetaInput;
 	readonly inputSchema: TInputSchema;
 	readonly outputSchema: TOutputSchema;
 	run(
@@ -186,7 +203,7 @@ export function defineWorkflow<
 >(
 	options: WorkflowDefinitionOptions<TInputSchema, TOutputSchema>,
 ): WorkflowDefinition<Static<TInputSchema>, Static<TOutputSchema>> {
-	if (!Value.Check(WorkflowMetaSchema, options.meta)) {
+	if (!Value.Check(WorkflowMetaInputSchema, options.meta)) {
 		throw new Error("invalid workflow metadata");
 	}
 	const inputSchema = validateJsonSchemaDocument(
@@ -202,7 +219,10 @@ export function defineWorkflow<
 	}
 	return Object.freeze({
 		schema: "pi-workflow-definition" as const,
-		meta: Object.freeze({ ...options.meta }),
+		meta: Object.freeze({
+			...options.meta,
+			concurrency: options.meta.concurrency ?? DEFAULT_WORKFLOW_CONCURRENCY,
+		}),
 		inputSchema,
 		outputSchema,
 		run: options.run,
