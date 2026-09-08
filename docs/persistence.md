@@ -33,7 +33,8 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-2 accepts only the declared run, workflow phase/log effect, task, artifact,
+2 rejects revision-1 leases, journals, snapshots, and run records; no migration
+or dual-format reader is provided. Revision 2 accepts only the declared run, workflow phase/log effect, task, artifact,
 barrier, output-commit, and task-execution events. Task-execution evidence records generation creation, the latest
 preflight before launch intent, uncertain launch and reconciled absence or a
 launch receipt, child observation, bounded terminal child settlement, artifact
