@@ -37,12 +37,13 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 1 as const,
+			contractRevision: 2 as const,
 			runId: "workflow_record" as const,
 			definitionName: "example",
 			definitionPath: "/repo/workflows/example.workflow.ts",
 			definitionIdentitySha256: hash,
 			definitionSourceSha256: hash,
+			concurrency: 4,
 			cwd: "/repo",
 			input: { question: "why" },
 			createdAt: "2026-09-01T00:00:00.000Z",
@@ -59,12 +60,13 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 1,
+				contractRevision: 2,
 				runId: "workflow_record",
 				definitionName: "example",
 				definitionPath: "/repo/example.workflow.ts",
 				definitionIdentitySha256: hash,
 				definitionSourceSha256: hash,
+				concurrency: 4,
 				cwd: "/repo",
 				input: { value: "x".repeat(1024 * 1024) },
 				createdAt: "2026-09-01T00:00:00.000Z",

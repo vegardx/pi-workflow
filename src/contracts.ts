@@ -16,7 +16,9 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 1 as const;
+export const WORKFLOW_CONTRACT_REVISION = 2 as const;
+export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
+export const MAX_WORKFLOW_CONCURRENCY = 16;
 
 const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const JsonPrimitiveSchema = Type.Union([

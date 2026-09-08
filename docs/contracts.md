@@ -43,7 +43,12 @@ export default defineWorkflow({
 
 ```ts
 interface WorkflowDefinition<TInput, TOutput> {
-	meta: { name: string; description: string; version: number };
+	meta: {
+		name: string;
+		description: string;
+		version: number;
+		concurrency?: number;
+	};
 	inputSchema: JsonSchema<TInput>;
 	outputSchema: JsonSchema<TOutput>;
 	run(
@@ -54,13 +59,18 @@ interface WorkflowDefinition<TInput, TOutput> {
 type WorkflowReturn<T> = T | TaskHandle<T> | ArtifactHandle<T>;
 ```
 
+Concurrency defaults to 4 and has a hard maximum of 16. The workflow service
+may lower the effective value but never raise the definition grant; the
+effective value is persisted in the immutable run record before source
+execution.
+
 Inputs are validated before a run is created. The final value is validated and
 committed as a provenance-bound workflow-owned artifact through a durable
 `run-output-committed` event before the run completes. Restart from a persisted
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 1 identities cover the complete definition module but not a
+Contract revision 2 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than

@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
+	MAX_WORKFLOW_CONCURRENCY,
 	WORKFLOW_CONTRACT_REVISION,
 	WorkflowRunIdSchema,
 } from "./contracts.js";
@@ -25,6 +26,10 @@ export const WorkflowRunRecordSchema = Type.Object(
 		definitionPath: Type.String({ minLength: 1, maxLength: 4096 }),
 		definitionIdentitySha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
 		definitionSourceSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+		concurrency: Type.Integer({
+			minimum: 1,
+			maximum: MAX_WORKFLOW_CONCURRENCY,
+		}),
 		cwd: Type.String({ minLength: 1, maxLength: 4096 }),
 		input: Type.Unknown(),
 		createdAt: Type.String({ format: "date-time" }),

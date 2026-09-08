@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
 	type AgentLaunchPlan,
@@ -83,7 +83,7 @@ async function workflowFixture(name = "example") {
 		definitionPath,
 		`export default {
   schema: "pi-workflow-definition",
-  meta: { name: ${JSON.stringify(name)}, description: "Service workflow", version: 1 },
+  meta: { name: ${JSON.stringify(name)}, description: "Service workflow", version: 1, concurrency: 4 },
   inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
   outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
   run(ctx) { return { answer: ctx.input.value }; }
@@ -98,7 +98,7 @@ async function taskWorkflowFixture() {
 		fixture.definitionPath,
 		`export default {
   schema: "pi-workflow-definition",
-  meta: { name: "agent-task", description: "Agent task workflow", version: 1 },
+  meta: { name: "agent-task", description: "Agent task workflow", version: 1, concurrency: 4 },
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
   run(ctx) {
@@ -240,9 +240,10 @@ describe("workflow service", () => {
 			...fixture,
 			projectTrusted: () => true,
 			subagents,
+			maxConcurrency: 2,
 		});
 		expect(await service.list()).toMatchObject([
-			{ name: "example", scope: "project" },
+			{ name: "example", concurrency: 4, scope: "project" },
 		]);
 		await expect(
 			service.validate("example", { value: "yes" }),
@@ -258,6 +259,13 @@ describe("workflow service", () => {
 		expect(subagents.bind).not.toHaveBeenCalled();
 		const receipt = await service.run("example", { value: "yes" });
 		expect(receipt.status).toBe("created");
+		const record = JSON.parse(
+			await readFile(
+				path.join(fixture.storeRoot, "runs", receipt.runId, "service.json"),
+				"utf8",
+			),
+		) as { concurrency: number };
+		expect(record.concurrency).toBe(2);
 		const immediate = await service.status(receipt.runId);
 		expect(["created", "running", "finalizing", "completed"]).toContain(
 			immediate.status,
@@ -407,12 +415,13 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 1,
+			contractRevision: 2,
 			runId,
 			definitionName: "pending",
 			definitionPath: workflow.path,
 			definitionIdentitySha256: workflow.identity.identitySha256,
 			definitionSourceSha256: workflow.identity.sourceSha256,
+			concurrency: 4,
 			cwd: fixture.cwd,
 			input,
 			createdAt: "2026-09-01T00:00:00.000Z",
