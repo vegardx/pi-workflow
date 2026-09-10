@@ -42,6 +42,27 @@ runs were released, and the final output artifact committed before
 No credential marker appeared in the workflow run directory and no QEMU process
 remained after completion.
 
+## Graceful shutdown with two active children
+
+A second fresh Pi process launched a workflow whose two agents were blocked in
+separate 30-second guest commands. After both launch receipts were durable, the
+Pi process received `SIGTERM`:
+
+```text
+workflow_2ae450bd84de4fdf92077697f2a66c87
+launch receipts: 10, 16
+child settlements: 22, 30
+release receipts: 24, 32
+terminal executions: 25, 33
+final status: cancelled
+```
+
+Shutdown persisted run and task stop intent, interrupted and settled both
+children, released both subagent runs, terminalized both tasks, and exited only
+after `stopping -> cancelled`. Both settlements reported proved sandbox cleanup.
+No credential marker appeared in the workflow run directory and no QEMU process
+remained.
+
 ## Result
 
 The persisted effective concurrency now controls execution. Scheduler selection
