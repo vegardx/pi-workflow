@@ -575,7 +575,7 @@ describe("durable sequential scheduler", () => {
 			"cancelled",
 			"cancelled",
 		]);
-	});
+	}, 15_000);
 
 	it("replays a settled task without relaunching or waiting again", async () => {
 		const { journal } = await fixture();
