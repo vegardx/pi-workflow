@@ -4,12 +4,14 @@ import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
 import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
 import type {
 	WorkflowArtifactRef,
 	WorkflowRunId,
 	WorkflowTaskId,
 } from "./contracts.js";
+import { TaskKeySchema } from "./contracts.js";
 import {
 	isArtifactHandle,
 	isTaskHandle,
@@ -605,6 +607,40 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				const handle = materializer.agent(key, request);
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
 				return handle;
+			},
+			fanOut(namespace, items, options) {
+				if (!Value.Check(TaskKeySchema, namespace)) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow fan-out namespace is invalid.",
+					);
+				}
+				if (items.length > 64) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow fan-out exceeds 64 items.",
+					);
+				}
+				if (
+					!options ||
+					typeof options.key !== "function" ||
+					typeof options.task !== "function"
+				) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow fan-out options are invalid.",
+					);
+				}
+				const created = items.map((item, index) => {
+					const handle = materializer.agentInNamespace(
+						[namespace],
+						options.key(item, index),
+						options.task(item, index),
+					);
+					handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+					return handle;
+				});
+				return Object.freeze(created);
 			},
 			result<T>(task: TaskHandle<T>): Promise<T> {
 				const commit = prepareBarrier("result", [task]);

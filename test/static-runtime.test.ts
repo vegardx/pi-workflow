@@ -364,9 +364,18 @@ describe("static workflow runtime", () => {
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ values: Type.Array(Type.String()) }),
 			async run(ctx) {
-				const first = ctx.agent("first", request("First"));
-				const second = ctx.agent("second", request("Second"));
-				const outcomes = await ctx.settled([first, second] as const);
+				const tasks = ctx.fanOut(
+					"items",
+					[
+						{ id: "first", goal: "First" },
+						{ id: "second", goal: "Second" },
+					],
+					{
+						key: (item) => item.id,
+						task: (item) => request(item.goal),
+					},
+				);
+				const outcomes = await ctx.settled(tasks);
 				return {
 					values: outcomes.map((outcome) =>
 						outcome.status === "fulfilled" ? outcome.value.answer : "rejected",
@@ -396,6 +405,42 @@ describe("static workflow runtime", () => {
 		});
 		const state = reduceWorkflowEvents(await journal.readEvents());
 		expect(state.barriers[0]?.kind).toBe("settled");
+		expect(
+			Object.values(state.tasks).map((task) => task.task.namespace),
+		).toEqual([["items"], ["items"]]);
+	});
+
+	it("rejects oversized fan-out before task materialization", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: { name: "fan-out-bound", description: "Bound", version: 1 },
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({}),
+			run(ctx) {
+				ctx.fanOut(
+					"items",
+					Array.from({ length: 65 }, (_, index) => index),
+					{
+						key: (item) => `item-${item}`,
+						task: () => request("Item"),
+					},
+				);
+				return {};
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(journal, artifacts, new Map()),
+		});
+		await expect(runtime.drive()).rejects.toMatchObject({ stage: "execution" });
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		expect(Object.keys(state.tasks)).toHaveLength(0);
+		expect(state.status).toBe("failed");
 	});
 
 	it("returns bounded rejection evidence for an optional task", async () => {
