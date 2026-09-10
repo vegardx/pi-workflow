@@ -477,6 +477,106 @@ describe("durable sequential scheduler", () => {
 		);
 	});
 
+	it("stops and releases every concurrently active child", async () => {
+		const { journal } = await fixture((materializer) => [
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const pending = [
+			deferred<ReturnType<typeof executionResult>>(),
+			deferred<ReturnType<typeof executionResult>>(),
+		];
+		const grants = new Map<string, SubagentPreflight>();
+		let ordinal = 0;
+		const preflightCall = vi.fn(async (input: SubagentRequest) => {
+			const index = ordinal++;
+			const original = launchPlan(input, "pi-workflow:workflow_scheduler");
+			const { identitySha256: _identity, ...base } = original;
+			const draft = {
+				...base,
+				runId: `run_stop${index}`,
+				attemptId: `attempt_stop${index}`,
+			};
+			const plan = { ...draft, identitySha256: canonicalSha256(draft) };
+			const grant: SubagentPreflight = {
+				preflightId: `preflight-stop${index}`,
+				identitySha256: plan.identitySha256,
+				expiresAt: "2099-01-01T00:00:00.000Z",
+				launchPlan: plan,
+			};
+			grants.set(grant.preflightId, grant);
+			return grant;
+		});
+		const launch = vi.fn(async (preflightId: string) => {
+			const grant = grants.get(preflightId);
+			if (!grant) throw new Error("missing grant");
+			return {
+				runId: grant.launchPlan.runId,
+				attemptId: grant.launchPlan.attemptId,
+				status: "active" as const,
+			};
+		});
+		const wait = vi.fn((runId: string) => {
+			const value = pending[Number(runId.at(-1))];
+			if (!value) throw new Error("unexpected child");
+			return value.promise;
+		});
+		const interrupt = vi.fn(async (runId: string) => {
+			const index = Number(runId.at(-1));
+			pending[index]?.resolve(
+				executionResult({ ...result("cancelled"), runId }),
+			);
+			return {
+				runId,
+				attemptId: `attempt_stop${index}`,
+				status: "stopping" as const,
+			};
+		});
+		const release = vi.fn(async (runId: string) => ({
+			runId,
+			attemptId: `attempt_stop${Number(runId.at(-1))}`,
+			status: "cancelled" as const,
+		}));
+		const ownerClient = client({
+			preflight: preflightCall,
+			launch,
+			wait,
+			interrupt,
+			release,
+		});
+		const ownerBinding = binding(ownerClient);
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			finalizer,
+			concurrency: 2,
+		});
+
+		const drives = [scheduler.drive(), scheduler.drive()];
+		while (wait.mock.calls.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		await expect(scheduler.stop("operator stop")).resolves.toMatchObject({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		await Promise.allSettled(drives);
+		expect(interrupt).toHaveBeenCalledTimes(2);
+		expect(release).toHaveBeenCalledTimes(2);
+		const state = await projection(journal);
+		expect(state.status).toBe("cancelled");
+		expect(Object.values(state.tasks).map((task) => task.status)).toEqual([
+			"cancelled",
+			"cancelled",
+		]);
+	});
+
 	it("replays a settled task without relaunching or waiting again", async () => {
 		const { journal } = await fixture();
 		const ownerClient = client();

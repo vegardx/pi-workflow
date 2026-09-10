@@ -72,7 +72,8 @@ An in-memory-only successful drive does not satisfy the first slice.
 
 - sequential, parallel, settled-parallel, pipeline, and bounded fan-out preserve
   stable results and limits;
-- fatal cancellation cancels siblings and drains to terminal evidence;
+- fatal cancellation and explicit stop drain every concurrently active child to
+  terminal settlement and release evidence without duplicate interruption;
 - checkpoint waits can be stopped and resumed;
 - child retry and resume record fresh attempts under the existing workflow task
   execution, while explicit invalidation creates a new execution generation,
