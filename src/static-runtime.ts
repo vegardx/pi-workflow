@@ -16,6 +16,7 @@ import {
 	isArtifactHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
+	type PipelineStage,
 	type SettledTaskResult,
 	type TaskHandle,
 	validateJsonSchemaDocument,
@@ -676,6 +677,47 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				});
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
 				return handle;
+			},
+			pipeline(namespace, build) {
+				if (
+					!Value.Check(TaskKeySchema, namespace) ||
+					typeof build !== "function"
+				) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow pipeline definition is invalid.",
+					);
+				}
+				const created = new Set<WorkflowTaskId>();
+				const stage: PipelineStage = Object.freeze({
+					agent<TOutputSchema extends TSchema>(
+						key: Parameters<typeof materializer.agent>[0],
+						request: Parameters<typeof materializer.agent<TOutputSchema>>[1],
+					) {
+						if (created.size >= 64) {
+							throw new StaticWorkflowRuntimeError(
+								"validation",
+								"Workflow pipeline exceeds 64 stages.",
+							);
+						}
+						const handle = materializer.agentInNamespace(
+							[namespace],
+							key,
+							request,
+						);
+						created.add(handle.ref.taskId);
+						handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+						return handle;
+					},
+				});
+				const final = build(stage);
+				if (!isTaskHandle(final) || !created.has(final.ref.taskId)) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow pipeline must return one of its stage handles.",
+					);
+				}
+				return final;
 			},
 			result<T>(task: TaskHandle<T>): Promise<T> {
 				const commit = prepareBarrier("result", [task]);

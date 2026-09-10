@@ -153,6 +153,13 @@ export interface FanInOptions<TSource, TOutputSchema extends TSchema> {
 	readonly task: Omit<AgentTaskAuthoringRequest<TOutputSchema>, "inputs">;
 }
 
+export interface PipelineStage {
+	agent<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		request: AgentTaskAuthoringRequest<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>>;
+}
+
 export interface WorkflowContext<TInput> {
 	readonly input: TInput;
 	readonly runId: WorkflowRunId;
@@ -174,6 +181,10 @@ export interface WorkflowContext<TInput> {
 		sources: readonly TaskHandle<TSource>[],
 		options: FanInOptions<TSource, TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>>;
+	pipeline<T>(
+		namespace: TaskKey,
+		build: (stage: PipelineStage) => TaskHandle<T>,
+	): TaskHandle<T>;
 	result<T>(task: TaskHandle<T>): Promise<T>;
 	results<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,

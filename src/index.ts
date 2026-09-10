@@ -67,6 +67,7 @@ export {
 	isArtifactHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
+	type PipelineStage,
 	type SettledTaskFailure,
 	type SettledTaskResult,
 	type TaskHandle,

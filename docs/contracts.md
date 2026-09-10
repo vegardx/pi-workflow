@@ -70,7 +70,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 6 identities cover the complete definition module but not a
+Contract revision 7 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than
@@ -149,6 +149,10 @@ interface WorkflowContext<TInput> {
 			task: AgentTask<T>;
 		},
 	): TaskHandle<T>;
+	pipeline<T>(
+		namespace: string,
+		build: (stage: PipelineStage) => TaskHandle<T>,
+	): TaskHandle<T>;
 	support<T>(key: string, request: SupportTask<T>): TaskHandle<T>;
 	workflow<T>(key: string, request: NestedWorkflowTask<T>): TaskHandle<T>;
 	checkpoint<T>(key: string, request: CheckpointRequest<T>): TaskHandle<T>;
@@ -180,8 +184,15 @@ names; each source output becomes an explicit named artifact input and therefore
 an order dependency. The supplied aggregate request may not define a competing
 `inputs` field.
 
-Pipelines and settled-parallel are typed authoring helpers that materialize
-ordinary task nodes and dependencies. They are not separate
+`ctx.pipeline(namespace, build)` invokes a synchronous namespace-scoped builder
+that may declare at most 64 ordinary agent stages. Stages use explicit handles
+and artifact inputs rather than implicit previous-result injection. The builder
+must return one handle it created; that handle becomes the pipeline result.
+Pipeline namespace and stage keys participate in ordinary task identity and
+exact-prefix replay.
+
+Settled-parallel is a typed authoring helper that materializes ordinary task
+nodes and dependencies. They are not separate
 execution runtimes.
 
 ## Materialized task graph
