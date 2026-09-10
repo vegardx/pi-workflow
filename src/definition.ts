@@ -140,6 +140,14 @@ export type SettledTaskResult<T> =
 			failure?: SettledTaskFailure;
 	  }>;
 
+export interface FanOutOptions<TItem, TOutputSchema extends TSchema> {
+	readonly key: (item: TItem, index: number) => TaskKey;
+	readonly task: (
+		item: TItem,
+		index: number,
+	) => AgentTaskAuthoringRequest<TOutputSchema>;
+}
+
 export interface WorkflowContext<TInput> {
 	readonly input: TInput;
 	readonly runId: WorkflowRunId;
@@ -151,6 +159,11 @@ export interface WorkflowContext<TInput> {
 		key: TaskKey,
 		request: AgentTaskAuthoringRequest<TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>>;
+	fanOut<TItem, TOutputSchema extends TSchema>(
+		namespace: TaskKey,
+		items: readonly TItem[],
+		options: FanOutOptions<TItem, TOutputSchema>,
+	): readonly TaskHandle<Static<TOutputSchema>>[];
 	result<T>(task: TaskHandle<T>): Promise<T>;
 	results<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,

@@ -71,6 +71,7 @@ describe("workflow contracts", () => {
 			durableRuns: true,
 			parallel: true,
 			settledResults: true,
+			fanOut: true,
 			replay: true,
 			resume: false,
 		});

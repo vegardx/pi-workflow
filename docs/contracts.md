@@ -70,7 +70,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 4 identities cover the complete definition module but not a
+Contract revision 5 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than
@@ -133,6 +133,14 @@ interface WorkflowContext<TInput> {
 	phase(name: string): void;
 	log(message: string): void;
 	agent<T>(key: string, request: AgentTask<T>): TaskHandle<T>;
+	fanOut<TItem, T>(
+		namespace: string,
+		items: readonly TItem[],
+		options: {
+			key(item: TItem, index: number): string;
+			task(item: TItem, index: number): AgentTask<T>;
+		},
+	): readonly TaskHandle<T>[];
 	support<T>(key: string, request: SupportTask<T>): TaskHandle<T>;
 	workflow<T>(key: string, request: NestedWorkflowTask<T>): TaskHandle<T>;
 	checkpoint<T>(key: string, request: CheckpointRequest<T>): TaskHandle<T>;
@@ -152,8 +160,14 @@ interface WorkflowContext<TInput> {
 }
 ```
 
-Pipelines, fan-out, fan-in, and settled-parallel are typed authoring helpers
-that materialize ordinary task nodes and dependencies. They are not separate
+`ctx.fanOut(namespace, items, options)` synchronously materializes at most 64
+ordinary agent tasks in the named child namespace. The caller supplies a stable
+item key and task factory; returned handles preserve input order. Namespace and
+item keys participate in task identity, duplicate keys fail before an execution
+barrier, and restart must reproduce the exact declaration prefix.
+
+Pipelines, fan-in, and settled-parallel are typed authoring helpers that
+materialize ordinary task nodes and dependencies. They are not separate
 execution runtimes.
 
 ## Materialized task graph

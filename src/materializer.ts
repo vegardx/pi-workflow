@@ -202,6 +202,20 @@ export class WorkflowTaskMaterializer {
 		key: TaskKey,
 		request: AgentTaskAuthoringRequest<TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>> {
+		return this.agentInNamespace(this.namespace, key, request);
+	}
+
+	agentInNamespace<TOutputSchema extends TSchema>(
+		namespace: readonly TaskKey[],
+		key: TaskKey,
+		request: AgentTaskAuthoringRequest<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>> {
+		if (
+			namespace.length > 32 ||
+			namespace.some((entry) => !Value.Check(TaskKeySchema, entry))
+		) {
+			throw new WorkflowMaterializationError("invalid task namespace");
+		}
 		if (this.finalClosed) {
 			throw new WorkflowMaterializationError(
 				"task declaration follows the final materialization barrier",
@@ -213,7 +227,7 @@ export class WorkflowTaskMaterializer {
 		if (!Value.Check(TaskKeySchema, key)) {
 			throw new WorkflowMaterializationError("invalid task key");
 		}
-		const namespaceKey = [...this.namespace, key].join("\u0000");
+		const namespaceKey = [...namespace, key].join("\u0000");
 		if (
 			[...this.seen.values()].some(
 				(task) =>
@@ -297,11 +311,11 @@ export class WorkflowTaskMaterializer {
 			identitySha256: deriveAgentTaskIdentity({
 				definitionIdentitySha256: this.definitionIdentitySha256,
 				inputSha256: this.inputSha256,
-				namespace: this.namespace,
+				namespace,
 				spec: specWithoutIdentity,
 			}),
 		};
-		const id = deriveWorkflowTaskId(this.runId, this.namespace, key);
+		const id = deriveWorkflowTaskId(this.runId, namespace, key);
 		const position =
 			[...this.seen.values()].filter(
 				(task) => task.materializationEpoch === this.epoch,
@@ -309,7 +323,7 @@ export class WorkflowTaskMaterializer {
 		const task = cloneFrozen({
 			id,
 			runId: this.runId,
-			namespace: this.namespace,
+			namespace,
 			spec,
 			definitionIdentitySha256: this.definitionIdentitySha256,
 			materializationSequence: this.sequence + 1,
