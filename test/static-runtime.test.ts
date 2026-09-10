@@ -410,6 +410,92 @@ describe("static workflow runtime", () => {
 		).toEqual([["items"], ["items"]]);
 	});
 
+	it("materializes a namespace-scoped pipeline with explicit artifact flow", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: { name: "pipeline", description: "Pipeline", version: 1 },
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				return ctx.pipeline("analysis", (stage) => {
+					const collect = stage.agent("collect", request("Collect"));
+					return stage.agent("review", {
+						...request("Review"),
+						inputs: { input: collect.output },
+					});
+				});
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(
+				journal,
+				artifacts,
+				new Map([
+					["collect", { answer: "draft" }],
+					["review", { answer: "approved" }],
+				]),
+			),
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { answer: "approved" },
+		});
+		const tasks = Object.values(
+			reduceWorkflowEvents(await journal.readEvents()).tasks,
+		).map((task) => task.task);
+		expect(tasks.map((task) => task.namespace)).toEqual([
+			["analysis"],
+			["analysis"],
+		]);
+		expect(Object.keys(tasks[1]?.spec.inputs ?? {})).toEqual(["input"]);
+		expect(tasks[1]?.spec.after).toEqual([
+			{ runId: tasks[0]?.runId, taskId: tasks[0]?.id },
+		]);
+	}, 15_000);
+
+	it("rejects oversized pipelines and foreign final handles", async () => {
+		for (const kind of ["oversized", "foreign"] as const) {
+			const { journal, artifacts } = await fixture();
+			const definition = defineWorkflow({
+				meta: { name: `pipeline-${kind}`, description: "Invalid", version: 1 },
+				inputSchema: Type.Object({}),
+				outputSchema: Type.Object({ answer: Type.String() }),
+				run(ctx) {
+					const external = ctx.agent("external", request());
+					return ctx.pipeline("stages", (stage) => {
+						let final = stage.agent("stage-0", request());
+						if (kind === "oversized") {
+							for (let index = 1; index <= 64; index += 1) {
+								final = stage.agent(`stage-${index}`, request());
+							}
+						}
+						return kind === "foreign" ? external : final;
+					});
+				},
+			});
+			const runtime = createStaticWorkflowRuntime({
+				definition,
+				definitionIdentitySha256,
+				input: {},
+				cwd: "/repo",
+				journal,
+				artifacts,
+				scheduler: schedulerFor(journal, artifacts, new Map()),
+			});
+			await expect(runtime.drive()).rejects.toMatchObject({
+				stage: "execution",
+			});
+			expect(
+				Object.keys(reduceWorkflowEvents(await journal.readEvents()).tasks),
+			).toHaveLength(0);
+		}
+	});
+
 	it("materializes bounded fan-in with explicit named artifact inputs", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({

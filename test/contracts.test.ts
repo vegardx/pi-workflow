@@ -73,6 +73,7 @@ describe("workflow contracts", () => {
 			settledResults: true,
 			fanOut: true,
 			fanIn: true,
+			pipelines: true,
 			replay: true,
 			resume: false,
 		});
