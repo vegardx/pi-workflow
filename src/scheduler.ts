@@ -13,6 +13,7 @@ import type {
 	WorkflowTaskId,
 	WorkflowTaskStatus,
 } from "./contracts.js";
+import type { WorkflowBudget } from "./definition.js";
 import type {
 	TaskExecutionProjection,
 	WorkflowEventInput,
@@ -89,6 +90,7 @@ export interface WorkflowSequentialSchedulerOptions {
 	readonly launcher?: WorkflowTaskLauncher;
 	readonly finalizer?: WorkflowTaskFinalizer;
 	readonly concurrency?: number;
+	readonly budget?: WorkflowBudget;
 }
 
 export class WorkflowSchedulerError extends Error {
@@ -228,6 +230,10 @@ export function createWorkflowSequentialScheduler(
 	options: WorkflowSequentialSchedulerOptions,
 ): WorkflowSequentialScheduler {
 	const { binding, finalizer, journal } = options;
+	const budget = options.budget ?? {
+		cost: Number.MAX_SAFE_INTEGER,
+		childRuntimeMs: Number.MAX_SAFE_INTEGER,
+	};
 	const concurrency = options.concurrency ?? 1;
 	if (
 		!Number.isSafeInteger(concurrency) ||
@@ -244,6 +250,20 @@ export function createWorkflowSequentialScheduler(
 	const launcher =
 		options.launcher ?? createWorkflowTaskLauncher({ binding, journal });
 	const coordinationKey = journal.directory;
+
+	if (
+		!Number.isFinite(budget.cost) ||
+		budget.cost < 0 ||
+		!Number.isSafeInteger(budget.childRuntimeMs) ||
+		budget.childRuntimeMs < 1_000 ||
+		(budget.totalTokens !== undefined &&
+			(!Number.isSafeInteger(budget.totalTokens) || budget.totalTokens < 1))
+	) {
+		throw new WorkflowSchedulerError(
+			"validation",
+			"Workflow scheduler budget is invalid.",
+		);
+	}
 
 	if (
 		binding.workflowRunId !== journal.runId ||
@@ -390,6 +410,131 @@ export function createWorkflowSequentialScheduler(
 		}
 	}
 
+	function settledBudgetReason(
+		current: WorkflowStateProjection,
+	): string | undefined {
+		let cost = 0;
+		let totalTokens = 0;
+		let childRuntimeMs = 0;
+		for (const execution of Object.values(current.executions)) {
+			if (!execution.settlement) continue;
+			if (!execution.settlement.evidence.usageComplete) {
+				return "Workflow child usage evidence is incomplete.";
+			}
+			cost += execution.settlement.evidence.usage.cost;
+			totalTokens += execution.settlement.evidence.usage.totalTokens;
+			childRuntimeMs += execution.settlement.evidence.runtimeMs;
+		}
+		if (cost > budget.cost) return "Workflow cost budget was exceeded.";
+		if (budget.totalTokens !== undefined && totalTokens > budget.totalTokens) {
+			return "Workflow total-token budget was exceeded.";
+		}
+		if (childRuntimeMs > budget.childRuntimeMs) {
+			return "Workflow child-runtime budget was exceeded.";
+		}
+		return undefined;
+	}
+
+	function budgetAdmission(
+		current: WorkflowStateProjection,
+		candidate: WorkflowTaskProjection,
+	): { allowed: true } | { allowed: false; deferred: boolean; reason: string } {
+		let settledCost = 0;
+		let settledTotalTokens = 0;
+		let settledChildRuntimeMs = 0;
+		let reservedCost = 0;
+		let reservedTotalTokens = 0;
+		let reservedChildRuntimeMs = 0;
+		for (const execution of Object.values(current.executions)) {
+			if (execution.settlement) {
+				if (!execution.settlement.evidence.usageComplete) {
+					return {
+						allowed: false,
+						deferred: false,
+						reason: "Workflow child usage evidence is incomplete.",
+					};
+				}
+				settledCost += execution.settlement.evidence.usage.cost;
+				settledTotalTokens += execution.settlement.evidence.usage.totalTokens;
+				settledChildRuntimeMs += execution.settlement.evidence.runtimeMs;
+				continue;
+			}
+			if (!execution.launchReceipt) continue;
+			const task = current.tasks[execution.execution.taskId];
+			if (!task) {
+				return {
+					allowed: false,
+					deferred: false,
+					reason: "Workflow budget reservation has no task declaration.",
+				};
+			}
+			if (
+				budget.totalTokens !== undefined &&
+				task.task.spec.request.limits.totalTokens === undefined
+			) {
+				return {
+					allowed: false,
+					deferred: false,
+					reason:
+						"Active workflow task has no total-token maximum for its reservation.",
+				};
+			}
+			reservedCost += task.task.spec.request.limits.cost;
+			reservedTotalTokens += task.task.spec.request.limits.totalTokens ?? 0;
+			reservedChildRuntimeMs +=
+				task.task.spec.request.limits.cumulativeRuntimeMs;
+		}
+		const candidateCost = candidate.task.spec.request.limits.cost;
+		if (
+			budget.totalTokens !== undefined &&
+			candidate.task.spec.request.limits.totalTokens === undefined
+		) {
+			return {
+				allowed: false,
+				deferred: false,
+				reason:
+					"Workflow task has no total-token maximum to reserve against the workflow budget.",
+			};
+		}
+		const candidateTotalTokens =
+			candidate.task.spec.request.limits.totalTokens ?? 0;
+		const candidateChildRuntimeMs =
+			candidate.task.spec.request.limits.cumulativeRuntimeMs;
+		const reason = (
+			cost: number,
+			totalTokens: number,
+			childRuntimeMs: number,
+		): string | undefined => {
+			if (cost > budget.cost) return "Workflow cost budget is exhausted.";
+			if (
+				budget.totalTokens !== undefined &&
+				totalTokens > budget.totalTokens
+			) {
+				return "Workflow total-token budget is exhausted.";
+			}
+			if (childRuntimeMs > budget.childRuntimeMs) {
+				return "Workflow child-runtime budget is exhausted.";
+			}
+			return undefined;
+		};
+		const exhausted = reason(
+			settledCost + candidateCost,
+			settledTotalTokens + candidateTotalTokens,
+			settledChildRuntimeMs + candidateChildRuntimeMs,
+		);
+		if (exhausted) {
+			return { allowed: false, deferred: false, reason: exhausted };
+		}
+		const reserved = reason(
+			settledCost + reservedCost + candidateCost,
+			settledTotalTokens + reservedTotalTokens + candidateTotalTokens,
+			settledChildRuntimeMs + reservedChildRuntimeMs + candidateChildRuntimeMs,
+		);
+		return reserved
+			? { allowed: false, deferred: true, reason: reserved }
+			: { allowed: true };
+	}
+
 	async function prepare(): Promise<
 		| { state: "wait"; taskId: WorkflowTaskId; receipt: RunReceipt }
 		| WorkflowSchedulerOutcome
@@ -495,6 +640,28 @@ export function createWorkflowSequentialScheduler(
 					selectedExecution.settlement.evidence.status,
 				),
 			};
+		}
+
+		const admission = budgetAdmission(current, selected);
+		if (!admission.allowed && admission.deferred) {
+			return { state: "idle", runStatus: current.status };
+		}
+		if (!admission.allowed) {
+			await changeTask(
+				selected.task.id,
+				selected.status,
+				"blocked",
+				admission.reason,
+			);
+			if (
+				selected.task.spec.disposition === "required" ||
+				admission.reason.includes("incomplete") ||
+				admission.reason.includes("no task declaration")
+			) {
+				await changeRun("running", "failed", admission.reason);
+				return { state: "terminal", runStatus: "failed" };
+			}
+			return prepare();
 		}
 
 		let launch: Awaited<ReturnType<WorkflowTaskLauncher["launch"]>>;
@@ -690,6 +857,20 @@ export function createWorkflowSequentialScheduler(
 	): Promise<WorkflowSchedulerOutcome> {
 		if (settled.state !== "awaiting-finalization" || !finalizer) return settled;
 		const finalized = await finalizer.finalize(settled.taskId);
+		const afterFinalization = await state();
+		const budgetFailure = settledBudgetReason(afterFinalization);
+		if (
+			budgetFailure &&
+			afterFinalization.status !== "failed" &&
+			afterFinalization.status !== "cancelled" &&
+			afterFinalization.status !== "interrupted" &&
+			afterFinalization.status !== "cleanup-blocked" &&
+			afterFinalization.status !== "completed" &&
+			afterFinalization.status !== "completed-degraded"
+		) {
+			await changeRun(afterFinalization.status, "failed", budgetFailure);
+			return { state: "terminal", runStatus: "failed" };
+		}
 		if (
 			finalized.runStatus === "failed" ||
 			finalized.runStatus === "cancelled" ||

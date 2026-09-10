@@ -23,8 +23,9 @@ A bounded global pointer index may live under:
 Directories are mode `0700`; sensitive files are mode `0600`. Prompts, logs,
 checkpoint values, context, artifacts, and results are bounded. `service.json`
 is an immutable bounded private record containing the exact workflow definition
-provenance, project root, input, effective concurrency limit, and creation
-identity needed for restart reconstruction. It is written before workflow source
+provenance, project root, input, effective concurrency limit, declared and
+effective workflow budgets, declared and effective timeout, absolute deadline,
+and creation identity needed for restart reconstruction. It is written before workflow source
 starts.
 Credential-shaped metadata is redacted. Source-derived sensitive content that
 must be retained is stored as private artifact data, not copied into indexes or
@@ -33,8 +34,8 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-8 rejects revision-1 through revision-7 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 8 accepts only
+8 rejects revision-1 through revision-8 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 9 accepts only
 the
 declared run, workflow phase/log effect, task, artifact, barrier, output-commit,
 and task-execution events. Task-execution evidence records generation creation, the latest
@@ -103,7 +104,7 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 8 currently admits generation 1 only; later generations
+invalidation. Revision 9 currently admits generation 1 only; later generations
 remain unavailable until transactional invalidation lands. Each agent-task
 execution generation owns one subagent run and
 contains:

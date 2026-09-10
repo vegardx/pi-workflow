@@ -71,6 +71,8 @@ export {
 	type SettledTaskFailure,
 	type SettledTaskResult,
 	type TaskHandle,
+	type WorkflowBudget,
+	WorkflowBudgetSchema,
 	type WorkflowContext,
 	type WorkflowDefinition,
 	type WorkflowDefinitionOptions,
@@ -156,6 +158,7 @@ export {
 } from "./scheduler.js";
 export {
 	createWorkflowService,
+	DEFAULT_MAX_WORKFLOW_COST,
 	type WorkflowDefinitionSummary,
 	type WorkflowService,
 	WorkflowServiceError,

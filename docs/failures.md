@@ -13,7 +13,8 @@
 | Structured output | Terminating schema repair exhausted | Task failure |
 | Support task | Helper exception or invalid output | Task failure |
 | Checkpoint | No approver, expired, headless block | Waiting or blocked |
-| Budget | Run/task/token/cost/time cap reached | Stop new work; explicit terminal result |
+| Budget | Cost, optional total-token, or cumulative child-runtime cap reached | Reserve before launch; block inadmissible task; fail post-settlement overage |
+| Deadline | Persisted workflow wall deadline reached | Stop and drain; cleanup uncertainty remains cleanup-blocked |
 | Lease loss | Scheduler ownership lost | Interrupt and reconcile |
 | Persistence | Journal, snapshot, intent, receipt, or artifact durability failure | Fail closed |
 | Resource/source drift | Workflow, helper, tool, skill, model, or service changed | Invalidate or refuse resume |

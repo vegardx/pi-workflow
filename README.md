@@ -15,6 +15,8 @@ Provide one reusable workflow engine with:
 - stable tasks, explicit order/data dependencies, parallelism, pipelines, and
   bounded fan-out/fan-in;
 - schema-validated agent results and deterministic support tasks;
+- declared cost/runtime budgets, optional total-token guards, and durable
+  wall-clock deadlines;
 - append-only lifecycle state, leases, fencing, resume, retry, replay, and
   reconciliation;
 - fail-closed persistence, required finalizers, and bounded UI;

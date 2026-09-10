@@ -354,6 +354,77 @@ afterEach(async () => {
 });
 
 describe("durable sequential scheduler", () => {
+	it("reserves declared maxima before launching a task", async () => {
+		const { journal, tasks } = await fixture();
+		const ownerClient = client();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			budget: { cost: 99, totalTokens: 1_000_000, childRuntimeMs: 300_000 },
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("blocked");
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+	});
+
+	it("defers a candidate while active reservations consume its capacity", async () => {
+		const { journal } = await fixture((materializer) => [
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const waiting = deferred<ReturnType<typeof executionResult>>();
+		const delegated = concurrentClient("budget", async () => waiting.promise);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(delegated.ownerClient),
+			concurrency: 2,
+			budget: { cost: 150, childRuntimeMs: 600_000 },
+		});
+
+		const first = scheduler.drive();
+		await vi.waitFor(() => expect(delegated.launch).toHaveBeenCalledOnce());
+		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
+		expect(delegated.launch).toHaveBeenCalledOnce();
+		waiting.resolve(
+			executionResult({ ...result("completed"), runId: "run_budget0" }),
+		);
+		await expect(first).resolves.toMatchObject({
+			state: "awaiting-finalization",
+		});
+	});
+
+	it("requires task maxima for an effective workflow token budget", async () => {
+		const { journal, tasks } = await fixture((materializer) => {
+			const task = request();
+			const { totalTokens: _totalTokens, ...limits } = task.limits;
+			return [materializer.agent("answer", { ...task, limits })];
+		});
+		const ownerClient = client();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			budget: {
+				cost: 100,
+				totalTokens: 1_000_000,
+				childRuntimeMs: 300_000,
+			},
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("blocked");
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+	});
+
 	it("launches one ready task and persists bounded child settlement", async () => {
 		const { journal, tasks } = await fixture();
 		const ownerClient = client();
@@ -450,6 +521,40 @@ describe("durable sequential scheduler", () => {
 		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("completed");
 		expect(ownerClient.wait).toHaveBeenCalledTimes(2);
 		expect(ownerClient.release).toHaveBeenCalledOnce();
+	});
+
+	it("fails after a settled child overshoots the workflow budget", async () => {
+		const { journal } = await fixture((materializer) => [
+			materializer.agent("optional", request({ disposition: "optional" })),
+		]);
+		const overage = result("failed");
+		overage.usage.cost = 101;
+		const ownerClient = client({
+			wait: vi.fn(async () => executionResult(overage)),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "failed" as const,
+			})),
+		});
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			artifacts,
+			binding: binding(ownerClient),
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			finalizer,
+			budget: { cost: 100, childRuntimeMs: 300_000 },
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		expect((await projection(journal)).status).toBe("failed");
 	});
 
 	it("launches two independent tasks before either child settles", async () => {

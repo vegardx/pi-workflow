@@ -14,6 +14,7 @@ import {
 	WorkflowRunIdSchema,
 	type WorkflowRunStatus,
 } from "./contracts.js";
+import type { WorkflowBudget } from "./definition.js";
 import { WorkflowRunJournal } from "./persistence/journal.js";
 import {
 	acquireWorkflowRunLease,
@@ -45,11 +46,14 @@ import { createWorkflowTaskLauncher } from "./task-launcher.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
+export const DEFAULT_MAX_WORKFLOW_COST = 1_000;
 export type WorkflowDefinitionSummary = {
 	readonly name: string;
 	readonly description: string;
 	readonly version: number;
 	readonly concurrency: number;
+	readonly budget: WorkflowBudget;
+	readonly timeoutMs: number;
 	readonly scope: DiscoveredWorkflow["scope"];
 	readonly source: string;
 	readonly path: string;
@@ -92,6 +96,10 @@ export interface WorkflowServiceOptions {
 	readonly projectTrusted: () => boolean;
 	readonly subagents: WorkflowSubagentProvider;
 	readonly maxConcurrency?: number;
+	readonly maxWorkflowCost?: number;
+	readonly maxWorkflowTotalTokens?: number;
+	readonly maxWorkflowChildRuntimeMs?: number;
+	readonly maxWorkflowTimeoutMs?: number;
 }
 
 export class WorkflowServiceError extends Error {
@@ -131,6 +139,8 @@ function summary(workflow: DiscoveredWorkflow): WorkflowDefinitionSummary {
 		description: workflow.definition.meta.description,
 		version: workflow.definition.meta.version,
 		concurrency: workflow.definition.meta.concurrency,
+		budget: Object.freeze({ ...workflow.definition.meta.budget }),
+		timeoutMs: workflow.definition.meta.timeoutMs,
 		scope: workflow.scope,
 		source: workflow.source,
 		path: workflow.path,
@@ -204,6 +214,31 @@ export async function createWorkflowService(
 			"Workflow service concurrency limit is invalid.",
 		);
 	}
+	const maxWorkflowCost = options.maxWorkflowCost ?? DEFAULT_MAX_WORKFLOW_COST;
+	const maxWorkflowTotalTokens = options.maxWorkflowTotalTokens;
+	const maxWorkflowChildRuntimeMs = options.maxWorkflowChildRuntimeMs;
+	const maxWorkflowTimeoutMs = options.maxWorkflowTimeoutMs;
+	if (!Number.isFinite(maxWorkflowCost) || maxWorkflowCost < 0) {
+		throw new WorkflowServiceError(
+			"validation",
+			"Workflow service cost limit is invalid.",
+		);
+	}
+	for (const [name, value, minimum] of [
+		["total-token", maxWorkflowTotalTokens, 1],
+		["child-runtime", maxWorkflowChildRuntimeMs, 1_000],
+		["timeout", maxWorkflowTimeoutMs, 1_000],
+	] as const) {
+		if (
+			value !== undefined &&
+			(!Number.isSafeInteger(value) || value < minimum)
+		) {
+			throw new WorkflowServiceError(
+				"validation",
+				`Workflow service ${name} limit is invalid.`,
+			);
+		}
+	}
 	const cwd = await realpath(options.cwd);
 	const storeRoot = path.resolve(options.storeRoot);
 	const roots: WorkflowRoot[] = [];
@@ -260,6 +295,39 @@ export async function createWorkflowService(
 		return matches[0] as DiscoveredWorkflow;
 	}
 
+	function effectiveLimits(workflow: DiscoveredWorkflow): {
+		declaredBudget: WorkflowBudget;
+		effectiveBudget: WorkflowBudget;
+		declaredTimeoutMs: number;
+		effectiveTimeoutMs: number;
+	} {
+		const declared = workflow.definition.meta.budget;
+		const effectiveTotalTokens =
+			declared.totalTokens === undefined
+				? maxWorkflowTotalTokens
+				: maxWorkflowTotalTokens === undefined
+					? declared.totalTokens
+					: Math.min(declared.totalTokens, maxWorkflowTotalTokens);
+		return {
+			declaredBudget: structuredClone(declared),
+			effectiveBudget: {
+				cost: Math.min(declared.cost, maxWorkflowCost),
+				childRuntimeMs: Math.min(
+					declared.childRuntimeMs,
+					maxWorkflowChildRuntimeMs ?? declared.childRuntimeMs,
+				),
+				...(effectiveTotalTokens === undefined
+					? {}
+					: { totalTokens: effectiveTotalTokens }),
+			},
+			declaredTimeoutMs: workflow.definition.meta.timeoutMs,
+			effectiveTimeoutMs: Math.min(
+				workflow.definition.meta.timeoutMs,
+				maxWorkflowTimeoutMs ?? workflow.definition.meta.timeoutMs,
+			),
+		};
+	}
+
 	async function compose(
 		record: WorkflowRunRecord,
 		workflow: DiscoveredWorkflow,
@@ -288,15 +356,7 @@ export async function createWorkflowService(
 			launcher,
 			finalizer,
 			concurrency: record.concurrency,
-		});
-		const runtime = createStaticWorkflowRuntime({
-			definition: workflow.definition,
-			definitionIdentitySha256: workflow.identity.identitySha256,
-			input: record.input,
-			cwd: record.cwd,
-			journal,
-			artifacts,
-			scheduler,
+			budget: record.effectiveBudget,
 		});
 		const ownedRun: OwnedRun = {
 			record,
@@ -314,9 +374,50 @@ export async function createWorkflowService(
 			ownedRun.settled = false;
 			delete ownedRun.failure;
 			delete ownedRun.view;
-			ownedRun.drive = Promise.resolve()
+			const controller = new AbortController();
+			const runtime = createStaticWorkflowRuntime({
+				definition: workflow.definition,
+				definitionIdentitySha256: workflow.identity.identitySha256,
+				input: record.input,
+				cwd: record.cwd,
+				journal,
+				artifacts,
+				scheduler,
+				signal: controller.signal,
+			});
+			let deadlineTimer: NodeJS.Timeout | undefined;
+			let deadlineSettled = false;
+			const deadline = new Promise<void>((resolve, reject) => {
+				const check = () => {
+					const remaining = Date.parse(record.deadlineAt) - Date.now();
+					if (remaining > 0) {
+						deadlineTimer = setTimeout(
+							check,
+							Math.min(remaining, 2_147_483_647),
+						);
+						deadlineTimer.unref();
+						return;
+					}
+					void scheduler.stop("Workflow deadline exceeded.").then(
+						() => {
+							controller.abort(new Error("Workflow deadline exceeded."));
+							deadlineSettled = true;
+							resolve();
+						},
+						(error: unknown) => {
+							controller.abort(error);
+							deadlineSettled = true;
+							reject(error);
+						},
+					);
+				};
+				check();
+			});
+			const execution = Promise.resolve()
 				.then(() => runtime.drive())
-				.then(() => undefined)
+				.then(() => undefined);
+			void execution.catch(() => undefined);
+			ownedRun.drive = Promise.race([execution, deadline])
 				.catch((error: unknown) => {
 					ownedRun.failure =
 						error instanceof Error
@@ -324,6 +425,8 @@ export async function createWorkflowService(
 							: new Error("unknown workflow failure");
 				})
 				.finally(async () => {
+					if (deadlineTimer) clearTimeout(deadlineTimer);
+					if (!deadlineSettled) controller.abort();
 					try {
 						ownedRun.view = await viewFrom(record, journal, artifacts);
 					} catch (error) {
@@ -351,6 +454,11 @@ export async function createWorkflowService(
 			workflow.identity.identitySha256 !== record.definitionIdentitySha256 ||
 			workflow.identity.sourceSha256 !== record.definitionSourceSha256 ||
 			workflow.path !== record.definitionPath ||
+			!isDeepStrictEqual(
+				workflow.definition.meta.budget,
+				record.declaredBudget,
+			) ||
+			workflow.definition.meta.timeoutMs !== record.declaredTimeoutMs ||
 			cwd !== record.cwd
 		) {
 			throw new WorkflowServiceError(
@@ -540,6 +648,8 @@ export async function createWorkflowService(
 				});
 				try {
 					const journal = await WorkflowRunJournal.open(storeRoot, id, lease);
+					const limits = effectiveLimits(workflow);
+					const createdAt = new Date();
 					const record: WorkflowRunRecord = {
 						schema: "pi-workflow-run",
 						contractRevision: WORKFLOW_CONTRACT_REVISION,
@@ -552,9 +662,13 @@ export async function createWorkflowService(
 							workflow.definition.meta.concurrency,
 							maxConcurrency,
 						),
+						...limits,
+						deadlineAt: new Date(
+							createdAt.getTime() + limits.effectiveTimeoutMs,
+						).toISOString(),
 						cwd,
 						input: JSON.parse(JSON.stringify(input)) as unknown,
-						createdAt: new Date().toISOString(),
+						createdAt: createdAt.toISOString(),
 					};
 					await WorkflowRunRecordStore.open(journal).create(record);
 					const run = await compose(record, workflow, lease, binding);

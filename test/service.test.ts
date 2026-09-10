@@ -83,7 +83,7 @@ async function workflowFixture(name = "example") {
 		definitionPath,
 		`export default {
   schema: "pi-workflow-definition",
-  meta: { name: ${JSON.stringify(name)}, description: "Service workflow", version: 1, concurrency: 4 },
+  meta: { name: ${JSON.stringify(name)}, description: "Service workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4 },
   inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
   outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
   run(ctx) { return { answer: ctx.input.value }; }
@@ -98,7 +98,7 @@ async function taskWorkflowFixture() {
 		fixture.definitionPath,
 		`export default {
   schema: "pi-workflow-definition",
-  meta: { name: "agent-task", description: "Agent task workflow", version: 1, concurrency: 4 },
+  meta: { name: "agent-task", description: "Agent task workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4 },
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
   run(ctx) {
@@ -241,6 +241,10 @@ describe("workflow service", () => {
 			projectTrusted: () => true,
 			subagents,
 			maxConcurrency: 2,
+			maxWorkflowCost: 750,
+			maxWorkflowTotalTokens: 2_000_000,
+			maxWorkflowChildRuntimeMs: 1_800_000,
+			maxWorkflowTimeoutMs: 900_000,
 		});
 		expect(await service.list()).toMatchObject([
 			{ name: "example", concurrency: 4, scope: "project" },
@@ -264,8 +268,29 @@ describe("workflow service", () => {
 				path.join(fixture.storeRoot, "runs", receipt.runId, "service.json"),
 				"utf8",
 			),
-		) as { concurrency: number };
-		expect(record.concurrency).toBe(2);
+		) as {
+			concurrency: number;
+			declaredBudget: unknown;
+			effectiveBudget: unknown;
+			declaredTimeoutMs: number;
+			effectiveTimeoutMs: number;
+			createdAt: string;
+			deadlineAt: string;
+		};
+		expect(record).toMatchObject({
+			concurrency: 2,
+			declaredBudget: { cost: 1_000, childRuntimeMs: 3_600_000 },
+			effectiveBudget: {
+				cost: 750,
+				totalTokens: 2_000_000,
+				childRuntimeMs: 1_800_000,
+			},
+			declaredTimeoutMs: 3_600_000,
+			effectiveTimeoutMs: 900_000,
+		});
+		expect(Date.parse(record.deadlineAt) - Date.parse(record.createdAt)).toBe(
+			900_000,
+		);
 		const immediate = await service.status(receipt.runId);
 		expect(["created", "running", "finalizing", "completed"]).toContain(
 			immediate.status,
@@ -279,6 +304,30 @@ describe("workflow service", () => {
 		expect(subagents.bind).toHaveBeenCalledWith(receipt.runId);
 		await service.shutdown();
 	});
+
+	it("terminalizes an expired workflow deadline", async () => {
+		const fixture = await workflowFixture("deadline");
+		await writeFile(
+			fixture.definitionPath,
+			`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "deadline", description: "Deadline workflow", version: 1, budget: { cost: 10, childRuntimeMs: 10000 }, timeoutMs: 1000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run(ctx) { return new Promise((resolve) => ctx.signal.addEventListener("abort", () => resolve({ answer: "late" }), { once: true })); }
+};\n`,
+		);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: provider(),
+		});
+		const receipt = await service.run("deadline", {});
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "cancelled",
+		});
+		await service.shutdown();
+	}, 5_000);
 
 	it("composes the full delegated task runtime through the owner client", async () => {
 		const fixture = await taskWorkflowFixture();
@@ -415,16 +464,21 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 8,
+			contractRevision: 9,
 			runId,
 			definitionName: "pending",
 			definitionPath: workflow.path,
 			definitionIdentitySha256: workflow.identity.identitySha256,
 			definitionSourceSha256: workflow.identity.sourceSha256,
 			concurrency: 4,
+			declaredBudget: { cost: 1_000, childRuntimeMs: 3_600_000 },
+			effectiveBudget: { cost: 1_000, childRuntimeMs: 3_600_000 },
+			declaredTimeoutMs: 3_600_000,
+			effectiveTimeoutMs: 3_600_000,
+			deadlineAt: "2099-09-01T01:00:00.000Z",
 			cwd: fixture.cwd,
 			input,
-			createdAt: "2026-09-01T00:00:00.000Z",
+			createdAt: "2099-09-01T00:00:00.000Z",
 		});
 		await journal.append("run-created", {
 			definitionIdentitySha256: workflow.identity.identitySha256,

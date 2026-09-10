@@ -5,7 +5,13 @@ import { defineWorkflow, isWorkflowDefinition } from "../src/definition.js";
 describe("workflow definitions", () => {
 	it("creates an immutable typed definition", () => {
 		const definition = defineWorkflow({
-			meta: { name: "example", description: "Example workflow", version: 1 },
+			meta: {
+				name: "example",
+				description: "Example workflow",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({ question: Type.String() }),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -15,6 +21,7 @@ describe("workflow definitions", () => {
 		expect(isWorkflowDefinition(definition)).toBe(true);
 		expect(Object.isFrozen(definition)).toBe(true);
 		expect(Object.isFrozen(definition.meta)).toBe(true);
+		expect(Object.isFrozen(definition.meta.budget)).toBe(true);
 		expect(definition.meta.concurrency).toBe(4);
 		expect(Object.isFrozen(definition.inputSchema)).toBe(true);
 		expect(Object.isFrozen(definition.outputSchema)).toBe(true);
@@ -23,7 +30,13 @@ describe("workflow definitions", () => {
 	it("validates repeated schema IDs without shared validator state", () => {
 		const create = () =>
 			defineWorkflow({
-				meta: { name: "schema-id", description: "Schema ID", version: 1 },
+				meta: {
+					name: "schema-id",
+					description: "Schema ID",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: { $id: "urn:test:input", type: "object" },
 				outputSchema: { $id: "urn:test:output", type: "object" },
 				run() {
@@ -41,6 +54,8 @@ describe("workflow definitions", () => {
 					name: "bounded",
 					description: "Bounded",
 					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
 					concurrency: 16,
 				},
 				inputSchema: Type.Object({}),
@@ -56,6 +71,8 @@ describe("workflow definitions", () => {
 					name: "too-concurrent",
 					description: "Invalid",
 					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
 					concurrency: 17,
 				},
 				inputSchema: Type.Object({}),
@@ -67,7 +84,13 @@ describe("workflow definitions", () => {
 		).toThrow("invalid workflow metadata");
 		expect(() =>
 			defineWorkflow({
-				meta: { name: "Invalid Name", description: "Invalid", version: 1 },
+				meta: {
+					name: "Invalid Name",
+					description: "Invalid",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: Type.Object({}),
 				outputSchema: Type.Object({}),
 				run() {
@@ -77,7 +100,13 @@ describe("workflow definitions", () => {
 		).toThrow("invalid workflow metadata");
 		expect(() =>
 			defineWorkflow({
-				meta: { name: "invalid", description: "Invalid", version: 1 },
+				meta: {
+					name: "invalid",
+					description: "Invalid",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: { type: "not-a-schema-type" },
 				outputSchema: Type.Object({}),
 				run() {
@@ -87,7 +116,13 @@ describe("workflow definitions", () => {
 		).toThrow("not a valid JSON Schema");
 		expect(() =>
 			defineWorkflow({
-				meta: { name: "missing-ref", description: "Invalid", version: 1 },
+				meta: {
+					name: "missing-ref",
+					description: "Invalid",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: { $ref: "#/missing" },
 				outputSchema: Type.Object({}),
 				run() {
@@ -98,7 +133,13 @@ describe("workflow definitions", () => {
 		expect(
 			isWorkflowDefinition({
 				schema: "pi-workflow-definition",
-				meta: { name: "invalid", description: "Invalid", version: 1 },
+				meta: {
+					name: "invalid",
+					description: "Invalid",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: () => undefined,
 				outputSchema: {},
 				run() {},
