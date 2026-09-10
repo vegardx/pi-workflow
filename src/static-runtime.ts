@@ -223,17 +223,14 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		const settled = await Promise.allSettled(
 			Array.from({ length: scheduler.concurrency }, () => scheduler.drive()),
 		);
-		const rejected = settled.find(
-			(result): result is PromiseRejectedResult => result.status === "rejected",
-		);
-		if (rejected) throw rejected.reason;
-		return settled.map((result) =>
-			result.status === "fulfilled"
-				? result.value
-				: (() => {
-						throw result.reason;
-					})(),
-		);
+		return {
+			outcomes: settled.flatMap((result) =>
+				result.status === "fulfilled" ? [result.value] : [],
+			),
+			errors: settled.flatMap((result) =>
+				result.status === "rejected" ? [result.reason] : [],
+			),
+		};
 	}
 
 	async function driveTasks(taskIds: readonly WorkflowTaskId[]): Promise<void> {
@@ -259,7 +256,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					);
 				}
 			}
-			const outcomes = await driveSchedulerBatch();
+			const { outcomes, errors } = await driveSchedulerBatch();
 			if (outcomes.every((outcome) => outcome.state === "idle")) {
 				const after = await state();
 				if (
@@ -272,6 +269,12 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				}
 			}
 			const afterOutcome = await state();
+			if (
+				afterOutcome.lastSequence === current.lastSequence &&
+				errors.length > 0
+			) {
+				throw errors[0];
+			}
 			if (
 				afterOutcome.lastSequence === current.lastSequence &&
 				pending.some(
@@ -315,8 +318,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				return;
 			}
 			const before = current.lastSequence;
-			await driveSchedulerBatch();
+			const { errors } = await driveSchedulerBatch();
 			const after = await state();
+			if (after.lastSequence === before && errors.length > 0) {
+				throw errors[0];
+			}
 			if (after.lastSequence === before) {
 				throw new StaticWorkflowRuntimeError(
 					"execution",
@@ -357,7 +363,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			);
 			if (!unsettled) return;
 			const before = current.lastSequence;
-			const outcomes = await driveSchedulerBatch();
+			const { outcomes, errors } = await driveSchedulerBatch();
 			const after = await state();
 			const terminal = outcomes.find((outcome) => outcome.state === "terminal");
 			if (terminal?.state === "terminal" && after.status !== "completed") {
@@ -365,6 +371,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					"execution",
 					`Workflow run terminated while settling its final graph: ${terminal.runStatus}.`,
 				);
+			}
+			if (after.lastSequence === before && errors.length > 0) {
+				throw errors[0];
 			}
 			if (after.lastSequence === before) {
 				throw new StaticWorkflowRuntimeError(
