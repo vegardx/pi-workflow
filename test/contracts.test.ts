@@ -69,6 +69,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features).toMatchObject({
 			staticWorkflows: true,
 			durableRuns: true,
+			parallel: true,
 			replay: true,
 			resume: false,
 		});

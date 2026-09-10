@@ -33,9 +33,10 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-2 rejects revision-1 leases, journals, snapshots, and run records; no migration
-or dual-format reader is provided. Revision 2 accepts only the declared run, workflow phase/log effect, task, artifact,
-barrier, output-commit, and task-execution events. Task-execution evidence records generation creation, the latest
+3 rejects revision-1 and revision-2 leases, journals, snapshots, and run records;
+no migration or dual-format reader is provided. Revision 3 accepts only the
+declared run, workflow phase/log effect, task, artifact, barrier, output-commit,
+and task-execution events. Task-execution evidence records generation creation, the latest
 preflight before launch intent, uncertain launch and reconciled absence or a
 launch receipt, child observation, bounded terminal child settlement, artifact
 import, release intent and receipt, and terminal outcome in that order. An
@@ -101,7 +102,7 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 2 currently admits generation 1 only; later generations
+invalidation. Revision 3 currently admits generation 1 only; later generations
 remain unavailable until transactional invalidation lands. Each agent-task
 execution generation owns one subagent run and
 contains:
