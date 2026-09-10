@@ -82,6 +82,7 @@ const BarrierReachedEventSchema = Type.Object(
 				kind: Type.Union([
 					Type.Literal("result"),
 					Type.Literal("results"),
+					Type.Literal("settled"),
 					Type.Literal("final"),
 				]),
 				taskIds: Type.Array(WorkflowTaskIdSchema, {
@@ -536,6 +537,7 @@ export const WorkflowBarrierProjectionSchema = Type.Object(
 		kind: Type.Union([
 			Type.Literal("result"),
 			Type.Literal("results"),
+			Type.Literal("settled"),
 			Type.Literal("final"),
 		]),
 		taskIds: Type.Array(WorkflowTaskIdSchema, {

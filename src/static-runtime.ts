@@ -14,6 +14,7 @@ import {
 	isArtifactHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
+	type SettledTaskResult,
 	type TaskHandle,
 	validateJsonSchemaDocument,
 	type WorkflowContext,
@@ -292,6 +293,39 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		}
 	}
 
+	async function driveSettledTasks(
+		taskIds: readonly WorkflowTaskId[],
+	): Promise<void> {
+		const terminal = new Set([
+			"completed",
+			"failed",
+			"cancelled",
+			"interrupted",
+			"blocked",
+			"cleanup-blocked",
+			"invalidated",
+		]);
+		for (;;) {
+			const current = await state();
+			if (
+				taskIds.every((taskId) =>
+					terminal.has(current.tasks[taskId]?.status ?? ""),
+				)
+			) {
+				return;
+			}
+			const before = current.lastSequence;
+			await driveSchedulerBatch();
+			const after = await state();
+			if (after.lastSequence === before) {
+				throw new StaticWorkflowRuntimeError(
+					"execution",
+					"Workflow scheduler made no durable progress toward the settled barrier.",
+				);
+			}
+		}
+	}
+
 	async function driveFinalGraph(): Promise<void> {
 		for (;;) {
 			const current = await state();
@@ -479,7 +513,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		let barrierTail = Promise.resolve();
 
 		function prepareBarrier(
-			kind: "result" | "results" | "final",
+			kind: "result" | "results" | "settled" | "final",
 			tasks: readonly TaskHandle<unknown>[],
 		): () => Promise<void> {
 			const effectPrefix = effectTail;
@@ -584,6 +618,62 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 						tasks.map((task) => loadTaskResult(task.ref.taskId)),
 					) as Promise<{
 						[K in keyof T]: T[K] extends TaskHandle<infer V> ? V : never;
+					}>;
+				});
+			},
+			settled<const T extends readonly TaskHandle<unknown>[]>(
+				tasks: T,
+			): Promise<{
+				[K in keyof T]: T[K] extends TaskHandle<infer V>
+					? SettledTaskResult<V>
+					: never;
+			}> {
+				const commit = prepareBarrier("settled", tasks);
+				return barrier(async () => {
+					await commit();
+					await driveSettledTasks(tasks.map((task) => task.ref.taskId));
+					const current = await state();
+					return Promise.all(
+						tasks.map(async (task) => {
+							const projected = current.tasks[task.ref.taskId];
+							if (projected?.status === "completed") {
+								return Object.freeze({
+									status: "fulfilled" as const,
+									value: await loadTaskResult(task.ref.taskId),
+								});
+							}
+							if (!projected) throw new Error("settled task disappeared");
+							if (
+								projected.status === "pending" ||
+								projected.status === "ready" ||
+								projected.status === "running" ||
+								projected.status === "waiting" ||
+								projected.status === "cancelling"
+							) {
+								throw new Error("settled task remained active");
+							}
+							const execution = projected.currentExecutionId
+								? current.executions[projected.currentExecutionId]
+								: undefined;
+							const evidence = execution?.terminal?.evidence;
+							const failure = evidence
+								? evidence.kind === "workflow"
+									? { message: evidence.message, code: evidence.stage }
+									: evidence.failure
+										? structuredClone(evidence.failure)
+										: undefined
+								: undefined;
+							return Object.freeze({
+								status: "rejected" as const,
+								taskId: task.ref.taskId,
+								outcome: projected.status,
+								...(failure ? { failure: Object.freeze(failure) } : {}),
+							});
+						}),
+					) as Promise<{
+						[K in keyof T]: T[K] extends TaskHandle<infer V>
+							? SettledTaskResult<V>
+							: never;
 					}>;
 				});
 			},

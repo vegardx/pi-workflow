@@ -70,6 +70,9 @@ An in-memory-only successful drive does not satisfy the first slice.
 
 ## Scheduling and control
 
+- `results()` preserves fail-fast typed tuples, while the distinct persisted
+  `settled()` barrier returns declaration-ordered fulfilled values or bounded
+  rejected task identity, outcome, and failure evidence;
 - sequential, parallel, settled-parallel, pipeline, and bounded fan-out preserve
   stable results and limits;
 - partial parallel launch failure preserves and settles every already-launched

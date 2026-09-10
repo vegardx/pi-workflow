@@ -10,6 +10,7 @@ import {
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
+	deriveWorkflowFailureSha256,
 } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
@@ -355,6 +356,150 @@ describe("static workflow runtime", () => {
 			"completed",
 		]);
 	}, 15_000);
+
+	it("returns declaration-ordered fulfilled settled results", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: { name: "settled", description: "Settled", version: 1 },
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ values: Type.Array(Type.String()) }),
+			async run(ctx) {
+				const first = ctx.agent("first", request("First"));
+				const second = ctx.agent("second", request("Second"));
+				const outcomes = await ctx.settled([first, second] as const);
+				return {
+					values: outcomes.map((outcome) =>
+						outcome.status === "fulfilled" ? outcome.value.answer : "rejected",
+					),
+				};
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(
+				journal,
+				artifacts,
+				new Map([
+					["first", { answer: "alpha" }],
+					["second", { answer: "beta" }],
+				]),
+			),
+		});
+
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { values: ["alpha", "beta"] },
+		});
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.barriers[0]?.kind).toBe("settled");
+	});
+
+	it("returns bounded rejection evidence for an optional task", async () => {
+		const { journal, artifacts } = await fixture();
+		const message = "Subagent preflight failed before launch.";
+		const scheduler: WorkflowSequentialScheduler = {
+			concurrency: 1,
+			async drive() {
+				let current = reduceWorkflowEvents(await journal.readEvents());
+				if (current.status === "created") {
+					await journal.append("run-status-changed", {
+						from: "created",
+						to: "running",
+					});
+					current = reduceWorkflowEvents(await journal.readEvents());
+				}
+				const task = Object.values(current.tasks)[0];
+				if (!task || task.status === "failed") {
+					return { state: "idle" as const, runStatus: "running" as const };
+				}
+				await journal.append("task-status-changed", {
+					taskId: task.task.id,
+					from: "pending",
+					to: "ready",
+				});
+				const executionId = deriveTaskExecutionId(
+					current.runId,
+					task.task.id,
+					1,
+				);
+				await journal.append("task-execution-created", {
+					execution: {
+						id: executionId,
+						runId: current.runId,
+						taskId: task.task.id,
+						generation: 1,
+						taskIdentitySha256: task.task.spec.identitySha256,
+						operationId: deriveSubagentOperationId(
+							current.runId,
+							task.task.id,
+							1,
+						),
+					},
+				});
+				await journal.append("task-execution-terminal", {
+					executionId,
+					outcome: "failed",
+					evidence: {
+						kind: "workflow",
+						stage: "preflight",
+						failureSha256: deriveWorkflowFailureSha256("preflight", message),
+						message,
+					},
+				});
+				await journal.append("task-status-changed", {
+					taskId: task.task.id,
+					from: "ready",
+					to: "failed",
+				});
+				return { state: "idle" as const, runStatus: "running" as const };
+			},
+			async reconcile() {
+				throw new Error("not cleanup-blocked");
+			},
+			async stop() {
+				return { state: "terminal" as const, runStatus: "cancelled" as const };
+			},
+		};
+		const definition = defineWorkflow({
+			meta: { name: "rejected", description: "Rejected", version: 1 },
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({
+				status: Type.String(),
+				message: Type.String(),
+			}),
+			async run(ctx) {
+				const task = ctx.agent("optional", {
+					...request("Optional"),
+					disposition: "optional",
+				});
+				const [outcome] = await ctx.settled([task] as const);
+				return {
+					status: outcome.status,
+					message:
+						outcome.status === "rejected"
+							? (outcome.failure?.message ?? "missing")
+							: "fulfilled",
+				};
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed-degraded",
+			value: { status: "rejected", message },
+		});
+	});
 
 	it("captures result barriers before later synchronous effects", async () => {
 		const { journal, artifacts } = await fixture();
