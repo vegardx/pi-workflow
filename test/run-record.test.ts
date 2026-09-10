@@ -37,7 +37,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 2 as const,
+			contractRevision: 3 as const,
 			runId: "workflow_record" as const,
 			definitionName: "example",
 			definitionPath: "/repo/workflows/example.workflow.ts",
@@ -60,7 +60,7 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 2,
+				contractRevision: 3,
 				runId: "workflow_record",
 				definitionName: "example",
 				definitionPath: "/repo/example.workflow.ts",
