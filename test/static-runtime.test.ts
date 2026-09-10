@@ -455,7 +455,7 @@ describe("static workflow runtime", () => {
 					from: "ready",
 					to: "failed",
 				});
-				return { state: "idle" as const, runStatus: "running" as const };
+				throw new Error("preflight failed after durable task failure");
 			},
 			async reconcile() {
 				throw new Error("not cleanup-blocked");

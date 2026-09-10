@@ -54,6 +54,7 @@ own publication, push, pull-request, merge, release, or deployment policy.
 - [macOS arm64 Phase 1 qualification](docs/qualification/macos-arm64-phase1.md)
 - [macOS arm64 artifact pipeline qualification](docs/qualification/macos-arm64-artifact-pipeline.md)
 - [macOS arm64 bounded parallel qualification](docs/qualification/macos-arm64-parallel.md)
+- [macOS arm64 settled-result qualification](docs/qualification/macos-arm64-settled.md)
 
 ## Dependency
 
