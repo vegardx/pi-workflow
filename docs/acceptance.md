@@ -85,7 +85,12 @@ An in-memory-only successful drive does not satisfy the first slice.
 - child retry and resume record fresh attempts under the existing workflow task
   execution, while explicit invalidation creates a new execution generation,
   preflight, operation ID, and child run;
-- run/task budgets survive restart and retry;
+- declared and effective workflow budgets plus the absolute deadline survive
+  restart;
+- task admission reserves declared maxima against settled usage and active
+  reservations before launch;
+- incomplete usage stops further spending, post-settlement overage fails the
+  run, and deadline expiry uses normal stop/drain semantics;
 - optional task disposition is persisted and identity-bound; optional task or
   advisory-finalizer failure is eligible for `completed-degraded` only after all
   required work succeeds;

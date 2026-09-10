@@ -9,6 +9,7 @@ import {
 	WORKFLOW_CONTRACT_REVISION,
 	WorkflowRunIdSchema,
 } from "./contracts.js";
+import { WorkflowBudgetSchema } from "./definition.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 
 const MAX_RUN_RECORD_BYTES = 1024 * 1024;
@@ -30,6 +31,17 @@ export const WorkflowRunRecordSchema = Type.Object(
 			minimum: 1,
 			maximum: MAX_WORKFLOW_CONCURRENCY,
 		}),
+		declaredBudget: WorkflowBudgetSchema,
+		effectiveBudget: WorkflowBudgetSchema,
+		declaredTimeoutMs: Type.Integer({
+			minimum: 1_000,
+			maximum: 365 * 24 * 60 * 60 * 1_000,
+		}),
+		effectiveTimeoutMs: Type.Integer({
+			minimum: 1_000,
+			maximum: 365 * 24 * 60 * 60 * 1_000,
+		}),
+		deadlineAt: Type.String({ format: "date-time" }),
 		cwd: Type.String({ minLength: 1, maxLength: 4096 }),
 		input: Type.Unknown(),
 		createdAt: Type.String({ format: "date-time" }),
@@ -43,6 +55,24 @@ export class WorkflowRunRecordError extends Error {
 		super(message, options);
 		this.name = "WorkflowRunRecordError";
 	}
+}
+
+function hasValidLimits(record: WorkflowRunRecord): boolean {
+	const createdAt = Date.parse(record.createdAt);
+	const deadlineAt = Date.parse(record.deadlineAt);
+	return (
+		Number.isFinite(createdAt) &&
+		Number.isFinite(deadlineAt) &&
+		deadlineAt - createdAt === record.effectiveTimeoutMs &&
+		record.effectiveTimeoutMs <= record.declaredTimeoutMs &&
+		record.effectiveBudget.cost <= record.declaredBudget.cost &&
+		record.effectiveBudget.childRuntimeMs <=
+			record.declaredBudget.childRuntimeMs &&
+		(record.declaredBudget.totalTokens === undefined ||
+			(record.effectiveBudget.totalTokens !== undefined &&
+				record.effectiveBudget.totalTokens <=
+					record.declaredBudget.totalTokens))
+	);
 }
 
 function serialize(record: WorkflowRunRecord): string {
@@ -125,6 +155,7 @@ export class WorkflowRunRecordStore {
 	async create(record: WorkflowRunRecord): Promise<void> {
 		if (
 			!Value.Check(WorkflowRunRecordSchema, record) ||
+			!hasValidLimits(record) ||
 			record.runId !== this.journal.runId ||
 			!path.isAbsolute(record.definitionPath) ||
 			!path.isAbsolute(record.cwd)
@@ -173,6 +204,7 @@ export class WorkflowRunRecordStore {
 		}
 		if (
 			!Value.Check(WorkflowRunRecordSchema, value) ||
+			!hasValidLimits(value as WorkflowRunRecord) ||
 			value.runId !== this.journal.runId ||
 			!path.isAbsolute(value.definitionPath) ||
 			!path.isAbsolute(value.cwd)

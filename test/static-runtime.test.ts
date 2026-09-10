@@ -264,7 +264,13 @@ describe("static workflow runtime", () => {
 		const { journal, artifacts } = await fixture();
 		let calls = 0;
 		const definition = defineWorkflow({
-			meta: { name: "concrete", description: "Concrete", version: 1 },
+			meta: {
+				name: "concrete",
+				description: "Concrete",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({ value: Type.String() }),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -308,7 +314,13 @@ describe("static workflow runtime", () => {
 	it("executes and replays a result-dependent branch", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "branch", description: "Branch", version: 1 },
+			meta: {
+				name: "branch",
+				description: "Branch",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			async run(ctx) {
@@ -360,7 +372,13 @@ describe("static workflow runtime", () => {
 	it("returns declaration-ordered fulfilled settled results", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "settled", description: "Settled", version: 1 },
+			meta: {
+				name: "settled",
+				description: "Settled",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ values: Type.Array(Type.String()) }),
 			async run(ctx) {
@@ -413,7 +431,13 @@ describe("static workflow runtime", () => {
 	it("materializes a namespace-scoped pipeline with explicit artifact flow", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "pipeline", description: "Pipeline", version: 1 },
+			meta: {
+				name: "pipeline",
+				description: "Pipeline",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -462,7 +486,13 @@ describe("static workflow runtime", () => {
 		for (const kind of ["oversized", "foreign"] as const) {
 			const { journal, artifacts } = await fixture();
 			const definition = defineWorkflow({
-				meta: { name: `pipeline-${kind}`, description: "Invalid", version: 1 },
+				meta: {
+					name: `pipeline-${kind}`,
+					description: "Invalid",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: Type.Object({}),
 				outputSchema: Type.Object({ answer: Type.String() }),
 				run(ctx) {
@@ -499,7 +529,13 @@ describe("static workflow runtime", () => {
 	it("materializes bounded fan-in with explicit named artifact inputs", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "fan-in", description: "Fan in", version: 1 },
+			meta: {
+				name: "fan-in",
+				description: "Fan in",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -548,7 +584,13 @@ describe("static workflow runtime", () => {
 		for (const kind of ["empty", "duplicate"] as const) {
 			const { journal, artifacts } = await fixture();
 			const definition = defineWorkflow({
-				meta: { name: `fan-in-${kind}`, description: "Invalid", version: 1 },
+				meta: {
+					name: `fan-in-${kind}`,
+					description: "Invalid",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
 				inputSchema: Type.Object({}),
 				outputSchema: Type.Object({}),
 				run(ctx) {
@@ -584,7 +626,13 @@ describe("static workflow runtime", () => {
 	it("rejects oversized fan-out before task materialization", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "fan-out-bound", description: "Bound", version: 1 },
+			meta: {
+				name: "fan-out-bound",
+				description: "Bound",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({}),
 			run(ctx) {
@@ -681,7 +729,13 @@ describe("static workflow runtime", () => {
 			},
 		};
 		const definition = defineWorkflow({
-			meta: { name: "rejected", description: "Rejected", version: 1 },
+			meta: {
+				name: "rejected",
+				description: "Rejected",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({
 				status: Type.String(),
@@ -720,7 +774,13 @@ describe("static workflow runtime", () => {
 	it("captures result barriers before later synchronous effects", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "ordering", description: "Ordering", version: 1 },
+			meta: {
+				name: "ordering",
+				description: "Ordering",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			async run(ctx) {
@@ -756,7 +816,13 @@ describe("static workflow runtime", () => {
 	it("settles declared final-epoch work before concrete completion", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "effects-only", description: "Effects only", version: 1 },
+			meta: {
+				name: "effects-only",
+				description: "Effects only",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -792,7 +858,13 @@ describe("static workflow runtime", () => {
 		const { journal, artifacts } = await fixture();
 		let goal = "Original";
 		const definition = defineWorkflow({
-			meta: { name: "drift", description: "Drift", version: 1 },
+			meta: {
+				name: "drift",
+				description: "Drift",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -824,7 +896,13 @@ describe("static workflow runtime", () => {
 		const { journal, artifacts } = await fixture();
 		let answer = "first";
 		const definition = defineWorkflow({
-			meta: { name: "output", description: "Output", version: 1 },
+			meta: {
+				name: "output",
+				description: "Output",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({ value: Type.String() }),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run() {
@@ -868,7 +946,13 @@ describe("static workflow runtime", () => {
 		const { journal, artifacts } = await fixture();
 		let includeLog = true;
 		const definition = defineWorkflow({
-			meta: { name: "effects", description: "Effects", version: 1 },
+			meta: {
+				name: "effects",
+				description: "Effects",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run(ctx) {
@@ -894,7 +978,13 @@ describe("static workflow runtime", () => {
 	it("persists fresh source failure without exposing its raw error", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "failure", description: "Failure", version: 1 },
+			meta: {
+				name: "failure",
+				description: "Failure",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run() {
@@ -925,7 +1015,13 @@ describe("static workflow runtime", () => {
 		const inputSha256 = deriveJsonValueSha256(input);
 		const outputSchema = Type.Object({ answer: Type.String() });
 		const definition = defineWorkflow({
-			meta: { name: "repair", description: "Repair", version: 1 },
+			meta: {
+				name: "repair",
+				description: "Repair",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema,
 			run() {
@@ -982,7 +1078,13 @@ describe("static workflow runtime", () => {
 	it("serializes concurrent source drives", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({
-			meta: { name: "serial", description: "Serial", version: 1 },
+			meta: {
+				name: "serial",
+				description: "Serial",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
 			inputSchema: Type.Object({}),
 			outputSchema: Type.Object({ answer: Type.String() }),
 			run() {

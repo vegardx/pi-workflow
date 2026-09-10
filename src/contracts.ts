@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 8 as const;
+export const WORKFLOW_CONTRACT_REVISION = 9 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 

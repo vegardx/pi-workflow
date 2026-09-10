@@ -25,10 +25,26 @@ import {
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
+const MAX_WORKFLOW_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
 const taskHandleBrand: unique symbol = Symbol("pi-workflow-task-handle");
 const artifactHandleBrand: unique symbol = Symbol(
 	"pi-workflow-artifact-handle",
 );
+
+export const WorkflowBudgetSchema = Type.Object(
+	{
+		cost: Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+		totalTokens: Type.Optional(
+			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		),
+		childRuntimeMs: Type.Integer({
+			minimum: 1_000,
+			maximum: MAX_WORKFLOW_DURATION_MS,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowBudget = Static<typeof WorkflowBudgetSchema>;
 
 const WorkflowMetaInputSchema = Type.Object(
 	{
@@ -39,6 +55,11 @@ const WorkflowMetaInputSchema = Type.Object(
 		}),
 		description: Type.String({ minLength: 1, maxLength: 1024 }),
 		version: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		budget: WorkflowBudgetSchema,
+		timeoutMs: Type.Integer({
+			minimum: 1_000,
+			maximum: MAX_WORKFLOW_DURATION_MS,
+		}),
 		concurrency: Type.Optional(
 			Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_CONCURRENCY }),
 		),
@@ -282,8 +303,9 @@ export function defineWorkflow<
 	}
 	return Object.freeze({
 		schema: "pi-workflow-definition" as const,
-		meta: Object.freeze({
+		meta: deepFreeze({
 			...options.meta,
+			budget: { ...options.meta.budget },
 			concurrency: options.meta.concurrency ?? DEFAULT_WORKFLOW_CONCURRENCY,
 		}),
 		inputSchema,

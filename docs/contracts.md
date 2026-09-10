@@ -17,6 +17,8 @@ export default defineWorkflow({
 		name: "example",
 		description: "Example workflow",
 		version: 1,
+		budget: { cost: 25, childRuntimeMs: 900_000 },
+		timeoutMs: 1_800_000,
 	},
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
@@ -47,6 +49,12 @@ interface WorkflowDefinition<TInput, TOutput> {
 		name: string;
 		description: string;
 		version: number;
+		budget: {
+			cost: number; // provider-reported dollars
+			totalTokens?: number; // all model traffic, including cache
+			childRuntimeMs: number; // cumulative settled child runtime
+		};
+		timeoutMs: number; // workflow wall-clock deadline
 		concurrency?: number;
 	};
 	inputSchema: JsonSchema<TInput>;
@@ -62,7 +70,24 @@ type WorkflowReturn<T> = T | TaskHandle<T> | ArtifactHandle<T>;
 Concurrency defaults to 4 and has a hard maximum of 16. The workflow service
 may lower the effective value but never raise the definition grant; the
 effective value is persisted in the immutable run record before source
-execution.
+execution. Every definition also declares independent cost, cumulative
+child-runtime, and wall-clock limits; an all-traffic token guard is optional.
+The service defaults to a $1,000 maximum workflow cost. Embedders may lower
+cost, total-token, child-runtime, and timeout limits. Declared and effective
+limits plus the absolute deadline are persisted before execution. Before each launch, admission
+requires:
+
+```text
+settled usage + active declared reservations + candidate declared maximum
+  <= effective workflow budget
+```
+
+A configured workflow token budget therefore requires every admitted task to
+declare `totalTokens`. Active reservations defer otherwise admissible work;
+settled usage replaces each reservation. Incomplete usage evidence stops further
+spending. Provider cost can still overshoot by one in-flight model response, so
+a post-settlement overage fails the workflow. Reaching the persisted deadline
+runs the normal stop/drain path; uncertain cleanup remains `cleanup-blocked`.
 
 Inputs are validated before a run is created. The final value is validated and
 committed as a provenance-bound workflow-owned artifact through a durable
@@ -70,7 +95,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 8 identities cover the complete definition module but not a
+Contract revision 9 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than
