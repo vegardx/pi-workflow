@@ -118,10 +118,12 @@ Phase 3 adds subagent retry/resume attempts and control receipts to the existing
 task execution. A new execution generation requires a new preflight, operation
 ID, launch intent, and subagent run.
 
-No persisted `running` field proves that a scheduler or child still exists.
-The sequential scheduler reselects work from the journal after every restart.
-Scheduler mutations are serialized process-wide per canonical run directory, in
-addition to lease fencing and journal append serialization. It persists
+No persisted `running` field proves that a scheduler or child still exists. The
+bounded scheduler reselects work and reconstructs active concurrency slots from
+the journal after every restart. Scheduler selection and mutations are serialized
+process-wide per canonical run directory, while admitted child waits run outside
+that queue and settle independently under lease fencing and journal append
+serialization. It persists
 readiness before launch and stores a bounded child settlement digest,
 status, usage, cleanup, failure, and artifact-reference projection without raw
 model output, session paths, or JavaScript promises. Completed child settlement

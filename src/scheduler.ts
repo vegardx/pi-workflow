@@ -77,6 +77,7 @@ export type WorkflowSchedulerOutcome =
 	  };
 
 export interface WorkflowSequentialScheduler {
+	readonly concurrency: number;
 	drive(): Promise<WorkflowSchedulerOutcome>;
 	reconcile(taskId: WorkflowTaskId): Promise<WorkflowSchedulerOutcome>;
 	stop(reason: string): Promise<WorkflowSchedulerOutcome>;
@@ -87,6 +88,7 @@ export interface WorkflowSequentialSchedulerOptions {
 	readonly binding: WorkflowSubagentBinding;
 	readonly launcher?: WorkflowTaskLauncher;
 	readonly finalizer?: WorkflowTaskFinalizer;
+	readonly concurrency?: number;
 }
 
 export class WorkflowSchedulerError extends Error {
@@ -226,6 +228,19 @@ export function createWorkflowSequentialScheduler(
 	options: WorkflowSequentialSchedulerOptions,
 ): WorkflowSequentialScheduler {
 	const { binding, finalizer, journal } = options;
+	const concurrency = options.concurrency ?? 1;
+	if (
+		!Number.isSafeInteger(concurrency) ||
+		concurrency < 1 ||
+		concurrency > 16
+	) {
+		throw new WorkflowSchedulerError(
+			"validation",
+			"Workflow scheduler concurrency limit is invalid.",
+		);
+	}
+	const busy = new Set<WorkflowTaskId>();
+	const interrupting = new Set<WorkflowTaskId>();
 	const launcher =
 		options.launcher ?? createWorkflowTaskLauncher({ binding, journal });
 	const coordinationKey = journal.directory;
@@ -418,15 +433,8 @@ export function createWorkflowSequentialScheduler(
 				ACTIVE_TASK_STATUSES.has(task.status) &&
 				executionFor(current, task)?.launchReceipt !== undefined,
 		);
-		if (active.length > 1) {
-			throw new WorkflowSchedulerError(
-				"selection",
-				"Sequential workflow has more than one launched task.",
-			);
-		}
-
-		let selected = active[0];
-		if (!selected) {
+		let selected = active.find((task) => !busy.has(task.task.id));
+		if (!selected && active.length < concurrency) {
 			selected = orderedTasks(current).find((task) => {
 				if (task.status === "ready") return true;
 				return (
@@ -473,6 +481,7 @@ export function createWorkflowSequentialScheduler(
 					"Settled workflow task has no persisted child receipt.",
 				);
 			}
+			busy.add(selected.task.id);
 			return {
 				state: "awaiting-finalization",
 				runStatus: current.status,
@@ -561,6 +570,7 @@ export function createWorkflowSequentialScheduler(
 		if (isTerminalChildStatus(effectiveReceipt.status)) {
 			await observeReceipt(normalizedExecution, effectiveReceipt);
 		}
+		busy.add(selected.task.id);
 		return { state: "wait", taskId: selected.task.id, receipt: launch.receipt };
 	}
 
@@ -698,13 +708,22 @@ export function createWorkflowSequentialScheduler(
 		if (prepared.state === "stopping") {
 			return stop("Resume persisted workflow stop intent.");
 		}
-		if (prepared.state === "awaiting-finalization") {
-			return continueAfterFinalization(prepared);
+		if (
+			prepared.state !== "wait" &&
+			prepared.state !== "awaiting-finalization"
+		) {
+			return prepared;
 		}
-		if (prepared.state !== "wait") return prepared;
-		return continueAfterFinalization(
-			await settle(prepared.taskId, prepared.receipt),
-		);
+		try {
+			if (prepared.state === "awaiting-finalization") {
+				return await continueAfterFinalization(prepared);
+			}
+			return await continueAfterFinalization(
+				await settle(prepared.taskId, prepared.receipt),
+			);
+		} finally {
+			busy.delete(prepared.taskId);
+		}
 	}
 
 	async function reconcile(
@@ -787,13 +806,10 @@ export function createWorkflowSequentialScheduler(
 						execution.phase === "launch-absent")
 				);
 			});
-			if (active.length > 1) {
-				throw new WorkflowSchedulerError(
-					"stop",
-					"Sequential workflow has more than one unsettled child.",
-				);
+			let selected = active.find((task) => !interrupting.has(task.task.id));
+			if (!selected && active.length > 0) {
+				return { state: "stopping", runStatus: "stopping" } as const;
 			}
-			let selected = active[0];
 			const pendingFinalization = orderedTasks(current).find(
 				(task) => executionFor(current, task)?.settlement,
 			);
@@ -894,6 +910,7 @@ export function createWorkflowSequentialScheduler(
 			if (interruptReceipt.status !== receipt.status) {
 				await observeReceipt(refreshedExecution, interruptReceipt);
 			}
+			interrupting.add(selected.task.id);
 			return {
 				state: "wait",
 				taskId: selected.task.id,
@@ -904,10 +921,14 @@ export function createWorkflowSequentialScheduler(
 			return continueAfterFinalization(prepared);
 		}
 		if (prepared.state !== "wait") return prepared;
-		return continueAfterFinalization(
-			await settle(prepared.taskId, prepared.receipt),
-		);
+		try {
+			return await continueAfterFinalization(
+				await settle(prepared.taskId, prepared.receipt),
+			);
+		} finally {
+			interrupting.delete(prepared.taskId);
+		}
 	}
 
-	return Object.freeze({ drive, reconcile, stop });
+	return Object.freeze({ concurrency, drive, reconcile, stop });
 }

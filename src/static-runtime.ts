@@ -218,6 +218,23 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		return jsonCloneFrozen(value, "Workflow task result");
 	}
 
+	async function driveSchedulerBatch() {
+		const settled = await Promise.allSettled(
+			Array.from({ length: scheduler.concurrency }, () => scheduler.drive()),
+		);
+		const rejected = settled.find(
+			(result): result is PromiseRejectedResult => result.status === "rejected",
+		);
+		if (rejected) throw rejected.reason;
+		return settled.map((result) =>
+			result.status === "fulfilled"
+				? result.value
+				: (() => {
+						throw result.reason;
+					})(),
+		);
+	}
+
 	async function driveTasks(taskIds: readonly WorkflowTaskId[]): Promise<void> {
 		for (;;) {
 			const current = await state();
@@ -241,8 +258,8 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					);
 				}
 			}
-			const outcome = await scheduler.drive();
-			if (outcome.state === "idle") {
+			const outcomes = await driveSchedulerBatch();
+			if (outcomes.every((outcome) => outcome.state === "idle")) {
 				const after = await state();
 				if (
 					pending.every((taskId) => after.tasks[taskId]?.status !== "completed")
@@ -265,10 +282,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					"Workflow scheduler made no durable progress toward the result barrier.",
 				);
 			}
-			if (outcome.state === "terminal") {
+			const terminal = outcomes.find((outcome) => outcome.state === "terminal");
+			if (terminal?.state === "terminal") {
 				throw new StaticWorkflowRuntimeError(
 					"execution",
-					`Workflow run terminated before its result barrier: ${outcome.runStatus}.`,
+					`Workflow run terminated before its result barrier: ${terminal.runStatus}.`,
 				);
 			}
 		}
@@ -305,12 +323,13 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			);
 			if (!unsettled) return;
 			const before = current.lastSequence;
-			const outcome = await scheduler.drive();
+			const outcomes = await driveSchedulerBatch();
 			const after = await state();
-			if (outcome.state === "terminal" && after.status !== "completed") {
+			const terminal = outcomes.find((outcome) => outcome.state === "terminal");
+			if (terminal?.state === "terminal" && after.status !== "completed") {
 				throw new StaticWorkflowRuntimeError(
 					"execution",
-					`Workflow run terminated while settling its final graph: ${outcome.runStatus}.`,
+					`Workflow run terminated while settling its final graph: ${terminal.runStatus}.`,
 				);
 			}
 			if (after.lastSequence === before) {

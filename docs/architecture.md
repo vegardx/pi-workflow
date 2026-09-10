@@ -95,10 +95,15 @@ runtime has persisted:
 - exact subagent preflight identity;
 - launch intent and deterministic operation ID.
 
-The initial scheduler is deliberately sequential. It derives readiness and
-failed-dependency blocking from committed journal state, persists task readiness
-before launch, and persists bounded terminal child evidence after `wait`. It
-does not treat an in-memory wait promise as authority. Artifact import and child release are required later phases of the same
+The scheduler derives readiness and failed-dependency blocking from committed
+journal state and admits independent tasks up to the immutable effective run
+concurrency. Selection and journal mutation remain serialized in materialization
+order; child waits occur outside that queue and may complete in any order. A
+process-local claim prevents one scheduler instance from waiting on the same
+child twice. Restart discards those claims and reconstructs active children from
+durable launch receipts. Stop intent remains durable before child interruption
+and drains multiple active children through the same settlement and finalization
+path. It does not treat an in-memory wait promise as authority. Artifact import and child release are required later phases of the same
 execution lifecycle, so child settlement alone cannot complete a task. The
 workflow store imports schema-validated structured output as canonical JSON,
 binds its provenance into artifact identity, persists import evidence, and then
