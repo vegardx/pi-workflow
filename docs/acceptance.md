@@ -76,6 +76,8 @@ An in-memory-only successful drive does not satisfy the first slice.
   sibling before the source runtime propagates the batch failure;
 - fatal cancellation and explicit stop drain every concurrently active child to
   terminal settlement and release evidence without duplicate interruption;
+- an interrupt failure leaves the run durably `stopping`, preserves sibling
+  evidence, and permits explicit stop retry without inventing cancellation;
 - checkpoint waits can be stopped and resumed;
 - child retry and resume record fresh attempts under the existing workflow task
   execution, while explicit invalidation creates a new execution generation,

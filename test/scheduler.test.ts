@@ -722,6 +722,79 @@ describe("durable sequential scheduler", () => {
 		]);
 	}, 15_000);
 
+	it("keeps parallel stop action-required after one interrupt fails", async () => {
+		const { journal } = await fixture((materializer) => [
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const pending = [
+			deferred<ReturnType<typeof executionResult>>(),
+			deferred<ReturnType<typeof executionResult>>(),
+		];
+		const wait = vi.fn((runId: string) => {
+			const value = pending[Number(runId.at(-1))];
+			if (!value) throw new Error("unexpected child");
+			return value.promise;
+		});
+		const harness = concurrentClient("interrupt", wait);
+		let interruptCalls = 0;
+		const interrupt = vi.fn(async (runId: string) => {
+			interruptCalls += 1;
+			if (interruptCalls === 1) throw new Error("interrupt unavailable");
+			const index = Number(runId.at(-1));
+			pending[index]?.resolve(
+				executionResult({ ...result("cancelled"), runId }),
+			);
+			return {
+				runId,
+				attemptId: `attempt_interrupt${index}`,
+				status: "stopping" as const,
+			};
+		});
+		const release = vi.fn(async (runId: string) => ({
+			runId,
+			attemptId: `attempt_interrupt${Number(runId.at(-1))}`,
+			status: "cancelled" as const,
+		}));
+		const ownerClient = harness.ownerClient;
+		vi.mocked(ownerClient.interrupt).mockImplementation(interrupt);
+		vi.mocked(ownerClient.release).mockImplementation(release);
+		const ownerBinding = binding(ownerClient);
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			finalizer,
+			concurrency: 2,
+		});
+		const drives = [scheduler.drive(), scheduler.drive()];
+		while (wait.mock.calls.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+
+		await expect(scheduler.stop("operator stop")).rejects.toMatchObject({
+			stage: "stop",
+		});
+		const blocked = await projection(journal);
+		expect(blocked.status).toBe("stopping");
+		expect(Object.values(blocked.tasks).map((task) => task.status)).toEqual([
+			"cancelling",
+			"running",
+		]);
+		await expect(scheduler.stop("retry stop")).resolves.toMatchObject({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		await Promise.allSettled(drives);
+		expect(interrupt).toHaveBeenCalledTimes(3);
+		expect(release).toHaveBeenCalledTimes(2);
+	}, 15_000);
+
 	it("replays a settled task without relaunching or waiting again", async () => {
 		const { journal } = await fixture();
 		const ownerClient = client();
