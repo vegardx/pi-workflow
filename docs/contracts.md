@@ -70,7 +70,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 5 identities cover the complete definition module but not a
+Contract revision 6 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than
@@ -141,6 +141,14 @@ interface WorkflowContext<TInput> {
 			task(item: TItem, index: number): AgentTask<T>;
 		},
 	): readonly TaskHandle<T>[];
+	fanIn<TSource, T>(
+		key: string,
+		sources: readonly TaskHandle<TSource>[],
+		options: {
+			inputKey(source: TaskHandle<TSource>, index: number): string;
+			task: AgentTask<T>;
+		},
+	): TaskHandle<T>;
 	support<T>(key: string, request: SupportTask<T>): TaskHandle<T>;
 	workflow<T>(key: string, request: NestedWorkflowTask<T>): TaskHandle<T>;
 	checkpoint<T>(key: string, request: CheckpointRequest<T>): TaskHandle<T>;
@@ -166,8 +174,14 @@ item key and task factory; returned handles preserve input order. Namespace and
 item keys participate in task identity, duplicate keys fail before an execution
 barrier, and restart must reproduce the exact declaration prefix.
 
-Pipelines, fan-in, and settled-parallel are typed authoring helpers that
-materialize ordinary task nodes and dependencies. They are not separate
+`ctx.fanIn(key, sources, options)` materializes one ordinary aggregate agent
+from 1 to 64 source handles. The input-key callback must return unique stable
+names; each source output becomes an explicit named artifact input and therefore
+an order dependency. The supplied aggregate request may not define a competing
+`inputs` field.
+
+Pipelines and settled-parallel are typed authoring helpers that materialize
+ordinary task nodes and dependencies. They are not separate
 execution runtimes.
 
 ## Materialized task graph

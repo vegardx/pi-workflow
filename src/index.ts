@@ -62,6 +62,7 @@ export {
 	type AgentTaskAuthoringRequest,
 	type ArtifactHandle,
 	defineWorkflow,
+	type FanInOptions,
 	type FanOutOptions,
 	isArtifactHandle,
 	isTaskHandle,

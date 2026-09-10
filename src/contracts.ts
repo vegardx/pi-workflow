@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 5 as const;
+export const WORKFLOW_CONTRACT_REVISION = 6 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 
@@ -340,6 +340,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				parallel: Type.Boolean(),
 				settledResults: Type.Boolean(),
 				fanOut: Type.Boolean(),
+				fanIn: Type.Boolean(),
 				pipelines: Type.Boolean(),
 				resume: Type.Boolean(),
 				replay: Type.Boolean(),
@@ -392,6 +393,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			parallel: true,
 			settledResults: true,
 			fanOut: true,
+			fanIn: true,
 			pipelines: false,
 			resume: false,
 			replay: true,
