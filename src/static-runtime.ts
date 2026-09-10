@@ -642,6 +642,41 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				});
 				return Object.freeze(created);
 			},
+			fanIn(key, sources, options) {
+				if (sources.length < 1 || sources.length > 64) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow fan-in requires 1 to 64 sources.",
+					);
+				}
+				if (
+					!options ||
+					typeof options.inputKey !== "function" ||
+					!options.task ||
+					Object.hasOwn(options.task, "inputs")
+				) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow fan-in options are invalid.",
+					);
+				}
+				const entries = sources.map(
+					(source, index) =>
+						[options.inputKey(source, index), source.output] as const,
+				);
+				if (new Set(entries.map(([name]) => name)).size !== entries.length) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow fan-in input keys must be unique.",
+					);
+				}
+				const handle = materializer.agent(key, {
+					...options.task,
+					inputs: Object.fromEntries(entries),
+				});
+				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+				return handle;
+			},
 			result<T>(task: TaskHandle<T>): Promise<T> {
 				const commit = prepareBarrier("result", [task]);
 				return barrier(async () => {

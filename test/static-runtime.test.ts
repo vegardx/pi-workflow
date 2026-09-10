@@ -410,6 +410,91 @@ describe("static workflow runtime", () => {
 		).toEqual([["items"], ["items"]]);
 	});
 
+	it("materializes bounded fan-in with explicit named artifact inputs", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: { name: "fan-in", description: "Fan in", version: 1 },
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				const sources = ctx.fanOut("items", ["first", "second"], {
+					key: (item) => item,
+					task: (item) => request(item),
+				});
+				return ctx.fanIn("aggregate", sources, {
+					inputKey: (_, index) => `item-${index}`,
+					task: request("Aggregate"),
+				});
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(
+				journal,
+				artifacts,
+				new Map([
+					["first", { answer: "alpha" }],
+					["second", { answer: "beta" }],
+					["aggregate", { answer: "combined" }],
+				]),
+			),
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { answer: "combined" },
+		});
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const aggregate = Object.values(state.tasks).find(
+			(task) => task.task.spec.key === "aggregate",
+		)?.task;
+		expect(Object.keys(aggregate?.spec.inputs ?? {})).toEqual([
+			"item-0",
+			"item-1",
+		]);
+		expect(aggregate?.spec.after).toHaveLength(2);
+	});
+
+	it("rejects empty and duplicate-key fan-in before its barrier", async () => {
+		for (const kind of ["empty", "duplicate"] as const) {
+			const { journal, artifacts } = await fixture();
+			const definition = defineWorkflow({
+				meta: { name: `fan-in-${kind}`, description: "Invalid", version: 1 },
+				inputSchema: Type.Object({}),
+				outputSchema: Type.Object({}),
+				run(ctx) {
+					const sources =
+						kind === "empty"
+							? []
+							: [ctx.agent("first", request()), ctx.agent("second", request())];
+					ctx.fanIn("aggregate", sources, {
+						inputKey: () => "duplicate",
+						task: request("Aggregate"),
+					});
+					return {};
+				},
+			});
+			const runtime = createStaticWorkflowRuntime({
+				definition,
+				definitionIdentitySha256,
+				input: {},
+				cwd: "/repo",
+				journal,
+				artifacts,
+				scheduler: schedulerFor(journal, artifacts, new Map()),
+			});
+			await expect(runtime.drive()).rejects.toMatchObject({
+				stage: "execution",
+			});
+			expect(
+				Object.keys(reduceWorkflowEvents(await journal.readEvents()).tasks),
+			).toHaveLength(0);
+		}
+	});
+
 	it("rejects oversized fan-out before task materialization", async () => {
 		const { journal, artifacts } = await fixture();
 		const definition = defineWorkflow({

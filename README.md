@@ -56,6 +56,7 @@ own publication, push, pull-request, merge, release, or deployment policy.
 - [macOS arm64 bounded parallel qualification](docs/qualification/macos-arm64-parallel.md)
 - [macOS arm64 settled-result qualification](docs/qualification/macos-arm64-settled.md)
 - [macOS arm64 bounded fan-out qualification](docs/qualification/macos-arm64-fan-out.md)
+- [macOS arm64 bounded fan-in qualification](docs/qualification/macos-arm64-fan-in.md)
 
 ## Dependency
 
