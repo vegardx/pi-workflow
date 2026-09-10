@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 7 as const;
+export const WORKFLOW_CONTRACT_REVISION = 8 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 
@@ -357,7 +357,7 @@ export type WorkflowRuntimeContract = Static<
 
 const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 	schema: "pi-subagent-runtime",
-	contractRevision: 4,
+	contractRevision: 5,
 	features: Object.freeze({
 		nativeSessionBackend: true,
 		gondolinSandbox: true,
@@ -371,6 +371,7 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		resume: true,
 		classifiedFailures: true,
 		cumulativeRuntimeBudget: true,
+		costFirstBudgets: true,
 		retryBackoff: true,
 		deepReconciliation: true,
 		worktrees: true,

@@ -49,9 +49,9 @@ function request() {
 		workspace: { mode: "read-only" as const, cwd: "/repo" },
 		outputSchema: Type.Object({ answer: Type.String() }),
 		limits: {
-			runtimeMs: 300_000,
-			attemptRuntimeMs: 300_000,
-			tokens: 1_000_000,
+			cumulativeRuntimeMs: 300_000,
+			attemptTimeoutMs: 300_000,
+			totalTokens: 1_000_000,
 			cost: 100,
 			outputBytes: 1_048_576,
 			workspaceWriteBytes: 0,
@@ -76,7 +76,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 7,
+		contractRevision: 8,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",

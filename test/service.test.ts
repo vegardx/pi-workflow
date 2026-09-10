@@ -111,7 +111,7 @@ async function taskWorkflowFixture() {
       contextScopes: ["project"],
       workspace: { mode: "read-only", cwd: ctx.cwd },
       outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
-      limits: { runtimeMs: 300000, attemptRuntimeMs: 300000, tokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 0, retries: 0, resumes: 0 }
+      limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 0, retries: 0, resumes: 0 }
     });
   }
 };\n`,
@@ -415,7 +415,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 7,
+			contractRevision: 8,
 			runId,
 			definitionName: "pending",
 			definitionPath: workflow.path,
