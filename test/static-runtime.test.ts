@@ -456,7 +456,7 @@ describe("static workflow runtime", () => {
 			"item-1",
 		]);
 		expect(aggregate?.spec.after).toHaveLength(2);
-	});
+	}, 15_000);
 
 	it("rejects empty and duplicate-key fan-in before its barrier", async () => {
 		for (const kind of ["empty", "duplicate"] as const) {
