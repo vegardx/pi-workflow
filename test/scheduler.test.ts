@@ -404,6 +404,79 @@ describe("durable sequential scheduler", () => {
 		expect(ownerClient.release).toHaveBeenCalledOnce();
 	});
 
+	it("launches two independent tasks before either child settles", async () => {
+		const { journal } = await fixture((materializer) => [
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+			materializer.agent("third", request()),
+		]);
+		const pending = [
+			deferred<ReturnType<typeof executionResult>>(),
+			deferred<ReturnType<typeof executionResult>>(),
+		];
+		const grants = new Map<string, SubagentPreflight>();
+		let ordinal = 0;
+		const preflightCall = vi.fn(async (input: SubagentRequest) => {
+			const index = ordinal++;
+			const original = launchPlan(input, "pi-workflow:workflow_scheduler");
+			const { identitySha256: _identity, ...base } = original;
+			const draft = {
+				...base,
+				runId: `run_parallel${index}`,
+				attemptId: `attempt_parallel${index}`,
+			};
+			const plan = { ...draft, identitySha256: canonicalSha256(draft) };
+			const grant: SubagentPreflight = {
+				preflightId: `preflight-parallel${index}`,
+				identitySha256: plan.identitySha256,
+				expiresAt: "2099-01-01T00:00:00.000Z",
+				launchPlan: plan,
+			};
+			grants.set(grant.preflightId, grant);
+			return grant;
+		});
+		const launch = vi.fn(async (preflightId: string) => {
+			const grant = grants.get(preflightId);
+			if (!grant) throw new Error("missing grant");
+			return {
+				runId: grant.launchPlan.runId,
+				attemptId: grant.launchPlan.attemptId,
+				status: "active" as const,
+			};
+		});
+		const wait = vi.fn((runId: string) => {
+			const index = Number(runId.at(-1));
+			const value = pending[index];
+			if (!value) throw new Error("unexpected child");
+			return value.promise;
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(client({ preflight: preflightCall, launch, wait })),
+			concurrency: 2,
+		});
+
+		const drives = [scheduler.drive(), scheduler.drive()];
+		while (wait.mock.calls.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		expect(launch).toHaveBeenCalledTimes(2);
+		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
+		expect(launch).toHaveBeenCalledTimes(2);
+		pending[1]?.resolve(
+			executionResult({ ...result("completed"), runId: "run_parallel1" }),
+		);
+		pending[0]?.resolve(
+			executionResult({ ...result("completed"), runId: "run_parallel0" }),
+		);
+		await expect(Promise.all(drives)).resolves.toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ outcome: "completed" }),
+				expect.objectContaining({ outcome: "completed" }),
+			]),
+		);
+	});
+
 	it("replays a settled task without relaunching or waiting again", async () => {
 		const { journal } = await fixture();
 		const ownerClient = client();
@@ -446,34 +519,19 @@ describe("durable sequential scheduler", () => {
 		expect(ownerClient.launch).toHaveBeenCalledOnce();
 	});
 
-	it("rejects conflicting terminal results from concurrent waits", async () => {
+	it("does not wait for the same child twice in one scheduler", async () => {
 		const { journal } = await fixture();
-		const firstWait = deferred<ReturnType<typeof executionResult>>();
-		const secondWait = deferred<ReturnType<typeof executionResult>>();
-		const wait = vi
-			.fn()
-			.mockImplementationOnce(() => firstWait.promise)
-			.mockImplementationOnce(() => secondWait.promise);
+		const waiting = deferred<ReturnType<typeof executionResult>>();
+		const wait = vi.fn(() => waiting.promise);
 		const scheduler = createWorkflowSequentialScheduler({
 			journal,
 			binding: binding(client({ wait })),
 		});
 		const first = scheduler.drive();
-		const second = scheduler.drive();
-		const conflicting = expect(second).rejects.toMatchObject({
-			stage: "observation",
-		});
-		while (wait.mock.calls.length < 2) {
-			await new Promise((resolve) => setTimeout(resolve, 1));
-		}
-		firstWait.resolve(executionResult(result("completed")));
+		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
+		expect(wait).toHaveBeenCalledOnce();
+		waiting.resolve(executionResult(result("completed")));
 		await expect(first).resolves.toMatchObject({ outcome: "completed" });
-		secondWait.resolve(executionResult(result("failed")));
-		await conflicting;
-		expect(
-			Object.values((await projection(journal)).executions)[0]?.settlement
-				?.evidence.status,
-		).toBe("completed");
 	});
 
 	it("persists stop intent before interrupt and drains cancellation evidence", async () => {

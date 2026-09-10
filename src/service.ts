@@ -287,6 +287,7 @@ export async function createWorkflowService(
 			binding,
 			launcher,
 			finalizer,
+			concurrency: record.concurrency,
 		});
 		const runtime = createStaticWorkflowRuntime({
 			definition: workflow.definition,

@@ -98,6 +98,7 @@ function schedulerFor(
 	outputs: ReadonlyMap<string, unknown>,
 ): WorkflowSequentialScheduler & { calls: number } {
 	const scheduler = {
+		concurrency: 1,
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;

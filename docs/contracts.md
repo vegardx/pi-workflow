@@ -315,12 +315,17 @@ launch it:
 6. launches with the exact preflight identity;
 7. persists the launch receipt.
 
-The sequential scheduler selects committed tasks in materialization order and
-persists readiness before calling the launcher. It runs at most one child at a
-time. Active children map tasks to `running`; queued or terminal children awaiting
+The bounded scheduler selects committed tasks in materialization order and
+persists readiness before calling the launcher. Independent tasks may run up to
+the immutable effective run concurrency. Launch registration and journal
+mutation remain serialized, while child waits run outside the mutation queue and
+may settle in any order. One scheduler instance claims each active child once to
+avoid duplicate waits; restart reconstructs active work from launch receipts.
+Active children map tasks to `running`; queued or terminal children awaiting
 required finalization map tasks to `waiting`; durable workflow stop intent maps
-the active task to `cancelling` before interruption. Failed dependencies map
-pending dependents to `blocked`.
+active tasks to `cancelling` before interruption and drains them without
+exceeding the same durable lifecycle. Failed dependencies map pending dependents
+to `blocked`.
 
 The journal stores bounded child-settlement evidence and a digest of the complete
 child result, not model output, structured values, session paths, or
