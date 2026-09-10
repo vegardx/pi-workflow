@@ -43,9 +43,9 @@ function request(goal = "Answer") {
 		workspace: { mode: "read-only" as const, cwd: "/repo" },
 		outputSchema: Type.Object({ answer: Type.String() }),
 		limits: {
-			runtimeMs: 300_000,
-			attemptRuntimeMs: 300_000,
-			tokens: 1_000_000,
+			cumulativeRuntimeMs: 300_000,
+			attemptTimeoutMs: 300_000,
+			totalTokens: 1_000_000,
 			cost: 10,
 			outputBytes: 1024,
 			workspaceWriteBytes: 0,

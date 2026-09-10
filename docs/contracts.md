@@ -70,7 +70,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 7 identities cover the complete definition module but not a
+Contract revision 8 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than

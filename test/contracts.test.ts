@@ -46,9 +46,9 @@ function agentTaskSpec() {
 			workspace: { mode: "read-only" as const, cwd: "/repo" },
 			outputSchema: { type: "object" },
 			limits: {
-				runtimeMs: 300_000,
-				attemptRuntimeMs: 300_000,
-				tokens: 1_000_000,
+				cumulativeRuntimeMs: 300_000,
+				attemptTimeoutMs: 300_000,
+				totalTokens: 1_000_000,
 				cost: 100,
 				outputBytes: 1_048_576,
 				workspaceWriteBytes: 0,
