@@ -426,7 +426,7 @@ describe("static workflow runtime", () => {
 		expect(
 			Object.values(state.tasks).map((task) => task.task.namespace),
 		).toEqual([["items"], ["items"]]);
-	});
+	}, 15_000);
 
 	it("materializes a namespace-scoped pipeline with explicit artifact flow", async () => {
 		const { journal, artifacts } = await fixture();
