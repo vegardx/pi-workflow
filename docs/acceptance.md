@@ -72,6 +72,8 @@ An in-memory-only successful drive does not satisfy the first slice.
 
 - sequential, parallel, settled-parallel, pipeline, and bounded fan-out preserve
   stable results and limits;
+- partial parallel launch failure preserves and settles every already-launched
+  sibling before the source runtime propagates the batch failure;
 - fatal cancellation and explicit stop drain every concurrently active child to
   terminal settlement and release evidence without duplicate interruption;
 - checkpoint waits can be stopped and resumed;
@@ -103,6 +105,8 @@ An in-memory-only successful drive does not satisfy the first slice.
 - lease reclamation refuses a replacement owner while prior process evidence is
   still live, and stable subagent operation IDs prevent duplicate launch after
   uncertain outcomes;
+- after lease rotation, every concurrently active child is reacquired from its
+  durable launch receipt without another preflight or launch;
 - dependency invalidation is crash-safe and transitive;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - required finalizer failure prevents success;

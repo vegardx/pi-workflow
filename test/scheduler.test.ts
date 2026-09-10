@@ -41,14 +41,17 @@ const leases = new Set<WorkflowRunLease>();
 type Deferred<T> = {
 	promise: Promise<T>;
 	resolve(value: T): void;
+	reject(reason: unknown): void;
 };
 
 function deferred<T>(): Deferred<T> {
 	let resolve!: (value: T) => void;
-	const promise = new Promise<T>((accept) => {
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<T>((accept, fail) => {
 		resolve = accept;
+		reject = fail;
 	});
-	return { promise, resolve };
+	return { promise, reject, resolve };
 }
 
 function request(
@@ -251,6 +254,51 @@ function client(overrides: Partial<SubagentClient> = {}): SubagentClient {
 		exportArtifact: unavailable,
 		...overrides,
 	} as unknown as SubagentClient;
+}
+
+function concurrentClient(
+	prefix: string,
+	wait: SubagentClient["wait"],
+): {
+	ownerClient: SubagentClient;
+	preflightCall: ReturnType<typeof vi.fn>;
+	launch: ReturnType<typeof vi.fn>;
+} {
+	const grants = new Map<string, SubagentPreflight>();
+	let ordinal = 0;
+	const preflightCall = vi.fn(async (input: SubagentRequest) => {
+		const index = ordinal++;
+		const original = launchPlan(input, "pi-workflow:workflow_scheduler");
+		const { identitySha256: _identity, ...base } = original;
+		const draft = {
+			...base,
+			runId: `run_${prefix}${index}`,
+			attemptId: `attempt_${prefix}${index}`,
+		};
+		const plan = { ...draft, identitySha256: canonicalSha256(draft) };
+		const grant: SubagentPreflight = {
+			preflightId: `preflight-${prefix}${index}`,
+			identitySha256: plan.identitySha256,
+			expiresAt: "2099-01-01T00:00:00.000Z",
+			launchPlan: plan,
+		};
+		grants.set(grant.preflightId, grant);
+		return grant;
+	});
+	const launch = vi.fn(async (preflightId: string) => {
+		const grant = grants.get(preflightId);
+		if (!grant) throw new Error("missing grant");
+		return {
+			runId: grant.launchPlan.runId,
+			attemptId: grant.launchPlan.attemptId,
+			status: "active" as const,
+		};
+	});
+	return {
+		ownerClient: client({ preflight: preflightCall, launch, wait }),
+		preflightCall,
+		launch,
+	};
 }
 
 function binding(ownerClient: SubagentClient): WorkflowSubagentBinding {
@@ -476,6 +524,103 @@ describe("durable sequential scheduler", () => {
 			]),
 		);
 	});
+
+	it("preserves an active sibling when a later launch fails", async () => {
+		const { journal } = await fixture((materializer) => [
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const pending = deferred<ReturnType<typeof executionResult>>();
+		const wait = vi.fn(() => pending.promise);
+		const harness = concurrentClient("partial", wait);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(harness.ownerClient),
+			concurrency: 2,
+		});
+		const first = scheduler.drive();
+		while (wait.mock.calls.length < 1) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		harness.preflightCall.mockRejectedValueOnce(new Error("agent unavailable"));
+		await expect(scheduler.drive()).rejects.toMatchObject({
+			stage: "preflight",
+		});
+		expect(harness.launch).toHaveBeenCalledOnce();
+		pending.resolve(
+			executionResult({ ...result("completed"), runId: "run_partial0" }),
+		);
+		await expect(first).resolves.toMatchObject({ outcome: "completed" });
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(
+			Object.values(state.executions).some(
+				(execution) => execution.settlement?.evidence.status === "completed",
+			),
+		).toBe(true);
+	}, 15_000);
+
+	it("reacquires every active child after lease rotation", async () => {
+		const { journal, lease, root } = await fixture((materializer) => [
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const pending = [
+			deferred<ReturnType<typeof executionResult>>(),
+			deferred<ReturnType<typeof executionResult>>(),
+		];
+		const initialWait = vi.fn((runId: string) => {
+			const value = pending[Number(runId.at(-1))];
+			if (!value) throw new Error("unexpected child");
+			return value.promise;
+		});
+		const initial = concurrentClient("restart", initialWait);
+		const firstScheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(initial.ownerClient),
+			concurrency: 2,
+		});
+		const drives = [firstScheduler.drive(), firstScheduler.drive()];
+		while (initialWait.mock.calls.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		pending[0]?.reject(new Error("seat lost"));
+		pending[1]?.reject(new Error("seat lost"));
+		await Promise.allSettled(drives);
+		expect(initial.launch).toHaveBeenCalledTimes(2);
+
+		await lease.release();
+		leases.delete(lease);
+		const replacement = await acquireWorkflowRunLease({
+			storeRoot: root,
+			runId: "workflow_scheduler",
+			ownerId: "scheduler-restart",
+		});
+		leases.add(replacement);
+		const resumedJournal = await WorkflowRunJournal.open(
+			root,
+			"workflow_scheduler",
+			replacement,
+		);
+		const resumedWait = vi.fn(async (runId: string) =>
+			executionResult({ ...result("completed"), runId }),
+		);
+		const resumed = concurrentClient("unused", resumedWait);
+		const secondScheduler = createWorkflowSequentialScheduler({
+			journal: resumedJournal,
+			binding: binding(resumed.ownerClient),
+			concurrency: 2,
+		});
+
+		await expect(
+			Promise.all([secondScheduler.drive(), secondScheduler.drive()]),
+		).resolves.toHaveLength(2);
+		expect(resumed.preflightCall).not.toHaveBeenCalled();
+		expect(resumed.launch).not.toHaveBeenCalled();
+		expect(new Set(resumedWait.mock.calls.map(([runId]) => runId))).toEqual(
+			new Set(["run_restart0", "run_restart1"]),
+		);
+	}, 15_000);
 
 	it("stops and releases every concurrently active child", async () => {
 		const { journal } = await fixture((materializer) => [
