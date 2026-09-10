@@ -19,6 +19,8 @@ import {
 	type TaskRef,
 	type WorkflowArtifactHandleRef,
 	type WorkflowRunId,
+	type WorkflowTaskId,
+	type WorkflowTaskStatus,
 } from "./contracts.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -118,6 +120,26 @@ export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
 	readonly replay?: ReplayPolicy;
 }
 
+export type SettledTaskFailure = Readonly<{
+	message: string;
+	code?: string;
+	origin?: string;
+	retry?: string;
+	guidance?: string;
+}>;
+
+export type SettledTaskResult<T> =
+	| Readonly<{ status: "fulfilled"; value: T }>
+	| Readonly<{
+			status: "rejected";
+			taskId: WorkflowTaskId;
+			outcome: Exclude<
+				WorkflowTaskStatus,
+				"pending" | "ready" | "running" | "waiting" | "cancelling" | "completed"
+			>;
+			failure?: SettledTaskFailure;
+	  }>;
+
 export interface WorkflowContext<TInput> {
 	readonly input: TInput;
 	readonly runId: WorkflowRunId;
@@ -133,6 +155,13 @@ export interface WorkflowContext<TInput> {
 	results<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,
 	): Promise<{ [K in keyof T]: T[K] extends TaskHandle<infer V> ? V : never }>;
+	settled<const T extends readonly TaskHandle<unknown>[]>(
+		tasks: T,
+	): Promise<{
+		[K in keyof T]: T[K] extends TaskHandle<infer V>
+			? SettledTaskResult<V>
+			: never;
+	}>;
 }
 
 export type WorkflowReturn<T> =

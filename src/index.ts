@@ -65,6 +65,8 @@ export {
 	isArtifactHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
+	type SettledTaskFailure,
+	type SettledTaskResult,
 	type TaskHandle,
 	type WorkflowContext,
 	type WorkflowDefinition,

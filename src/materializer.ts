@@ -345,7 +345,7 @@ export class WorkflowTaskMaterializer {
 	}
 
 	closeEpoch(
-		kind: "result" | "results" | "final",
+		kind: "result" | "results" | "settled" | "final",
 		tasks: readonly TaskHandle<unknown>[],
 	): MaterializationCommit {
 		if (this.finalClosed) {

@@ -70,7 +70,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 3 identities cover the complete definition module but not a
+Contract revision 4 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than
@@ -113,8 +113,14 @@ return review;
 `ctx.result(handle)` persists all currently materialized nodes, allows the
 scheduler to run until the selected task settles and finalizes, revalidates its
 workflow-owned artifact, and returns an immutable concrete value.
-`ctx.results(handles)` is the bounded multi-task barrier. Merely constructing a handle never starts work synchronously in the
-workflow function.
+`ctx.results(handles)` is the bounded fail-fast multi-task barrier.
+`ctx.settled(handles)` is a distinct persisted barrier returning
+`{ status: "fulfilled", value }` or
+`{ status: "rejected", taskId, outcome, failure? }` in declaration order.
+Required-task failure still fails the workflow; rejected settled values are
+therefore intended for tasks explicitly declared with optional disposition.
+Merely constructing a handle never starts work synchronously in the workflow
+function.
 
 ## Workflow context
 
@@ -139,6 +145,9 @@ interface WorkflowContext<TInput> {
 	results<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,
 	): Promise<ResultTuple<T>>;
+	settled<const T extends readonly TaskHandle<unknown>[]>(
+		tasks: T,
+	): Promise<SettledResultTuple<T>>;
 	finalize(key: string, finalizer: Finalizer): void;
 }
 ```
