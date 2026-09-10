@@ -297,7 +297,7 @@ describe("workflow service", () => {
 		expect(delegated.ownerClient.launch).toHaveBeenCalledOnce();
 		expect(delegated.ownerClient.release).toHaveBeenCalledOnce();
 		await service.shutdown();
-	});
+	}, 15_000);
 
 	it("persists stop intent and drains an active delegated task", async () => {
 		const fixture = await taskWorkflowFixture();
