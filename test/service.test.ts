@@ -464,8 +464,9 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 11,
+			contractRevision: 12,
 			runId,
+			depth: 0,
 			definitionName: "pending",
 			definitionPath: workflow.path,
 			definitionIdentitySha256: workflow.identity.identitySha256,

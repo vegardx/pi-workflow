@@ -37,8 +37,9 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 11 as const,
+			contractRevision: 12 as const,
 			runId: "workflow_record" as const,
+			depth: 0,
 			definitionName: "example",
 			definitionPath: "/repo/workflows/example.workflow.ts",
 			definitionIdentitySha256: hash,
@@ -58,6 +59,72 @@ describe("workflow run record", () => {
 		await expect(store.create(record)).rejects.toThrow("already exists");
 	});
 
+	it("requires lineage exactly when the run is nested", async () => {
+		const { store } = await fixture();
+		const root = {
+			schema: "pi-workflow-run" as const,
+			contractRevision: 12 as const,
+			runId: "workflow_record" as const,
+			depth: 0,
+			definitionName: "example",
+			definitionPath: "/repo/workflows/example.workflow.ts",
+			definitionIdentitySha256: hash,
+			definitionSourceSha256: hash,
+			concurrency: 4,
+			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			declaredTimeoutMs: 3600000,
+			effectiveTimeoutMs: 3600000,
+			deadlineAt: "2026-09-01T01:00:00.000Z",
+			cwd: "/repo",
+			input: { question: "why" },
+			createdAt: "2026-09-01T00:00:00.000Z",
+		};
+		const parent = {
+			runId: "workflow_parent",
+			taskId: `task_${"b".repeat(64)}`,
+			executionId: `execution_${"c".repeat(64)}`,
+			ancestorDefinitionIdentities: ["d".repeat(64)],
+		};
+		await expect(store.create({ ...root, depth: 1 })).rejects.toThrow(
+			"invalid workflow run record",
+		);
+		await expect(store.create({ ...root, parent })).rejects.toThrow(
+			"invalid workflow run record",
+		);
+		await expect(store.create({ ...root, depth: 2, parent })).rejects.toThrow(
+			"invalid workflow run record",
+		);
+		await expect(
+			store.create({
+				...root,
+				depth: 1,
+				parent: { ...parent, runId: "workflow_record" },
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({
+				...root,
+				depth: 4,
+				parent: {
+					...parent,
+					ancestorDefinitionIdentities: [
+						"d".repeat(64),
+						"e".repeat(64),
+						"f".repeat(64),
+						"1".repeat(64),
+					],
+				},
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({ ...root, contractRevision: 11 as unknown as 12 }),
+		).rejects.toThrow("invalid workflow run record");
+		const nested = { ...root, depth: 1, parent };
+		await store.create(nested);
+		expect(await store.read()).toEqual(nested);
+	});
+
 	it("rejects corruption and oversized input", async () => {
 		const { store } = await fixture();
 		await writeFile(store.path, "not-json\n");
@@ -65,8 +132,9 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 11,
+				contractRevision: 12,
 				runId: "workflow_record",
+				depth: 0,
 				definitionName: "example",
 				definitionPath: "/repo/example.workflow.ts",
 				definitionIdentitySha256: hash,

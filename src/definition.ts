@@ -18,6 +18,8 @@ import {
 	type TaskKey,
 	type TaskRef,
 	type WorkflowArtifactHandleRef,
+	type WorkflowBudget,
+	WorkflowBudgetSchema,
 	type WorkflowRunId,
 	type WorkflowTaskId,
 	type WorkflowTaskStatus,
@@ -32,20 +34,7 @@ const artifactHandleBrand: unique symbol = Symbol(
 	"pi-workflow-artifact-handle",
 );
 
-export const WorkflowBudgetSchema = Type.Object(
-	{
-		cost: Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
-		totalTokens: Type.Optional(
-			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-		),
-		childRuntimeMs: Type.Integer({
-			minimum: 1_000,
-			maximum: MAX_WORKFLOW_DURATION_MS,
-		}),
-	},
-	{ additionalProperties: false },
-);
-export type WorkflowBudget = Static<typeof WorkflowBudgetSchema>;
+export { type WorkflowBudget, WorkflowBudgetSchema };
 
 const WorkflowMetaInputSchema = Type.Object(
 	{

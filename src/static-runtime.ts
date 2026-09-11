@@ -214,9 +214,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		}
 		const value = await artifacts.readJson(artifact);
 		const outputSchema =
-			task.task.spec.kind === "agent"
-				? task.task.spec.request.outputSchema
-				: task.task.spec.request.implementation.outputSchema;
+			task.task.spec.kind === "support"
+				? task.task.spec.request.implementation.outputSchema
+				: task.task.spec.request.outputSchema;
 		if (!validator(outputSchema)(value)) {
 			throw new StaticWorkflowRuntimeError(
 				"result",

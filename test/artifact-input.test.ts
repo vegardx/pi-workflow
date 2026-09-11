@@ -114,9 +114,9 @@ async function fixture(
 		schemaSha256:
 			schemaSha256 ??
 			deriveJsonValueSha256(
-				producerSpec.kind === "agent"
-					? producerSpec.request.outputSchema
-					: producerSpec.request.implementation.outputSchema,
+				producerSpec.kind === "support"
+					? producerSpec.request.implementation.outputSchema
+					: producerSpec.request.outputSchema,
 			),
 	});
 	producerProjection.status = "completed";

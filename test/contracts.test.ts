@@ -5,13 +5,21 @@ import {
 	AgentTaskSpecSchema,
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
+	MAX_NESTED_WORKFLOW_DEPTH,
+	MAX_NESTED_WORKFLOW_TASKS,
 	MaterializedAgentTaskSchema,
+	MaterializedWorkflowTaskSchema,
+	NestedWorkflowTaskSpecSchema,
+	NestedWorkflowTerminalEvidenceSchema,
 	SupportTaskTerminalEvidenceSchema,
 	TaskExecutionRecordSchema,
+	TaskExecutionTerminalEvidenceSchema,
 	WORKFLOW_CONTRACT_REVISION,
 	WORKFLOW_RUNTIME_CONTRACT,
+	WorkflowBudgetSchema,
 	WorkflowExecutionFailureEvidenceSchema,
 } from "../src/contracts.js";
+import { WorkflowBudgetSchema as DefinitionBudgetSchema } from "../src/definition.js";
 import {
 	WorkflowJournalEventSchema,
 	WorkflowRunSnapshotSchema,
@@ -68,6 +76,31 @@ function agentTaskSpec() {
 	};
 }
 
+function nestedTaskSpec() {
+	return {
+		key: "child",
+		kind: "workflow" as const,
+		disposition: "required" as const,
+		after: [],
+		inputs: {},
+		replay: "read-only" as const,
+		request: {
+			definitionName: "child",
+			definitionIdentitySha256: sha,
+			definitionSourceSha256: sha,
+			definitionVersion: 1,
+			input: { topic: "nested" },
+			inputSha256: sha,
+			inputSchema: { type: "object" },
+			outputSchema: { type: "object" },
+			budget: { cost: 10, childRuntimeMs: 60_000 },
+			timeoutMs: 60_000,
+			concurrency: 2,
+		},
+		identitySha256: sha,
+	};
+}
+
 describe("workflow contracts", () => {
 	it("binds the exact current subagent runtime contract", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent).toEqual(
@@ -87,13 +120,14 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 11 and rejects revision 10 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(11);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(11);
+	it("publishes revision 12 and rejects revision 11 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(12);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(12);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 11,
+			contractRevision: 12,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -108,12 +142,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 10,
+				contractRevision: 11,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 11,
+			contractRevision: 12,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -137,7 +171,7 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 10,
+				contractRevision: 11,
 			}),
 		).toBe(false);
 	});
@@ -209,6 +243,119 @@ describe("workflow contracts", () => {
 			"support-input",
 			"support-execution",
 			"support-output",
+		]) {
+			expect(
+				Value.Check(WorkflowExecutionFailureEvidenceSchema, {
+					kind: "workflow",
+					stage,
+					failureSha256: sha,
+					message: "failed",
+				}),
+			).toBe(true);
+		}
+	});
+
+	it("publishes the bounded nested workflow feature", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
+		expect(MAX_NESTED_WORKFLOW_DEPTH).toBe(4);
+		expect(MAX_NESTED_WORKFLOW_TASKS).toBe(64);
+		expect(DefinitionBudgetSchema).toBe(WorkflowBudgetSchema);
+		expect(
+			isWorkflowRuntimeContract({
+				...WORKFLOW_RUNTIME_CONTRACT,
+				features: {
+					...WORKFLOW_RUNTIME_CONTRACT.features,
+					nestedWorkflows: undefined,
+				},
+			}),
+		).toBe(false);
+	});
+
+	it("validates nested workflow task specs, records, and evidence", () => {
+		const spec = nestedTaskSpec();
+		expect(Value.Check(NestedWorkflowTaskSpecSchema, spec)).toBe(true);
+		expect(
+			Value.Check(MaterializedWorkflowTaskSchema, {
+				id: "task_abc123",
+				runId: "workflow_abc123",
+				namespace: [],
+				spec,
+				definitionIdentitySha256: sha,
+				materializationSequence: 1,
+				materializationEpoch: 1,
+				epochPosition: 1,
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(NestedWorkflowTaskSpecSchema, {
+				...spec,
+				inputs: { answer: artifactRef() },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(NestedWorkflowTaskSpecSchema, {
+				...spec,
+				request: { ...spec.request, concurrency: 17 },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(NestedWorkflowTaskSpecSchema, {
+				...spec,
+				request: { ...spec.request, definitionName: "Child" },
+			}),
+		).toBe(false);
+		const base = {
+			id: `execution_${sha}`,
+			runId: "workflow_abc123",
+			taskId: "task_abc123",
+			generation: 1,
+			taskIdentitySha256: sha,
+		};
+		expect(
+			Value.Check(TaskExecutionRecordSchema, {
+				kind: "workflow",
+				...base,
+				childRunId: "workflow_child",
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(TaskExecutionRecordSchema, {
+				kind: "workflow",
+				...base,
+				operationId: `workflow-op_${sha}`,
+			}),
+		).toBe(false);
+		const evidence = {
+			kind: "nested-workflow",
+			childRunId: "workflow_child",
+			status: "completed",
+			usage: { cost: 0.5, totalTokens: 10, childRuntimeMs: 5 },
+			usageComplete: true,
+			outputSha256: sha,
+			artifactId: `artifact_${sha}`,
+		};
+		expect(Value.Check(NestedWorkflowTerminalEvidenceSchema, evidence)).toBe(
+			true,
+		);
+		expect(Value.Check(TaskExecutionTerminalEvidenceSchema, evidence)).toBe(
+			true,
+		);
+		expect(
+			Value.Check(NestedWorkflowTerminalEvidenceSchema, {
+				...evidence,
+				usage: { cost: -1, totalTokens: 10, childRuntimeMs: 5 },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(NestedWorkflowTerminalEvidenceSchema, {
+				...evidence,
+				extra: true,
+			}),
+		).toBe(false);
+		for (const stage of [
+			"nested-resolution",
+			"nested-launch",
+			"nested-import",
 		]) {
 			expect(
 				Value.Check(WorkflowExecutionFailureEvidenceSchema, {

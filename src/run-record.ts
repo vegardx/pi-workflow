@@ -5,11 +5,15 @@ import { isDeepStrictEqual } from "node:util";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
+	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_WORKFLOW_CONCURRENCY,
+	TaskExecutionIdSchema,
 	WORKFLOW_CONTRACT_REVISION,
+	WorkflowBudgetSchema,
+	WorkflowDefinitionNameSchema,
 	WorkflowRunIdSchema,
+	WorkflowTaskIdSchema,
 } from "./contracts.js";
-import { WorkflowBudgetSchema } from "./definition.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 
 const MAX_RUN_RECORD_BYTES = 1024 * 1024;
@@ -19,11 +23,22 @@ export const WorkflowRunRecordSchema = Type.Object(
 		schema: Type.Literal("pi-workflow-run"),
 		contractRevision: Type.Literal(WORKFLOW_CONTRACT_REVISION),
 		runId: WorkflowRunIdSchema,
-		definitionName: Type.String({
-			pattern: "^[a-z][a-z0-9-]*$",
-			minLength: 1,
-			maxLength: 128,
-		}),
+		depth: Type.Integer({ minimum: 0, maximum: MAX_NESTED_WORKFLOW_DEPTH - 1 }),
+		parent: Type.Optional(
+			Type.Object(
+				{
+					runId: WorkflowRunIdSchema,
+					taskId: WorkflowTaskIdSchema,
+					executionId: TaskExecutionIdSchema,
+					ancestorDefinitionIdentities: Type.Array(
+						Type.String({ pattern: "^[a-f0-9]{64}$" }),
+						{ minItems: 1, maxItems: MAX_NESTED_WORKFLOW_DEPTH - 1 },
+					),
+				},
+				{ additionalProperties: false },
+			),
+		),
+		definitionName: WorkflowDefinitionNameSchema,
 		definitionPath: Type.String({ minLength: 1, maxLength: 4096 }),
 		definitionIdentitySha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
 		definitionSourceSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
@@ -57,10 +72,20 @@ export class WorkflowRunRecordError extends Error {
 	}
 }
 
+function hasValidLineage(record: WorkflowRunRecord): boolean {
+	if (record.parent === undefined) return record.depth === 0;
+	return (
+		record.depth >= 1 &&
+		record.parent.runId !== record.runId &&
+		record.parent.ancestorDefinitionIdentities.length === record.depth
+	);
+}
+
 function hasValidLimits(record: WorkflowRunRecord): boolean {
 	const createdAt = Date.parse(record.createdAt);
 	const deadlineAt = Date.parse(record.deadlineAt);
 	return (
+		hasValidLineage(record) &&
 		Number.isFinite(createdAt) &&
 		Number.isFinite(deadlineAt) &&
 		deadlineAt - createdAt === record.effectiveTimeoutMs &&

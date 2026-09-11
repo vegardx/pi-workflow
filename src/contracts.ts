@@ -16,9 +16,12 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 11 as const;
+export const WORKFLOW_CONTRACT_REVISION = 12 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
+export const MAX_NESTED_WORKFLOW_DEPTH = 4;
+export const MAX_NESTED_WORKFLOW_TASKS = 64;
+const MAX_WORKFLOW_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
 
 const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const JsonPrimitiveSchema = Type.Union([
@@ -47,6 +50,30 @@ const ResourceNameSchema = Type.String({
 	minLength: 1,
 	maxLength: 128,
 });
+
+export const WorkflowBudgetSchema = Type.Object(
+	{
+		cost: Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+		totalTokens: Type.Optional(
+			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		),
+		childRuntimeMs: Type.Integer({
+			minimum: 1_000,
+			maximum: MAX_WORKFLOW_DURATION_MS,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowBudget = Static<typeof WorkflowBudgetSchema>;
+
+export const WorkflowDefinitionNameSchema = Type.String({
+	pattern: "^[a-z][a-z0-9-]*$",
+	minLength: 1,
+	maxLength: 128,
+});
+export type WorkflowDefinitionName = Static<
+	typeof WorkflowDefinitionNameSchema
+>;
 
 export const WorkflowRunIdSchema = Type.String({
 	pattern: "^workflow_[a-z0-9]+$",
@@ -236,6 +263,35 @@ export const AgentTaskRequestSchema = Type.Object(
 );
 export type AgentTaskRequest = Static<typeof AgentTaskRequestSchema>;
 
+export const NestedWorkflowTaskRequestSchema = Type.Object(
+	{
+		definitionName: WorkflowDefinitionNameSchema,
+		definitionIdentitySha256: Sha256Schema,
+		definitionSourceSha256: Sha256Schema,
+		definitionVersion: Type.Integer({
+			minimum: 1,
+			maximum: Number.MAX_SAFE_INTEGER,
+		}),
+		input: Type.Unknown(),
+		inputSha256: Sha256Schema,
+		inputSchema: JsonSchemaDocumentSchema,
+		outputSchema: JsonSchemaDocumentSchema,
+		budget: WorkflowBudgetSchema,
+		timeoutMs: Type.Integer({
+			minimum: 1_000,
+			maximum: MAX_WORKFLOW_DURATION_MS,
+		}),
+		concurrency: Type.Integer({
+			minimum: 1,
+			maximum: MAX_WORKFLOW_CONCURRENCY,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type NestedWorkflowTaskRequest = Static<
+	typeof NestedWorkflowTaskRequestSchema
+>;
+
 const TaskInputsSchema = Type.Record(
 	TaskKeySchema,
 	WorkflowArtifactHandleRefSchema,
@@ -281,6 +337,29 @@ export const SupportTaskSpecSchema = Type.Object(
 );
 export type SupportTaskSpec = Static<typeof SupportTaskSpecSchema>;
 
+export const NestedWorkflowTaskSpecSchema = Type.Object(
+	{
+		key: TaskKeySchema,
+		kind: Type.Literal("workflow"),
+		disposition: TaskDispositionSchema,
+		after: Type.Array(TaskRefSchema, {
+			maxItems: 256,
+			uniqueItems: true,
+		}),
+		inputs: Type.Record(TaskKeySchema, WorkflowArtifactHandleRefSchema, {
+			additionalProperties: false,
+			maxProperties: 0,
+		}),
+		replay: ReplayPolicySchema,
+		request: NestedWorkflowTaskRequestSchema,
+		identitySha256: Sha256Schema,
+	},
+	{ additionalProperties: false },
+);
+export type NestedWorkflowTaskSpec = Static<
+	typeof NestedWorkflowTaskSpecSchema
+>;
+
 export const MaterializedAgentTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
@@ -313,9 +392,27 @@ export type MaterializedSupportTask = Static<
 	typeof MaterializedSupportTaskSchema
 >;
 
+export const MaterializedNestedWorkflowTaskSchema = Type.Object(
+	{
+		id: WorkflowTaskIdSchema,
+		runId: WorkflowRunIdSchema,
+		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
+		spec: NestedWorkflowTaskSpecSchema,
+		definitionIdentitySha256: Sha256Schema,
+		materializationSequence: Type.Integer({ minimum: 1 }),
+		materializationEpoch: Type.Integer({ minimum: 1 }),
+		epochPosition: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type MaterializedNestedWorkflowTask = Static<
+	typeof MaterializedNestedWorkflowTaskSchema
+>;
+
 export const MaterializedWorkflowTaskSchema = Type.Union([
 	MaterializedAgentTaskSchema,
 	MaterializedSupportTaskSchema,
+	MaterializedNestedWorkflowTaskSchema,
 ]);
 export type MaterializedWorkflowTask = Static<
 	typeof MaterializedWorkflowTaskSchema
@@ -353,9 +450,26 @@ export type SupportTaskExecutionRecord = Static<
 	typeof SupportTaskExecutionRecordSchema
 >;
 
+export const NestedWorkflowTaskExecutionRecordSchema = Type.Object(
+	{
+		kind: Type.Literal("workflow"),
+		id: TaskExecutionIdSchema,
+		runId: WorkflowRunIdSchema,
+		taskId: WorkflowTaskIdSchema,
+		generation: TaskExecutionGenerationSchema,
+		taskIdentitySha256: Sha256Schema,
+		childRunId: WorkflowRunIdSchema,
+	},
+	{ additionalProperties: false },
+);
+export type NestedWorkflowTaskExecutionRecord = Static<
+	typeof NestedWorkflowTaskExecutionRecordSchema
+>;
+
 export const TaskExecutionRecordSchema = Type.Union([
 	AgentTaskExecutionRecordSchema,
 	SupportTaskExecutionRecordSchema,
+	NestedWorkflowTaskExecutionRecordSchema,
 ]);
 export type TaskExecutionRecord = Static<typeof TaskExecutionRecordSchema>;
 
@@ -397,6 +511,9 @@ export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
 			Type.Literal("support-input"),
 			Type.Literal("support-execution"),
 			Type.Literal("support-output"),
+			Type.Literal("nested-resolution"),
+			Type.Literal("nested-launch"),
+			Type.Literal("nested-import"),
 		]),
 		failureSha256: Sha256Schema,
 		message: Type.String({ minLength: 1, maxLength: 4096 }),
@@ -423,10 +540,43 @@ export type SupportTaskTerminalEvidence = Static<
 	typeof SupportTaskTerminalEvidenceSchema
 >;
 
+export const NestedWorkflowUsageSchema = Type.Object(
+	{
+		cost: Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+		totalTokens: Type.Integer({
+			minimum: 0,
+			maximum: Number.MAX_SAFE_INTEGER,
+		}),
+		childRuntimeMs: Type.Integer({
+			minimum: 0,
+			maximum: Number.MAX_SAFE_INTEGER,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type NestedWorkflowUsage = Static<typeof NestedWorkflowUsageSchema>;
+
+export const NestedWorkflowTerminalEvidenceSchema = Type.Object(
+	{
+		kind: Type.Literal("nested-workflow"),
+		childRunId: WorkflowRunIdSchema,
+		status: WorkflowRunStatusSchema,
+		usage: NestedWorkflowUsageSchema,
+		usageComplete: Type.Boolean(),
+		outputSha256: Type.Optional(Sha256Schema),
+		artifactId: Type.Optional(WorkflowArtifactIdSchema),
+	},
+	{ additionalProperties: false },
+);
+export type NestedWorkflowTerminalEvidence = Static<
+	typeof NestedWorkflowTerminalEvidenceSchema
+>;
+
 export const TaskExecutionTerminalEvidenceSchema = Type.Union([
 	SubagentTerminalEvidenceSchema,
 	WorkflowExecutionFailureEvidenceSchema,
 	SupportTaskTerminalEvidenceSchema,
+	NestedWorkflowTerminalEvidenceSchema,
 ]);
 export type TaskExecutionTerminalEvidence = Static<
 	typeof TaskExecutionTerminalEvidenceSchema
@@ -466,6 +616,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				replay: Type.Boolean(),
 				worktrees: Type.Boolean(),
 				supportTaskExecution: Type.Boolean(),
+				nestedWorkflows: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -521,6 +672,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			replay: true,
 			worktrees: false,
 			supportTaskExecution: true,
+			nestedWorkflows: true,
 		}),
 	},
 );

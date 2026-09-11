@@ -471,7 +471,15 @@ export function createWorkflowSequentialScheduler(
 		current: WorkflowStateProjection,
 		candidate: WorkflowTaskProjection,
 	): { allowed: true } | { allowed: false; deferred: boolean; reason: string } {
-		if (candidate.task.spec.kind === "support") return { allowed: true };
+		const candidateSpec = candidate.task.spec;
+		if (candidateSpec.kind === "support") return { allowed: true };
+		if (candidateSpec.kind === "workflow") {
+			return {
+				allowed: false,
+				deferred: false,
+				reason: "Nested workflow budget admission is not implemented.",
+			};
+		}
 		let settledCost = 0;
 		let settledTotalTokens = 0;
 		let settledChildRuntimeMs = 0;
@@ -524,10 +532,10 @@ export function createWorkflowSequentialScheduler(
 			reservedChildRuntimeMs +=
 				task.task.spec.request.limits.cumulativeRuntimeMs;
 		}
-		const candidateCost = candidate.task.spec.request.limits.cost;
+		const candidateCost = candidateSpec.request.limits.cost;
 		if (
 			budget.totalTokens !== undefined &&
-			candidate.task.spec.request.limits.totalTokens === undefined
+			candidateSpec.request.limits.totalTokens === undefined
 		) {
 			return {
 				allowed: false,
@@ -536,10 +544,9 @@ export function createWorkflowSequentialScheduler(
 					"Workflow task has no total-token maximum to reserve against the workflow budget.",
 			};
 		}
-		const candidateTotalTokens =
-			candidate.task.spec.request.limits.totalTokens ?? 0;
+		const candidateTotalTokens = candidateSpec.request.limits.totalTokens ?? 0;
 		const candidateChildRuntimeMs =
-			candidate.task.spec.request.limits.cumulativeRuntimeMs;
+			candidateSpec.request.limits.cumulativeRuntimeMs;
 		const reason = (
 			cost: number,
 			totalTokens: number,
