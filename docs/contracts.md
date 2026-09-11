@@ -95,12 +95,52 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 9 identities cover the complete definition module but not a
+Contract revision 10 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to
 `@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
 CommonJS require, and TypeScript import assignment is rejected rather than
 silently omitted from source identity. Bundle-contained helper provenance is
 added before support tasks or multi-file definitions ship.
+
+## Support-task descriptors
+
+Trusted packages define typed descriptor helpers and register the matching
+implementation when constructing the workflow service:
+
+```ts
+export const jsonParse = defineSupportTask({
+	name: "@vegardx/workflow-tools/json-parse",
+	moduleSpecifier: "@vegardx/workflow-tools",
+	revision: 1,
+	implementationSha256: "<build-produced sha256>",
+	parametersSchema: JsonParseParameters,
+	outputSchema: ParsedValue,
+});
+
+export const jsonParseRegistration = jsonParse.registration(
+	({ parameters, inputs, signal }) => parse(parameters, inputs, signal),
+);
+
+const parsed = ctx.support(
+	"parse",
+	jsonParse({
+		parameters: { strict: true },
+		inputs: { source: fetched.output },
+	}),
+);
+```
+
+The helper only creates a frozen declarative descriptor. It does not execute the
+implementation. Materialization binds the implementation name, module
+specifier, revision, explicit implementation digest, parameter/output schemas,
+parameters, dependencies, and replay policy into task identity. Static workflow
+imports remain denied unless their exact module specifier is present in the
+constructor-injected support registry. The same descriptor is the intended
+future dynamic-workflow frontend.
+
+Revision 10 materializes and replays support declarations. Durable local
+execution intent, artifact commit, and terminal evidence are the next focused
+slice; declaring support tasks does not yet make them schedulable.
 
 ## Authoring handles
 

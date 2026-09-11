@@ -1,6 +1,6 @@
 import { type Static, Type } from "typebox";
 import {
-	MaterializedAgentTaskSchema,
+	MaterializedWorkflowTaskSchema,
 	SubagentAttemptIdSchema,
 	SubagentOperationIdSchema,
 	SubagentRunIdSchema,
@@ -55,7 +55,7 @@ const TaskDeclaredEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-declared"),
 		data: Type.Object(
-			{ task: MaterializedAgentTaskSchema },
+			{ task: MaterializedWorkflowTaskSchema },
 			{ additionalProperties: false },
 		),
 	},
@@ -370,7 +370,7 @@ export type WorkflowEventType = WorkflowEventInput["type"];
 
 export const WorkflowTaskProjectionSchema = Type.Object(
 	{
-		task: MaterializedAgentTaskSchema,
+		task: MaterializedWorkflowTaskSchema,
 		status: WorkflowTaskStatusSchema,
 		committed: Type.Boolean(),
 		currentExecutionId: Type.Optional(TaskExecutionIdSchema),

@@ -14,7 +14,10 @@ import {
 	WorkflowRunIdSchema,
 	type WorkflowRunStatus,
 } from "./contracts.js";
-import type { WorkflowBudget } from "./definition.js";
+import {
+	validateJsonSchemaDocument,
+	type WorkflowBudget,
+} from "./definition.js";
 import { WorkflowRunJournal } from "./persistence/journal.js";
 import {
 	acquireWorkflowRunLease,
@@ -38,6 +41,10 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "./subagent-provider.js";
+import {
+	type SupportTaskRegistration,
+	supportRegistrationIdentity,
+} from "./support.js";
 import {
 	createWorkflowTaskFinalizer,
 	type WorkflowTaskFinalizer,
@@ -100,6 +107,7 @@ export interface WorkflowServiceOptions {
 	readonly maxWorkflowTotalTokens?: number;
 	readonly maxWorkflowChildRuntimeMs?: number;
 	readonly maxWorkflowTimeoutMs?: number;
+	readonly supportTasks?: readonly SupportTaskRegistration[];
 }
 
 export class WorkflowServiceError extends Error {
@@ -239,6 +247,36 @@ export async function createWorkflowService(
 			);
 		}
 	}
+	const supportTasks = new Map<string, SupportTaskRegistration>();
+	for (const registration of options.supportTasks ?? []) {
+		if (typeof registration.execute !== "function") {
+			throw new WorkflowServiceError(
+				"validation",
+				"Support task implementation is not executable.",
+			);
+		}
+		supportRegistrationIdentity(registration);
+		if (supportTasks.has(registration.name)) {
+			throw new WorkflowServiceError(
+				"conflict",
+				`Duplicate support task implementation: ${registration.name}`,
+			);
+		}
+		supportTasks.set(
+			registration.name,
+			Object.freeze({
+				...registration,
+				parametersSchema: validateJsonSchemaDocument(
+					registration.parametersSchema,
+					"support registration parameters schema",
+				),
+				outputSchema: validateJsonSchemaDocument(
+					registration.outputSchema,
+					"support registration output schema",
+				),
+			}),
+		);
+	}
 	const cwd = await realpath(options.cwd);
 	const storeRoot = path.resolve(options.storeRoot);
 	const roots: WorkflowRoot[] = [];
@@ -269,6 +307,13 @@ export async function createWorkflowService(
 			agentDir: options.agentDir,
 			projectTrusted: options.projectTrusted(),
 			registeredRoots: roots,
+			allowedSupportImports: [
+				...new Set(
+					[...supportTasks.values()].map(
+						(registration) => registration.moduleSpecifier,
+					),
+				),
+			],
 		});
 	}
 

@@ -213,7 +213,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			);
 		}
 		const value = await artifacts.readJson(artifact);
-		if (!validator(task.task.spec.request.outputSchema)(value)) {
+		const outputSchema =
+			task.task.spec.kind === "agent"
+				? task.task.spec.request.outputSchema
+				: task.task.spec.request.implementation.outputSchema;
+		if (!validator(outputSchema)(value)) {
 			throw new StaticWorkflowRuntimeError(
 				"result",
 				"Workflow task artifact no longer matches its output schema.",
@@ -606,6 +610,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			},
 			agent(key, request) {
 				const handle = materializer.agent(key, request);
+				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+				return handle;
+			},
+			support(key, descriptor) {
+				const handle = materializer.support(key, descriptor);
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
 				return handle;
 			},

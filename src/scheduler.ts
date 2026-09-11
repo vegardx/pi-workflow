@@ -439,6 +439,7 @@ export function createWorkflowSequentialScheduler(
 		current: WorkflowStateProjection,
 		candidate: WorkflowTaskProjection,
 	): { allowed: true } | { allowed: false; deferred: boolean; reason: string } {
+		if (candidate.task.spec.kind === "support") return { allowed: true };
 		let settledCost = 0;
 		let settledTotalTokens = 0;
 		let settledChildRuntimeMs = 0;
@@ -468,6 +469,7 @@ export function createWorkflowSequentialScheduler(
 					reason: "Workflow budget reservation has no task declaration.",
 				};
 			}
+			if (task.task.spec.kind === "support") continue;
 			if (
 				budget.totalTokens !== undefined &&
 				task.task.spec.request.limits.totalTokens === undefined

@@ -260,6 +260,9 @@ async function readyJournalWithInput() {
 		throw new Error("missing producer declaration");
 	}
 	const producerTask = producerDeclaration.data.task;
+	if (producerTask.spec.kind !== "agent") {
+		throw new Error("producer fixture must be an agent task");
+	}
 	await journal.append("run-status-changed", {
 		from: "created",
 		to: "running",

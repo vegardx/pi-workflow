@@ -268,6 +268,12 @@ export function createWorkflowTaskFinalizer(
 		execution: TaskExecutionProjection,
 		structuredOutput: unknown,
 	): Promise<WorkflowArtifactRef> {
+		if (task.task.spec.kind !== "agent") {
+			throw new WorkflowTaskFinalizationError(
+				"artifact-import",
+				"Subagent finalizer cannot import support-task output.",
+			);
+		}
 		const schemaSha256 = deriveJsonValueSha256(
 			task.task.spec.request.outputSchema,
 		);

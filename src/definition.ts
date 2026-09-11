@@ -22,6 +22,7 @@ import {
 	type WorkflowTaskId,
 	type WorkflowTaskStatus,
 } from "./contracts.js";
+import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
@@ -191,6 +192,10 @@ export interface WorkflowContext<TInput> {
 	agent<TOutputSchema extends TSchema>(
 		key: TaskKey,
 		request: AgentTaskAuthoringRequest<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>>;
+	support<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		descriptor: SupportTaskDescriptor<TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>>;
 	fanOut<TItem, TOutputSchema extends TSchema>(
 		namespace: TaskKey,

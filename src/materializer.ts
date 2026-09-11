@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { Ajv } from "ajv";
+import type { FormatsPlugin } from "ajv-formats";
+import * as addFormatsModule from "ajv-formats";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -8,6 +11,12 @@ import {
 	type AgentTaskSpec,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
+	type MaterializedSupportTask,
+	MaterializedSupportTaskSchema,
+	type MaterializedWorkflowTask,
+	type SupportTaskRequest,
+	SupportTaskRequestSchema,
+	type SupportTaskSpec,
 	type TaskKey,
 	TaskKeySchema,
 	type TaskRef,
@@ -29,7 +38,10 @@ import {
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
 } from "./events.js";
+import type { SupportTaskDescriptor } from "./support.js";
 
+const addFormats = (addFormatsModule.default ??
+	addFormatsModule) as unknown as FormatsPlugin;
 const MAX_MATERIALIZED_TASKS = 256;
 const MAX_MATERIALIZATION_EPOCHS = 4096;
 
@@ -66,6 +78,21 @@ export function deriveAgentTaskIdentity(value: {
 	readonly inputSha256: string;
 	readonly namespace: readonly TaskKey[];
 	readonly spec: Omit<AgentTaskSpec, "identitySha256">;
+}): string {
+	return sha256({
+		contractRevision: WORKFLOW_CONTRACT_REVISION,
+		definitionIdentitySha256: value.definitionIdentitySha256,
+		inputSha256: value.inputSha256,
+		namespace: value.namespace,
+		...value.spec,
+	});
+}
+
+export function deriveSupportTaskIdentity(value: {
+	readonly definitionIdentitySha256: string;
+	readonly inputSha256: string;
+	readonly namespace: readonly TaskKey[];
+	readonly spec: Omit<SupportTaskSpec, "identitySha256">;
 }): string {
 	return sha256({
 		contractRevision: WORKFLOW_CONTRACT_REVISION,
@@ -115,14 +142,14 @@ export class WorkflowTaskMaterializer {
 		number,
 		WorkflowBarrierProjection
 	>;
-	private readonly expectedTasks: readonly MaterializedAgentTask[];
+	private readonly expectedTasks: readonly MaterializedWorkflowTask[];
 	private readonly inputSha256: string;
 	private readonly namespace: readonly TaskKey[];
 	private readonly runId: WorkflowRunId;
-	private readonly seen = new Map<string, MaterializedAgentTask>();
+	private readonly seen = new Map<string, MaterializedWorkflowTask>();
 	private projectedState: WorkflowStateProjection;
 	private readonly replayOnly: boolean;
-	private readonly uncommitted: MaterializedAgentTask[] = [];
+	private readonly uncommitted: MaterializedWorkflowTask[] = [];
 	private readonly controlAfter = new Map<string, TaskRef>();
 	private epoch = 1;
 	private finalClosed = false;
@@ -332,6 +359,167 @@ export class WorkflowTaskMaterializer {
 		}) as MaterializedAgentTask;
 		if (!Value.Check(MaterializedAgentTaskSchema, task)) {
 			throw new WorkflowMaterializationError("invalid materialized agent task");
+		}
+		const expected = this.expectedTasks[this.sequence];
+		if (!expected && this.replayOnly) {
+			throw new WorkflowMaterializationError(
+				"completed workflow materialization may only replay its exact prefix",
+			);
+		}
+		if (expected && !isDeepStrictEqual(task, expected)) {
+			throw new WorkflowMaterializationError(
+				"task declaration does not match the persisted ordered prefix",
+			);
+		}
+		this.sequence += 1;
+		const selected = expected ?? task;
+		this.seen.set(selected.id, selected);
+		if (!expected) this.uncommitted.push(selected);
+		return createTaskHandle<Static<TOutputSchema>>(
+			{ runId: this.runId, taskId: selected.id },
+			{
+				runId: this.runId,
+				producerTaskId: selected.id,
+				output: "result",
+			},
+		);
+	}
+
+	support<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		descriptor: SupportTaskDescriptor<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>> {
+		if (this.finalClosed) {
+			throw new WorkflowMaterializationError(
+				"task declaration follows the final materialization barrier",
+			);
+		}
+		if (this.sequence >= MAX_MATERIALIZED_TASKS) {
+			throw new WorkflowMaterializationError("workflow task limit exceeded");
+		}
+		if (!Value.Check(TaskKeySchema, key)) {
+			throw new WorkflowMaterializationError("invalid task key");
+		}
+		const namespaceKey = [...this.namespace, key].join("\u0000");
+		if (
+			[...this.seen.values()].some(
+				(task) =>
+					[...task.namespace, task.spec.key].join("\u0000") === namespaceKey,
+			)
+		) {
+			throw new WorkflowMaterializationError("duplicate task key in namespace");
+		}
+		if (descriptor.schema !== "pi-workflow-support-task-descriptor") {
+			throw new WorkflowMaterializationError("invalid support task descriptor");
+		}
+		const after = new Map<string, TaskRef>(this.controlAfter);
+		for (const dependency of descriptor.after ?? []) {
+			if (
+				dependency.runId !== this.runId ||
+				!this.seen.has(dependency.taskId)
+			) {
+				throw new WorkflowMaterializationError(
+					"task order dependency is unknown or belongs to another run",
+				);
+			}
+			after.set(dependency.taskId, dependency);
+		}
+		const inputs = Object.fromEntries(
+			Object.entries(descriptor.inputs ?? {})
+				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+				.map(([name, handle]) => {
+					const ref = handle.ref;
+					if (
+						!Value.Check(TaskKeySchema, name) ||
+						ref.runId !== this.runId ||
+						!this.seen.has(ref.producerTaskId)
+					) {
+						throw new WorkflowMaterializationError(
+							"task data dependency is invalid, unknown, or belongs to another run",
+						);
+					}
+					after.set(ref.producerTaskId, {
+						runId: this.runId,
+						taskId: ref.producerTaskId,
+					});
+					return [name, ref];
+				}),
+		);
+		const parametersSchema = validateJsonSchemaDocument(
+			descriptor.parametersSchema,
+			"support task parameters schema",
+		);
+		const outputSchema = validateJsonSchemaDocument(
+			descriptor.outputSchema,
+			"support task output schema",
+		);
+		const request: SupportTaskRequest = {
+			implementation: {
+				name: descriptor.implementation,
+				moduleSpecifier: descriptor.moduleSpecifier,
+				revision: descriptor.revision,
+				implementationSha256: descriptor.implementationSha256,
+				parametersSchema:
+					parametersSchema as SupportTaskRequest["implementation"]["parametersSchema"],
+				outputSchema:
+					outputSchema as SupportTaskRequest["implementation"]["outputSchema"],
+			},
+			parameters: descriptor.parameters,
+		};
+		if (!Value.Check(SupportTaskRequestSchema, request)) {
+			throw new WorkflowMaterializationError("invalid support task request");
+		}
+		const ajv = new Ajv({
+			allErrors: true,
+			strict: true,
+			validateSchema: true,
+		});
+		addFormats(ajv);
+		if (!ajv.validate(parametersSchema, request.parameters)) {
+			throw new WorkflowMaterializationError(
+				"support task parameters do not match their schema",
+			);
+		}
+		const orderedAfter = [...after.values()].sort((left, right) =>
+			left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0,
+		);
+		const specWithoutIdentity: Omit<SupportTaskSpec, "identitySha256"> = {
+			key,
+			kind: "support",
+			disposition: descriptor.disposition ?? "required",
+			after: orderedAfter,
+			inputs,
+			replay: descriptor.replay ?? "read-only",
+			request,
+		};
+		const spec: SupportTaskSpec = {
+			...specWithoutIdentity,
+			identitySha256: deriveSupportTaskIdentity({
+				definitionIdentitySha256: this.definitionIdentitySha256,
+				inputSha256: this.inputSha256,
+				namespace: this.namespace,
+				spec: specWithoutIdentity,
+			}),
+		};
+		const id = deriveWorkflowTaskId(this.runId, this.namespace, key);
+		const position =
+			[...this.seen.values()].filter(
+				(task) => task.materializationEpoch === this.epoch,
+			).length + 1;
+		const task = cloneFrozen({
+			id,
+			runId: this.runId,
+			namespace: this.namespace,
+			spec,
+			definitionIdentitySha256: this.definitionIdentitySha256,
+			materializationSequence: this.sequence + 1,
+			materializationEpoch: this.epoch,
+			epochPosition: position,
+		}) as MaterializedSupportTask;
+		if (!Value.Check(MaterializedSupportTaskSchema, task)) {
+			throw new WorkflowMaterializationError(
+				"invalid materialized support task",
+			);
 		}
 		const expected = this.expectedTasks[this.sequence];
 		if (!expected && this.replayOnly) {

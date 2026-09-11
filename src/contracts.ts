@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 9 as const;
+export const WORKFLOW_CONTRACT_REVISION = 10 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 
@@ -173,6 +173,32 @@ export const WorkflowArtifactRefSchema = Type.Object(
 );
 export type WorkflowArtifactRef = Static<typeof WorkflowArtifactRefSchema>;
 
+export const SupportImplementationSchema = Type.Object(
+	{
+		name: Type.String({
+			pattern: "^[a-zA-Z0-9@][a-zA-Z0-9@._/-]{0,255}$",
+		}),
+		moduleSpecifier: Type.String({
+			pattern: "^[a-zA-Z0-9@][a-zA-Z0-9@._/-]{0,255}$",
+		}),
+		revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		implementationSha256: Sha256Schema,
+		parametersSchema: JsonSchemaDocumentSchema,
+		outputSchema: JsonSchemaDocumentSchema,
+	},
+	{ additionalProperties: false },
+);
+export type SupportImplementation = Static<typeof SupportImplementationSchema>;
+
+export const SupportTaskRequestSchema = Type.Object(
+	{
+		implementation: SupportImplementationSchema,
+		parameters: Type.Unknown(),
+	},
+	{ additionalProperties: false },
+);
+export type SupportTaskRequest = Static<typeof SupportTaskRequestSchema>;
+
 export const AgentTaskRequestSchema = Type.Object(
 	{
 		agent: ResourceNameSchema,
@@ -232,6 +258,24 @@ export const AgentTaskSpecSchema = Type.Object(
 );
 export type AgentTaskSpec = Static<typeof AgentTaskSpecSchema>;
 
+export const SupportTaskSpecSchema = Type.Object(
+	{
+		key: TaskKeySchema,
+		kind: Type.Literal("support"),
+		disposition: TaskDispositionSchema,
+		after: Type.Array(TaskRefSchema, {
+			maxItems: 256,
+			uniqueItems: true,
+		}),
+		inputs: TaskInputsSchema,
+		replay: ReplayPolicySchema,
+		request: SupportTaskRequestSchema,
+		identitySha256: Sha256Schema,
+	},
+	{ additionalProperties: false },
+);
+export type SupportTaskSpec = Static<typeof SupportTaskSpecSchema>;
+
 export const MaterializedAgentTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
@@ -246,6 +290,31 @@ export const MaterializedAgentTaskSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type MaterializedAgentTask = Static<typeof MaterializedAgentTaskSchema>;
+
+export const MaterializedSupportTaskSchema = Type.Object(
+	{
+		id: WorkflowTaskIdSchema,
+		runId: WorkflowRunIdSchema,
+		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
+		spec: SupportTaskSpecSchema,
+		definitionIdentitySha256: Sha256Schema,
+		materializationSequence: Type.Integer({ minimum: 1 }),
+		materializationEpoch: Type.Integer({ minimum: 1 }),
+		epochPosition: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type MaterializedSupportTask = Static<
+	typeof MaterializedSupportTaskSchema
+>;
+
+export const MaterializedWorkflowTaskSchema = Type.Union([
+	MaterializedAgentTaskSchema,
+	MaterializedSupportTaskSchema,
+]);
+export type MaterializedWorkflowTask = Static<
+	typeof MaterializedWorkflowTaskSchema
+>;
 
 export const TaskExecutionRecordSchema = Type.Object(
 	{

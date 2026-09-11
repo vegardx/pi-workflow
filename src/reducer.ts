@@ -26,6 +26,7 @@ import {
 } from "./lifecycle.js";
 import {
 	deriveAgentTaskIdentity,
+	deriveSupportTaskIdentity,
 	deriveWorkflowTaskId,
 } from "./materializer.js";
 import type {
@@ -224,16 +225,28 @@ function applyEvent(
 			) {
 				fail("declared task ID is not deterministic", event.sequence);
 			}
-			const { identitySha256, ...specWithoutIdentity } = task.spec;
-			if (
-				identitySha256 !==
-				deriveAgentTaskIdentity({
+			let identitySha256: string;
+			let derivedIdentity: string;
+			if (task.spec.kind === "agent") {
+				const { identitySha256: identity, ...spec } = task.spec;
+				identitySha256 = identity;
+				derivedIdentity = deriveAgentTaskIdentity({
 					definitionIdentitySha256: state.definitionIdentitySha256,
 					inputSha256: state.inputSha256,
 					namespace: task.namespace,
-					spec: specWithoutIdentity,
-				})
-			) {
+					spec,
+				});
+			} else {
+				const { identitySha256: identity, ...spec } = task.spec;
+				identitySha256 = identity;
+				derivedIdentity = deriveSupportTaskIdentity({
+					definitionIdentitySha256: state.definitionIdentitySha256,
+					inputSha256: state.inputSha256,
+					namespace: task.namespace,
+					spec,
+				});
+			}
+			if (identitySha256 !== derivedIdentity) {
 				fail("declared task identity digest does not match", event.sequence);
 			}
 			if (state.tasks[task.id]) {
@@ -755,6 +768,9 @@ function applyEvent(
 			}
 			const evidence = structuredClone(input.data.evidence);
 			if (evidence.kind === "subagent") {
+				if (task.task.spec.kind !== "agent") {
+					fail("support task has subagent terminal evidence", event.sequence);
+				}
 				const observation = projection.observation;
 				const expectedOutcome = subagentOutcome(evidence.status);
 				const importedArtifact = projection.artifactImport
