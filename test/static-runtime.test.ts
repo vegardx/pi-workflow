@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RunResult } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
-import { defineWorkflow } from "../src/definition.js";
+import { defineWorkflow, type WorkflowContext } from "../src/definition.js";
 import {
 	deriveJsonValueSha256,
+	deriveNestedWorkflowRunId,
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
@@ -19,6 +21,7 @@ import {
 	type WorkflowRunLease,
 } from "../src/persistence/run-lease.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
+import { type DiscoveredWorkflow, discoverWorkflows } from "../src/registry.js";
 import type {
 	WorkflowSchedulerOutcome,
 	WorkflowSequentialScheduler,
@@ -26,11 +29,276 @@ import type {
 import {
 	createStaticWorkflowRuntime,
 	StaticWorkflowRuntimeError,
+	type StaticWorkflowRuntimeOptions,
 } from "../src/static-runtime.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
 const planIdentitySha256 = "b".repeat(64);
 const leases = new Set<WorkflowRunLease>();
+const nestedRoot = path.resolve(
+	".pi",
+	"test-static-runtime",
+	`nested-${randomUUID()}`,
+);
+const childOutputArtifactId = `artifact_${"5".repeat(64)}`;
+const nestedUsage = { cost: 0.5, totalTokens: 1_200, childRuntimeMs: 4_000 };
+let discovery: Promise<readonly DiscoveredWorkflow[]> | undefined;
+
+function childDefinitionSource(name: string): string {
+	return `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: ${JSON.stringify(name)}, description: "Nested child", version: 2, budget: { cost: 10, totalTokens: 100000, childRuntimeMs: 600000 }, timeoutMs: 600000, concurrency: 2 },
+  inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run(ctx) { return { answer: ctx.input.value }; }
+};\n`;
+}
+
+function discoveredWorkflows(): Promise<readonly DiscoveredWorkflow[]> {
+	discovery ??= (async () => {
+		const cwd = path.join(nestedRoot, "project");
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "child.workflow.ts"),
+			childDefinitionSource("child"),
+		);
+		return discoverWorkflows({
+			cwd,
+			agentDir: path.join(nestedRoot, "agent"),
+			projectTrusted: true,
+		});
+	})();
+	return discovery;
+}
+
+async function discoveredChild(): Promise<DiscoveredWorkflow> {
+	const child = (await discoveredWorkflows()).find(
+		(workflow) => workflow.definition.meta.name === "child",
+	);
+	if (!child) throw new Error("missing discovered child workflow");
+	return child;
+}
+
+async function nesting(
+	depth = 0,
+	ancestorDefinitionIdentities: readonly string[] = [],
+): Promise<
+	NonNullable<StaticWorkflowRuntimeOptions<unknown, unknown>["nesting"]>
+> {
+	const workflows = await discoveredWorkflows();
+	return {
+		depth,
+		ancestorDefinitionIdentities,
+		resolveWorkflow: (name) =>
+			workflows.find((workflow) => workflow.definition.meta.name === name),
+	};
+}
+
+function parentMeta(name: string) {
+	return {
+		name,
+		description: "Nested parent",
+		version: 1,
+		budget: { cost: 1000, childRuntimeMs: 3600000 },
+		timeoutMs: 3600000,
+	};
+}
+
+function nestedSchedulerFor(
+	journal: WorkflowRunJournal,
+	artifacts: WorkflowArtifactStore,
+	outcomes: ReadonlyMap<
+		string,
+		{ status: "completed"; output: unknown } | { status: "failed" }
+	>,
+): WorkflowSequentialScheduler & { calls: number } {
+	const scheduler = {
+		concurrency: 1,
+		stopSignal: new AbortController().signal,
+		calls: 0,
+		async drive(): Promise<WorkflowSchedulerOutcome> {
+			scheduler.calls += 1;
+			let current = reduceWorkflowEvents(await journal.readEvents());
+			if (current.status === "created" || current.status === "waiting") {
+				await journal.append("run-status-changed", {
+					from: current.status,
+					to: "running",
+				});
+				current = reduceWorkflowEvents(await journal.readEvents());
+			}
+			const task = Object.values(current.tasks)
+				.sort(
+					(left, right) =>
+						left.task.materializationSequence -
+						right.task.materializationSequence,
+				)
+				.find(
+					(candidate) =>
+						candidate.status !== "completed" && candidate.status !== "failed",
+				);
+			if (!task) return { state: "idle", runStatus: current.status };
+			if (task.task.spec.kind !== "workflow") {
+				throw new Error("nested fake scheduler only supports workflow tasks");
+			}
+			const outcome = outcomes.get(task.task.spec.key);
+			if (!outcome) throw new Error("missing fake nested outcome");
+			const spec = task.task.spec;
+			const taskId = task.task.id;
+			await journal.append("task-status-changed", {
+				taskId,
+				from: "pending",
+				to: "ready",
+			});
+			const executionId = deriveTaskExecutionId(current.runId, taskId, 1);
+			const childRunId = deriveNestedWorkflowRunId(current.runId, taskId, 1);
+			await journal.append("task-execution-created", {
+				execution: {
+					kind: "workflow",
+					id: executionId,
+					runId: current.runId,
+					taskId,
+					generation: 1,
+					taskIdentitySha256: spec.identitySha256,
+					childRunId,
+				},
+			});
+			await journal.append("task-execution-nested-intended", {
+				executionId,
+				childRunId,
+				definitionIdentitySha256: spec.request.definitionIdentitySha256,
+				inputSha256: spec.request.inputSha256,
+				budget: structuredClone(spec.request.budget),
+				timeoutMs: spec.request.timeoutMs,
+				deadlineAt: new Date(Date.now() + 1_000).toISOString(),
+				concurrency: spec.request.concurrency,
+			});
+			await journal.append("task-execution-nested-launched", {
+				executionId,
+				childRunId,
+			});
+			await journal.append("task-status-changed", {
+				taskId,
+				from: "ready",
+				to: "running",
+			});
+			if (outcome.status === "failed") {
+				await journal.append("task-execution-nested-settled", {
+					executionId,
+					childRunId,
+					status: "failed",
+					usage: { ...nestedUsage },
+					usageComplete: true,
+				});
+				await journal.append("task-execution-terminal", {
+					executionId,
+					outcome: "failed",
+					evidence: {
+						kind: "nested-workflow",
+						childRunId,
+						status: "failed",
+						usage: { ...nestedUsage },
+						usageComplete: true,
+					},
+				});
+				await journal.append("task-status-changed", {
+					taskId,
+					from: "running",
+					to: "failed",
+				});
+				return { state: "idle", runStatus: "running" };
+			}
+			const artifact = await artifacts.putJson(outcome.output, {
+				runId: current.runId,
+				producerTaskId: taskId,
+				output: "result",
+				schemaSha256: deriveJsonValueSha256(spec.request.outputSchema),
+			});
+			await journal.append("task-execution-nested-settled", {
+				executionId,
+				childRunId,
+				status: "completed",
+				usage: { ...nestedUsage },
+				usageComplete: true,
+				outputArtifactId: childOutputArtifactId,
+				outputSha256: artifact.sha256,
+			});
+			await journal.append("artifact-declared", { artifact });
+			await journal.append("task-execution-nested-output-imported", {
+				executionId,
+				childRunId,
+				artifactId: artifact.id,
+				sourceArtifactId: childOutputArtifactId,
+				sourceSha256: artifact.sha256,
+			});
+			await journal.append("task-execution-terminal", {
+				executionId,
+				outcome: "completed",
+				evidence: {
+					kind: "nested-workflow",
+					childRunId,
+					status: "completed",
+					usage: { ...nestedUsage },
+					usageComplete: true,
+					outputSha256: artifact.sha256,
+					artifactId: artifact.id,
+				},
+			});
+			await journal.append("task-status-changed", {
+				taskId,
+				from: "running",
+				to: "completed",
+			});
+			return { state: "idle", runStatus: "running" };
+		},
+		async reconcile() {
+			throw new Error("fake nested workflow has no cleanup-blocked task");
+		},
+		async stop() {
+			return { state: "terminal", runStatus: "cancelled" } as const;
+		},
+	};
+	return scheduler;
+}
+
+async function nestedDeclarationFailure(
+	options: {
+		nesting?: StaticWorkflowRuntimeOptions<unknown, unknown>["nesting"];
+		definitionIdentitySha256?: string;
+	},
+	declare: (ctx: WorkflowContext<unknown>) => unknown,
+): Promise<unknown> {
+	const { journal, artifacts } = await fixture();
+	const definition = defineWorkflow({
+		meta: parentMeta("rejecting-parent"),
+		inputSchema: Type.Object({}),
+		outputSchema: Type.Object({}),
+		run(ctx) {
+			declare(ctx);
+			return {};
+		},
+	});
+	const runtime = createStaticWorkflowRuntime({
+		definition,
+		definitionIdentitySha256:
+			options.definitionIdentitySha256 ?? definitionIdentitySha256,
+		input: {},
+		cwd: "/repo",
+		journal,
+		artifacts,
+		scheduler: schedulerFor(journal, artifacts, new Map()),
+		...(options.nesting === undefined ? {} : { nesting: options.nesting }),
+	});
+	const error = await runtime.drive().then(
+		() => undefined,
+		(reason: unknown) => reason,
+	);
+	expect(error).toBeInstanceOf(StaticWorkflowRuntimeError);
+	expect((error as StaticWorkflowRuntimeError).stage).toBe("execution");
+	const state = reduceWorkflowEvents(await journal.readEvents());
+	expect(Object.keys(state.tasks)).toHaveLength(0);
+	expect(state.status).toBe("failed");
+	return (error as StaticWorkflowRuntimeError).cause;
+}
 
 function request(goal = "Answer") {
 	return {
@@ -262,6 +530,285 @@ function schedulerFor(
 afterEach(async () => {
 	await Promise.all([...leases].map((lease) => lease.release()));
 	leases.clear();
+});
+
+afterAll(async () => {
+	await rm(nestedRoot, { recursive: true, force: true });
+});
+
+describe("static workflow runtime nested workflows", () => {
+	it("rejects invalid nesting options at construction", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: parentMeta("nesting-options"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({}),
+			run() {
+				return {};
+			},
+		});
+		const resolveWorkflow = () => undefined;
+		for (const nesting of [
+			{ depth: 4, ancestorDefinitionIdentities: [], resolveWorkflow },
+			{ depth: -1, ancestorDefinitionIdentities: [], resolveWorkflow },
+			{ depth: 1, ancestorDefinitionIdentities: [], resolveWorkflow },
+			{
+				depth: 1,
+				ancestorDefinitionIdentities: ["not-a-sha256"],
+				resolveWorkflow,
+			},
+			{
+				depth: 0,
+				ancestorDefinitionIdentities: [],
+				resolveWorkflow: undefined as never,
+			},
+		]) {
+			expect(() =>
+				createStaticWorkflowRuntime({
+					definition,
+					definitionIdentitySha256,
+					input: {},
+					cwd: "/repo",
+					journal,
+					artifacts,
+					scheduler: schedulerFor(journal, artifacts, new Map()),
+					nesting,
+				}),
+			).toThrow("Static workflow runtime nesting is invalid.");
+		}
+		expect(await journal.readEvents()).toEqual([]);
+	});
+
+	it("rejects nested declarations when the runtime has no nesting", async () => {
+		await expect(
+			nestedDeclarationFailure({}, (ctx) =>
+				ctx.workflow("child", { workflow: "child", input: { value: "x" } }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflows are not available in this runtime.",
+		});
+	});
+
+	it("rejects undiscovered and invalid nested workflow names", async () => {
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) =>
+				ctx.workflow("child", { workflow: "missing", input: { value: "x" } }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow definition is not discovered.",
+		});
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) =>
+				ctx.workflow("child", { workflow: "Bad Name", input: {} }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow name is invalid.",
+		});
+	}, 15_000);
+
+	it("rejects nested declarations at the depth bound", async () => {
+		await expect(
+			nestedDeclarationFailure(
+				{
+					nesting: await nesting(3, [
+						"1".repeat(64),
+						"2".repeat(64),
+						"3".repeat(64),
+					]),
+				},
+				(ctx) =>
+					ctx.workflow("child", { workflow: "child", input: { value: "x" } }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow depth bound exceeded.",
+		});
+	}, 15_000);
+
+	it("rejects recursive nested declarations", async () => {
+		const child = await discoveredChild();
+		await expect(
+			nestedDeclarationFailure(
+				{
+					nesting: await nesting(),
+					definitionIdentitySha256: child.identity.identitySha256,
+				},
+				(ctx) =>
+					ctx.workflow("child", { workflow: "child", input: { value: "x" } }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow recursion is not allowed.",
+		});
+		await expect(
+			nestedDeclarationFailure(
+				{ nesting: await nesting(1, [child.identity.identitySha256]) },
+				(ctx) =>
+					ctx.workflow("child", { workflow: "child", input: { value: "x" } }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow recursion is not allowed.",
+		});
+	}, 15_000);
+
+	it("rejects nested input that does not match the child schema", async () => {
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) =>
+				ctx.workflow("child", { workflow: "child", input: { value: 42 } }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow input does not match its schema.",
+		});
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) =>
+				ctx.workflow("child", {
+					workflow: "child",
+					input: { value: "x", extra: undefined },
+				}),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow input is not losslessly JSON-serializable.",
+		});
+	}, 15_000);
+
+	it("declares, completes, and replays a nested workflow task", async () => {
+		const { journal, artifacts } = await fixture();
+		const child = await discoveredChild();
+		const definition = defineWorkflow({
+			meta: parentMeta("nested-parent"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				return ctx.workflow<{ answer: string }>("child", {
+					workflow: "child",
+					input: { value: "nested" },
+				});
+			},
+		});
+		const scheduler = nestedSchedulerFor(
+			journal,
+			artifacts,
+			new Map([
+				[
+					"child",
+					{ status: "completed" as const, output: { answer: "from child" } },
+				],
+			]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+			nesting: await nesting(),
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { answer: "from child" },
+		});
+		expect(scheduler.calls).toBe(1);
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const tasks = Object.values(state.tasks);
+		expect(tasks).toHaveLength(1);
+		const task = tasks[0]?.task;
+		if (task?.spec.kind !== "workflow")
+			throw new Error("expected workflow task");
+		expect(tasks[0]?.status).toBe("completed");
+		expect(task.spec.inputs).toEqual({});
+		expect(task.spec.after).toEqual([]);
+		expect(task.spec.disposition).toBe("required");
+		expect(task.spec.replay).toBe("read-only");
+		expect(task.spec.request).toEqual({
+			definitionName: "child",
+			definitionIdentitySha256: child.identity.identitySha256,
+			definitionSourceSha256: child.identity.sourceSha256,
+			definitionVersion: 2,
+			input: { value: "nested" },
+			inputSha256: deriveJsonValueSha256({ value: "nested" }),
+			inputSchema: child.definition.inputSchema,
+			outputSchema: child.definition.outputSchema,
+			budget: { cost: 10, totalTokens: 100_000, childRuntimeMs: 600_000 },
+			timeoutMs: 600_000,
+			concurrency: 2,
+		});
+		expect(task.spec.request.budget).toEqual(child.definition.meta.budget);
+		const execution = Object.values(state.executions)[0];
+		expect(execution?.execution.kind).toBe("workflow");
+		expect(execution?.terminal?.evidence.kind).toBe("nested-workflow");
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { answer: "from child" },
+		});
+		expect(scheduler.calls).toBe(1);
+	}, 15_000);
+
+	it("projects nested workflow failure into settled results", async () => {
+		const { journal, artifacts } = await fixture();
+		let declaredTaskId = "";
+		const definition = defineWorkflow({
+			meta: parentMeta("nested-settled"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({
+				status: Type.String(),
+				taskId: Type.String(),
+				outcome: Type.String(),
+				code: Type.String(),
+				message: Type.String(),
+			}),
+			async run(ctx) {
+				const task = ctx.workflow<{ answer: string }>("child", {
+					workflow: "child",
+					input: { value: "doomed" },
+					disposition: "optional",
+				});
+				declaredTaskId = task.ref.taskId;
+				const [outcome] = await ctx.settled([task] as const);
+				if (outcome.status !== "rejected") {
+					throw new Error("expected a rejected nested task");
+				}
+				return {
+					status: outcome.status,
+					taskId: outcome.taskId,
+					outcome: outcome.outcome,
+					code: outcome.failure?.code ?? "missing",
+					message: outcome.failure?.message ?? "missing",
+				};
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: nestedSchedulerFor(
+				journal,
+				artifacts,
+				new Map([["child", { status: "failed" as const }]]),
+			),
+			nesting: await nesting(),
+		});
+		const result = await runtime.drive();
+		expect(result.status).toBe("completed-degraded");
+		expect(result.value).toEqual({
+			status: "rejected",
+			taskId: declaredTaskId,
+			outcome: "failed",
+			code: "nested-workflow",
+			message: "failed",
+		});
+		expect(declaredTaskId).not.toBe("");
+	}, 15_000);
 });
 
 describe("static workflow runtime", () => {
