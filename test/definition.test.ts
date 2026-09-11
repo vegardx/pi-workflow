@@ -1,8 +1,56 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { defineWorkflow, isWorkflowDefinition } from "../src/definition.js";
+import {
+	createTaskHandle,
+	defineWorkflow,
+	isWorkflowDefinition,
+	type NestedWorkflowRequest,
+} from "../src/definition.js";
 
 describe("workflow definitions", () => {
+	it("exposes typed nested workflow requests on the workflow context", () => {
+		const request: NestedWorkflowRequest<{ value: string }> = {
+			workflow: "child",
+			input: { value: "yes" },
+			disposition: "optional",
+			after: [],
+			replay: "read-only",
+		};
+		const definition = defineWorkflow({
+			meta: {
+				name: "parent",
+				description: "Parent",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				return ctx.workflow<{ answer: string }>("child", request);
+			},
+		});
+		expect(isWorkflowDefinition(definition)).toBe(true);
+		const taskId = `task_${"a".repeat(64)}`;
+		const handle = createTaskHandle<{ answer: string }>(
+			{ runId: "workflow_definition", taskId },
+			{
+				runId: "workflow_definition",
+				producerTaskId: taskId,
+				output: "result",
+			},
+		);
+		const declared: Array<{ key: string; request: NestedWorkflowRequest }> = [];
+		const context = {
+			workflow(key: string, nested: NestedWorkflowRequest) {
+				declared.push({ key, request: nested });
+				return handle;
+			},
+		} as unknown as Parameters<typeof definition.run>[0];
+		expect(definition.run(context)).toBe(handle);
+		expect(declared).toEqual([{ key: "child", request }]);
+	});
+
 	it("creates an immutable typed definition", () => {
 		const definition = defineWorkflow({
 			meta: {

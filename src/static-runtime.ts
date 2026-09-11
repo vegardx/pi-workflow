@@ -7,15 +7,21 @@ import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
 import type {
+	NestedWorkflowTaskRequest,
 	WorkflowArtifactRef,
 	WorkflowRunId,
 	WorkflowTaskId,
 } from "./contracts.js";
-import { TaskKeySchema } from "./contracts.js";
+import {
+	MAX_NESTED_WORKFLOW_DEPTH,
+	TaskKeySchema,
+	WorkflowDefinitionNameSchema,
+} from "./contracts.js";
 import {
 	isArtifactHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
+	type NestedWorkflowRequest,
 	type PipelineStage,
 	type SettledTaskResult,
 	type TaskHandle,
@@ -27,6 +33,7 @@ import { deriveJsonValueSha256 } from "./execution.js";
 import { WorkflowTaskMaterializer } from "./materializer.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
+import type { DiscoveredWorkflow } from "./registry.js";
 import type { WorkflowSequentialScheduler } from "./scheduler.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -53,6 +60,11 @@ export interface StaticWorkflowRuntimeOptions<TInput, TOutput> {
 	readonly artifacts: WorkflowArtifactStore;
 	readonly scheduler: WorkflowSequentialScheduler;
 	readonly signal?: AbortSignal;
+	readonly nesting?: {
+		readonly depth: number;
+		readonly ancestorDefinitionIdentities: readonly string[];
+		readonly resolveWorkflow: (name: string) => DiscoveredWorkflow | undefined;
+	};
 }
 
 export class StaticWorkflowRuntimeError extends Error {
@@ -134,6 +146,25 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		throw new StaticWorkflowRuntimeError(
 			"validation",
 			"Static workflow runtime identity is invalid.",
+		);
+	}
+	const nesting = options.nesting;
+	if (
+		nesting !== undefined &&
+		(!Number.isInteger(nesting.depth) ||
+			nesting.depth < 0 ||
+			nesting.depth >= MAX_NESTED_WORKFLOW_DEPTH ||
+			!Array.isArray(nesting.ancestorDefinitionIdentities) ||
+			nesting.ancestorDefinitionIdentities.length !== nesting.depth ||
+			!nesting.ancestorDefinitionIdentities.every(
+				(identity) =>
+					typeof identity === "string" && /^[a-f0-9]{64}$/.test(identity),
+			) ||
+			typeof nesting.resolveWorkflow !== "function")
+	) {
+		throw new StaticWorkflowRuntimeError(
+			"validation",
+			"Static workflow runtime nesting is invalid.",
 		);
 	}
 	const inputSchema = validateJsonSchemaDocument(
@@ -618,6 +649,94 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
 				return handle;
 			},
+			workflow<TOutput = unknown>(
+				key: Parameters<typeof materializer.workflow>[0],
+				request: NestedWorkflowRequest,
+			): TaskHandle<TOutput> {
+				if (!nesting) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Nested workflows are not available in this runtime.",
+					);
+				}
+				if (
+					typeof request !== "object" ||
+					request === null ||
+					!Value.Check(WorkflowDefinitionNameSchema, request.workflow)
+				) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Nested workflow name is invalid.",
+					);
+				}
+				const child = nesting.resolveWorkflow(request.workflow);
+				if (!child || !isWorkflowDefinition(child.definition)) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Nested workflow definition is not discovered.",
+					);
+				}
+				if (nesting.depth + 1 >= MAX_NESTED_WORKFLOW_DEPTH) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Nested workflow depth bound exceeded.",
+					);
+				}
+				const childIdentity = child.identity.identitySha256;
+				if (
+					childIdentity === definitionIdentitySha256 ||
+					nesting.ancestorDefinitionIdentities.includes(childIdentity)
+				) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Nested workflow recursion is not allowed.",
+					);
+				}
+				const childInputSchema = validateJsonSchemaDocument(
+					child.definition.inputSchema,
+					"nested workflow input schema",
+				);
+				const childOutputSchema = validateJsonSchemaDocument(
+					child.definition.outputSchema,
+					"nested workflow output schema",
+				);
+				const childInput = jsonCloneFrozen(
+					request.input,
+					"Nested workflow input",
+				);
+				if (!validator(childInputSchema)(childInput)) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Nested workflow input does not match its schema.",
+					);
+				}
+				const meta = child.definition.meta;
+				const nestedRequest: NestedWorkflowTaskRequest = {
+					definitionName: meta.name,
+					definitionIdentitySha256: childIdentity,
+					definitionSourceSha256: child.identity.sourceSha256,
+					definitionVersion: meta.version,
+					input: childInput,
+					inputSha256: deriveJsonValueSha256(childInput),
+					inputSchema:
+						childInputSchema as NestedWorkflowTaskRequest["inputSchema"],
+					outputSchema:
+						childOutputSchema as NestedWorkflowTaskRequest["outputSchema"],
+					budget: structuredClone(meta.budget),
+					timeoutMs: meta.timeoutMs,
+					concurrency: meta.concurrency,
+				};
+				const handle = materializer.workflow<TOutput>(key, {
+					request: nestedRequest,
+					...(request.disposition === undefined
+						? {}
+						: { disposition: request.disposition }),
+					...(request.after === undefined ? {} : { after: request.after }),
+					...(request.replay === undefined ? {} : { replay: request.replay }),
+				});
+				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+				return handle;
+			},
 			fanOut(namespace, items, options) {
 				if (!Value.Check(TaskKeySchema, namespace)) {
 					throw new StaticWorkflowRuntimeError(
@@ -790,9 +909,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 							const failure = evidence
 								? evidence.kind === "workflow"
 									? { message: evidence.message, code: evidence.stage }
-									: evidence.kind === "subagent" && evidence.failure
-										? structuredClone(evidence.failure)
-										: undefined
+									: evidence.kind === "nested-workflow"
+										? { message: evidence.status, code: "nested-workflow" }
+										: evidence.kind === "subagent" && evidence.failure
+											? structuredClone(evidence.failure)
+											: undefined
 								: undefined;
 							return Object.freeze({
 								status: "rejected" as const,

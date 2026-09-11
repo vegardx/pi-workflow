@@ -131,6 +131,14 @@ export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
 	readonly replay?: ReplayPolicy;
 }
 
+export interface NestedWorkflowRequest<TInput = unknown> {
+	readonly workflow: string;
+	readonly input: TInput;
+	readonly disposition?: TaskDisposition;
+	readonly after?: readonly TaskRef[];
+	readonly replay?: ReplayPolicy;
+}
+
 export type SettledTaskFailure = Readonly<{
 	message: string;
 	code?: string;
@@ -186,6 +194,10 @@ export interface WorkflowContext<TInput> {
 		key: TaskKey,
 		descriptor: SupportTaskDescriptor<TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>>;
+	workflow<TOutput = unknown>(
+		key: TaskKey,
+		request: NestedWorkflowRequest,
+	): TaskHandle<TOutput>;
 	fanOut<TItem, TOutputSchema extends TSchema>(
 		namespace: TaskKey,
 		items: readonly TItem[],

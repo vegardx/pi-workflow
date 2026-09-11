@@ -9,15 +9,22 @@ import {
 	type AgentTaskRequest,
 	AgentTaskRequestSchema,
 	type AgentTaskSpec,
+	MAX_NESTED_WORKFLOW_TASKS,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
+	type MaterializedNestedWorkflowTask,
+	MaterializedNestedWorkflowTaskSchema,
 	type MaterializedSupportTask,
 	MaterializedSupportTaskSchema,
 	type MaterializedWorkflowTask,
+	type NestedWorkflowTaskRequest,
+	NestedWorkflowTaskRequestSchema,
 	type NestedWorkflowTaskSpec,
+	type ReplayPolicy,
 	type SupportTaskRequest,
 	SupportTaskRequestSchema,
 	type SupportTaskSpec,
+	type TaskDisposition,
 	type TaskKey,
 	TaskKeySchema,
 	type TaskRef,
@@ -39,6 +46,7 @@ import {
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
 } from "./events.js";
+import { deriveJsonValueSha256 } from "./execution.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -145,6 +153,13 @@ export interface WorkflowTaskMaterializerOptions {
 	readonly inputSha256: string;
 	readonly namespace?: readonly TaskKey[];
 	readonly previousState?: WorkflowStateProjection;
+}
+
+export interface NestedWorkflowDeclaration {
+	readonly request: NestedWorkflowTaskRequest;
+	readonly disposition?: TaskDisposition;
+	readonly after?: readonly TaskRef[];
+	readonly replay?: ReplayPolicy;
 }
 
 export interface MaterializationCommit {
@@ -553,6 +568,129 @@ export class WorkflowTaskMaterializer {
 		this.seen.set(selected.id, selected);
 		if (!expected) this.uncommitted.push(selected);
 		return createTaskHandle<Static<TOutputSchema>>(
+			{ runId: this.runId, taskId: selected.id },
+			{
+				runId: this.runId,
+				producerTaskId: selected.id,
+				output: "result",
+			},
+		);
+	}
+
+	workflow<TOutput = unknown>(
+		key: TaskKey,
+		declaration: NestedWorkflowDeclaration,
+	): TaskHandle<TOutput> {
+		if (this.finalClosed) {
+			throw new WorkflowMaterializationError(
+				"task declaration follows the final materialization barrier",
+			);
+		}
+		if (this.sequence >= MAX_MATERIALIZED_TASKS) {
+			throw new WorkflowMaterializationError("workflow task limit exceeded");
+		}
+		if (!Value.Check(TaskKeySchema, key)) {
+			throw new WorkflowMaterializationError("invalid task key");
+		}
+		const namespaceKey = [...this.namespace, key].join("\u0000");
+		if (
+			[...this.seen.values()].some(
+				(task) =>
+					[...task.namespace, task.spec.key].join("\u0000") === namespaceKey,
+			)
+		) {
+			throw new WorkflowMaterializationError("duplicate task key in namespace");
+		}
+		const after = new Map<string, TaskRef>(this.controlAfter);
+		for (const dependency of declaration.after ?? []) {
+			if (
+				dependency.runId !== this.runId ||
+				!this.seen.has(dependency.taskId)
+			) {
+				throw new WorkflowMaterializationError(
+					"task order dependency is unknown or belongs to another run",
+				);
+			}
+			after.set(dependency.taskId, dependency);
+		}
+		const inputs: NestedWorkflowTaskSpec["inputs"] = {};
+		const request = declaration.request;
+		if (!Value.Check(NestedWorkflowTaskRequestSchema, request)) {
+			throw new WorkflowMaterializationError(
+				"invalid nested workflow task request",
+			);
+		}
+		if (request.inputSha256 !== deriveJsonValueSha256(request.input)) {
+			throw new WorkflowMaterializationError(
+				"nested workflow request input digest does not match its input",
+			);
+		}
+		const declaredWorkflows = [...this.seen.values()].filter(
+			(task) => task.spec.kind === "workflow",
+		).length;
+		if (declaredWorkflows >= MAX_NESTED_WORKFLOW_TASKS) {
+			throw new WorkflowMaterializationError(
+				"nested workflow task bound exceeded",
+			);
+		}
+		const orderedAfter = [...after.values()].sort((left, right) =>
+			left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0,
+		);
+		const specWithoutIdentity: Omit<NestedWorkflowTaskSpec, "identitySha256"> =
+			{
+				key,
+				kind: "workflow",
+				disposition: declaration.disposition ?? "required",
+				after: orderedAfter,
+				inputs,
+				replay: declaration.replay ?? "read-only",
+				request,
+			};
+		const spec: NestedWorkflowTaskSpec = {
+			...specWithoutIdentity,
+			identitySha256: deriveNestedWorkflowTaskIdentity({
+				definitionIdentitySha256: this.definitionIdentitySha256,
+				inputSha256: this.inputSha256,
+				namespace: this.namespace,
+				spec: specWithoutIdentity,
+			}),
+		};
+		const id = deriveWorkflowTaskId(this.runId, this.namespace, key);
+		const position =
+			[...this.seen.values()].filter(
+				(task) => task.materializationEpoch === this.epoch,
+			).length + 1;
+		const task = cloneFrozen({
+			id,
+			runId: this.runId,
+			namespace: this.namespace,
+			spec,
+			definitionIdentitySha256: this.definitionIdentitySha256,
+			materializationSequence: this.sequence + 1,
+			materializationEpoch: this.epoch,
+			epochPosition: position,
+		}) as MaterializedNestedWorkflowTask;
+		if (!Value.Check(MaterializedNestedWorkflowTaskSchema, task)) {
+			throw new WorkflowMaterializationError(
+				"invalid materialized nested workflow task",
+			);
+		}
+		const expected = this.expectedTasks[this.sequence];
+		if (!expected && this.replayOnly) {
+			throw new WorkflowMaterializationError(
+				"completed workflow materialization may only replay its exact prefix",
+			);
+		}
+		if (expected && !isDeepStrictEqual(task, expected)) {
+			throw new WorkflowMaterializationError(
+				"task declaration does not match the persisted ordered prefix",
+			);
+		}
+		this.sequence += 1;
+		const selected = expected ?? task;
+		this.seen.set(selected.id, selected);
+		if (!expected) this.uncommitted.push(selected);
+		return createTaskHandle<TOutput>(
 			{ runId: this.runId, taskId: selected.id },
 			{
 				runId: this.runId,
