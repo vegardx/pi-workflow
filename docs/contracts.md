@@ -591,7 +591,9 @@ Active children map tasks to `running`; queued or terminal children awaiting
 required finalization map tasks to `waiting`; durable workflow stop intent maps
 active tasks to `cancelling` before interruption and drains them without
 exceeding the same durable lifecycle. Failed dependencies map pending dependents
-to `blocked`.
+to `blocked`. Run status `waiting` means no committed task is currently
+selectable by the lane that observed it; other lanes may still be executing
+agent children or in-process support tasks.
 
 The journal stores bounded child-settlement evidence and a digest of the complete
 child result, not model output, structured values, session paths, or
