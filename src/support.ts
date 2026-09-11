@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
@@ -6,6 +5,7 @@ import * as addFormatsModule from "ajv-formats";
 import type { Static, TSchema } from "typebox";
 import type {
 	ReplayPolicy,
+	SupportImplementation,
 	TaskDisposition,
 	TaskKey,
 	TaskRef,
@@ -14,6 +14,7 @@ import {
 	type ArtifactHandle,
 	validateJsonSchemaDocument,
 } from "./definition.js";
+import { deriveSupportImplementationIdentitySha256 } from "./execution.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
@@ -206,16 +207,13 @@ export function supportRegistrationIdentity(
 		registration.outputSchema,
 		"support registration output schema",
 	);
-	return createHash("sha256")
-		.update(
-			JSON.stringify({
-				implementation: registration.name,
-				moduleSpecifier: registration.moduleSpecifier,
-				revision: registration.revision,
-				implementationSha256: registration.implementationSha256,
-				parametersSchema,
-				outputSchema,
-			}),
-		)
-		.digest("hex");
+	return deriveSupportImplementationIdentitySha256({
+		name: registration.name,
+		moduleSpecifier: registration.moduleSpecifier,
+		revision: registration.revision,
+		implementationSha256: registration.implementationSha256,
+		parametersSchema:
+			parametersSchema as SupportImplementation["parametersSchema"],
+		outputSchema: outputSchema as SupportImplementation["outputSchema"],
+	});
 }

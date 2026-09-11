@@ -6,8 +6,16 @@ import {
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
 	MaterializedAgentTaskSchema,
+	SupportTaskTerminalEvidenceSchema,
+	TaskExecutionRecordSchema,
+	WORKFLOW_CONTRACT_REVISION,
 	WORKFLOW_RUNTIME_CONTRACT,
+	WorkflowExecutionFailureEvidenceSchema,
 } from "../src/contracts.js";
+import {
+	WorkflowJournalEventSchema,
+	WorkflowRunSnapshotSchema,
+} from "../src/persistence/journal.js";
 
 const sha = "a".repeat(64);
 
@@ -77,6 +85,140 @@ describe("workflow contracts", () => {
 			replay: true,
 			resume: false,
 		});
+	});
+
+	it("publishes revision 11 and rejects revision 10 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(11);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(11);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
+		const event = {
+			schema: "pi-workflow-event",
+			contractRevision: 11,
+			sequence: 1,
+			eventId: "event-1",
+			timestamp: "2026-09-01T00:00:00.000Z",
+			runId: "workflow_abc123",
+			ownerId: "test",
+			leaseId: "lease-test",
+			fencingGeneration: 1,
+			type: "run-created",
+			data: { definitionIdentitySha256: sha, inputSha256: sha },
+		};
+		expect(Value.Check(WorkflowJournalEventSchema, event)).toBe(true);
+		expect(
+			Value.Check(WorkflowJournalEventSchema, {
+				...event,
+				contractRevision: 10,
+			}),
+		).toBe(false);
+		const snapshot = {
+			schema: "pi-workflow-snapshot",
+			contractRevision: 11,
+			runId: "workflow_abc123",
+			ownerId: "test",
+			leaseId: "lease-test",
+			fencingGeneration: 1,
+			lastSequence: 1,
+			state: {
+				runId: "workflow_abc123",
+				definitionIdentitySha256: sha,
+				inputSha256: sha,
+				status: "created",
+				currentEpoch: 1,
+				effects: [],
+				lastSequence: 1,
+				tasks: {},
+				executions: {},
+				artifacts: {},
+				barriers: [],
+			},
+		};
+		expect(Value.Check(WorkflowRunSnapshotSchema, snapshot)).toBe(true);
+		expect(
+			Value.Check(WorkflowRunSnapshotSchema, {
+				...snapshot,
+				contractRevision: 10,
+			}),
+		).toBe(false);
+	});
+
+	it("discriminates execution records and terminal evidence by kind", () => {
+		const base = {
+			id: `execution_${sha}`,
+			runId: "workflow_abc123",
+			taskId: "task_abc123",
+			generation: 1,
+			taskIdentitySha256: sha,
+		};
+		const operationId = `workflow-op_${sha}`;
+		expect(
+			Value.Check(TaskExecutionRecordSchema, {
+				kind: "agent",
+				...base,
+				operationId,
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(TaskExecutionRecordSchema, {
+				kind: "support",
+				...base,
+				implementationIdentitySha256: sha,
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(TaskExecutionRecordSchema, { ...base, operationId }),
+		).toBe(false);
+		expect(
+			Value.Check(TaskExecutionRecordSchema, {
+				kind: "support",
+				...base,
+				operationId,
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(TaskExecutionRecordSchema, {
+				kind: "agent",
+				...base,
+				implementationIdentitySha256: sha,
+			}),
+		).toBe(false);
+		const evidence = {
+			kind: "support",
+			implementationIdentitySha256: sha,
+			parametersSha256: sha,
+			inputsSha256: sha,
+			outputSha256: sha,
+			artifactId: `artifact_${sha}`,
+			durationMs: 5,
+		};
+		expect(Value.Check(SupportTaskTerminalEvidenceSchema, evidence)).toBe(true);
+		expect(
+			Value.Check(SupportTaskTerminalEvidenceSchema, {
+				...evidence,
+				durationMs: -1,
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(SupportTaskTerminalEvidenceSchema, {
+				...evidence,
+				extra: true,
+			}),
+		).toBe(false);
+		for (const stage of [
+			"support-resolution",
+			"support-input",
+			"support-execution",
+			"support-output",
+		]) {
+			expect(
+				Value.Check(WorkflowExecutionFailureEvidenceSchema, {
+					kind: "workflow",
+					stage,
+					failureSha256: sha,
+					message: "failed",
+				}),
+			).toBe(true);
+		}
 	});
 
 	it("keeps the compatibility baseline immutable", () => {

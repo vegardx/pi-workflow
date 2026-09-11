@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 10 as const;
+export const WORKFLOW_CONTRACT_REVISION = 11 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 
@@ -154,9 +154,14 @@ export type WorkflowArtifactHandleRef = Static<
 	typeof WorkflowArtifactHandleRefSchema
 >;
 
+export const WorkflowArtifactIdSchema = Type.String({
+	pattern: "^artifact_[a-f0-9]{64}$",
+});
+export type WorkflowArtifactId = Static<typeof WorkflowArtifactIdSchema>;
+
 export const WorkflowArtifactRefSchema = Type.Object(
 	{
-		id: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
+		id: WorkflowArtifactIdSchema,
 		runId: WorkflowRunIdSchema,
 		producerTaskId: Type.Optional(WorkflowTaskIdSchema),
 		output: Type.Optional(Type.Literal("result")),
@@ -316,8 +321,9 @@ export type MaterializedWorkflowTask = Static<
 	typeof MaterializedWorkflowTaskSchema
 >;
 
-export const TaskExecutionRecordSchema = Type.Object(
+export const AgentTaskExecutionRecordSchema = Type.Object(
 	{
+		kind: Type.Literal("agent"),
 		id: TaskExecutionIdSchema,
 		runId: WorkflowRunIdSchema,
 		taskId: WorkflowTaskIdSchema,
@@ -327,6 +333,30 @@ export const TaskExecutionRecordSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+export type AgentTaskExecutionRecord = Static<
+	typeof AgentTaskExecutionRecordSchema
+>;
+
+export const SupportTaskExecutionRecordSchema = Type.Object(
+	{
+		kind: Type.Literal("support"),
+		id: TaskExecutionIdSchema,
+		runId: WorkflowRunIdSchema,
+		taskId: WorkflowTaskIdSchema,
+		generation: TaskExecutionGenerationSchema,
+		taskIdentitySha256: Sha256Schema,
+		implementationIdentitySha256: Sha256Schema,
+	},
+	{ additionalProperties: false },
+);
+export type SupportTaskExecutionRecord = Static<
+	typeof SupportTaskExecutionRecordSchema
+>;
+
+export const TaskExecutionRecordSchema = Type.Union([
+	AgentTaskExecutionRecordSchema,
+	SupportTaskExecutionRecordSchema,
+]);
 export type TaskExecutionRecord = Static<typeof TaskExecutionRecordSchema>;
 
 export const SubagentTerminalEvidenceSchema = Type.Object(
@@ -363,6 +393,10 @@ export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
 			Type.Literal("stop"),
 			Type.Literal("artifact-import"),
 			Type.Literal("release"),
+			Type.Literal("support-resolution"),
+			Type.Literal("support-input"),
+			Type.Literal("support-execution"),
+			Type.Literal("support-output"),
 		]),
 		failureSha256: Sha256Schema,
 		message: Type.String({ minLength: 1, maxLength: 4096 }),
@@ -373,9 +407,26 @@ export type WorkflowExecutionFailureEvidence = Static<
 	typeof WorkflowExecutionFailureEvidenceSchema
 >;
 
+export const SupportTaskTerminalEvidenceSchema = Type.Object(
+	{
+		kind: Type.Literal("support"),
+		implementationIdentitySha256: Sha256Schema,
+		parametersSha256: Sha256Schema,
+		inputsSha256: Sha256Schema,
+		outputSha256: Sha256Schema,
+		artifactId: WorkflowArtifactIdSchema,
+		durationMs: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+	},
+	{ additionalProperties: false },
+);
+export type SupportTaskTerminalEvidence = Static<
+	typeof SupportTaskTerminalEvidenceSchema
+>;
+
 export const TaskExecutionTerminalEvidenceSchema = Type.Union([
 	SubagentTerminalEvidenceSchema,
 	WorkflowExecutionFailureEvidenceSchema,
+	SupportTaskTerminalEvidenceSchema,
 ]);
 export type TaskExecutionTerminalEvidence = Static<
 	typeof TaskExecutionTerminalEvidenceSchema
@@ -414,6 +465,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				resume: Type.Boolean(),
 				replay: Type.Boolean(),
 				worktrees: Type.Boolean(),
+				supportTaskExecution: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -468,6 +520,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			resume: false,
 			replay: true,
 			worktrees: false,
+			supportTaskExecution: true,
 		}),
 	},
 );

@@ -10,6 +10,7 @@ import {
 	TaskExecutionOutcomeSchema,
 	TaskExecutionRecordSchema,
 	TaskExecutionTerminalEvidenceSchema,
+	WorkflowArtifactIdSchema,
 	WorkflowArtifactRefSchema,
 	WorkflowRunIdSchema,
 	WorkflowRunStatusSchema,
@@ -266,6 +267,37 @@ const TaskExecutionReleasedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const TaskExecutionSupportIntendedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-support-intended"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				implementationIdentitySha256: Sha256Schema,
+				parametersSha256: Sha256Schema,
+				inputsSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionSupportOutputCommittedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-support-output-committed"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				artifactId: WorkflowArtifactIdSchema,
+				outputSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskExecutionTerminalEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-terminal"),
@@ -359,6 +391,8 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionArtifactImportedEventSchema,
 	TaskExecutionReleaseIntendedEventSchema,
 	TaskExecutionReleasedEventSchema,
+	TaskExecutionSupportIntendedEventSchema,
+	TaskExecutionSupportOutputCommittedEventSchema,
 	TaskExecutionTerminalEventSchema,
 	TaskStatusChangedEventSchema,
 	TaskInvalidatedEventSchema,
@@ -393,6 +427,8 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("artifact-imported"),
 	Type.Literal("release-intended"),
 	Type.Literal("released"),
+	Type.Literal("support-intended"),
+	Type.Literal("support-output-committed"),
 	Type.Literal("terminal"),
 ]);
 
@@ -499,6 +535,25 @@ const SequencedReleaseSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const SequencedSupportIntentSchema = Type.Object(
+	{
+		implementationIdentitySha256: Sha256Schema,
+		parametersSha256: Sha256Schema,
+		inputsSha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedSupportOutputSchema = Type.Object(
+	{
+		artifactId: WorkflowArtifactIdSchema,
+		outputSha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 const SequencedTerminalSchema = Type.Object(
 	{
 		outcome: TaskExecutionOutcomeSchema,
@@ -523,6 +578,8 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		artifactImport: Type.Optional(SequencedArtifactImportSchema),
 		releaseIntent: Type.Optional(SequencedReleaseIntentSchema),
 		release: Type.Optional(SequencedReleaseSchema),
+		supportIntent: Type.Optional(SequencedSupportIntentSchema),
+		supportOutput: Type.Optional(SequencedSupportOutputSchema),
 		terminal: Type.Optional(SequencedTerminalSchema),
 	},
 	{ additionalProperties: false },
