@@ -407,6 +407,7 @@ export function createWorkflowTaskLauncher(
 				"Workflow task is not an agent task.",
 			);
 		}
+		const agentTask = task.task as MaterializedAgentTask;
 
 		let execution = task.currentExecutionId
 			? current.executions[task.currentExecutionId]
@@ -453,7 +454,7 @@ export function createWorkflowTaskLauncher(
 			);
 		}
 		if (!execution) {
-			const record = executionRecord(current, task.task);
+			const record = executionRecord(current, agentTask);
 			await append(journal, {
 				type: "task-execution-created",
 				data: { execution: record },
@@ -492,10 +493,10 @@ export function createWorkflowTaskLauncher(
 		let request: SubagentRequest;
 		try {
 			request = await lowerRequest(
-				task.task,
+				agentTask,
 				execution.execution.operationId,
 				current,
-				await artifactsFor(task.task),
+				await artifactsFor(agentTask),
 			);
 		} catch (error) {
 			const message =

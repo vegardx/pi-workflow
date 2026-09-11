@@ -119,6 +119,9 @@ function schedulerFor(
 				)
 				.find((candidate) => candidate.status !== "completed");
 			if (!task) return { state: "idle", runStatus: current.status };
+			if (task.task.spec.kind !== "agent") {
+				throw new Error("fake scheduler only supports agent tasks");
+			}
 			const output = outputs.get(task.task.spec.key);
 			if (output === undefined) throw new Error("missing fake task output");
 			if (task.status === "pending") {

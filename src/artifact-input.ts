@@ -6,7 +6,7 @@ import {
 	type WorkflowArtifactStore,
 } from "./artifact-store.js";
 import type {
-	MaterializedAgentTask,
+	MaterializedWorkflowTask,
 	WorkflowArtifactRef,
 } from "./contracts.js";
 import type { WorkflowStateProjection } from "./events.js";
@@ -49,11 +49,13 @@ function resultArtifact(
 function validateArtifactValue(
 	value: unknown,
 	artifact: WorkflowArtifactRef,
-	producer: MaterializedAgentTask,
+	producer: MaterializedWorkflowTask,
 ): void {
-	const expectedSchemaSha256 = deriveJsonValueSha256(
-		producer.spec.request.outputSchema,
-	);
+	const outputSchema =
+		producer.spec.kind === "agent"
+			? producer.spec.request.outputSchema
+			: producer.spec.request.implementation.outputSchema;
+	const expectedSchemaSha256 = deriveJsonValueSha256(outputSchema);
 	if (artifact.schemaSha256 !== expectedSchemaSha256) {
 		throw new WorkflowArtifactInputError(
 			"Workflow task input artifact schema identity does not match its producer.",
@@ -63,7 +65,7 @@ function validateArtifactValue(
 	addFormats(ajv);
 	let valid: boolean;
 	try {
-		valid = ajv.validate(producer.spec.request.outputSchema, value);
+		valid = ajv.validate(outputSchema, value);
 	} catch (error) {
 		throw new WorkflowArtifactInputError(
 			"Workflow task input schema could not be evaluated.",
@@ -99,7 +101,7 @@ function projectedEntry(
 }
 
 export async function projectWorkflowArtifactInputs(options: {
-	readonly task: MaterializedAgentTask;
+	readonly task: MaterializedWorkflowTask;
 	readonly state: WorkflowStateProjection;
 	readonly artifacts: WorkflowArtifactStore;
 }): Promise<readonly string[]> {

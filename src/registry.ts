@@ -155,7 +155,11 @@ async function readDefinitionSource(filePath: string): Promise<string> {
 	}
 }
 
-function assertSupportedImports(source: string, filePath: string): void {
+function assertSupportedImports(
+	source: string,
+	filePath: string,
+	allowedSupportImports: ReadonlySet<string>,
+): void {
 	let ast: unknown;
 	try {
 		ast = parse(source, {
@@ -185,7 +189,8 @@ function assertSupportedImports(source: string, filePath: string): void {
 			const sourceNode = node.source as { value?: unknown } | undefined;
 			if (
 				typeof sourceNode?.value === "string" &&
-				!ALLOWED_STATIC_IMPORTS.has(sourceNode.value)
+				!ALLOWED_STATIC_IMPORTS.has(sourceNode.value) &&
+				!allowedSupportImports.has(sourceNode.value)
 			) {
 				throw new WorkflowDefinitionLoadError(
 					`workflow import ${sourceNode.value} is not identity-bound by contract revision ${WORKFLOW_CONTRACT_REVISION}`,
@@ -250,8 +255,15 @@ export async function discoverWorkflows(options: {
 	agentDir?: string;
 	projectTrusted: boolean;
 	registeredRoots?: readonly WorkflowRoot[];
+	allowedSupportImports?: readonly string[];
 }): Promise<readonly DiscoveredWorkflow[]> {
 	const cwd = await realpath(options.cwd);
+	const allowedSupportImports = new Set(options.allowedSupportImports ?? []);
+	if (allowedSupportImports.size > 64) {
+		throw new WorkflowDefinitionLoadError(
+			"workflow support import registry exceeds 64 modules",
+		);
+	}
 	const registeredRoots = [...(options.registeredRoots ?? [])];
 	if (registeredRoots.length > MAX_REGISTERED_ROOTS) {
 		throw new WorkflowDefinitionLoadError(
@@ -328,7 +340,7 @@ export async function discoverWorkflows(options: {
 				);
 			}
 			const source = await readDefinitionSource(resolved);
-			assertSupportedImports(source, resolved);
+			assertSupportedImports(source, resolved, allowedSupportImports);
 			let loaded: unknown;
 			try {
 				const module = await jiti.evalModule(source, {
