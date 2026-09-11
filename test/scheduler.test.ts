@@ -1392,7 +1392,9 @@ function statusChanges(
 		.map((event) => event.data as { to: string; reason?: string });
 }
 
-describe("support task scheduling", () => {
+// Full lifecycle cases here take 1-2 s locally and exceeded the 5 s default
+// under Ubuntu CI load (run 34596885650); use the file's existing allowance.
+describe("support task scheduling", { timeout: 15_000 }, () => {
 	it("completes a support-only graph without any subagent call", async () => {
 		const { journal, tasks } = await fixture((materializer) => [
 			materializer.support("left", echo({ parameters: { value: "left" } })),
