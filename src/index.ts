@@ -116,6 +116,7 @@ export {
 	isArtifactHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
+	type NestedWorkflowRequest,
 	type PipelineStage,
 	type SettledTaskFailure,
 	type SettledTaskResult,
@@ -162,10 +163,24 @@ export {
 	deriveSupportTaskIdentity,
 	deriveWorkflowTaskId,
 	type MaterializationCommit,
+	type NestedWorkflowDeclaration,
 	WorkflowMaterializationError,
 	WorkflowTaskMaterializer,
 	type WorkflowTaskMaterializerOptions,
 } from "./materializer.js";
+export {
+	createWorkflowNestedRunExecutor,
+	type NestedWorkflowTerminalStatus,
+	type WorkflowNestedExecutionResult,
+	type WorkflowNestedLaunchOutcome,
+	WorkflowNestedRunError,
+	type WorkflowNestedRunExecutor,
+	type WorkflowNestedRunExecutorOptions,
+	type WorkflowNestedRunLaunch,
+	type WorkflowNestedRunProvider,
+	type WorkflowNestedRunSettlement,
+	type WorkflowNestedTaskOutcome,
+} from "./nested-run-executor.js";
 export {
 	type WorkflowJournalEvent,
 	WorkflowJournalEventSchema,

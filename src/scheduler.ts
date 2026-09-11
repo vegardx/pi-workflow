@@ -26,6 +26,11 @@ import {
 	deriveSubagentResultSha256,
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
+import {
+	createWorkflowNestedRunExecutor,
+	type WorkflowNestedRunExecutor,
+	type WorkflowNestedRunProvider,
+} from "./nested-run-executor.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
@@ -107,11 +112,25 @@ export interface WorkflowSequentialSchedulerOptions {
 	readonly supportExecutor?: WorkflowSupportTaskExecutor;
 	readonly artifacts?: WorkflowArtifactStore;
 	readonly supportTasks?: ReadonlyMap<string, SupportTaskRegistration>;
+	/**
+	 * Nested execution: either an explicit executor, or the artifact store,
+	 * the nested run provider, and this run's nesting context used to build
+	 * one. Without either, nested workflow tasks fail closed.
+	 */
+	readonly nestedExecutor?: WorkflowNestedRunExecutor;
+	readonly nestedRuns?: WorkflowNestedRunProvider;
+	readonly nesting?: {
+		readonly depth: number;
+		readonly ancestorDefinitionIdentities: readonly string[];
+		readonly definitionIdentitySha256: string;
+		readonly deadlineAt: string;
+	};
 }
 
 type PreparedWork =
 	| { state: "wait"; taskId: WorkflowTaskId; receipt: RunReceipt }
 	| { state: "support"; taskId: WorkflowTaskId }
+	| { state: "nested"; taskId: WorkflowTaskId }
 	| WorkflowSchedulerOutcome;
 
 export class WorkflowSchedulerError extends Error {
@@ -279,6 +298,16 @@ export function createWorkflowSequentialScheduler(
 					artifacts: options.artifacts,
 					registrations: options.supportTasks,
 					signal: () => stopController.signal,
+				})
+			: undefined);
+	const nestedExecutor =
+		options.nestedExecutor ??
+		(options.artifacts && options.nestedRuns && options.nesting
+			? createWorkflowNestedRunExecutor({
+					journal,
+					artifacts: options.artifacts,
+					provider: options.nestedRuns,
+					nesting: options.nesting,
 				})
 			: undefined);
 	const coordinationKey = journal.directory;
@@ -449,6 +478,15 @@ export function createWorkflowSequentialScheduler(
 		let totalTokens = 0;
 		let childRuntimeMs = 0;
 		for (const execution of Object.values(current.executions)) {
+			if (execution.nestedSettlement) {
+				if (!execution.nestedSettlement.usageComplete) {
+					return "Nested workflow usage evidence is incomplete.";
+				}
+				cost += execution.nestedSettlement.usage.cost;
+				totalTokens += execution.nestedSettlement.usage.totalTokens;
+				childRuntimeMs += execution.nestedSettlement.usage.childRuntimeMs;
+				continue;
+			}
 			if (!execution.settlement) continue;
 			if (!execution.settlement.evidence.usageComplete) {
 				return "Workflow child usage evidence is incomplete.";
@@ -473,13 +511,6 @@ export function createWorkflowSequentialScheduler(
 	): { allowed: true } | { allowed: false; deferred: boolean; reason: string } {
 		const candidateSpec = candidate.task.spec;
 		if (candidateSpec.kind === "support") return { allowed: true };
-		if (candidateSpec.kind === "workflow") {
-			return {
-				allowed: false,
-				deferred: false,
-				reason: "Nested workflow budget admission is not implemented.",
-			};
-		}
 		let settledCost = 0;
 		let settledTotalTokens = 0;
 		let settledChildRuntimeMs = 0;
@@ -487,6 +518,16 @@ export function createWorkflowSequentialScheduler(
 		let reservedTotalTokens = 0;
 		let reservedChildRuntimeMs = 0;
 		for (const execution of Object.values(current.executions)) {
+			// The candidate's own active execution is what admission is deciding
+			// on; counting it as a reservation would double-charge a task that is
+			// re-selected after restart.
+			if (
+				execution.execution.taskId === candidate.task.id &&
+				!execution.settlement &&
+				!execution.nestedSettlement
+			) {
+				continue;
+			}
 			if (execution.settlement) {
 				if (!execution.settlement.evidence.usageComplete) {
 					return {
@@ -498,6 +539,37 @@ export function createWorkflowSequentialScheduler(
 				settledCost += execution.settlement.evidence.usage.cost;
 				settledTotalTokens += execution.settlement.evidence.usage.totalTokens;
 				settledChildRuntimeMs += execution.settlement.evidence.runtimeMs;
+				continue;
+			}
+			if (execution.nestedSettlement) {
+				if (!execution.nestedSettlement.usageComplete) {
+					return {
+						allowed: false,
+						deferred: false,
+						reason: "Nested workflow usage evidence is incomplete.",
+					};
+				}
+				settledCost += execution.nestedSettlement.usage.cost;
+				settledTotalTokens += execution.nestedSettlement.usage.totalTokens;
+				settledChildRuntimeMs +=
+					execution.nestedSettlement.usage.childRuntimeMs;
+				continue;
+			}
+			if (execution.nestedLaunch && execution.nestedIntent) {
+				if (
+					budget.totalTokens !== undefined &&
+					execution.nestedIntent.budget.totalTokens === undefined
+				) {
+					return {
+						allowed: false,
+						deferred: false,
+						reason:
+							"Active nested workflow has no total-token budget for its reservation.",
+					};
+				}
+				reservedCost += execution.nestedIntent.budget.cost;
+				reservedTotalTokens += execution.nestedIntent.budget.totalTokens ?? 0;
+				reservedChildRuntimeMs += execution.nestedIntent.budget.childRuntimeMs;
 				continue;
 			}
 			if (!execution.launchReceipt) continue;
@@ -532,21 +604,34 @@ export function createWorkflowSequentialScheduler(
 			reservedChildRuntimeMs +=
 				task.task.spec.request.limits.cumulativeRuntimeMs;
 		}
-		const candidateCost = candidateSpec.request.limits.cost;
+		const candidateMaximum =
+			candidateSpec.kind === "workflow"
+				? {
+						cost: candidateSpec.request.budget.cost,
+						totalTokens: candidateSpec.request.budget.totalTokens,
+						childRuntimeMs: candidateSpec.request.budget.childRuntimeMs,
+					}
+				: {
+						cost: candidateSpec.request.limits.cost,
+						totalTokens: candidateSpec.request.limits.totalTokens,
+						childRuntimeMs: candidateSpec.request.limits.cumulativeRuntimeMs,
+					};
+		const candidateCost = candidateMaximum.cost;
 		if (
 			budget.totalTokens !== undefined &&
-			candidateSpec.request.limits.totalTokens === undefined
+			candidateMaximum.totalTokens === undefined
 		) {
 			return {
 				allowed: false,
 				deferred: false,
 				reason:
-					"Workflow task has no total-token maximum to reserve against the workflow budget.",
+					candidateSpec.kind === "workflow"
+						? "Nested workflow has no total-token budget to reserve against the workflow budget."
+						: "Workflow task has no total-token maximum to reserve against the workflow budget.",
 			};
 		}
-		const candidateTotalTokens = candidateSpec.request.limits.totalTokens ?? 0;
-		const candidateChildRuntimeMs =
-			candidateSpec.request.limits.cumulativeRuntimeMs;
+		const candidateTotalTokens = candidateMaximum.totalTokens ?? 0;
+		const candidateChildRuntimeMs = candidateMaximum.childRuntimeMs;
 		const reason = (
 			cost: number,
 			totalTokens: number,
@@ -586,12 +671,19 @@ export function createWorkflowSequentialScheduler(
 		return task.task.spec.kind === "support";
 	}
 
+	function isNestedTask(task: WorkflowTaskProjection): boolean {
+		return task.task.spec.kind === "workflow";
+	}
+
 	function occupiesLane(
 		current: WorkflowStateProjection,
 		task: WorkflowTaskProjection,
 	): boolean {
 		if (!ACTIVE_TASK_STATUSES.has(task.status)) return false;
 		if (isSupportTask(task)) return task.status === "running";
+		if (isNestedTask(task)) {
+			return task.status === "running" || task.status === "cancelling";
+		}
 		return executionFor(current, task)?.launchReceipt !== undefined;
 	}
 
@@ -613,6 +705,114 @@ export function createWorkflowSequentialScheduler(
 			return { state: "terminal", runStatus: "failed" };
 		}
 		return undefined;
+	}
+
+	async function updateRunAfterNestedTask(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowSchedulerOutcome | undefined> {
+		const after = await state();
+		const task = after.tasks[taskId];
+		if (!task) return undefined;
+		if (after.status === "cleanup-blocked") {
+			if (task.status === "cleanup-blocked") {
+				return { state: "terminal", runStatus: "cleanup-blocked" };
+			}
+			const recovered =
+				task.status === "completed"
+					? "running"
+					: task.status === "interrupted"
+						? "interrupted"
+						: "failed";
+			await changeRun(
+				"cleanup-blocked",
+				recovered,
+				"Nested workflow reconciliation produced terminal evidence.",
+			);
+			return recovered === "running"
+				? undefined
+				: { state: "terminal", runStatus: recovered };
+		}
+		if (
+			after.status === "completed" ||
+			after.status === "completed-degraded" ||
+			after.status === "failed" ||
+			after.status === "cancelled" ||
+			after.status === "interrupted"
+		) {
+			return { state: "terminal", runStatus: after.status };
+		}
+		if (task.status === "cleanup-blocked") {
+			await changeRun(
+				after.status,
+				"cleanup-blocked",
+				"Nested workflow run requires reconciliation.",
+			);
+			return { state: "terminal", runStatus: "cleanup-blocked" };
+		}
+		if (
+			task.task.spec.disposition === "required" &&
+			task.status === "interrupted" &&
+			after.status !== "stopping"
+		) {
+			await changeRun(
+				after.status,
+				"interrupted",
+				"A required workflow task was interrupted.",
+			);
+			return { state: "terminal", runStatus: "interrupted" };
+		}
+		return failRunAfterRequiredSupportTask(taskId);
+	}
+
+	async function prepareNested(
+		selected: WorkflowTaskProjection,
+	): Promise<PreparedWork> {
+		const taskId = selected.task.id;
+		if (!nestedExecutor) {
+			const message =
+				"Nested workflow execution is not configured for this workflow run.";
+			await changeTask(taskId, selected.status, "blocked", message);
+			if (selected.task.spec.disposition === "required") {
+				await changeRun("running", "failed", message);
+				return { state: "terminal", runStatus: "failed" };
+			}
+			return prepare();
+		}
+		const launch = await nestedExecutor.launch(taskId);
+		if (launch.state === "terminal") {
+			return (await updateRunAfterNestedTask(taskId)) ?? prepare();
+		}
+		busy.add(taskId);
+		return { state: "nested", taskId };
+	}
+
+	async function continueAfterNested(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowSchedulerOutcome> {
+		if (!nestedExecutor) {
+			throw new WorkflowSchedulerError(
+				"validation",
+				"Nested workflow executor disappeared during execution.",
+			);
+		}
+		const result = await nestedExecutor.wait(taskId);
+		const updated = await updateRunAfterNestedTask(taskId);
+		if (updated) return updated;
+		const after = await state();
+		if (
+			after.status === "failed" ||
+			after.status === "cancelled" ||
+			after.status === "interrupted" ||
+			after.status === "cleanup-blocked" ||
+			after.status === "completed" ||
+			after.status === "completed-degraded"
+		) {
+			return { state: "terminal", runStatus: after.status };
+		}
+		if (result.outcome === "cancelled" || after.status === "stopping") {
+			return { state: "stopping", runStatus: after.status };
+		}
+		return drive();
 	}
 
 	async function prepareSupport(
@@ -763,6 +963,10 @@ export function createWorkflowSequentialScheduler(
 				return { state: "terminal", runStatus: "failed" };
 			}
 			return prepare();
+		}
+
+		if (isNestedTask(selected)) {
+			return prepareNested(selected);
 		}
 
 		let launch: Awaited<ReturnType<WorkflowTaskLauncher["launch"]>>;
@@ -1022,13 +1226,17 @@ export function createWorkflowSequentialScheduler(
 		if (
 			prepared.state !== "wait" &&
 			prepared.state !== "support" &&
+			prepared.state !== "nested" &&
 			prepared.state !== "awaiting-finalization"
 		) {
 			return prepared;
 		}
 		try {
-			if (prepared.state === "support") {
-				const outcome = await continueAfterSupport(prepared.taskId);
+			if (prepared.state === "support" || prepared.state === "nested") {
+				const outcome =
+					prepared.state === "support"
+						? await continueAfterSupport(prepared.taskId)
+						: await continueAfterNested(prepared.taskId);
 				if (outcome.state === "stopping") {
 					busy.delete(prepared.taskId);
 					return stop("Resume persisted workflow stop intent.");
@@ -1046,6 +1254,28 @@ export function createWorkflowSequentialScheduler(
 		}
 	}
 
+	async function reconcileNested(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowSchedulerOutcome> {
+		return mutate(async () => {
+			const current = await state();
+			const task = current.tasks[taskId];
+			if (
+				current.status !== "cleanup-blocked" ||
+				task?.status !== "cleanup-blocked" ||
+				!nestedExecutor
+			) {
+				throw new WorkflowSchedulerError(
+					"validation",
+					"Workflow task has no cleanup-blocked nested run to reconcile.",
+				);
+			}
+			await nestedExecutor.reconcile(taskId);
+			const updated = await updateRunAfterNestedTask(taskId);
+			return updated ?? { state: "idle", runStatus: (await state()).status };
+		});
+	}
+
 	async function reconcile(
 		taskId: WorkflowTaskId,
 	): Promise<WorkflowSchedulerOutcome> {
@@ -1058,6 +1288,7 @@ export function createWorkflowSequentialScheduler(
 				);
 			}
 			const task = current.tasks[taskId];
+			if (task && isNestedTask(task)) return { nested: true } as const;
 			const execution = task ? executionFor(current, task) : undefined;
 			const child = execution ? receiptFor(execution) : undefined;
 			if (
@@ -1083,6 +1314,7 @@ export function createWorkflowSequentialScheduler(
 			}
 			return { taskId, receipt: child };
 		});
+		if ("nested" in prepared) return reconcileNested(taskId);
 		return continueAfterFinalization(
 			await settle(prepared.taskId, prepared.receipt),
 		);
@@ -1144,6 +1376,27 @@ export function createWorkflowSequentialScheduler(
 			const supportStillRunning = orderedTasks(current).some(
 				(task) => isSupportTask(task) && task.status === "running",
 			);
+			const runningNested = orderedTasks(current).filter(
+				(task) =>
+					isNestedTask(task) &&
+					(task.status === "running" || task.status === "cancelling"),
+			);
+			if (runningNested.length > 0 && !nestedExecutor) {
+				throw new WorkflowSchedulerError(
+					"stop",
+					"Running nested workflow task has no executor to stop it.",
+				);
+			}
+			if (nestedExecutor) {
+				await Promise.all(
+					runningNested.map((task) =>
+						nestedExecutor.stop(task.task.id, reason),
+					),
+				);
+			}
+			if (runningNested.length > 0) {
+				current = await state();
+			}
 
 			const active = orderedTasks(current).filter((task) => {
 				const execution = executionFor(current, task);
