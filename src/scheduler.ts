@@ -501,7 +501,13 @@ export function createWorkflowSequentialScheduler(
 					reason: "Workflow budget reservation has no task declaration.",
 				};
 			}
-			if (task.task.spec.kind === "support") continue;
+			if (task.task.spec.kind !== "agent") {
+				return {
+					allowed: false,
+					deferred: false,
+					reason: "Workflow budget reservation is not an agent task.",
+				};
+			}
 			if (
 				budget.totalTokens !== undefined &&
 				task.task.spec.request.limits.totalTokens === undefined
