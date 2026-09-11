@@ -18,9 +18,12 @@ This document owns workflow terminology.
 | Artifact handle | Opaque authoring reference to a task output or committed workflow artifact. |
 | Materialized graph | Durable declarative task and dependency records discovered from workflow effects. |
 | Task | One stable-keyed effect materialized by a workflow run. |
-| Task execution | One generation of task execution, discriminated by kind; an agent-task execution owns one subagent run and its retry/resume attempts, a support-task execution owns one in-process computation bound to its implementation identity, and explicit invalidation creates a new generation. |
+| Task execution | One generation of task execution, discriminated by kind; an agent-task execution owns one subagent run and its retry/resume attempts, a support-task execution owns one in-process computation bound to its implementation identity, a nested workflow task execution owns one linked child workflow run named by its deterministic child run ID, and explicit invalidation creates a new generation. |
 | Agent task | Task executed through the extension-owned `SubagentService`. |
 | Support task | Deterministic trusted registered code executed in the host process without a model, subagent, VM, or worktree; its output is a workflow-owned result artifact. |
+| Nested workflow task | Task of kind `workflow` declared with `ctx.workflow(key, { workflow, input })` that captures a child definition's identity, source digest, schemas, budget, timeout, concurrency, and validated concrete input at declaration and executes it as a linked child run; its output is a parent-owned result artifact imported from the child. |
+| Child workflow run | Separate durable workflow run launched by a nested workflow task, with its own journal, lease, artifact store, subagent owner binding `pi-workflow:<childRunId>`, budget, and deadline; it re-executes its own trusted source exactly like a root run and is addressable by its own run ID. |
+| Lineage | Persisted nesting relationship of a run: its `depth` (0 through 3) and, for a child run, `parent { runId, taskId, executionId, ancestorDefinitionIdentities }`; verified exactly before an existing child run is adopted and used to reject recursion at declaration. |
 | Support registry | Immutable map of support-task registrations supplied when the workflow service is constructed; never persisted and resolved again on every restart. |
 | Implementation identity | Canonical digest of a support implementation's name, module specifier, revision, implementation digest, parameters schema, and output schema. |
 | Support intent | Durable record of the implementation, parameter, and input digests a support execution computes from; persisted before the implementation runs. |

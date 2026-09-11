@@ -14,6 +14,8 @@ graph TD
     Scheduler[Scheduler]
     Journal[Journal and artifacts]
     Support[In-process support executor]
+    Nested[Nested run executor]
+    Child[Linked child workflow run]
     Broker[pi-subagent service provider]
     Service[Extension-owned SubagentService]
     UI[Widget and inspector]
@@ -25,7 +27,10 @@ graph TD
     Graph --> Scheduler
     Scheduler --> Broker
     Scheduler --> Support
+    Scheduler --> Nested
     Support --> Journal
+    Nested --> Child
+    Child --> Journal
     Broker --> Service
     Journal --> UI
 ```
@@ -48,8 +53,9 @@ this runtime.
    and finalization.
 6. **Executors**: the task launcher and task finalizer dispatch agent tasks
    through the shared service; the support task executor runs registered
-   deterministic implementations in the host process. There is no other
-   executor.
+   deterministic implementations in the host process; the nested run executor
+   launches, waits for, and imports from a linked child workflow run through
+   the service's nested run provider. There is no other executor.
 7. **Store** owns events, snapshots, artifacts, leases, fencing, and replay
    records.
 8. **UI** projects persisted state and never owns lifecycle authority.
@@ -153,6 +159,44 @@ lane; it reserves no cost, tokens, or child runtime, and the recorded
 the implementation receives as `signal`; the executor terminalizes the task as
 cancelled and discards a late result.
 
+## Nested workflows
+
+A nested workflow task (`kind: "workflow"`) is declared through
+`ctx.workflow(key, { workflow, input })` in the same effect frontend as agent
+and support tasks. The child definition is referenced by name and resolved from
+the same discovery pass and trust gate as the parent; nothing is loaded from a
+run directory or a dynamic import. At declaration the runtime captures the
+child's definition identity, source digest, version, input and output schemas,
+declared budget, timeout, and concurrency, validates the concrete `input`
+against the child's input schema, and binds all of it into the task identity.
+Child source drift therefore fails replay of the parent. Artifact inputs into
+a child are not supported in this revision: `input` is a concrete JSON value,
+while the nested result artifact is parent-owned and may be consumed by later
+parent tasks as an ordinary input.
+
+Execution is a **linked child run**. The parent scheduler routes the task by
+kind to the nested run executor, which persists the workflow-kind execution
+record with a deterministic `childRunId`, durable launch intent (budget,
+timeout, deadline, concurrency), and then asks the service to create a separate
+run: its own journal, lease, artifact store, subagent owner binding
+`pi-workflow:<childRunId>`, and immutable run record carrying `depth` and
+`parent { runId, taskId, executionId, ancestorDefinitionIdentities }`. The
+child composes the same launcher, finalizer, support executor, scheduler, and
+static runtime as a root run and re-executes its own trusted source from entry;
+there is no second scheduler class and no persisted continuation. Depth is
+bounded at 0 through 3, a run may declare at most 64 workflow tasks, and a
+definition already on the ancestor chain is rejected as recursion.
+
+The parent reserves the child's declared budget while the child runs and
+settles with the child's summed usage; the child's effective budget and
+deadline are capped by the parent's reservation and deadline. When the child
+completes, the parent reads the child's declared output artifact with full
+verification, validates it against the captured output schema, and copies it
+as verified bytes into the parent store before the parent task completes.
+Cross-run artifact references remain impossible otherwise. Parent stop and
+deadline stop the child through the parent task and wait for its terminal
+state; a child run is also independently addressable by its own run ID.
+
 ## Subagent integration
 
 The `pi-subagent` extension registers one lazy provider on Pi's process-local
@@ -180,17 +224,23 @@ workflow work starts.
 The session-scoped service discovers definitions under current trust, validates
 input before creating a run, and acquires the exact shared subagent owner client
 before durable workflow state exists. An immutable private run record binds the
-project root, definition name/path/source/identity, input, and creation time for
-restart reconstruction.
+project root, definition name/path/source/identity, input, creation time,
+depth, and (for a linked child run) parent lineage for restart reconstruction.
 
 Each owned run composes one fenced journal, workflow artifact store, launcher,
 finalizer, support task executor bound to the frozen constructor registry,
-sequential scheduler, and static source runtime. Completed runs keep
-their workflow lease until session shutdown so concurrent status, wait, stop,
-and terminal projection cannot race lease release. A replacement session can
-reacquire the lease and reconstruct nonterminal work from the run record and
-journal. Status and output are always journal/artifact projections; in-memory
-promises are only wait notifications.
+nested run executor bound to the service's nested run provider, sequential
+scheduler, and static source runtime. Root runs are created at depth 0; the
+provider creates child runs at the parent's depth plus one under the same
+service, and every owned run is a peer in the same run directory. Completed
+runs keep their workflow lease until session shutdown so concurrent status,
+wait, stop, and terminal projection cannot race lease release. A replacement
+session can reacquire the lease and reconstruct nonterminal work from the run
+record and journal. Status and output are always journal/artifact projections,
+and every view reports `depth` and, for a child, `parent`; in-memory promises
+are only wait notifications. Session shutdown stops owned runs in ascending
+depth order, so children are cancelled through their parents before their own
+leases are released.
 
 ## Dynamic workflows
 

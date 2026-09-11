@@ -10,6 +10,9 @@
 - Dynamic workflow code is never trusted merely because it runs in a VM.
 - Support tasks are trusted registered code executed in the host process; they
   are bundle-contained and never sandboxed.
+- A nested workflow is a linked child run of a definition resolved through the
+  same discovery pass and trust gate as its parent; it never receives more than
+  the parent's remaining budget and deadline.
 - Worktree and sandbox requirements fail closed.
 - Publication, push, pull requests, merge, release, and deployment are outside
   this runtime.
@@ -37,7 +40,9 @@ export. Provider discovery is composition among trusted extensions, not an
 authorization boundary.
 
 Workflow binds an owner client to its durable run identity as
-`pi-workflow:<workflow-run-id>`. Model input cannot choose that owner. The
+`pi-workflow:<workflow-run-id>`; a linked child run binds its own owner client
+as `pi-workflow:<childRunId>` and never reuses its parent's binding. Model
+input cannot choose that owner. The
 session-scoped adapter pins the exact first service object and reacquires before
 each binding, so missing, duplicate, removed, replaced, malformed, or
 incompatible providers fail before a run starts. The upstream provider is also
@@ -66,6 +71,32 @@ requests exceeding policy limits.
 An order dependency grants readiness ordering only. A data dependency must name
 a verified artifact handle. The scheduler never passes all predecessor output
 implicitly.
+
+## Nested workflow runs
+
+A nested workflow task executes a linked child run: a separate durable run
+with its own journal, lease, artifact store, subagent owner binding
+`pi-workflow:<childRunId>`, and run record carrying `depth` and
+`parent { runId, taskId, executionId, ancestorDefinitionIdentities }`. The
+child is trusted by the same rule as any static workflow: it is resolved by
+name from the parent's discovery pass and trust gate, and its identity and
+source digest are captured in the parent's task identity at declaration. At
+launch the provider must resolve exactly that identity and source; anything
+else fails at `nested-resolution`.
+
+The parent scheduler routes by kind to the nested run executor; the child
+composes the same runtime as a root run and re-executes its own trusted source.
+There is no second scheduler class, no persisted continuation, and no shared
+in-memory state between parent and child. The child receives only the concrete
+input captured at declaration, a budget no larger than the parent's reservation
+and the service caps, and a deadline no later than the parent's. Depth is
+bounded (0 through 3), each run may declare at most 64 workflow tasks, and a
+definition already on the ancestor chain is rejected at declaration.
+
+Child output enters the parent only by copying verified bytes into the parent
+artifact store, bound to the parent task and the captured output schema, before
+the parent task completes. Cross-run artifact references remain impossible
+otherwise, and artifact inputs into a child are not supported in this revision.
 
 ## Dynamic workflow host API
 

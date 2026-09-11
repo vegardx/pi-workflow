@@ -3,8 +3,9 @@
 Custom workflow runtime for [Pi](https://pi.dev).
 
 This repository contains the durable static execution core and Pi extension for
-trusted read-only agent workflows and durable deterministic support-task
-execution. Dynamic workflows, writer tasks, retry/resume, and polished UI remain
+trusted read-only agent workflows, durable deterministic support-task
+execution, and bounded nested static workflows executed as linked child runs.
+Dynamic workflows, writer tasks, retry/resume, and polished UI remain
 unavailable.
 
 ## Goal
@@ -13,8 +14,8 @@ Provide one reusable workflow engine with:
 
 - trusted TypeScript workflow authoring and a later bounded dynamic frontend;
 - typed task/artifact handles that materialize a declarative durable graph;
-- stable tasks, explicit order/data dependencies, parallelism, pipelines, and
-  bounded fan-out/fan-in;
+- stable tasks, explicit order/data dependencies, parallelism, pipelines,
+  bounded fan-out/fan-in, and bounded nested workflows;
 - schema-validated agent results and deterministic support tasks;
 - declared cost/runtime budgets, optional total-token guards, and durable
   wall-clock deadlines;
@@ -33,6 +34,7 @@ journal + scheduler + recovery
       ↓
 shared pi-subagent service (agent tasks)
 in-process support executor (support tasks)
+linked child workflow run (nested workflow tasks)
 ```
 
 Workflows without result-dependent branches can materialize their complete DAG
@@ -98,6 +100,46 @@ The public entry points are `createWorkflowSupportTaskExecutor`,
 `supportRegistrationIdentity`, `deriveSupportImplementationIdentitySha256`,
 `SupportTaskExecutionRecordSchema`, and `SupportTaskTerminalEvidenceSchema`;
 see [Contracts](docs/contracts.md#support-task-execution).
+
+## Nested workflows
+
+A workflow can run another discovered workflow as a linked child run:
+
+```ts
+export default defineWorkflow({
+	meta: {
+		name: "nest-parent",
+		description: "Parent",
+		version: 1,
+		budget: { cost: 5, childRuntimeMs: 120_000 },
+		timeoutMs: 600_000,
+	},
+	inputSchema: InputSchema,
+	outputSchema: OutputSchema,
+	run(ctx) {
+		return ctx.workflow("child", {
+			workflow: "echo-child",
+			input: { value: ctx.input.value },
+		});
+	},
+});
+```
+
+The child is resolved by name from the same discovery pass and trust gate as
+the parent. Its identity, source digest, schemas, budget, timeout, and
+concurrency are captured at declaration together with the validated concrete
+`input`, and the task is lowered into a `kind: "workflow"` record. Execution
+launches a separate durable run with its own journal, lease, artifact store,
+and subagent owner binding; the parent reserves the child's declared budget,
+caps the child's deadline at its own, and imports the child's verified output
+as a parent-owned artifact before the task completes. Depth is bounded at
+0 through 3, a run may declare at most 64 workflow tasks, and recursion along
+the ancestor chain is rejected. Artifact inputs into children are not
+supported in this revision. The public entry points are
+`createWorkflowNestedRunExecutor`, `deriveNestedWorkflowRunId`,
+`NestedWorkflowTaskSpecSchema`, `NestedWorkflowTerminalEvidenceSchema`, and
+`MAX_NESTED_WORKFLOW_DEPTH`; see
+[Contracts](docs/contracts.md#nested-workflow-tasks).
 
 ## Development
 
