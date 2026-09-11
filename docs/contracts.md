@@ -2,9 +2,10 @@
 
 This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
-artifact store, and static source runtime implement the current subset; later
-interfaces remain design contracts. The runtime contract is revision 11 and
-declares the feature flag `supportTaskExecution: true`.
+nested run executor, artifact store, and static source runtime implement the
+current subset; later interfaces remain design contracts. The runtime contract
+is revision 12 and declares the feature flags `supportTaskExecution: true` and
+`nestedWorkflows: true`.
 
 ## Static definition
 
@@ -96,7 +97,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 11 identities cover the complete definition module but not a
+Contract revision 12 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
 `typebox`, and the module specifiers present in the constructor-injected
 support registry; every other static import, dynamic import, CommonJS require,
@@ -207,6 +208,15 @@ type TaskExecutionRecord =
 			generation: number;
 			taskIdentitySha256: string;
 			implementationIdentitySha256: string;
+	  }
+	| {
+			kind: "workflow";
+			id: TaskExecutionId;
+			runId: WorkflowRunId;
+			taskId: WorkflowTaskId;
+			generation: number;
+			taskIdentitySha256: string;
+			childRunId: WorkflowRunId;
 	  };
 
 interface SupportTaskTerminalEvidence {
@@ -220,7 +230,9 @@ interface SupportTaskTerminalEvidence {
 }
 ```
 
-Support records carry no subagent operation ID. `parametersSha256` is the
+Support records carry no subagent operation ID; the workflow-kind record is
+described under [Nested workflow tasks](#nested-workflow-tasks).
+`parametersSha256` is the
 canonical digest of `spec.request.parameters`; `inputsSha256` is the canonical
 digest of `{ [inputName]: <sha256 of the producer's unique result artifact> }`
 over `spec.inputs` (empty inputs hash `{}`); `outputSha256` is the result
@@ -372,7 +384,10 @@ interface WorkflowContext<TInput> {
 		key: string,
 		descriptor: SupportTaskDescriptor<TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>>;
-	workflow<T>(key: string, request: NestedWorkflowTask<T>): TaskHandle<T>;
+	workflow<TOutput = unknown>(
+		key: TaskKey,
+		request: NestedWorkflowRequest,
+	): TaskHandle<TOutput>;
 	checkpoint<T>(key: string, request: CheckpointRequest<T>): TaskHandle<T>;
 	artifact<T>(
 		key: string,
@@ -409,6 +424,25 @@ must return one handle it created; that handle becomes the pipeline result.
 Pipeline namespace and stage keys participate in ordinary task identity and
 exact-prefix replay.
 
+`ctx.workflow(key, request)` declares a nested workflow task that runs another
+discovered definition as a linked child run:
+
+```ts
+interface NestedWorkflowRequest<TInput = unknown> {
+	readonly workflow: string; // child definition name
+	readonly input: TInput; // concrete JSON value, validated at declaration
+	readonly disposition?: "required" | "optional";
+	readonly after?: readonly TaskRef[];
+	readonly replay?: "auto" | "off" | "read-only";
+}
+```
+
+The child is resolved by name from the same discovery pass and trust gate as
+the parent. The returned handle's `output` is an ordinary parent-owned result
+artifact that later parent tasks may consume as a named input. Nested requests
+carry no artifact `inputs` in this revision; see
+[Nested workflow tasks](#nested-workflow-tasks).
+
 Settled-parallel is a typed authoring helper that materializes ordinary task
 nodes and dependencies. They are not separate
 execution runtimes.
@@ -421,7 +455,7 @@ scheduler consumes only validated records, never workflow closures.
 ```ts
 interface TaskSpecBase {
 	key: string;
-	kind: "agent" | "support" | "workflow" | "checkpoint";
+	kind: "agent" | "support" | "workflow";
 	disposition: "required" | "optional";
 	after: TaskRef[];
 	inputs: Record<string, ArtifactRef>;
@@ -440,10 +474,12 @@ interface MaterializedTask {
 }
 ```
 
-Keys are unique within a workflow namespace. Nested workflows, pipelines, and
-fan-out create explicit child namespaces. Order dependencies use `after`; data
-dependencies use named artifact `inputs`. Consuming an artifact implies order,
-but order alone never grants data access.
+`kind` is `"agent" | "support" | "workflow"` in revision 12; a checkpoint task
+kind remains a design contract. Keys are unique within a workflow namespace.
+Pipelines and fan-out create explicit child namespaces; a nested workflow task
+is one node in its parent's namespace whose child run owns a separate graph.
+Order dependencies use `after`; data dependencies use named artifact `inputs`.
+Consuming an artifact implies order, but order alone never grants data access.
 
 A materialization epoch validates keys, dependency ownership, schemas, limits,
 and authority before appending ordered `task-declared` events followed by one
@@ -617,18 +653,207 @@ only JSON-serializable output-schema documents within the runtime's bounded
 16-level schema-value depth, then revalidates and imports the value and every
 downstream artifact into workflow-owned storage before task completion.
 
+## Nested workflow tasks
+
+A nested workflow task (`kind: "workflow"`) runs another discovered definition
+as a **linked child run**: a separate durable workflow run with its own
+journal, lease, artifact store, subagent owner binding
+`pi-workflow:<childRunId>`, budget, and deadline. The parent scheduler routes
+the task by kind to the nested run executor, which launches, waits for, and
+imports from the child through the service's nested run provider. There is no
+second scheduler class and no persisted continuation: the child re-executes its
+own trusted source from entry exactly like a root run.
+
+### Authoring and declaration
+
+`ctx.workflow(key, { workflow, input, disposition?, after?, replay? })`
+resolves the child by name from the same discovery pass and trust gate as the
+parent. At declaration the runtime captures the child's identity, source
+digest, version, input and output schemas, declared budget, timeout, and
+concurrency, validates `input` against the child's input schema, and lowers
+everything into the persisted spec:
+
+```ts
+interface NestedWorkflowTaskSpec {
+	key: string;
+	kind: "workflow";
+	disposition: "required" | "optional";
+	after: TaskRef[];
+	inputs: {}; // no artifact inputs in this revision
+	replay: "auto" | "off" | "read-only";
+	request: {
+		definitionName: string;
+		definitionIdentitySha256: string;
+		definitionSourceSha256: string;
+		definitionVersion: number;
+		input: unknown;
+		inputSha256: string; // canonical digest of input
+		inputSchema: JsonSchemaDocument;
+		outputSchema: JsonSchemaDocument;
+		budget: WorkflowBudget; // the child's declared meta.budget
+		timeoutMs: number;
+		concurrency: number;
+	};
+	identitySha256: string;
+}
+```
+
+Task identity hashes the same canonical envelope as support tasks (contract
+revision, parent definition identity, parent input digest, namespace, and the
+spec without its identity); the reducer re-derives it on `task-declared` and
+requires `inputSha256` to equal the digest of `input`. Only a concrete
+`input` value is supported: artifact inputs into a child are not available in
+this revision (`inputs` must be `{}`; `after` is allowed). The nested result is
+an ordinary parent-owned artifact and may be consumed by later parent tasks as
+a named input. Because the child's identity and source digest are part of the
+task identity, child source drift fails replay of the parent as declaration
+drift.
+
+Bounds are fixed: `MAX_NESTED_WORKFLOW_DEPTH = 4`, so runs exist at depth 0
+through 3 and a run at depth 3 may not declare workflow tasks;
+`MAX_NESTED_WORKFLOW_TASKS = 64` workflow tasks per run, enforced by the
+materializer and the reducer; and a child whose definition identity equals the
+declaring workflow or any ancestor on the chain is rejected at declaration as
+recursion. Unbounded recursion remains a non-goal.
+
+### Execution record, events, and phases
+
+The execution record is `kind: "workflow"` with a deterministic
+`childRunId = deriveNestedWorkflowRunId(parentRunId, taskId, generation)`,
+which the reducer verifies on `task-execution-created`. Four
+`task-execution-nested-*` events extend the execution ladder:
+
+```text
+task-execution-created (kind workflow, childRunId)
+→ task-execution-nested-intended
+    { childRunId, definitionIdentitySha256, inputSha256, budget,
+      timeoutMs, deadlineAt, concurrency }
+→ task-execution-nested-launched { childRunId }   // child record durable
+→ task-status-changed ready→running
+→ task-execution-nested-settled
+    { childRunId, status, usage, usageComplete, outputArtifactId?, outputSha256? }
+→ artifact-declared (producerTaskId = task, output = "result",
+    schemaSha256 = sha256 of request.outputSchema)
+→ task-execution-nested-output-imported
+    { childRunId, artifactId, sourceArtifactId, sourceSha256 }
+→ task-execution-terminal (outcome completed, evidence kind nested-workflow)
+→ task-status-changed running→completed
+```
+
+Phases are `created → nested-intended → nested-launched → nested-settled →
+nested-output-imported → terminal`. Intent and launch happen under the
+scheduler mutation lock; the wait, settlement, and import run outside it,
+serialized per task. The intent's budget, timeout, and concurrency may not
+exceed the declaration, and `deadlineAt` must be within `timeoutMs` of the
+event timestamp. `outputArtifactId` and `outputSha256` are present exactly when
+the child status is `completed` or `completed-degraded`; the import event
+requires a parent-owned `application/json` artifact whose digest equals the
+settlement's `outputSha256` and whose schema digest equals the digest of
+`request.outputSchema`.
+
+### Terminal evidence and outcome mapping
+
+```ts
+interface NestedWorkflowTerminalEvidence {
+	kind: "nested-workflow";
+	childRunId: WorkflowRunId;
+	status: WorkflowRunStatus; // terminal only
+	usage: { cost: number; totalTokens: number; childRuntimeMs: number };
+	usageComplete: boolean;
+	outputSha256?: string; // present iff status is completed*
+	artifactId?: WorkflowArtifactId; // parent-owned import, iff completed*
+}
+```
+
+`usage` is the sum of the child's subagent settlements and its own nested
+settlements; `usageComplete` is false when any of them was incomplete. The
+reducer requires the evidence to equal the settlement and, for completion, the
+import.
+
+| Child run status | Parent task outcome |
+| --- | --- |
+| `completed` or `completed-degraded`, output imported | `completed` |
+| `failed` | `failed` |
+| `cancelled` | `cancelled` |
+| `interrupted` | `interrupted` |
+| `cleanup-blocked` | `cleanup-blocked` |
+
+Failure evidence of kind `workflow` on a workflow task uses stage
+`nested-resolution` (the child could not be resolved exactly by name, identity,
+and source digest at launch), `nested-launch` (no remaining time before the
+parent deadline, lease or record creation failure, or an existing child run
+whose lineage, definition, or input does not match the intent), or
+`nested-import` (the child completed but its output could not be read,
+verified, validated, or stored; outcome `cleanup-blocked`). Cancellation before
+launch uses stage `stop`. Agent and support stages are rejected on workflow
+tasks and vice versa. A required task that ends `failed` or `cancelled` fails
+the run, `interrupted` interrupts it, and `cleanup-blocked` marks the run
+`cleanup-blocked`.
+
+### Budget, deadline, and concurrency
+
+The child declares its own budget. Parent admission treats that declaration as
+the candidate maximum: it must fit within the parent's effective budget after
+settled usage and active reservations, and a parent token budget requires the
+child to declare `totalTokens`. While the child runs (launched, not settled)
+the parent reserves the intent budget; settlement replaces the reservation with
+the child's summed usage. Incomplete child usage fails closed and stops further
+spending. The child's effective budget is the minimum of its declaration, the
+parent's reservation, and service caps; its effective concurrency is the
+minimum of its declaration, the intent, and the service maximum.
+
+The child's deadline is the earlier of its own timeout and the parent's
+deadline. The executor computes intent `timeoutMs` as the minimum of the
+declared timeout and the time remaining before the parent deadline, and the
+provider recomputes it at record creation; under one second at either point
+fails the task at `nested-launch`. A `running` or `cancelling` nested task
+occupies one parent concurrency lane.
+
+### Stop, deadline, reconciliation, and recovery
+
+Parent stop marks a launched nested task `cancelling`, stops the child run
+through the provider, and waits for the child's terminal state through the same
+settlement path before the parent reaches its own terminal status. The parent
+deadline uses the same stop path, and the child deadline is never later than
+the parent's. A task whose execution is `created` or `nested-intended` at stop
+is terminalized `cancelled` at stage `stop` without launching.
+
+Import failure yields `cleanup-blocked` at stage `nested-import`; explicit
+parent reconciliation retries the import. A child that itself settled
+`cleanup-blocked` is reconciled through parent reconciliation, which reconciles
+the child run, waits for its new terminal status, appends a replacement
+`task-execution-nested-settled` (accepted only from a `cleanup-blocked`
+settlement), and continues as an ordinary settlement. Restart resumes a
+launched child from its own durable state without launching again; the
+recovery ladder is in
+[Persistence and recovery](persistence.md#nested-execution-recovery).
+
+Without a configured nested run provider, workflow tasks become `blocked` with
+"Nested workflow execution is not configured for this workflow run." and a
+required task fails the run. Nested tasks use `pending`, `ready`, `blocked`,
+`running`, `cancelling`, `completed`, `failed`, `cancelled`, `interrupted`,
+and `cleanup-blocked`; they never enter `waiting`.
+
 ## Identity hierarchy
 
 ```text
 Workflow definition
-  Workflow run
+  Workflow run (depth 0..3)
     Workflow task
-      Task execution generation (kind agent | support)
+      Task execution generation (kind agent | support | workflow)
         Subagent run (agent tasks only)
           Subagent attempt
         Support computation (support tasks only)
           Result artifact
+        Child workflow run (workflow tasks only; depth + 1)
+          Workflow task ... (same hierarchy)
+          Imported result artifact
 ```
+
+A workflow task of kind `workflow` owns one task execution whose deterministic
+`childRunId` names the linked child run. The child run record persists `depth`
+and `parent { runId, taskId, executionId, ancestorDefinitionIdentities }`, so
+the lineage is recoverable from either side.
 
 Phase 3 retry control will call the owner client's `retry` on the same subagent
 run and record the fresh attempt and VM under the same task execution. Resume
@@ -694,9 +919,13 @@ The current extension exposes list, validate, run, status, wait, stop, and
 reconcile. `run` validates trust, definition, input, and the shared subagent
 provider before creating durable state, then returns a run ID immediately.
 `status` is a journal projection, `wait` reconstructs nonterminal work after
-restart, and `stop` persists run/task intent before delegated interruption and
-support abort. `createWorkflowService` accepts an optional `supportTasks`
-registration list that becomes the frozen constructor registry.
+restart, and `stop` persists run/task intent before delegated interruption,
+support abort, and child-run stop. Every run view carries `depth` and, for a
+linked child run, `parent: { runId, taskId }`; a child run is addressable by
+its own run ID for status, wait, stop, and reconcile. `createWorkflowService`
+accepts an optional `supportTasks` registration list that becomes the frozen
+constructor registry and supplies the nested run provider to every run it
+composes.
 Retry, explicit interrupted-run resume, logs, and polished inspection remain
 later contract work.
 
@@ -773,7 +1002,8 @@ type WorkflowTaskStatus =
 stopped, and only explicit reconciliation or release may transition it to a
 proved terminal outcome. It is never degraded success. Support tasks use only
 `pending`, `ready`, `blocked`, `running`, `completed`, `failed`, and
-`cancelled`.
+`cancelled`. Nested workflow tasks additionally use `cancelling`,
+`interrupted`, and `cleanup-blocked` but never `waiting`.
 `completed-degraded` requires every required task and required finalizer to
 succeed while one or more optional tasks or advisory finalizers failed; all
 degradations remain visible.

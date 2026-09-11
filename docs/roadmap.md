@@ -47,11 +47,19 @@ Delivered:
 - deterministic bundle-contained support tasks: typed descriptor frontend,
   constructor registry, durable intent, in-process execution, artifact commit,
   crash-prefix recovery, and stop/deadline abort (runtime contract feature
-  `supportTaskExecution: true`).
+  `supportTaskExecution: true`);
+- nested static workflows with bounded depth: `ctx.workflow` declarations
+  lowered into `kind: "workflow"` tasks, linked child runs with their own
+  journal, lease, store, and owner binding, budget reservation and deadline
+  capping from the parent, verified output import, stop/deadline cascades,
+  restart resume, and reconciliation (runtime contract feature
+  `nestedWorkflows: true`, depth 0 through 3, at most 64 workflow tasks per
+  run, recursion rejected).
 
 Remaining:
 
-- nested static workflows with bounded depth;
+- artifact inputs into nested children (only concrete `input` is supported);
+- cross-run artifact references beyond the verified output import;
 - pi-subagent handoff-export contract and workflow-owned worktree artifacts
   before enabling writer tasks.
 

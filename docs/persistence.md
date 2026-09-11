@@ -25,8 +25,11 @@ checkpoint values, context, artifacts, and results are bounded. `service.json`
 is an immutable bounded private record containing the exact workflow definition
 provenance, project root, input, effective concurrency limit, declared and
 effective workflow budgets, declared and effective timeout, absolute deadline,
-and creation identity needed for restart reconstruction. It is written before workflow source
-starts.
+creation identity, nesting `depth`, and (exactly when `depth >= 1`) the
+`parent { runId, taskId, executionId, ancestorDefinitionIdentities }` lineage
+needed for restart reconstruction. It is written before workflow source
+starts. A linked child workflow run is a peer directory under the same
+`runs/` root, named by its deterministic child run ID.
 Credential-shaped metadata is redacted. Source-derived sensitive content that
 must be retained is stored as private artifact data, not copied into indexes or
 ordinary diagnostics.
@@ -34,17 +37,21 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-11 rejects revision-1 through revision-10 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 11 accepts only
+12 rejects revision-1 through revision-11 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 12 accepts only
 the declared run, workflow phase/log effect, task, artifact, barrier,
 output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent, uncertain launch
 and reconciled absence or a launch receipt, child observation, bounded terminal
 child settlement, artifact import, release intent and receipt, and terminal
 outcome in that order. Support task-execution evidence records generation
-creation, support intent, output commit, and terminal outcome in that order;
-subagent-shaped events are rejected on support executions and support events
-are rejected on agent executions. An
+creation, support intent, output commit, and terminal outcome in that order.
+Nested workflow task-execution evidence records generation creation, nested
+intent, nested launch, nested settlement, nested output import, and terminal
+outcome in that order. Each event family is accepted only on an execution of
+its own kind: subagent-shaped events are rejected on support and workflow
+executions, support events on agent and workflow executions, and nested events
+on agent and support executions. An
 expired preflight may be replaced only before launch intent is persisted. A
 preflight from an older workflow fencing generation is also replaced because
 pi-subagent preflight grants are intentionally process-local.
@@ -107,10 +114,10 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 11 currently admits generation 1 only; later generations
+invalidation. Revision 12 currently admits generation 1 only; later generations
 remain unavailable until transactional invalidation lands. The execution record
-is discriminated by `kind: "agent" | "support"`; both kinds share the derived
-execution ID, run, task, generation, and task identity digest.
+is discriminated by `kind: "agent" | "support" | "workflow"`; all kinds share
+the derived execution ID, run, task, generation, and task identity digest.
 
 An agent execution (`kind: "agent"`) owns one subagent run and contains:
 
@@ -138,6 +145,27 @@ persisted. Every restart resolves each journaled descriptor against the new
 process's registry by exact canonical identity over name, module specifier,
 revision, implementation digest, parameters schema, and output schema; a close
 match is a mismatch.
+
+A nested workflow execution (`kind: "workflow"`) carries a deterministic
+`childRunId = deriveNestedWorkflowRunId(runId, taskId, generation)` and no
+operation ID. It contains:
+
+- generation number and task identity;
+- durable nested intent: child definition identity, input digest, the budget
+  reserved from the parent, effective timeout, absolute deadline, and
+  concurrency;
+- the nested launch receipt, recorded once the child run record is durable;
+- the nested settlement: the child's terminal status, summed usage,
+  `usageComplete`, and (for a completed child) the child-owned output artifact
+  ID and digest;
+- the output import: the parent-owned result artifact and its child source;
+- terminal evidence of kind `nested-workflow` or of kind `workflow` with a
+  `nested-resolution`, `nested-launch`, `nested-import`, or `stop` stage.
+
+The child run is a separate durable run with its own journal, lease, artifact
+store, and run record; the parent journal never embeds child events. The
+parent's execution record and the child's run record reference each other by
+identity only.
 
 Phase 3 adds subagent retry/resume attempts and control receipts to the existing
 agent task execution. A new execution generation requires a new preflight,
@@ -173,6 +201,33 @@ rather than converted into task failure. A `running` support task found after
 restart with no in-process execution is cancelled directly during stop and is
 otherwise repaired or recomputed by the ladder above.
 
+### Nested execution recovery
+
+Restart repairs an interrupted nested workflow execution from its durable
+prefix in the parent journal together with the child run directory:
+
+| Durable prefix | Recovery |
+| --- | --- |
+| no execution record | ordinary readiness; a fresh generation-1 record with the derived `childRunId` is created |
+| `task-execution-created` only | recompute intent from the declaration and the parent deadline; under one second remaining fails at `nested-launch` |
+| intent only, no child run directory | the atomic child record write never happened; launch is retried under the same `childRunId` |
+| intent only, child run directory present | the existing child must match its lineage (`depth`, parent run, task, execution), definition identity, source digest, and input exactly, otherwise the task fails at `nested-launch`; a directory whose record is missing or unreadable is a persistence error and is thrown, not converted into task failure |
+| launched | the child is resumed from its own journal and driven to terminal state; it is never launched again |
+| settled, non-completed | terminal evidence is appended with the mapped outcome |
+| settled, completed, not imported | the child output is reread with full verification and imported; failure is `cleanup-blocked` at `nested-import` |
+| imported | terminal `completed` evidence is appended |
+| terminal evidence without the task status transition | repair the task status only |
+| completed | replay the parent-owned result artifact; the child is not consulted |
+
+A nested settlement of `cleanup-blocked` is replaced only through explicit
+parent reconciliation, which reconciles the child run, waits for its new
+terminal status, and appends a replacement settlement; an import-stage
+`cleanup-blocked` task retries the import on reconciliation. A `running` or
+`cancelling` nested task found after restart during stop is stopped through
+its child run and drained to terminal state. Journal, lease, and artifact-store
+errors during nested execution are thrown rather than converted into task
+failure.
+
 No persisted `running` field proves that a scheduler or child still exists. The
 bounded scheduler reselects work and reconstructs active concurrency slots from
 the journal after every restart. Scheduler selection and mutations are serialized
@@ -201,6 +256,7 @@ skills and context digests
 output schema
 workspace baseline
 support implementation identity (support tasks)
+child definition identity, source digest, and input digest (workflow tasks)
 subagent and workflow runtime revisions
 ```
 
@@ -214,6 +270,10 @@ Default policy:
 - support tasks: a completed result replays from its digest-verified
   workflow-owned artifact on full identity match and is never recomputed within
   its run; registry drift fails only non-terminal support executions;
+- nested workflow tasks: a completed result replays from the parent-owned
+  imported artifact; child source drift changes the declaration identity and
+  fails replay of the parent as declaration drift, while an already-launched
+  child whose definition no longer resolves exactly fails at `nested-launch`;
 - isolated worktree tasks: replay allowed only with verified retained handoff
   evidence and exact baseline;
 - live-branch mutation: not supported by the workflow task contract;
@@ -228,7 +288,9 @@ It reacquires run fencing, validates `service.json`, rediscovers the exact
 trusted definition path and source identity, reacquires the shared subagent owner
 client, and composes the same durable runtime. Provider binding happens before
 new run state is created. Completed status and output reads need no subagent
-acquisition.
+acquisition. A linked child run is reconstructed by the same path from its own
+directory, and its record's lineage is verified against the parent's nested
+intent before the parent resumes waiting on it.
 
 ## Resume
 
@@ -237,8 +299,9 @@ Resume:
 1. acquires or reclaims the run lease with evidence;
 2. reconstructs state from journal events;
 3. validates definition, input, runtime, and service compatibility;
-4. reconciles active agent executions by subagent operation ID and repairs or
-   recomputes intended support executions;
+4. reconciles active agent executions by subagent operation ID, repairs or
+   recomputes intended support executions, and resumes launched child runs
+   without launching them again;
 5. re-executes the workflow function from its entry point;
 6. replays matching declarations and completed results;
 7. incrementally materializes only the newly reached path;
@@ -279,6 +342,15 @@ Subagent artifacts are attempt evidence. Workflow imports every artifact needed
 for downstream execution, result delivery, resume, or replay using owner and
 digest verification. Workflow retention never depends on an unpinned subagent
 artifact that may expire independently.
+
+A child workflow run's artifacts belong to the child. The parent imports the
+child's declared output by rereading it through the child's own store with
+provenance, digest, canonical-encoding, media-type, and schema verification,
+validating it against the output schema captured at declaration, and writing it
+as a parent-owned result artifact bound to the parent task before the parent
+task completes. Cross-run artifact references remain impossible otherwise: a
+parent handle never points into a child store, and a child never reads its
+parent's store.
 
 The initial read-only slice imports structured/output artifacts only. Worktree
 execution is rejected until pi-subagent exposes bounded handoff content through

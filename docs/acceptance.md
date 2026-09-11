@@ -144,6 +144,55 @@ An in-memory-only successful drive does not satisfy the first slice.
   and fails when the task is required;
 - `durationMs` is diagnostic only and never affects budgets or identity.
 
+## Nested workflows
+
+- a parent workflow that declares `ctx.workflow` runs the child as a linked
+  child run with its own journal, lease, artifact store, owner binding
+  `pi-workflow:<childRunId>`, and run record; no second scheduler class,
+  private runtime, or extra subagent service is created, and a child without
+  agent tasks completes without any subagent call;
+- the parent journal records the workflow-kind execution record with the
+  deterministic child run ID, nested intent, nested launch, nested settlement,
+  result artifact declaration, nested output import, and nested terminal
+  evidence in order before `running → completed`;
+- the child's validated output is imported as a parent-owned result artifact,
+  the parent returns it as its own output, and a later parent task may consume
+  it as an ordinary named input;
+- status views report `depth` for every run and `parent { runId, taskId }` for
+  a child; a child run is addressable by its own run ID;
+- admission reserves the child's declared budget against the parent's settled
+  usage and active reservations, defers or blocks a child that does not fit,
+  requires a `totalTokens` declaration under a parent token budget, and settles
+  the reservation with the child's summed usage; incomplete child usage fails
+  closed;
+- the child's effective budget is capped by its declaration, the parent's
+  reservation, and service caps; its deadline is the earlier of its own timeout
+  and the parent's deadline; under one second remaining fails at
+  `nested-launch`;
+- a `running` or `cancelling` nested task occupies one parent lane;
+- declaration rejects an undiscovered name, a depth-3 run declaring a workflow
+  task, more than 64 workflow tasks in one run, a definition already on the
+  ancestor chain, and input that fails the child's input schema;
+- parent stop marks the task `cancelling`, stops the child, and reaches a
+  terminal parent status only after the child's terminal state; the parent
+  deadline cascades the same way and the child deadline is never later;
+- restart with a launched child resumes that child from its own journal and
+  never launches it again; an intent without a child directory relaunches
+  under the same child run ID; an existing child whose lineage, definition, or
+  input differs from the intent fails at `nested-launch`;
+- child source drift fails replay of the parent as declaration drift while a
+  completed nested task still replays from its imported artifact;
+- import failure yields `cleanup-blocked` at `nested-import` and parent
+  reconciliation retries the import; a child that settled `cleanup-blocked` is
+  reconciled through the parent and its replacement settlement drives the
+  parent task to a terminal outcome;
+- every terminal child status maps to the documented parent task outcome and
+  a required task propagates to the parent run;
+- session shutdown stops owned runs in ascending depth order so children are
+  cancelled through their parents;
+- a run without a configured nested run provider blocks workflow tasks with a
+  fixed message and fails when the task is required.
+
 ## Persistence and recovery
 
 - torn tail, corrupt snapshot, future version, lease loss, and stale running task
@@ -158,6 +207,9 @@ An in-memory-only successful drive does not satisfy the first slice.
 - support execution recovery follows the documented crash-prefix ladder, output
   conflict fails closed, and persistence uncertainty is thrown rather than
   converted into task failure;
+- nested execution recovery follows the documented crash-prefix ladder, a run
+  record with `depth >= 1` requires exact lineage and a root record forbids it,
+  and revision-12 stores reject revision 1 through 11 records;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - required finalizer failure prevents success;
 - bounded private stores redact sensitive metadata.
