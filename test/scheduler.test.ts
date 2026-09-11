@@ -1113,6 +1113,7 @@ describe("durable sequential scheduler", () => {
 		if (!task) throw new Error("missing projected task");
 		await journal.append("task-execution-created", {
 			execution: {
+				kind: "agent",
 				id: deriveTaskExecutionId(current.runId, taskId, 1),
 				runId: current.runId,
 				taskId,

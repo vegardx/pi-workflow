@@ -142,6 +142,7 @@ function schedulerFor(
 			const childAttemptId = `attempt_${childKey}`;
 			await journal.append("task-execution-created", {
 				execution: {
+					kind: "agent",
 					id: executionId,
 					runId: current.runId,
 					taskId: task.task.id,
@@ -695,6 +696,7 @@ describe("static workflow runtime", () => {
 				);
 				await journal.append("task-execution-created", {
 					execution: {
+						kind: "agent",
 						id: executionId,
 						runId: current.runId,
 						taskId: task.task.id,

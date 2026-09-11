@@ -1,13 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
 import type {
+	AgentTaskExecutionRecord,
 	SubagentTerminalEvidence,
+	SupportTaskExecutionRecord,
+	SupportTaskSpec,
 	TaskExecutionId,
 	TaskExecutionOutcome,
 	WorkflowTaskId,
 } from "./contracts.js";
 import {
 	MAX_WORKFLOW_STATE_BYTES,
+	type TaskExecutionProjection,
 	type WorkflowEventInput,
 	WorkflowEventInputSchema,
 	type WorkflowStateProjection,
@@ -16,6 +20,7 @@ import {
 import {
 	deriveJsonValueSha256,
 	deriveSubagentOperationId,
+	deriveSupportImplementationIdentitySha256,
 	deriveTaskExecutionId,
 	deriveWorkflowArtifactId,
 	deriveWorkflowFailureSha256,
@@ -96,6 +101,83 @@ function executionProjection(
 	return execution;
 }
 
+type AgentExecutionProjection = TaskExecutionProjection & {
+	execution: AgentTaskExecutionRecord;
+};
+
+type SupportExecutionProjection = TaskExecutionProjection & {
+	execution: SupportTaskExecutionRecord;
+};
+
+function isAgentExecution(
+	projection: TaskExecutionProjection,
+): projection is AgentExecutionProjection {
+	return projection.execution.kind === "agent";
+}
+
+function isSupportExecution(
+	projection: TaskExecutionProjection,
+): projection is SupportExecutionProjection {
+	return projection.execution.kind === "support";
+}
+
+function agentExecutionProjection(
+	state: WorkflowStateProjection,
+	executionId: TaskExecutionId,
+	sequence: number,
+): AgentExecutionProjection {
+	const projection = executionProjection(state, executionId, sequence);
+	if (!isAgentExecution(projection)) {
+		fail("subagent execution event targets a support execution", sequence);
+	}
+	return projection;
+}
+
+function supportExecutionProjection(
+	state: WorkflowStateProjection,
+	executionId: TaskExecutionId,
+	sequence: number,
+): SupportExecutionProjection {
+	const projection = executionProjection(state, executionId, sequence);
+	if (!isSupportExecution(projection)) {
+		fail("support execution event targets an agent execution", sequence);
+	}
+	return projection;
+}
+
+function supportTaskSpec(
+	state: WorkflowStateProjection,
+	projection: SupportExecutionProjection,
+	sequence: number,
+): SupportTaskSpec {
+	const spec = state.tasks[projection.execution.taskId]?.task.spec;
+	if (spec?.kind !== "support") {
+		fail("support execution target is not a support task", sequence);
+	}
+	return spec;
+}
+
+function supportInputsSha256(
+	state: WorkflowStateProjection,
+	spec: SupportTaskSpec,
+	sequence: number,
+): string {
+	const inputs: Record<string, string> = {};
+	for (const [name, input] of Object.entries(spec.inputs)) {
+		const candidates = Object.values(state.artifacts).filter(
+			(artifact) =>
+				artifact.producerTaskId === input.producerTaskId &&
+				artifact.output === "result",
+		);
+		const artifact = candidates[0];
+		if (!artifact || candidates.length !== 1) {
+			fail("support task input artifact is missing or ambiguous", sequence);
+		}
+		inputs[name] = artifact.sha256;
+	}
+	return deriveJsonValueSha256(inputs);
+}
+
 function isTerminalSubagentStatus(status: string): boolean {
 	return (
 		status === "completed" ||
@@ -145,6 +227,15 @@ function validSubagentSettlement(evidence: SubagentTerminalEvidence): boolean {
 		);
 	}
 	return cleanupIsProved;
+}
+
+function isSupportFailureStage(stage: string): boolean {
+	return (
+		stage === "support-resolution" ||
+		stage === "support-input" ||
+		stage === "support-execution" ||
+		stage === "support-output"
+	);
 }
 
 function subagentOutcome(status: string): TaskExecutionOutcome | undefined {
@@ -442,22 +533,49 @@ function applyEvent(
 			}
 			if (
 				execution.id !==
-					deriveTaskExecutionId(
-						state.runId,
-						execution.taskId,
-						execution.generation,
-					) ||
-				execution.operationId !==
-					deriveSubagentOperationId(
-						state.runId,
-						execution.taskId,
-						execution.generation,
-					)
+				deriveTaskExecutionId(
+					state.runId,
+					execution.taskId,
+					execution.generation,
+				)
 			) {
 				fail(
 					"task execution identifiers are not deterministic",
 					event.sequence,
 				);
+			}
+			if (task.task.spec.kind === "agent") {
+				if (execution.kind !== "agent") {
+					fail("task execution kind does not match its task", event.sequence);
+				}
+				if (
+					execution.operationId !==
+					deriveSubagentOperationId(
+						state.runId,
+						execution.taskId,
+						execution.generation,
+					)
+				) {
+					fail(
+						"task execution identifiers are not deterministic",
+						event.sequence,
+					);
+				}
+			} else {
+				if (execution.kind !== "support") {
+					fail("task execution kind does not match its task", event.sequence);
+				}
+				if (
+					execution.implementationIdentitySha256 !==
+					deriveSupportImplementationIdentitySha256(
+						task.task.spec.request.implementation,
+					)
+				) {
+					fail(
+						"support task execution implementation identity does not match",
+						event.sequence,
+					);
+				}
 			}
 			if (state.executions[execution.id] || task.currentExecutionId) {
 				fail("task execution is duplicate or already current", event.sequence);
@@ -471,7 +589,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-preflighted": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -503,7 +621,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-launch-intended": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -525,7 +643,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-launch-uncertain": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -545,7 +663,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-launch-absent": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -562,7 +680,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-launch-receipted": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -589,7 +707,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-child-observed": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -634,7 +752,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-child-settled": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -656,7 +774,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-artifact-imported": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -689,7 +807,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-release-intended": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -722,7 +840,7 @@ function applyEvent(
 			break;
 		}
 		case "task-execution-released": {
-			const projection = executionProjection(
+			const projection = agentExecutionProjection(
 				state,
 				input.data.executionId,
 				event.sequence,
@@ -744,6 +862,63 @@ function applyEvent(
 			const { executionId: _executionId, ...release } = input.data;
 			projection.release = { ...release, sequence: event.sequence };
 			projection.phase = "released";
+			break;
+		}
+		case "task-execution-support-intended": {
+			const projection = supportExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = supportTaskSpec(state, projection, event.sequence);
+			if (projection.phase !== "created") {
+				fail("support task intent is out of order", event.sequence);
+			}
+			if (
+				input.data.implementationIdentitySha256 !==
+					projection.execution.implementationIdentitySha256 ||
+				input.data.implementationIdentitySha256 !==
+					deriveSupportImplementationIdentitySha256(
+						spec.request.implementation,
+					) ||
+				input.data.parametersSha256 !==
+					deriveJsonValueSha256(spec.request.parameters) ||
+				input.data.inputsSha256 !==
+					supportInputsSha256(state, spec, event.sequence)
+			) {
+				fail("support task intent does not match its task", event.sequence);
+			}
+			const { executionId: _executionId, ...supportIntent } = input.data;
+			projection.supportIntent = { ...supportIntent, sequence: event.sequence };
+			projection.phase = "support-intended";
+			break;
+		}
+		case "task-execution-support-output-committed": {
+			const projection = supportExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = supportTaskSpec(state, projection, event.sequence);
+			if (projection.phase !== "support-intended") {
+				fail("support task output commit is out of order", event.sequence);
+			}
+			const artifact = state.artifacts[input.data.artifactId];
+			if (
+				!artifact ||
+				artifact.runId !== state.runId ||
+				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.output !== "result" ||
+				artifact.sha256 !== input.data.outputSha256 ||
+				artifact.mediaType !== "application/json" ||
+				artifact.schemaSha256 !==
+					deriveJsonValueSha256(spec.request.implementation.outputSchema)
+			) {
+				fail("support task output artifact does not match", event.sequence);
+			}
+			const { executionId: _executionId, ...supportOutput } = input.data;
+			projection.supportOutput = { ...supportOutput, sequence: event.sequence };
+			projection.phase = "support-output-committed";
 			break;
 		}
 		case "task-execution-terminal": {
@@ -805,7 +980,61 @@ function applyEvent(
 				) {
 					fail("subagent terminal artifact does not match", event.sequence);
 				}
+			} else if (evidence.kind === "support") {
+				if (task.task.spec.kind !== "support") {
+					fail("agent task has support terminal evidence", event.sequence);
+				}
+				if (projection.phase !== "support-output-committed") {
+					fail(
+						"support terminal evidence precedes output commit",
+						event.sequence,
+					);
+				}
+				if (input.data.outcome !== "completed") {
+					fail("support terminal outcome is not completed", event.sequence);
+				}
+				const intent = projection.supportIntent;
+				const output = projection.supportOutput;
+				if (
+					!intent ||
+					evidence.implementationIdentitySha256 !==
+						intent.implementationIdentitySha256 ||
+					evidence.parametersSha256 !== intent.parametersSha256 ||
+					evidence.inputsSha256 !== intent.inputsSha256
+				) {
+					fail("support terminal intent does not match", event.sequence);
+				}
+				if (
+					!output ||
+					evidence.outputSha256 !== output.outputSha256 ||
+					evidence.artifactId !== output.artifactId
+				) {
+					fail("support terminal output does not match", event.sequence);
+				}
+			} else if (task.task.spec.kind === "support") {
+				const failurePhase =
+					projection.phase === "created" ||
+					projection.phase === "support-intended" ||
+					projection.phase === "support-output-committed";
+				const stopPhase =
+					projection.phase === "created" ||
+					projection.phase === "support-intended";
+				if (
+					evidence.failureSha256 !==
+						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
+					(input.data.outcome === "failed" &&
+						(!isSupportFailureStage(evidence.stage) || !failurePhase)) ||
+					(input.data.outcome === "cancelled" &&
+						(evidence.stage !== "stop" || !stopPhase)) ||
+					(input.data.outcome !== "failed" &&
+						input.data.outcome !== "cancelled")
+				) {
+					fail("workflow terminal evidence is inconsistent", event.sequence);
+				}
 			} else {
+				if (isSupportFailureStage(evidence.stage)) {
+					fail("workflow terminal evidence is inconsistent", event.sequence);
+				}
 				if (
 					evidence.failureSha256 !==
 						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
@@ -869,7 +1098,15 @@ function applyEvent(
 			const execution = task.currentExecutionId
 				? state.executions[task.currentExecutionId]
 				: undefined;
-			if (input.data.to === "running") {
+			const supportTask = task.task.spec.kind === "support";
+			if (input.data.to === "running" && supportTask) {
+				if (execution?.phase !== "support-intended") {
+					fail(
+						"support task became running without persisted intent",
+						event.sequence,
+					);
+				}
+			} else if (input.data.to === "running") {
 				const childStatus =
 					execution?.observation?.status ?? execution?.launchReceipt?.status;
 				if (!execution || childStatus !== "active") {
@@ -879,11 +1116,17 @@ function applyEvent(
 					);
 				}
 			}
+			if (input.data.to === "waiting" && supportTask) {
+				fail("support task may not wait", event.sequence);
+			}
 			if (input.data.to === "waiting" && !execution?.launchReceipt) {
 				fail(
 					"task became waiting without a launched execution",
 					event.sequence,
 				);
+			}
+			if (input.data.to === "cancelling" && supportTask) {
+				fail("support task may not enter cancelling", event.sequence);
 			}
 			if (
 				input.data.to === "cancelling" &&
@@ -1097,6 +1340,14 @@ function applyEvent(
 				);
 			}
 			state.status = nextStatus;
+			break;
+		}
+		default: {
+			const _exhaustive: never = input;
+			fail(
+				`unknown workflow event ${String((_exhaustive as { type: string }).type)}`,
+				event.sequence,
+			);
 		}
 	}
 	state.lastSequence = event.sequence;

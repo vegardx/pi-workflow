@@ -7,6 +7,7 @@ import {
 } from "@vegardx/pi-subagent";
 import type {
 	SubagentOperationId,
+	SupportImplementation,
 	TaskExecutionGeneration,
 	TaskExecutionId,
 	WorkflowArtifactRef,
@@ -72,6 +73,19 @@ export function deriveWorkflowArtifactId(input: {
 	})}`;
 }
 
+export function deriveSupportImplementationIdentitySha256(
+	implementation: SupportImplementation,
+): string {
+	return deriveJsonValueSha256({
+		implementationSha256: implementation.implementationSha256,
+		moduleSpecifier: implementation.moduleSpecifier,
+		name: implementation.name,
+		outputSchema: implementation.outputSchema,
+		parametersSchema: implementation.parametersSchema,
+		revision: implementation.revision,
+	});
+}
+
 export function deriveWorkflowFailureSha256(
 	stage:
 		| "preflight"
@@ -79,7 +93,11 @@ export function deriveWorkflowFailureSha256(
 		| "reconciliation"
 		| "stop"
 		| "artifact-import"
-		| "release",
+		| "release"
+		| "support-resolution"
+		| "support-input"
+		| "support-execution"
+		| "support-output",
 	message: string,
 ): string {
 	return sha256({ message, stage });

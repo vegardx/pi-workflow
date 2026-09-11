@@ -790,7 +790,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 							const failure = evidence
 								? evidence.kind === "workflow"
 									? { message: evidence.message, code: evidence.stage }
-									: evidence.failure
+									: evidence.kind === "subagent" && evidence.failure
 										? structuredClone(evidence.failure)
 										: undefined
 								: undefined;

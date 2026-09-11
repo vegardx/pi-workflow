@@ -212,6 +212,7 @@ async function fixture(result: RunResult) {
 	const operationId = deriveSubagentOperationId(current.runId, task.task.id, 1);
 	await journal.append("task-execution-created", {
 		execution: {
+			kind: "agent",
 			id: executionId,
 			runId: current.runId,
 			taskId: task.task.id,

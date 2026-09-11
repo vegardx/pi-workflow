@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { deriveSupportImplementationIdentitySha256 } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import {
 	defineSupportTask,
@@ -70,5 +71,41 @@ describe("typed support tasks", () => {
 		}));
 		const identity = supportRegistrationIdentity(registration);
 		expect(identity).toMatch(/^[a-f0-9]{64}$/);
+		const materializer = new WorkflowTaskMaterializer({
+			runId: "workflow_support",
+			definitionIdentitySha256: hash,
+			inputSha256: hash,
+		});
+		const task = materializer.support(
+			"parse",
+			helper({ parameters: { strict: true } }),
+		);
+		const declaration = materializer
+			.closeEpoch("final", [task])
+			.events.find((event) => event.type === "task-declared");
+		if (
+			declaration?.type !== "task-declared" ||
+			declaration.data.task.spec.kind !== "support"
+		) {
+			throw new Error("missing support task declaration");
+		}
+		const implementation = declaration.data.task.spec.request.implementation;
+		expect(deriveSupportImplementationIdentitySha256(implementation)).toBe(
+			identity,
+		);
+		expect(
+			deriveSupportImplementationIdentitySha256({
+				...implementation,
+				outputSchema: Object.fromEntries(
+					Object.entries(implementation.outputSchema).reverse(),
+				),
+			}),
+		).toBe(identity);
+		expect(
+			deriveSupportImplementationIdentitySha256({
+				...implementation,
+				revision: 2,
+			}),
+		).not.toBe(identity);
 	});
 });

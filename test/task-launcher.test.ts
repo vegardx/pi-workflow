@@ -14,6 +14,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
+import type { TaskExecutionProjection } from "../src/events.js";
 import {
 	deriveJsonValueSha256,
 	deriveSubagentOperationId,
@@ -285,6 +286,7 @@ async function readyJournalWithInput() {
 	);
 	await journal.append("task-execution-created", {
 		execution: {
+			kind: "agent",
 			id: executionId,
 			runId: "workflow_launcher",
 			taskId: producer.ref.taskId,
@@ -405,6 +407,13 @@ async function readyJournalWithInput() {
 	};
 }
 
+function agentOperationId(execution: TaskExecutionProjection | undefined) {
+	if (execution?.execution.kind !== "agent") {
+		throw new Error("missing agent execution");
+	}
+	return execution.execution.operationId;
+}
+
 async function projection(journal: WorkflowRunJournal) {
 	return reduceWorkflowEvents(await journal.readEvents());
 }
@@ -429,6 +438,7 @@ async function primePreflight(
 	);
 	await journal.append("task-execution-created", {
 		execution: {
+			kind: "agent",
 			id: executionId,
 			runId: current.runId,
 			taskId: task.task.id,
@@ -493,12 +503,12 @@ describe("workflow task launcher", () => {
 		expect(execution).toMatchObject({
 			phase: "launched",
 			preflight: { preflightId: "preflight-launcher" },
-			launchIntent: { operationId: execution?.execution.operationId },
+			launchIntent: { operationId: agentOperationId(execution) },
 			launchReceipt: { subagentRunId: "run_launcher" },
 		});
 		expect(preflightCall).toHaveBeenCalledOnce();
 		expect(preflightCall.mock.calls[0]?.[0]).toMatchObject({
-			operationId: execution?.execution.operationId,
+			operationId: agentOperationId(execution),
 			contextMode: "fresh",
 			workspace: { mode: "read-only", cwd: "/repo" },
 		});
@@ -629,9 +639,7 @@ describe("workflow task launcher", () => {
 		const execution = Object.values(state.executions)[0];
 		expect(execution?.launchUncertain).toBeDefined();
 		expect(execution?.launchReceipt?.subagentRunId).toBe("run_launcher");
-		expect(findByOperation).toHaveBeenCalledWith(
-			execution?.execution.operationId,
-		);
+		expect(findByOperation).toHaveBeenCalledWith(agentOperationId(execution));
 	});
 
 	it("replaces process-local preflight evidence after lease rotation", async () => {
@@ -744,7 +752,7 @@ describe("workflow task launcher", () => {
 		const execution = Object.values(state.executions)[0];
 		expect(execution).toMatchObject({
 			phase: "terminal",
-			launchAbsent: { operationId: execution?.execution.operationId },
+			launchAbsent: { operationId: agentOperationId(execution) },
 			terminal: {
 				outcome: "failed",
 				evidence: { kind: "workflow", stage: "reconciliation" },
@@ -761,12 +769,12 @@ describe("workflow task launcher", () => {
 		if (!execution) throw new Error("missing execution");
 		await journal.append("task-execution-launch-uncertain", {
 			executionId: execution.execution.id,
-			operationId: execution.execution.operationId,
+			operationId: agentOperationId(execution),
 			reason: "receipt missing after crash",
 		});
 		await journal.append("task-execution-launch-absent", {
 			executionId: execution.execution.id,
-			operationId: execution.execution.operationId,
+			operationId: agentOperationId(execution),
 		});
 		const ownerClient = client();
 		const launcher = createWorkflowTaskLauncher({

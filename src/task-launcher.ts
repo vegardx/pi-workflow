@@ -19,6 +19,7 @@ import {
 import { WorkflowArtifactStore } from "./artifact-store.js";
 import {
 	type MaterializedAgentTask,
+	type SubagentOperationId,
 	type TaskExecutionRecord,
 	type WorkflowTaskId,
 	WorkflowTaskIdSchema,
@@ -194,6 +195,7 @@ function executionRecord(
 ): TaskExecutionRecord {
 	const generation = 1;
 	return {
+		kind: "agent",
 		id: deriveTaskExecutionId(state.runId, task.id, generation),
 		runId: state.runId,
 		taskId: task.id,
@@ -201,6 +203,18 @@ function executionRecord(
 		taskIdentitySha256: task.spec.identitySha256,
 		operationId: deriveSubagentOperationId(state.runId, task.id, generation),
 	};
+}
+
+function agentOperationId(
+	execution: TaskExecutionProjection,
+): SubagentOperationId {
+	if (execution.execution.kind !== "agent") {
+		throw new WorkflowTaskLaunchError(
+			"validation",
+			"Workflow task execution is not an agent execution.",
+		);
+	}
+	return execution.execution.operationId;
 }
 
 async function state(
@@ -308,7 +322,7 @@ export function createWorkflowTaskLauncher(
 			type: "task-execution-launch-receipted",
 			data: {
 				executionId: execution.execution.id,
-				operationId: execution.execution.operationId,
+				operationId: agentOperationId(execution),
 				subagentRunId: receipt.runId,
 				subagentAttemptId: receipt.attemptId,
 				status: receipt.status,
@@ -327,7 +341,7 @@ export function createWorkflowTaskLauncher(
 		let receipt: RunReceipt | undefined;
 		try {
 			receipt = await binding.client.findByOperation(
-				execution.execution.operationId,
+				agentOperationId(execution),
 			);
 		} catch (error) {
 			throw new WorkflowTaskLaunchError(
@@ -352,7 +366,7 @@ export function createWorkflowTaskLauncher(
 			type: "task-execution-launch-absent",
 			data: {
 				executionId: execution.execution.id,
-				operationId: execution.execution.operationId,
+				operationId: agentOperationId(execution),
 			},
 		});
 		const message =
@@ -473,7 +487,7 @@ export function createWorkflowTaskLauncher(
 				type: "task-execution-launch-uncertain",
 				data: {
 					executionId: execution.execution.id,
-					operationId: execution.execution.operationId,
+					operationId: agentOperationId(execution),
 					reason: "Launch intent has no durable receipt after recovery.",
 				},
 			});
@@ -494,7 +508,7 @@ export function createWorkflowTaskLauncher(
 		try {
 			request = await lowerRequest(
 				agentTask,
-				execution.execution.operationId,
+				agentOperationId(execution),
 				current,
 				await artifactsFor(agentTask),
 			);
@@ -538,7 +552,7 @@ export function createWorkflowTaskLauncher(
 				type: "task-execution-preflighted",
 				data: {
 					executionId: execution.execution.id,
-					operationId: execution.execution.operationId,
+					operationId: agentOperationId(execution),
 					preflightId: freshPreflight.preflightId,
 					planIdentitySha256: freshPreflight.identitySha256,
 					plannedSubagentRunId: freshPreflight.launchPlan.runId,
@@ -563,7 +577,7 @@ export function createWorkflowTaskLauncher(
 			type: "task-execution-launch-intended",
 			data: {
 				executionId: execution.execution.id,
-				operationId: execution.execution.operationId,
+				operationId: agentOperationId(execution),
 				preflightId,
 				planIdentitySha256,
 			},
@@ -579,7 +593,7 @@ export function createWorkflowTaskLauncher(
 				type: "task-execution-launch-uncertain",
 				data: {
 					executionId: execution.execution.id,
-					operationId: execution.execution.operationId,
+					operationId: agentOperationId(execution),
 					reason: "Launch call ended without a durable receipt.",
 				},
 			});

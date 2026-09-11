@@ -65,6 +65,7 @@ const TASK_TRANSITIONS: Readonly<
 		"failed",
 		"interrupted",
 		"cancelling",
+		"cancelled",
 		"cleanup-blocked",
 	]),
 	waiting: new Set([
