@@ -18,6 +18,12 @@ import {
 	validateJsonSchemaDocument,
 	type WorkflowBudget,
 } from "./definition.js";
+import {
+	WorkflowNestedRunError,
+	type WorkflowNestedRunLaunch,
+	type WorkflowNestedRunProvider,
+	type WorkflowNestedRunSettlement,
+} from "./nested-run-executor.js";
 import { WorkflowRunJournal } from "./persistence/journal.js";
 import {
 	acquireWorkflowRunLease,
@@ -30,6 +36,7 @@ import type { DiscoveredWorkflow, WorkflowRoot } from "./registry.js";
 import { discoverWorkflows } from "./registry.js";
 import {
 	type WorkflowRunRecord,
+	WorkflowRunRecordError,
 	WorkflowRunRecordStore,
 } from "./run-record.js";
 import {
@@ -80,6 +87,8 @@ export type WorkflowServiceRunReceipt = {
 export type WorkflowServiceRunView = WorkflowServiceRunReceipt & {
 	readonly definitionName: string;
 	readonly createdAt: string;
+	readonly depth: number;
+	readonly parent?: { readonly runId: WorkflowRunId; readonly taskId: string };
 	readonly output?: unknown;
 	readonly outputArtifactId?: string;
 };
@@ -385,6 +394,21 @@ export async function createWorkflowService(
 			lease,
 		);
 		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const discovered = await discover();
+		const byName = new Map(
+			discovered.map((candidate) => [
+				candidate.definition.meta.name,
+				candidate,
+			]),
+		);
+		const nesting = Object.freeze({
+			depth: record.depth,
+			ancestorDefinitionIdentities: Object.freeze([
+				...(record.parent?.ancestorDefinitionIdentities ?? []),
+			]),
+			definitionIdentitySha256: record.definitionIdentitySha256,
+			deadlineAt: record.deadlineAt,
+		});
 		const launcher = createWorkflowTaskLauncher({
 			journal,
 			binding,
@@ -402,6 +426,8 @@ export async function createWorkflowService(
 			finalizer,
 			artifacts,
 			supportTasks,
+			nestedRuns: nestedProvider,
+			nesting,
 			concurrency: record.concurrency,
 			budget: record.effectiveBudget,
 		});
@@ -422,6 +448,16 @@ export async function createWorkflowService(
 			delete ownedRun.failure;
 			delete ownedRun.view;
 			const controller = new AbortController();
+			// Durable stop intent (explicit stop, shutdown, or deadline) aborts the
+			// workflow signal so trusted source awaiting ctx.signal can unwind.
+			const onStop = () => {
+				if (!controller.signal.aborted) {
+					controller.abort(new Error("Workflow stop requested."));
+				}
+			};
+			if (scheduler.stopSignal.aborted) onStop();
+			else
+				scheduler.stopSignal.addEventListener("abort", onStop, { once: true });
 			const runtime = createStaticWorkflowRuntime({
 				definition: workflow.definition,
 				definitionIdentitySha256: workflow.identity.identitySha256,
@@ -431,6 +467,11 @@ export async function createWorkflowService(
 				artifacts,
 				scheduler,
 				signal: controller.signal,
+				nesting: {
+					depth: nesting.depth,
+					ancestorDefinitionIdentities: nesting.ancestorDefinitionIdentities,
+					resolveWorkflow: (name: string) => byName.get(name),
+				},
 			});
 			let deadlineTimer: NodeJS.Timeout | undefined;
 			let deadlineSettled = false;
@@ -472,6 +513,7 @@ export async function createWorkflowService(
 							: new Error("unknown workflow failure");
 				})
 				.finally(async () => {
+					scheduler.stopSignal.removeEventListener("abort", onStop);
 					if (deadlineTimer) clearTimeout(deadlineTimer);
 					if (!deadlineSettled) controller.abort();
 					try {
@@ -587,6 +629,8 @@ export async function createWorkflowService(
 				status: "created" as const,
 				definitionName: record.definitionName,
 				createdAt: record.createdAt,
+				depth: record.depth,
+				...lineageOf(record),
 			});
 		}
 		const state = reduceWorkflowEvents(events);
@@ -606,12 +650,315 @@ export async function createWorkflowService(
 			status: state.status,
 			definitionName: record.definitionName,
 			createdAt: record.createdAt,
+			depth: record.depth,
+			...lineageOf(record),
 			...(state.outputArtifactId
 				? { outputArtifactId: state.outputArtifactId }
 				: {}),
 			...(output === undefined ? {} : { output }),
 		});
 	}
+
+	function lineageOf(record: WorkflowRunRecord): {
+		parent?: { runId: WorkflowRunId; taskId: string };
+	} {
+		return record.parent
+			? {
+					parent: Object.freeze({
+						runId: record.parent.runId,
+						taskId: record.parent.taskId,
+					}),
+				}
+			: {};
+	}
+
+	function assertLineage(
+		record: WorkflowRunRecord,
+		request: WorkflowNestedRunLaunch,
+	): void {
+		if (
+			record.depth !== request.parent.depth ||
+			record.parent?.runId !== request.parent.runId ||
+			record.parent.taskId !== request.parent.taskId ||
+			record.parent.executionId !== request.parent.executionId ||
+			record.definitionIdentitySha256 !== request.definitionIdentitySha256 ||
+			record.definitionSourceSha256 !== request.definitionSourceSha256 ||
+			!isDeepStrictEqual(record.input, request.input)
+		) {
+			throw new WorkflowNestedRunError(
+				"launch",
+				"Existing nested workflow run does not match its launch intent.",
+			);
+		}
+	}
+
+	async function nestedSettlementFrom(
+		record: WorkflowRunRecord,
+		journal: WorkflowRunJournal,
+	): Promise<WorkflowNestedRunSettlement | undefined> {
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		if (
+			state.status !== "completed" &&
+			state.status !== "completed-degraded" &&
+			state.status !== "failed" &&
+			state.status !== "cancelled" &&
+			state.status !== "interrupted" &&
+			state.status !== "cleanup-blocked"
+		) {
+			return undefined;
+		}
+		let cost = 0;
+		let totalTokens = 0;
+		let childRuntimeMs = 0;
+		let usageComplete = true;
+		for (const execution of Object.values(state.executions)) {
+			if (execution.settlement) {
+				cost += execution.settlement.evidence.usage.cost;
+				totalTokens += execution.settlement.evidence.usage.totalTokens;
+				childRuntimeMs += execution.settlement.evidence.runtimeMs;
+				usageComplete &&= execution.settlement.evidence.usageComplete;
+			}
+			if (execution.nestedSettlement) {
+				cost += execution.nestedSettlement.usage.cost;
+				totalTokens += execution.nestedSettlement.usage.totalTokens;
+				childRuntimeMs += execution.nestedSettlement.usage.childRuntimeMs;
+				usageComplete &&= execution.nestedSettlement.usageComplete;
+			}
+		}
+		const outputArtifact = state.outputArtifactId
+			? state.artifacts[state.outputArtifactId]
+			: undefined;
+		if (record.runId !== state.runId) {
+			throw new WorkflowNestedRunError(
+				"persistence",
+				"Nested workflow journal does not match its run record.",
+			);
+		}
+		return Object.freeze({
+			status: state.status,
+			usage: Object.freeze({ cost, totalTokens, childRuntimeMs }),
+			usageComplete,
+			...(outputArtifact ? { outputArtifact } : {}),
+		});
+	}
+
+	async function runDirectoryExists(
+		runIdValue: WorkflowRunId,
+	): Promise<boolean> {
+		try {
+			const metadata = await lstat(path.join(storeRoot, "runs", runIdValue));
+			return metadata.isDirectory() && !metadata.isSymbolicLink();
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+			throw error;
+		}
+	}
+
+	const nestedProvider: WorkflowNestedRunProvider = Object.freeze({
+		async launch(request: WorkflowNestedRunLaunch): Promise<void> {
+			if (closed) {
+				throw new WorkflowNestedRunError(
+					"launch",
+					"Workflow service is closed.",
+				);
+			}
+			const existing = owned.get(request.childRunId);
+			if (existing) {
+				assertLineage(existing.record, request);
+				return;
+			}
+			if (await runDirectoryExists(request.childRunId)) {
+				let resumed: OwnedRun | undefined;
+				try {
+					resumed = await resume(request.childRunId);
+				} catch (error) {
+					// A directory without a record means the atomic record write
+					// never happened; the launch is retried under the same id.
+					if (
+						!(error instanceof WorkflowRunRecordError) ||
+						error.message !== "workflow run record is missing"
+					) {
+						throw error;
+					}
+				}
+				if (resumed) {
+					assertLineage(resumed.record, request);
+					return;
+				}
+			}
+			const discovered = await discover();
+			const workflow = discovered.find(
+				(candidate) =>
+					candidate.definition.meta.name === request.definitionName,
+			);
+			if (
+				!workflow ||
+				workflow.identity.identitySha256 !== request.definitionIdentitySha256 ||
+				workflow.identity.sourceSha256 !== request.definitionSourceSha256
+			) {
+				throw new WorkflowNestedRunError(
+					"resolution",
+					"Nested workflow definition could not be resolved exactly.",
+				);
+			}
+			validateInput(workflow, request.input);
+			const binding = await options.subagents.bind(request.childRunId);
+			let lease: WorkflowRunLease;
+			try {
+				lease = await acquireWorkflowRunLease({
+					storeRoot,
+					runId: request.childRunId,
+					ownerId: `pi-workflow-service:${instanceId}`,
+				});
+			} catch (error) {
+				throw new WorkflowNestedRunError(
+					"launch",
+					"Nested workflow run lease could not be acquired.",
+					{ cause: error },
+				);
+			}
+			try {
+				const journal = await WorkflowRunJournal.open(
+					storeRoot,
+					request.childRunId,
+					lease,
+				);
+				const limits = effectiveLimits(workflow);
+				const createdAt = new Date();
+				const remainingMs =
+					Date.parse(request.deadlineAt) - createdAt.getTime();
+				const effectiveTimeoutMs = Math.min(
+					limits.effectiveTimeoutMs,
+					remainingMs,
+				);
+				if (
+					!Number.isFinite(effectiveTimeoutMs) ||
+					effectiveTimeoutMs < 1_000
+				) {
+					throw new WorkflowNestedRunError(
+						"launch",
+						"Nested workflow has no remaining time before the parent deadline.",
+					);
+				}
+				const effectiveBudget: WorkflowBudget = {
+					cost: Math.min(limits.effectiveBudget.cost, request.budget.cost),
+					childRuntimeMs: Math.min(
+						limits.effectiveBudget.childRuntimeMs,
+						request.budget.childRuntimeMs,
+					),
+					...(limits.effectiveBudget.totalTokens === undefined &&
+					request.budget.totalTokens === undefined
+						? {}
+						: {
+								totalTokens: Math.min(
+									limits.effectiveBudget.totalTokens ?? Number.MAX_SAFE_INTEGER,
+									request.budget.totalTokens ?? Number.MAX_SAFE_INTEGER,
+								),
+							}),
+				};
+				const record: WorkflowRunRecord = {
+					schema: "pi-workflow-run",
+					contractRevision: WORKFLOW_CONTRACT_REVISION,
+					runId: request.childRunId,
+					definitionName: workflow.definition.meta.name,
+					definitionPath: workflow.path,
+					definitionIdentitySha256: workflow.identity.identitySha256,
+					definitionSourceSha256: workflow.identity.sourceSha256,
+					concurrency: Math.min(
+						workflow.definition.meta.concurrency,
+						maxConcurrency,
+						request.concurrency,
+					),
+					declaredBudget: limits.declaredBudget,
+					effectiveBudget,
+					declaredTimeoutMs: limits.declaredTimeoutMs,
+					effectiveTimeoutMs,
+					deadlineAt: new Date(
+						createdAt.getTime() + effectiveTimeoutMs,
+					).toISOString(),
+					cwd,
+					input: JSON.parse(JSON.stringify(request.input)) as unknown,
+					createdAt: createdAt.toISOString(),
+					depth: request.parent.depth,
+					parent: {
+						runId: request.parent.runId,
+						taskId: request.parent.taskId,
+						executionId: request.parent.executionId,
+						ancestorDefinitionIdentities: [
+							...request.parent.ancestorDefinitionIdentities,
+						],
+					},
+				};
+				await WorkflowRunRecordStore.open(journal).create(record);
+				const run = await compose(record, workflow, lease, binding);
+				owned.set(request.childRunId, run);
+			} catch (error) {
+				await lease.release();
+				if (error instanceof WorkflowNestedRunError) throw error;
+				throw new WorkflowNestedRunError(
+					"launch",
+					"Nested workflow run could not be created.",
+					{ cause: error },
+				);
+			}
+		},
+		async wait(
+			childRunId: WorkflowRunId,
+		): Promise<WorkflowNestedRunSettlement> {
+			const run = owned.get(childRunId) ?? (await resume(childRunId));
+			await run.drive;
+			const settlement = await nestedSettlementFrom(run.record, run.journal);
+			if (!settlement) {
+				throw new WorkflowNestedRunError(
+					"persistence",
+					"Nested workflow run ended without durable terminal state.",
+					{ cause: run.failure },
+				);
+			}
+			return settlement;
+		},
+		async readOutput(childRunId: WorkflowRunId, artifactId: string) {
+			const current = owned.get(childRunId);
+			if (current) {
+				const state = reduceWorkflowEvents(await current.journal.readEvents());
+				const artifact = state.artifacts[artifactId];
+				if (!artifact || state.outputArtifactId !== artifactId) {
+					throw new WorkflowNestedRunError(
+						"import",
+						"Nested workflow output artifact is not declared.",
+					);
+				}
+				return { artifact, value: await current.artifacts.readJson(artifact) };
+			}
+			const opened = await openInactive(childRunId);
+			try {
+				const artifacts = await WorkflowArtifactStore.open({
+					journal: opened.journal,
+				});
+				const state = reduceWorkflowEvents(await opened.journal.readEvents());
+				const artifact = state.artifacts[artifactId];
+				if (!artifact || state.outputArtifactId !== artifactId) {
+					throw new WorkflowNestedRunError(
+						"import",
+						"Nested workflow output artifact is not declared.",
+					);
+				}
+				return { artifact, value: await artifacts.readJson(artifact) };
+			} finally {
+				await opened.lease.release();
+			}
+		},
+		async stop(childRunId: WorkflowRunId, reason: string): Promise<void> {
+			if (!(await runDirectoryExists(childRunId))) return;
+			const run = owned.get(childRunId) ?? (await resume(childRunId));
+			if (run.settled) return;
+			await run.scheduler.stop(reason).catch(() => undefined);
+			await run.drive;
+		},
+		async reconcile(childRunId: WorkflowRunId): Promise<void> {
+			await reconcileCurrent(childRunId);
+		},
+	});
 
 	async function statusCurrent(
 		runIdValue: WorkflowRunId,
@@ -762,6 +1109,39 @@ export async function createWorkflowService(
 		},
 		async reconcile(runIdValue: WorkflowRunId) {
 			assertOpen();
+			return reconcileCurrent(runIdValue);
+		},
+		shutdown() {
+			return exclusive(async () => {
+				if (closed) return;
+				closed = true;
+				const runs = [...owned.values()].sort(
+					(left, right) => left.record.depth - right.record.depth,
+				);
+				const depths = [...new Set(runs.map((run) => run.record.depth))];
+				for (const depth of depths) {
+					await Promise.all(
+						runs
+							.filter((run) => run.record.depth === depth)
+							.map(async (run) => {
+								if (!run.settled) {
+									await run.scheduler
+										.stop("Pi workflow session is shutting down.")
+										.catch(() => undefined);
+									await run.drive;
+								}
+							}),
+					);
+				}
+				await Promise.all(runs.map((run) => run.lease.release()));
+			});
+		},
+	});
+
+	async function reconcileCurrent(
+		runIdValue: WorkflowRunId,
+	): Promise<WorkflowServiceRunView> {
+		{
 			const current = await statusCurrent(runIdValue);
 			if (
 				current.status === "completed" ||
@@ -813,23 +1193,6 @@ export async function createWorkflowService(
 				);
 			}
 			return view;
-		},
-		shutdown() {
-			return exclusive(async () => {
-				if (closed) return;
-				closed = true;
-				await Promise.all(
-					[...owned.values()].map(async (run) => {
-						if (!run.settled) {
-							await run.scheduler
-								.stop("Pi workflow session is shutting down.")
-								.catch(() => undefined);
-							await run.drive;
-						}
-						await run.lease.release();
-					}),
-				);
-			});
-		},
-	});
+		}
+	}
 }
