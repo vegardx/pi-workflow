@@ -13,6 +13,7 @@ graph TD
     Graph[Validated durable task graph]
     Scheduler[Scheduler]
     Journal[Journal and artifacts]
+    Support[In-process support executor]
     Broker[pi-subagent service provider]
     Service[Extension-owned SubagentService]
     UI[Widget and inspector]
@@ -23,6 +24,8 @@ graph TD
     Graph --> Journal
     Graph --> Scheduler
     Scheduler --> Broker
+    Scheduler --> Support
+    Support --> Journal
     Broker --> Service
     Journal --> UI
 ```
@@ -43,8 +46,10 @@ this runtime.
    declarative task records.
 5. **Scheduler** owns readiness, bounded concurrency, cancellation, budgets,
    and finalization.
-6. **Executors** dispatch agent tasks through the shared service or run trusted
-   deterministic support tasks.
+6. **Executors**: the task launcher and task finalizer dispatch agent tasks
+   through the shared service; the support task executor runs registered
+   deterministic implementations in the host process. There is no other
+   executor.
 7. **Store** owns events, snapshots, artifacts, leases, fencing, and replay
    records.
 8. **UI** projects persisted state and never owns lifecycle authority.
@@ -122,6 +127,32 @@ schema- and digest-verified workflow-owned artifacts. The final return value is
 validated and committed as a separate workflow output artifact before run
 completion. JavaScript continuations are never serialized.
 
+## Support execution
+
+Support tasks are deterministic trusted code declared through the same effect
+frontend as agent tasks. `ctx.support(key, descriptor)` is the only authoring
+surface: the descriptor is produced by a typed helper from `defineSupportTask`
+in a trusted package. There is no string-addressed API and no inline callback;
+a workflow module may import only registered module specifiers, and the future
+dynamic frontend lowers into the same `SupportTaskSpec` record.
+
+Implementations enter the runtime only through the constructor registry passed
+to `createWorkflowService({ supportTasks })`. That registry is frozen when the
+service is created, never persisted, and resolved again on every restart by
+exact canonical identity. The support task executor runs the resolved
+implementation in the host process: no subagent, VM, worktree, model, or web
+request is involved, and the implementation is not sandboxed.
+
+Before the implementation runs, the runtime has persisted the support execution
+record and durable support intent (implementation, parameter, and input
+digests). The output is validated, written to the workflow artifact store as a
+canonical JSON result artifact, declared, committed, and terminalized before the
+task becomes `completed`. A `running` support task occupies one concurrency
+lane; it reserves no cost, tokens, or child runtime, and the recorded
+`durationMs` is diagnostic only. Stop aborts the scheduler stop signal, which
+the implementation receives as `signal`; the executor terminalizes the task as
+cancelled and discards a late result.
+
 ## Subagent integration
 
 The `pi-subagent` extension registers one lazy provider on Pi's process-local
@@ -153,7 +184,8 @@ project root, definition name/path/source/identity, input, and creation time for
 restart reconstruction.
 
 Each owned run composes one fenced journal, workflow artifact store, launcher,
-finalizer, sequential scheduler, and static source runtime. Completed runs keep
+finalizer, support task executor bound to the frozen constructor registry,
+sequential scheduler, and static source runtime. Completed runs keep
 their workflow lease until session shutdown so concurrent status, wait, stop,
 and terminal projection cannot race lease release. A replacement session can
 reacquire the lease and reconstruct nonterminal work from the run record and

@@ -3,8 +3,9 @@
 Custom workflow runtime for [Pi](https://pi.dev).
 
 This repository contains the durable static execution core and Pi extension for
-trusted read-only workflows. Dynamic workflows, writer tasks, retry/resume, and
-polished UI remain unavailable.
+trusted read-only agent workflows and durable deterministic support-task
+execution. Dynamic workflows, writer tasks, retry/resume, and polished UI remain
+unavailable.
 
 ## Goal
 
@@ -30,7 +31,8 @@ validated TaskSpec graph
       ↓
 journal + scheduler + recovery
       ↓
-shared pi-subagent service
+shared pi-subagent service (agent tasks)
+in-process support executor (support tasks)
 ```
 
 Workflows without result-dependent branches can materialize their complete DAG
@@ -80,8 +82,22 @@ workflow_reconcile
 ```
 
 `workflow_run` returns a durable run ID immediately. Use `workflow_wait` for the
-bounded result or `workflow_stop` to persist stop intent and drain active child
-work.
+bounded result or `workflow_stop` to persist stop intent, abort in-process
+support work, and drain active child work.
+
+## Support tasks
+
+Trusted packages define typed descriptor helpers with `defineSupportTask` and
+pass the matching `helper.registration(execute)` objects to
+`createWorkflowService({ supportTasks })`. Workflows declare them with
+`ctx.support(key, helper({ parameters, inputs }))`. The runtime resolves each
+persisted descriptor against that constructor registry by exact implementation
+identity, runs the implementation in the host process without a subagent,
+model, VM, or worktree, and commits the output as a workflow-owned artifact.
+The public entry points are `createWorkflowSupportTaskExecutor`,
+`supportRegistrationIdentity`, `deriveSupportImplementationIdentitySha256`,
+`SupportTaskExecutionRecordSchema`, and `SupportTaskTerminalEvidenceSchema`;
+see [Contracts](docs/contracts.md#support-task-execution).
 
 ## Development
 

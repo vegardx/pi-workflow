@@ -18,9 +18,12 @@ This document owns workflow terminology.
 | Artifact handle | Opaque authoring reference to a task output or committed workflow artifact. |
 | Materialized graph | Durable declarative task and dependency records discovered from workflow effects. |
 | Task | One stable-keyed effect materialized by a workflow run. |
-| Task execution | One generation of task execution; an agent-task execution owns one subagent run and its retry/resume attempts, while explicit invalidation creates a new generation. |
+| Task execution | One generation of task execution, discriminated by kind; an agent-task execution owns one subagent run and its retry/resume attempts, a support-task execution owns one in-process computation bound to its implementation identity, and explicit invalidation creates a new generation. |
 | Agent task | Task executed through the extension-owned `SubagentService`. |
-| Support task | Deterministic trusted local code executed without a model. |
+| Support task | Deterministic trusted registered code executed in the host process without a model, subagent, VM, or worktree; its output is a workflow-owned result artifact. |
+| Support registry | Immutable map of support-task registrations supplied when the workflow service is constructed; never persisted and resolved again on every restart. |
+| Implementation identity | Canonical digest of a support implementation's name, module specifier, revision, implementation digest, parameters schema, and output schema. |
+| Support intent | Durable record of the implementation, parameter, and input digests a support execution computes from; persisted before the implementation runs. |
 | Stable task key | Workflow-authored identity unique within its namespace across resume and replay. |
 | Order dependency | Readiness edge requiring another task to settle without consuming its output. |
 | Data dependency | Edge requiring another task's verified artifact as input. |

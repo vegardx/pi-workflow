@@ -1,9 +1,10 @@
 # Contracts
 
 This document defines the target contracts. The exported static definition,
-materializer, sequential scheduler, task finalizer, artifact store, and static
-source runtime implement the current Phase 1 subset; later interfaces remain
-design contracts.
+materializer, sequential scheduler, task finalizer, support task executor,
+artifact store, and static source runtime implement the current subset; later
+interfaces remain design contracts. The runtime contract is revision 11 and
+declares the feature flag `supportTaskExecution: true`.
 
 ## Static definition
 
@@ -95,12 +96,14 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 10 identities cover the complete definition module but not a
-helper dependency graph. Static imports are limited to
-`@vegardx/pi-workflow` and `typebox`; every other static import, dynamic import,
-CommonJS require, and TypeScript import assignment is rejected rather than
-silently omitted from source identity. Bundle-contained helper provenance is
-added before support tasks or multi-file definitions ship.
+Contract revision 11 identities cover the complete definition module but not a
+helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
+`typebox`, and the module specifiers present in the constructor-injected
+support registry; every other static import, dynamic import, CommonJS require,
+and TypeScript import assignment is rejected rather than silently omitted from
+source identity. A support implementation is identified by its registered
+explicit implementation digest, not by tracing its dependency graph.
+Multi-file definition provenance remains future work.
 
 ## Support-task descriptors
 
@@ -135,12 +138,159 @@ implementation. Materialization binds the implementation name, module
 specifier, revision, explicit implementation digest, parameter/output schemas,
 parameters, dependencies, and replay policy into task identity. Static workflow
 imports remain denied unless their exact module specifier is present in the
-constructor-injected support registry. The same descriptor is the intended
-future dynamic-workflow frontend.
+constructor-injected support registry.
 
-Revision 10 materializes and replays support declarations. Durable local
-execution intent, artifact commit, and terminal evidence are the next focused
-slice; declaring support tasks does not yet make them schedulable.
+`ctx.support(key, descriptor)` is the only authoring surface. There is no
+string-addressed API and no inline callback: the implementation is referenced
+by descriptor identity and resolved at execution time from the registry. A
+future dynamic frontend lowers the same descriptor into the same
+`SupportTaskSpec`; the scheduler and executor never distinguish the frontend.
+
+## Support-task execution
+
+Declared support tasks are schedulable. The scheduler routes on
+`task.spec.kind`; a support task skips budget admission and is prepared by the
+support task executor, which runs the registered implementation in the host
+process. No subagent, VM, worktree, model, or web request is involved. When no
+executor is configured for the run, the task becomes `blocked` with the message
+"Support task execution is not configured for this workflow run." and a
+required task fails the run.
+
+### Registry and identity
+
+Implementations are supplied as `createWorkflowService({ supportTasks })`
+registrations produced by `helper.registration(execute)`. The service validates
+each registration, rejects duplicate names, and freezes the map. The registry
+is authoritative and immutable, never persisted, and resolved again on every
+restart. Resolution compares one canonical digest,
+`deriveSupportImplementationIdentitySha256(spec.request.implementation)`,
+with `supportRegistrationIdentity(registration)`; both hash the sorted-key
+value of name, module specifier, revision, implementation digest, parameters
+schema, and output schema. A close match is a mismatch. Resolution runs at
+intent and again before execution or repair; failure at either point is a
+terminal `support-resolution` failure, including during recovery.
+
+### Purity contract
+
+The implementation receives `{ parameters, inputs, signal }` and returns a
+value. Because the runtime may recompute an intended execution after a crash,
+every registered implementation must be:
+
+- deterministic for identical parameters and inputs;
+- side-effect free outside the return value;
+- bounded in time and output size;
+- cooperative with the supplied `AbortSignal`;
+- free of network access, publication, Git mutation, process administration,
+  and credential access.
+
+The runtime verifies digests, schemas, bounds, and abort timing; it cannot
+verify determinism or the absence of side effects.
+
+### Execution record and evidence
+
+```ts
+type TaskExecutionRecord =
+	| {
+			kind: "agent";
+			id: TaskExecutionId;
+			runId: WorkflowRunId;
+			taskId: WorkflowTaskId;
+			generation: number;
+			taskIdentitySha256: string;
+			operationId: SubagentOperationId;
+	  }
+	| {
+			kind: "support";
+			id: TaskExecutionId;
+			runId: WorkflowRunId;
+			taskId: WorkflowTaskId;
+			generation: number;
+			taskIdentitySha256: string;
+			implementationIdentitySha256: string;
+	  };
+
+interface SupportTaskTerminalEvidence {
+	kind: "support";
+	implementationIdentitySha256: string;
+	parametersSha256: string;
+	inputsSha256: string;
+	outputSha256: string;
+	artifactId: WorkflowArtifactId;
+	durationMs: number; // diagnostic only
+}
+```
+
+Support records carry no subagent operation ID. `parametersSha256` is the
+canonical digest of `spec.request.parameters`; `inputsSha256` is the canonical
+digest of `{ [inputName]: <sha256 of the producer's unique result artifact> }`
+over `spec.inputs` (empty inputs hash `{}`); `outputSha256` is the result
+artifact digest. The reducer recomputes each digest from journaled state and
+rejects an event that disagrees.
+
+### Event sequence
+
+```text
+task-execution-created (kind support)
+→ task-execution-support-intended
+    { implementationIdentitySha256, parametersSha256, inputsSha256 }
+→ task-status-changed ready→running
+→ artifact-declared (producerTaskId = task, output = "result",
+    schemaSha256 = sha256 of implementation.outputSchema)
+→ task-execution-support-output-committed { artifactId, outputSha256 }
+→ task-execution-terminal (outcome completed, evidence kind support)
+→ task-status-changed running→completed
+```
+
+The execution phases are `created → support-intended →
+support-output-committed → terminal`. Intent is persisted under the scheduler
+mutation lock before the `running` transition; the implementation runs outside
+the lock, serialized per task. Before it runs, the executor recomputes
+`inputsSha256` against the intent, reads every named input from the workflow
+artifact store with provenance, digest, canonical-encoding, and producer-schema
+revalidation, and revalidates `parameters` against the registered schema and
+the intent digest. The returned value must be losslessly JSON serializable,
+canonical bytes must not exceed the artifact bound, and the value must satisfy
+both the persisted and the registered output schema. The output is written as
+a content-addressed canonical JSON result artifact (idempotent), declared unless
+already declared, committed, and terminalized.
+
+Failure terminalizes with `evidence.kind === "workflow"` and a stage of
+`support-resolution` (unregistered or drifted implementation),
+`support-input` (missing input evidence, input digest mismatch, unreadable
+inputs, or parameters failing the registered schema), `support-execution`
+(the implementation threw; the persisted message is fixed and never contains
+raw error text), or `support-output` (non-JSON, oversized, schema-invalid, or
+conflicting output), followed by `running|ready → failed`. Failure stages are
+accepted from phases `created`, `support-intended`, and
+`support-output-committed`; agent stages are rejected on support executions
+and support stages on agent executions. Cancellation terminalizes with stage
+`stop` from `created` or `support-intended`, followed by `→ cancelled`. Support
+tasks never enter `waiting` or `cancelling`, and `running → cancelled` is a
+valid support transition. Persistence, journal, and lease errors are thrown,
+never converted into task failure.
+
+### Cost and concurrency
+
+Support tasks invent no model usage: they reserve no cost, tokens, or child
+runtime and settle no usage. A `running` support task occupies one concurrency
+lane, exactly as an agent task with a launch receipt does. `durationMs` in the
+terminal evidence is measured wall time (0 on repair) and is diagnostic only;
+it participates in no budget or identity.
+
+### Stop and deadline
+
+Stop persists `stopping`, then aborts the scheduler stop signal, which is the
+`signal` the implementation receives. A `running` support task that is not
+executing in this process (for example after restart) is cancelled directly
+through the executor. When a support task is still executing in this process,
+the executor races the implementation against the signal, terminalizes the
+task as `cancelled` at stage `stop` when abort wins, and discards a late result
+from an implementation that ignores abort. Stop waits only for that bounded
+executor drain, never for the implementation itself, and then continues to
+cancel remaining tasks and reach a terminal run status. Ready or pending
+support tasks with an execution record but no output are cancelled without
+running. The service deadline calls the same stop path. Agent stop, interrupt,
+subagent cleanup, and `cleanup-blocked` behavior are unchanged.
 
 ## Authoring handles
 
@@ -218,7 +368,10 @@ interface WorkflowContext<TInput> {
 		namespace: string,
 		build: (stage: PipelineStage) => TaskHandle<T>,
 	): TaskHandle<T>;
-	support<T>(key: string, request: SupportTask<T>): TaskHandle<T>;
+	support<TOutputSchema extends TSchema>(
+		key: string,
+		descriptor: SupportTaskDescriptor<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>>;
 	workflow<T>(key: string, request: NestedWorkflowTask<T>): TaskHandle<T>;
 	checkpoint<T>(key: string, request: CheckpointRequest<T>): TaskHandle<T>;
 	artifact<T>(
@@ -468,9 +621,11 @@ downstream artifact into workflow-owned storage before task completion.
 Workflow definition
   Workflow run
     Workflow task
-      Task execution generation
+      Task execution generation (kind agent | support)
         Subagent run (agent tasks only)
           Subagent attempt
+        Support computation (support tasks only)
+          Result artifact
 ```
 
 Phase 3 retry control will call the owner client's `retry` on the same subagent
@@ -492,7 +647,7 @@ Subagent terminal outcomes map using both primary status and cleanup evidence:
 | any retained, blocked, or unknown required cleanup | `cleanup-blocked`; preserve the observed subagent status/failure as evidence, block dependents, and mark the run cleanup-blocked |
 
 Stop writes run and task cancellation intent before calling the owner client's
-`interrupt`. A restart that finds `stopping` retries the idempotent interruption
+`interrupt` and before aborting in-process support work. A restart that finds `stopping` retries the idempotent interruption
 and waits for terminal child evidence; it never infers cancellation from a lost
 in-memory wait. A task execution that was created or preflighted but has no
 launch intent is terminalized as cancelled without launching. An uncertain
@@ -537,7 +692,9 @@ The current extension exposes list, validate, run, status, wait, stop, and
 reconcile. `run` validates trust, definition, input, and the shared subagent
 provider before creating durable state, then returns a run ID immediately.
 `status` is a journal projection, `wait` reconstructs nonterminal work after
-restart, and `stop` persists run/task intent before delegated interruption.
+restart, and `stop` persists run/task intent before delegated interruption and
+support abort. `createWorkflowService` accepts an optional `supportTasks`
+registration list that becomes the frozen constructor registry.
 Retry, explicit interrupted-run resume, logs, and polished inspection remain
 later contract work.
 
@@ -612,7 +769,9 @@ type WorkflowTaskStatus =
 
 `cleanup-blocked` is an action-required blocked state: ordinary scheduling has
 stopped, and only explicit reconciliation or release may transition it to a
-proved terminal outcome. It is never degraded success.
+proved terminal outcome. It is never degraded success. Support tasks use only
+`pending`, `ready`, `blocked`, `running`, `completed`, `failed`, and
+`cancelled`.
 `completed-degraded` requires every required task and required finalizer to
 succeed while one or more optional tasks or advisory finalizers failed; all
 degradations remain visible.
