@@ -31,6 +31,12 @@ import {
 	WorkflowSchedulerError,
 } from "../src/scheduler.js";
 import type { WorkflowSubagentBinding } from "../src/subagent-provider.js";
+import {
+	defineSupportTask,
+	type SupportTaskExecutionContext,
+	type SupportTaskRegistration,
+} from "../src/support.js";
+import { createWorkflowSupportTaskExecutor } from "../src/support-executor.js";
 import { createWorkflowTaskFinalizer } from "../src/task-finalizer.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
@@ -1258,5 +1264,774 @@ describe("durable sequential scheduler", () => {
 		waiting.resolve(executionResult(result("completed")));
 
 		await rejection;
+	});
+});
+
+const echo = defineSupportTask({
+	name: "test/echo",
+	moduleSpecifier: "@vegardx/workflow-tools",
+	revision: 1,
+	implementationSha256: hash,
+	parametersSchema: Type.Object({ value: Type.String() }),
+	outputSchema: Type.Object({ answer: Type.String() }),
+});
+
+type EchoContext = SupportTaskExecutionContext<{ value: string }>;
+type EchoExecute = (
+	context: EchoContext,
+) => Promise<{ answer: string }> | { answer: string };
+
+function echoRegistry(
+	execute: EchoExecute,
+): ReadonlyMap<string, SupportTaskRegistration> {
+	const registration = echo.registration(execute);
+	return new Map([[registration.name, registration]]);
+}
+
+function supportOnlyClient(): SubagentClient {
+	const unexpected = () =>
+		vi.fn(async () => {
+			throw new Error("unexpected subagent call");
+		});
+	return {
+		preflight: unexpected(),
+		launch: unexpected(),
+		findByOperation: unexpected(),
+		status: unexpected(),
+		listRuns: unexpected(),
+		logs: unexpected(),
+		wait: unexpected(),
+		interrupt: unexpected(),
+		steer: unexpected(),
+		followUp: unexpected(),
+		retry: unexpected(),
+		resume: unexpected(),
+		reconcile: unexpected(),
+		release: unexpected(),
+		abandon: unexpected(),
+		pin: unexpected(),
+		unpin: unexpected(),
+		exportArtifact: unexpected(),
+	} as unknown as SubagentClient;
+}
+
+function subagentCallCount(ownerClient: SubagentClient): number {
+	return Object.values(ownerClient).reduce<number>(
+		(total, method) =>
+			total + (vi.isMockFunction(method) ? method.mock.calls.length : 0),
+		0,
+	);
+}
+
+async function driveToRest(scheduler: {
+	drive(): Promise<{ state: string; runStatus: string }>;
+}) {
+	for (let round = 0; round < 16; round += 1) {
+		const outcome = await scheduler.drive();
+		if (outcome.state === "idle" || outcome.state === "terminal") {
+			return outcome;
+		}
+	}
+	throw new Error("scheduler did not come to rest");
+}
+
+async function rotateLease(fx: { root: string; lease: WorkflowRunLease }) {
+	await fx.lease.release();
+	leases.delete(fx.lease);
+	const replacement = await acquireWorkflowRunLease({
+		storeRoot: fx.root,
+		runId: "workflow_scheduler",
+		ownerId: "scheduler-restart",
+	});
+	leases.add(replacement);
+	const journal = await WorkflowRunJournal.open(
+		fx.root,
+		"workflow_scheduler",
+		replacement,
+	);
+	return { journal, lease: replacement };
+}
+
+/**
+ * Persists a support task as `running` with durable intent through the
+ * executor alone, the way a crashed process would have left it behind.
+ */
+async function seedRunningSupportTask(
+	journal: WorkflowRunJournal,
+	taskId: string,
+	registrations: ReadonlyMap<string, SupportTaskRegistration>,
+) {
+	await journal.append("run-status-changed", {
+		from: "created",
+		to: "running",
+	});
+	await journal.append("task-status-changed", {
+		taskId,
+		from: "pending",
+		to: "ready",
+	});
+	const executor = createWorkflowSupportTaskExecutor({
+		journal,
+		artifacts: await WorkflowArtifactStore.open({ journal }),
+		registrations,
+		signal: () => new AbortController().signal,
+	});
+	await expect(executor.intend(taskId)).resolves.toMatchObject({
+		state: "intended",
+	});
+	const seeded = await projection(journal);
+	expect(seeded.tasks[taskId]?.status).toBe("running");
+}
+
+function statusChanges(
+	events: readonly { type: string; data: unknown }[],
+	type: "task-status-changed" | "run-status-changed",
+) {
+	return events
+		.filter((event) => event.type === type)
+		.map((event) => event.data as { to: string; reason?: string });
+}
+
+describe("support task scheduling", () => {
+	it("completes a support-only graph without any subagent call", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("left", echo({ parameters: { value: "left" } })),
+			materializer.support("right", echo({ parameters: { value: "right" } })),
+		]);
+		const implementation = vi.fn<EchoExecute>(async ({ parameters }) => ({
+			answer: parameters.value.toUpperCase(),
+		}));
+		const ownerClient = supportOnlyClient();
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			concurrency: 2,
+			artifacts,
+			supportTasks: echoRegistry(implementation),
+		});
+
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(implementation).toHaveBeenCalledTimes(2);
+		expect(subagentCallCount(ownerClient)).toBe(0);
+		for (const [handle, answer] of [
+			[tasks[0], "LEFT"],
+			[tasks[1], "RIGHT"],
+		] as const) {
+			const taskId = handle?.ref.taskId ?? "";
+			expect(state.tasks[taskId]?.status).toBe("completed");
+			const results = Object.values(state.artifacts).filter(
+				(artifact) =>
+					artifact.producerTaskId === taskId && artifact.output === "result",
+			);
+			expect(results).toHaveLength(1);
+			const artifact = results[0];
+			if (!artifact) throw new Error("missing result artifact");
+			await expect(artifacts.readJson(artifact)).resolves.toEqual({ answer });
+			const execution =
+				state.executions[state.tasks[taskId]?.currentExecutionId ?? ""];
+			expect(execution).toMatchObject({
+				phase: "terminal",
+				terminal: {
+					outcome: "completed",
+					evidence: { kind: "support", artifactId: artifact.id },
+				},
+			});
+		}
+	});
+
+	it("keeps an agent task out of the lane a running support task occupies", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+			materializer.agent("answer", request()),
+		]);
+		const invoked = deferred<void>();
+		const release = deferred<{ answer: string }>();
+		const implementation = vi.fn<EchoExecute>(() => {
+			invoked.resolve();
+			return release.promise;
+		});
+		const ownerClient = client();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			concurrency: 1,
+			artifacts: await WorkflowArtifactStore.open({ journal }),
+			supportTasks: echoRegistry(implementation),
+		});
+
+		const first = scheduler.drive();
+		await invoked.promise;
+		expect(
+			(await projection(journal)).tasks[tasks[0]?.ref.taskId ?? ""]?.status,
+		).toBe("running");
+		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+		expect(ownerClient.launch).not.toHaveBeenCalled();
+		expect(
+			(await projection(journal)).tasks[tasks[1]?.ref.taskId ?? ""]?.status,
+		).toBe("pending");
+
+		release.resolve({ answer: "done" });
+		await expect(first).resolves.toMatchObject({
+			state: "awaiting-finalization",
+			outcome: "completed",
+		});
+		expect(ownerClient.preflight).toHaveBeenCalledOnce();
+		expect(ownerClient.launch).toHaveBeenCalledOnce();
+		const state = await projection(journal);
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("completed");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("running");
+	});
+
+	it("runs a support task and an agent task in parallel lanes", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+			materializer.agent("answer", request()),
+		]);
+		const invoked = deferred<void>();
+		const release = deferred<{ answer: string }>();
+		const implementation = vi.fn<EchoExecute>(() => {
+			invoked.resolve();
+			return release.promise;
+		});
+		const childResult = deferred<ReturnType<typeof executionResult>>();
+		const wait = vi.fn(() => childResult.promise);
+		const harness = concurrentClient("lanes", wait);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(harness.ownerClient),
+			concurrency: 2,
+			artifacts: await WorkflowArtifactStore.open({ journal }),
+			supportTasks: echoRegistry(implementation),
+		});
+
+		const first = scheduler.drive();
+		await invoked.promise;
+		const second = scheduler.drive();
+		await vi.waitFor(() => expect(wait).toHaveBeenCalledOnce());
+		expect(harness.launch).toHaveBeenCalledOnce();
+		const parallel = await projection(journal);
+		expect(parallel.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("running");
+		expect(parallel.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("running");
+		expect(implementation).toHaveBeenCalledOnce();
+
+		childResult.resolve(
+			executionResult({ ...result("completed"), runId: "run_lanes0" }),
+		);
+		await expect(second).resolves.toMatchObject({
+			state: "awaiting-finalization",
+			outcome: "completed",
+		});
+		release.resolve({ answer: "done" });
+		await expect(first).resolves.toMatchObject({
+			state: "awaiting-finalization",
+			outcome: "completed",
+		});
+		expect(harness.launch).toHaveBeenCalledOnce();
+		expect(
+			(await projection(journal)).tasks[tasks[0]?.ref.taskId ?? ""]?.status,
+		).toBe("completed");
+	});
+
+	it("resumes a running support task after lease rotation with one execution", async () => {
+		const fx = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const taskId = fx.tasks[0]?.ref.taskId ?? "";
+		const implementation = vi.fn<EchoExecute>(async ({ parameters }) => ({
+			answer: parameters.value,
+		}));
+		const registrations = echoRegistry(implementation);
+		await seedRunningSupportTask(fx.journal, taskId, registrations);
+		expect(implementation).not.toHaveBeenCalled();
+
+		const resumed = await rotateLease(fx);
+		const ownerClient = supportOnlyClient();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal: resumed.journal,
+			binding: binding(ownerClient),
+			artifacts: await WorkflowArtifactStore.open({
+				journal: resumed.journal,
+			}),
+			supportTasks: registrations,
+		});
+
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect(implementation).toHaveBeenCalledOnce();
+		expect(subagentCallCount(ownerClient)).toBe(0);
+		const state = await projection(resumed.journal);
+		expect(state.tasks[taskId]?.status).toBe("completed");
+		expect(
+			Object.values(state.executions).filter(
+				(execution) => execution.execution.taskId === taskId,
+			),
+		).toHaveLength(1);
+		expect(
+			Object.values(state.artifacts).filter(
+				(artifact) =>
+					artifact.producerTaskId === taskId && artifact.output === "result",
+			),
+		).toHaveLength(1);
+	});
+
+	it("blocks a required support task and fails the run without an executor", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const ownerClient = supportOnlyClient();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const message =
+			"Support task execution is not configured for this workflow run.";
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("blocked");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.currentExecutionId).toBe(
+			undefined,
+		);
+		const events = await journal.readEvents();
+		expect(statusChanges(events, "task-status-changed").at(-1)).toEqual({
+			taskId: tasks[0]?.ref.taskId,
+			from: "ready",
+			to: "blocked",
+			reason: message,
+		});
+		expect(statusChanges(events, "run-status-changed").at(-1)).toEqual({
+			from: "running",
+			to: "failed",
+			reason: message,
+		});
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("blocks an optional support task and proceeds without an executor", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support(
+				"prepare",
+				echo({ parameters: { value: "x" }, disposition: "optional" }),
+			),
+		]);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("blocked");
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").at(-1),
+		).toMatchObject({
+			to: "blocked",
+			reason: "Support task execution is not configured for this workflow run.",
+		});
+	});
+
+	it("fails the run when a required support implementation throws", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const implementation = vi.fn<EchoExecute>(async () => {
+			throw new Error("secret detail that must not leak");
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+			artifacts: await WorkflowArtifactStore.open({ journal }),
+			supportTasks: echoRegistry(implementation),
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("failed");
+		const execution =
+			state.executions[state.tasks[taskId]?.currentExecutionId ?? ""];
+		expect(execution).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "support-execution",
+					message: "Support task implementation failed.",
+				},
+			},
+		});
+		expect(JSON.stringify(execution)).not.toContain("secret detail");
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toEqual({
+			from: "running",
+			to: "failed",
+			reason: "A required workflow task did not complete.",
+		});
+		expect(implementation).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the run alive after an optional support failure and blocks dependents", async () => {
+		const { journal, tasks } = await fixture((materializer) => {
+			const prepare = materializer.support(
+				"prepare",
+				echo({ parameters: { value: "x" }, disposition: "optional" }),
+			);
+			const dependent = materializer.agent(
+				"answer",
+				request({ after: [prepare.ref] }),
+			);
+			return [prepare, dependent];
+		});
+		const implementation = vi.fn<EchoExecute>(async () => {
+			throw new Error("boom");
+		});
+		const ownerClient = supportOnlyClient();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+			artifacts: await WorkflowArtifactStore.open({ journal }),
+			supportTasks: echoRegistry(implementation),
+		});
+
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("failed");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("blocked");
+		expect(
+			state.executions[
+				state.tasks[tasks[0]?.ref.taskId ?? ""]?.currentExecutionId ?? ""
+			]?.terminal,
+		).toMatchObject({
+			outcome: "failed",
+			evidence: { kind: "workflow", stage: "support-execution" },
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").some(
+				(change) => change.to === "failed",
+			),
+		).toBe(false);
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("aborts an in-flight support task on stop and cancels the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const invoked = deferred<void>();
+		const observedAbort = deferred<void>();
+		const implementation = vi.fn<EchoExecute>(
+			({ signal }) =>
+				new Promise<{ answer: string }>((_resolve, reject) => {
+					invoked.resolve();
+					signal.addEventListener(
+						"abort",
+						() => {
+							observedAbort.resolve();
+							reject(signal.reason);
+						},
+						{ once: true },
+					);
+				}),
+		);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+			artifacts: await WorkflowArtifactStore.open({ journal }),
+			supportTasks: echoRegistry(implementation),
+		});
+
+		const drive = scheduler.drive();
+		await invoked.promise;
+		expect(scheduler.stopSignal.aborted).toBe(false);
+		const stop = await scheduler.stop("operator stop");
+		expect(scheduler.stopSignal.aborted).toBe(true);
+		expect(["stopping", "terminal"]).toContain(stop.state);
+		await observedAbort.promise;
+		await Promise.allSettled([drive]);
+		await expect(drive).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		const state = await projection(journal);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		expect(state.status).toBe("cancelled");
+		expect(state.tasks[taskId]?.status).toBe("cancelled");
+		expect(
+			state.executions[state.tasks[taskId]?.currentExecutionId ?? ""]?.terminal,
+		).toMatchObject({
+			outcome: "cancelled",
+			evidence: { kind: "workflow", stage: "stop" },
+		});
+		expect(implementation).toHaveBeenCalledOnce();
+	});
+
+	it("discards a late result from an implementation that ignores abort", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const invoked = deferred<void>();
+		const late = deferred<{ answer: string }>();
+		const implementation = vi.fn<EchoExecute>(() => {
+			invoked.resolve();
+			return late.promise;
+		});
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+			artifacts,
+			supportTasks: echoRegistry(implementation),
+		});
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const drive = scheduler.drive();
+			await invoked.promise;
+			await scheduler.stop("operator stop");
+			await expect(drive).resolves.toEqual({
+				state: "terminal",
+				runStatus: "cancelled",
+			});
+			const taskId = tasks[0]?.ref.taskId ?? "";
+			const stopped = await projection(journal);
+			expect(stopped.tasks[taskId]?.status).toBe("cancelled");
+			const before = await journal.readEvents();
+
+			late.resolve({ answer: "too late" });
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			const after = await journal.readEvents();
+			expect(after).toEqual(before);
+			const state = await projection(journal);
+			expect(state.status).toBe("cancelled");
+			expect(state.tasks[taskId]?.status).toBe("cancelled");
+			expect(
+				Object.values(state.artifacts).filter(
+					(artifact) => artifact.producerTaskId === taskId,
+				),
+			).toHaveLength(0);
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	it("cancels a running support task that no process is executing on stop", async () => {
+		const fx = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const taskId = fx.tasks[0]?.ref.taskId ?? "";
+		const implementation = vi.fn<EchoExecute>(async () => ({ answer: "x" }));
+		const registrations = echoRegistry(implementation);
+		await seedRunningSupportTask(fx.journal, taskId, registrations);
+
+		const resumed = await rotateLease(fx);
+		const ownerClient = supportOnlyClient();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal: resumed.journal,
+			binding: binding(ownerClient),
+			artifacts: await WorkflowArtifactStore.open({
+				journal: resumed.journal,
+			}),
+			supportTasks: registrations,
+		});
+
+		await expect(scheduler.stop("operator stop")).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		const state = await projection(resumed.journal);
+		expect(state.status).toBe("cancelled");
+		expect(state.tasks[taskId]?.status).toBe("cancelled");
+		expect(
+			state.executions[state.tasks[taskId]?.currentExecutionId ?? ""]?.terminal,
+		).toMatchObject({
+			outcome: "cancelled",
+			evidence: { kind: "workflow", stage: "stop", message: "operator stop" },
+		});
+		expect(implementation).not.toHaveBeenCalled();
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("stops and releases active children unchanged beside a completed support task", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const pending = [
+			deferred<ReturnType<typeof executionResult>>(),
+			deferred<ReturnType<typeof executionResult>>(),
+		];
+		const wait = vi.fn((runId: string) => {
+			const value = pending[Number(runId.at(-1))];
+			if (!value) throw new Error("unexpected child");
+			return value.promise;
+		});
+		const harness = concurrentClient("beside", wait);
+		const interrupt = vi.fn(async (runId: string) => {
+			const index = Number(runId.at(-1));
+			pending[index]?.resolve(
+				executionResult({ ...result("cancelled"), runId }),
+			);
+			return {
+				runId,
+				attemptId: `attempt_beside${index}`,
+				status: "stopping" as const,
+			};
+		});
+		const release = vi.fn(async (runId: string) => ({
+			runId,
+			attemptId: `attempt_beside${Number(runId.at(-1))}`,
+			status: "cancelled" as const,
+		}));
+		const ownerClient = harness.ownerClient;
+		vi.mocked(ownerClient.interrupt).mockImplementation(interrupt);
+		vi.mocked(ownerClient.release).mockImplementation(release);
+		const ownerBinding = binding(ownerClient);
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+		});
+		const implementation = vi.fn<EchoExecute>(async ({ parameters }) => ({
+			answer: parameters.value,
+		}));
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			finalizer,
+			concurrency: 2,
+			artifacts,
+			supportTasks: echoRegistry(implementation),
+		});
+
+		const drives = [scheduler.drive(), scheduler.drive()];
+		while (wait.mock.calls.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		expect(implementation).toHaveBeenCalledOnce();
+		expect(
+			(await projection(journal)).tasks[tasks[0]?.ref.taskId ?? ""]?.status,
+		).toBe("completed");
+		await expect(scheduler.stop("operator stop")).resolves.toMatchObject({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		await Promise.allSettled(drives);
+		expect(interrupt).toHaveBeenCalledTimes(2);
+		expect(release).toHaveBeenCalledTimes(2);
+		expect(implementation).toHaveBeenCalledOnce();
+		const state = await projection(journal);
+		expect(state.status).toBe("cancelled");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("completed");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("cancelled");
+		expect(state.tasks[tasks[2]?.ref.taskId ?? ""]?.status).toBe("cancelled");
+		expect(
+			state.executions[
+				state.tasks[tasks[0]?.ref.taskId ?? ""]?.currentExecutionId ?? ""
+			]?.terminal,
+		).toMatchObject({ outcome: "completed", evidence: { kind: "support" } });
+	}, 15_000);
+
+	it("admits an agent task against the budget while a support task is running", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+			materializer.agent("answer", {
+				...request(),
+				limits: { ...request().limits, cost: 0.4 },
+			}),
+		]);
+		const invoked = deferred<void>();
+		const release = deferred<{ answer: string }>();
+		const implementation = vi.fn<EchoExecute>(() => {
+			invoked.resolve();
+			return release.promise;
+		});
+		const childResult = deferred<ReturnType<typeof executionResult>>();
+		const wait = vi.fn(() => childResult.promise);
+		const harness = concurrentClient("budgeted", wait);
+		vi.mocked(harness.ownerClient.release).mockImplementation(
+			async (runId: string) => ({
+				runId,
+				attemptId: "attempt_budgeted0",
+				status: "completed" as const,
+			}),
+		);
+		const ownerBinding = binding(harness.ownerClient);
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			finalizer,
+			concurrency: 2,
+			budget: { cost: 0.5, childRuntimeMs: 300_000 },
+			artifacts,
+			supportTasks: echoRegistry(implementation),
+		});
+
+		const first = scheduler.drive();
+		await invoked.promise;
+		const second = scheduler.drive();
+		await vi.waitFor(() => expect(harness.launch).toHaveBeenCalledOnce());
+		expect(
+			(await projection(journal)).tasks[tasks[0]?.ref.taskId ?? ""]?.status,
+		).toBe("running");
+
+		childResult.resolve(
+			executionResult({ ...result("completed"), runId: "run_budgeted0" }),
+		);
+		await expect(second).resolves.toMatchObject({ state: "idle" });
+		release.resolve({ answer: "done" });
+		await expect(first).resolves.toMatchObject({ state: "idle" });
+		const state = await projection(journal);
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("completed");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("completed");
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").some(
+				(change) => change.to === "blocked",
+			),
+		).toBe(false);
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").some(
+				(change) => change.to === "failed",
+			),
+		).toBe(false);
 	});
 });
