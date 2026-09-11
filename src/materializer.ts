@@ -14,6 +14,7 @@ import {
 	type MaterializedSupportTask,
 	MaterializedSupportTaskSchema,
 	type MaterializedWorkflowTask,
+	type NestedWorkflowTaskSpec,
 	type SupportTaskRequest,
 	SupportTaskRequestSchema,
 	type SupportTaskSpec,
@@ -93,6 +94,21 @@ export function deriveSupportTaskIdentity(value: {
 	readonly inputSha256: string;
 	readonly namespace: readonly TaskKey[];
 	readonly spec: Omit<SupportTaskSpec, "identitySha256">;
+}): string {
+	return sha256({
+		contractRevision: WORKFLOW_CONTRACT_REVISION,
+		definitionIdentitySha256: value.definitionIdentitySha256,
+		inputSha256: value.inputSha256,
+		namespace: value.namespace,
+		...value.spec,
+	});
+}
+
+export function deriveNestedWorkflowTaskIdentity(value: {
+	readonly definitionIdentitySha256: string;
+	readonly inputSha256: string;
+	readonly namespace: readonly TaskKey[];
+	readonly spec: Omit<NestedWorkflowTaskSpec, "identitySha256">;
 }): string {
 	return sha256({
 		contractRevision: WORKFLOW_CONTRACT_REVISION,

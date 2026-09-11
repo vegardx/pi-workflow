@@ -40,6 +40,19 @@ export function deriveSubagentOperationId(
 	})}`;
 }
 
+export function deriveNestedWorkflowRunId(
+	parentRunId: WorkflowRunId,
+	taskId: WorkflowTaskId,
+	generation: TaskExecutionGeneration,
+): WorkflowRunId {
+	return `workflow_${sha256({
+		generation,
+		kind: "nested-workflow-run",
+		parentRunId,
+		taskId,
+	})}`;
+}
+
 export function deriveJsonValueSha256(value: unknown): string {
 	return canonicalSha256(value);
 }
@@ -97,7 +110,10 @@ export function deriveWorkflowFailureSha256(
 		| "support-resolution"
 		| "support-input"
 		| "support-execution"
-		| "support-output",
+		| "support-output"
+		| "nested-resolution"
+		| "nested-launch"
+		| "nested-import",
 	message: string,
 ): string {
 	return sha256({ message, stage });

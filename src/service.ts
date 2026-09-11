@@ -701,6 +701,7 @@ export async function createWorkflowService(
 						schema: "pi-workflow-run",
 						contractRevision: WORKFLOW_CONTRACT_REVISION,
 						runId: id,
+						depth: 0,
 						definitionName: workflow.definition.meta.name,
 						definitionPath: workflow.path,
 						definitionIdentitySha256: workflow.identity.identitySha256,

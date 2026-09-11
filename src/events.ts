@@ -1,6 +1,8 @@
 import { type Static, Type } from "typebox";
 import {
+	MAX_WORKFLOW_CONCURRENCY,
 	MaterializedWorkflowTaskSchema,
+	NestedWorkflowUsageSchema,
 	SubagentAttemptIdSchema,
 	SubagentOperationIdSchema,
 	SubagentRunIdSchema,
@@ -12,6 +14,7 @@ import {
 	TaskExecutionTerminalEvidenceSchema,
 	WorkflowArtifactIdSchema,
 	WorkflowArtifactRefSchema,
+	WorkflowBudgetSchema,
 	WorkflowRunIdSchema,
 	WorkflowRunStatusSchema,
 	WorkflowTaskIdSchema,
@@ -298,6 +301,86 @@ const TaskExecutionSupportOutputCommittedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const NestedTimeoutMsSchema = Type.Integer({
+	minimum: 1_000,
+	maximum: 365 * 24 * 60 * 60 * 1_000,
+});
+
+const NestedConcurrencySchema = Type.Integer({
+	minimum: 1,
+	maximum: MAX_WORKFLOW_CONCURRENCY,
+});
+
+const TaskExecutionNestedIntendedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-nested-intended"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				childRunId: WorkflowRunIdSchema,
+				definitionIdentitySha256: Sha256Schema,
+				inputSha256: Sha256Schema,
+				budget: WorkflowBudgetSchema,
+				timeoutMs: NestedTimeoutMsSchema,
+				deadlineAt: Type.String({ format: "date-time" }),
+				concurrency: NestedConcurrencySchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionNestedLaunchedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-nested-launched"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				childRunId: WorkflowRunIdSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionNestedSettledEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-nested-settled"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				childRunId: WorkflowRunIdSchema,
+				status: WorkflowRunStatusSchema,
+				usage: NestedWorkflowUsageSchema,
+				usageComplete: Type.Boolean(),
+				outputArtifactId: Type.Optional(WorkflowArtifactIdSchema),
+				outputSha256: Type.Optional(Sha256Schema),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionNestedOutputImportedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-nested-output-imported"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				childRunId: WorkflowRunIdSchema,
+				artifactId: WorkflowArtifactIdSchema,
+				sourceArtifactId: WorkflowArtifactIdSchema,
+				sourceSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskExecutionTerminalEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-terminal"),
@@ -393,6 +476,10 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionReleasedEventSchema,
 	TaskExecutionSupportIntendedEventSchema,
 	TaskExecutionSupportOutputCommittedEventSchema,
+	TaskExecutionNestedIntendedEventSchema,
+	TaskExecutionNestedLaunchedEventSchema,
+	TaskExecutionNestedSettledEventSchema,
+	TaskExecutionNestedOutputImportedEventSchema,
 	TaskExecutionTerminalEventSchema,
 	TaskStatusChangedEventSchema,
 	TaskInvalidatedEventSchema,
@@ -429,6 +516,10 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("released"),
 	Type.Literal("support-intended"),
 	Type.Literal("support-output-committed"),
+	Type.Literal("nested-intended"),
+	Type.Literal("nested-launched"),
+	Type.Literal("nested-settled"),
+	Type.Literal("nested-output-imported"),
 	Type.Literal("terminal"),
 ]);
 
@@ -554,6 +645,52 @@ const SequencedSupportOutputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const SequencedNestedIntentSchema = Type.Object(
+	{
+		childRunId: WorkflowRunIdSchema,
+		definitionIdentitySha256: Sha256Schema,
+		inputSha256: Sha256Schema,
+		budget: WorkflowBudgetSchema,
+		timeoutMs: NestedTimeoutMsSchema,
+		deadlineAt: Type.String({ format: "date-time" }),
+		concurrency: NestedConcurrencySchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedNestedLaunchSchema = Type.Object(
+	{
+		childRunId: WorkflowRunIdSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedNestedSettlementSchema = Type.Object(
+	{
+		childRunId: WorkflowRunIdSchema,
+		status: WorkflowRunStatusSchema,
+		usage: NestedWorkflowUsageSchema,
+		usageComplete: Type.Boolean(),
+		outputArtifactId: Type.Optional(WorkflowArtifactIdSchema),
+		outputSha256: Type.Optional(Sha256Schema),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedNestedOutputImportSchema = Type.Object(
+	{
+		childRunId: WorkflowRunIdSchema,
+		artifactId: WorkflowArtifactIdSchema,
+		sourceArtifactId: WorkflowArtifactIdSchema,
+		sourceSha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 const SequencedTerminalSchema = Type.Object(
 	{
 		outcome: TaskExecutionOutcomeSchema,
@@ -580,6 +717,10 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		release: Type.Optional(SequencedReleaseSchema),
 		supportIntent: Type.Optional(SequencedSupportIntentSchema),
 		supportOutput: Type.Optional(SequencedSupportOutputSchema),
+		nestedIntent: Type.Optional(SequencedNestedIntentSchema),
+		nestedLaunch: Type.Optional(SequencedNestedLaunchSchema),
+		nestedSettlement: Type.Optional(SequencedNestedSettlementSchema),
+		nestedOutputImport: Type.Optional(SequencedNestedOutputImportSchema),
 		terminal: Type.Optional(SequencedTerminalSchema),
 	},
 	{ additionalProperties: false },

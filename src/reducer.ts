@@ -1,13 +1,16 @@
 import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
-import type {
-	AgentTaskExecutionRecord,
-	SubagentTerminalEvidence,
-	SupportTaskExecutionRecord,
-	SupportTaskSpec,
-	TaskExecutionId,
-	TaskExecutionOutcome,
-	WorkflowTaskId,
+import {
+	type AgentTaskExecutionRecord,
+	MAX_NESTED_WORKFLOW_TASKS,
+	type NestedWorkflowTaskExecutionRecord,
+	type NestedWorkflowTaskSpec,
+	type SubagentTerminalEvidence,
+	type SupportTaskExecutionRecord,
+	type SupportTaskSpec,
+	type TaskExecutionId,
+	type TaskExecutionOutcome,
+	type WorkflowTaskId,
 } from "./contracts.js";
 import {
 	MAX_WORKFLOW_STATE_BYTES,
@@ -19,6 +22,7 @@ import {
 } from "./events.js";
 import {
 	deriveJsonValueSha256,
+	deriveNestedWorkflowRunId,
 	deriveSubagentOperationId,
 	deriveSupportImplementationIdentitySha256,
 	deriveTaskExecutionId,
@@ -31,6 +35,7 @@ import {
 } from "./lifecycle.js";
 import {
 	deriveAgentTaskIdentity,
+	deriveNestedWorkflowTaskIdentity,
 	deriveSupportTaskIdentity,
 	deriveWorkflowTaskId,
 } from "./materializer.js";
@@ -109,6 +114,14 @@ type SupportExecutionProjection = TaskExecutionProjection & {
 	execution: SupportTaskExecutionRecord;
 };
 
+type NestedExecutionProjection = TaskExecutionProjection & {
+	execution: NestedWorkflowTaskExecutionRecord;
+};
+
+function describeKind(kind: "agent" | "support" | "workflow"): string {
+	return kind === "agent" ? "an agent" : `a ${kind}`;
+}
+
 function isAgentExecution(
 	projection: TaskExecutionProjection,
 ): projection is AgentExecutionProjection {
@@ -121,6 +134,12 @@ function isSupportExecution(
 	return projection.execution.kind === "support";
 }
 
+function isNestedExecution(
+	projection: TaskExecutionProjection,
+): projection is NestedExecutionProjection {
+	return projection.execution.kind === "workflow";
+}
+
 function agentExecutionProjection(
 	state: WorkflowStateProjection,
 	executionId: TaskExecutionId,
@@ -128,7 +147,10 @@ function agentExecutionProjection(
 ): AgentExecutionProjection {
 	const projection = executionProjection(state, executionId, sequence);
 	if (!isAgentExecution(projection)) {
-		fail("subagent execution event targets a support execution", sequence);
+		fail(
+			`subagent execution event targets ${describeKind(projection.execution.kind)} execution`,
+			sequence,
+		);
 	}
 	return projection;
 }
@@ -140,9 +162,79 @@ function supportExecutionProjection(
 ): SupportExecutionProjection {
 	const projection = executionProjection(state, executionId, sequence);
 	if (!isSupportExecution(projection)) {
-		fail("support execution event targets an agent execution", sequence);
+		fail(
+			`support execution event targets ${describeKind(projection.execution.kind)} execution`,
+			sequence,
+		);
 	}
 	return projection;
+}
+
+function nestedExecutionProjection(
+	state: WorkflowStateProjection,
+	executionId: TaskExecutionId,
+	sequence: number,
+): NestedExecutionProjection {
+	const projection = executionProjection(state, executionId, sequence);
+	if (!isNestedExecution(projection)) {
+		fail(
+			`nested workflow execution event targets ${describeKind(projection.execution.kind)} execution`,
+			sequence,
+		);
+	}
+	return projection;
+}
+
+function nestedTaskSpec(
+	state: WorkflowStateProjection,
+	projection: NestedExecutionProjection,
+	sequence: number,
+): NestedWorkflowTaskSpec {
+	const spec = state.tasks[projection.execution.taskId]?.task.spec;
+	if (spec?.kind !== "workflow") {
+		fail("nested workflow execution target is not a workflow task", sequence);
+	}
+	return spec;
+}
+
+function isTerminalRunStatus(status: string): boolean {
+	return (
+		status === "completed" ||
+		status === "completed-degraded" ||
+		status === "failed" ||
+		status === "cancelled" ||
+		status === "interrupted" ||
+		status === "cleanup-blocked"
+	);
+}
+
+function isCompletedRunStatus(status: string): boolean {
+	return status === "completed" || status === "completed-degraded";
+}
+
+function nestedOutcome(status: string): TaskExecutionOutcome | undefined {
+	switch (status) {
+		case "completed":
+		case "completed-degraded":
+			return "completed";
+		case "failed":
+		case "cancelled":
+		case "interrupted":
+		case "cleanup-blocked":
+			return status;
+		default:
+			return undefined;
+	}
+}
+
+function isLaunchedNestedPhase(
+	phase: TaskExecutionProjection["phase"],
+): boolean {
+	return (
+		phase === "nested-launched" ||
+		phase === "nested-settled" ||
+		phase === "nested-output-imported"
+	);
 }
 
 function supportTaskSpec(
@@ -238,6 +330,14 @@ function isSupportFailureStage(stage: string): boolean {
 	);
 }
 
+function isNestedFailureStage(stage: string): boolean {
+	return (
+		stage === "nested-resolution" ||
+		stage === "nested-launch" ||
+		stage === "nested-import"
+	);
+}
+
 function subagentOutcome(status: string): TaskExecutionOutcome | undefined {
 	switch (status) {
 		case "completed":
@@ -327,7 +427,7 @@ function applyEvent(
 					namespace: task.namespace,
 					spec,
 				});
-			} else {
+			} else if (task.spec.kind === "support") {
 				const { identitySha256: identity, ...spec } = task.spec;
 				identitySha256 = identity;
 				derivedIdentity = deriveSupportTaskIdentity({
@@ -336,6 +436,35 @@ function applyEvent(
 					namespace: task.namespace,
 					spec,
 				});
+			} else {
+				const { identitySha256: identity, ...spec } = task.spec;
+				identitySha256 = identity;
+				derivedIdentity = deriveNestedWorkflowTaskIdentity({
+					definitionIdentitySha256: state.definitionIdentitySha256,
+					inputSha256: state.inputSha256,
+					namespace: task.namespace,
+					spec,
+				});
+				const workflowTaskCount = Object.values(state.tasks).filter(
+					(existing) => existing.task.spec.kind === "workflow",
+				).length;
+				if (workflowTaskCount + 1 > MAX_NESTED_WORKFLOW_TASKS) {
+					fail(
+						"workflow task count exceeds the nested workflow bound",
+						event.sequence,
+					);
+				}
+				if (Object.keys(spec.inputs).length > 0) {
+					fail("workflow task may not declare artifact inputs", event.sequence);
+				}
+				if (
+					spec.request.inputSha256 !== deriveJsonValueSha256(spec.request.input)
+				) {
+					fail(
+						"workflow task input digest does not match its input",
+						event.sequence,
+					);
+				}
 			}
 			if (identitySha256 !== derivedIdentity) {
 				fail("declared task identity digest does not match", event.sequence);
@@ -561,7 +690,7 @@ function applyEvent(
 						event.sequence,
 					);
 				}
-			} else {
+			} else if (task.task.spec.kind === "support") {
 				if (execution.kind !== "support") {
 					fail("task execution kind does not match its task", event.sequence);
 				}
@@ -573,6 +702,23 @@ function applyEvent(
 				) {
 					fail(
 						"support task execution implementation identity does not match",
+						event.sequence,
+					);
+				}
+			} else {
+				if (execution.kind !== "workflow") {
+					fail("task execution kind does not match its task", event.sequence);
+				}
+				if (
+					execution.childRunId !==
+					deriveNestedWorkflowRunId(
+						state.runId,
+						execution.taskId,
+						execution.generation,
+					)
+				) {
+					fail(
+						"task execution identifiers are not deterministic",
 						event.sequence,
 					);
 				}
@@ -921,6 +1067,193 @@ function applyEvent(
 			projection.phase = "support-output-committed";
 			break;
 		}
+		case "task-execution-nested-intended": {
+			const projection = nestedExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = nestedTaskSpec(state, projection, event.sequence);
+			if (projection.phase !== "created") {
+				fail("nested workflow intent is out of order", event.sequence);
+			}
+			if (input.data.childRunId !== projection.execution.childRunId) {
+				fail(
+					"nested workflow intent does not match its execution",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.definitionIdentitySha256 !==
+					spec.request.definitionIdentitySha256 ||
+				input.data.inputSha256 !== spec.request.inputSha256
+			) {
+				fail("nested workflow intent does not match its task", event.sequence);
+			}
+			const declared = spec.request.budget;
+			const intended = input.data.budget;
+			if (
+				intended.cost > declared.cost ||
+				intended.childRuntimeMs > declared.childRuntimeMs ||
+				(declared.totalTokens !== undefined &&
+					(intended.totalTokens === undefined ||
+						intended.totalTokens > declared.totalTokens))
+			) {
+				fail(
+					"nested workflow intent exceeds its declared budget",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.timeoutMs > spec.request.timeoutMs ||
+				input.data.concurrency > spec.request.concurrency
+			) {
+				fail(
+					"nested workflow intent exceeds its declared limits",
+					event.sequence,
+				);
+			}
+			const deadlineAt = Date.parse(input.data.deadlineAt);
+			if (
+				!Number.isFinite(deadlineAt) ||
+				deadlineAt > Date.parse(event.timestamp) + input.data.timeoutMs
+			) {
+				fail("nested workflow intent deadline is invalid", event.sequence);
+			}
+			const { executionId: _executionId, ...nestedIntent } = input.data;
+			projection.nestedIntent = {
+				...structuredClone(nestedIntent),
+				sequence: event.sequence,
+			};
+			projection.phase = "nested-intended";
+			break;
+		}
+		case "task-execution-nested-launched": {
+			const projection = nestedExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (projection.phase !== "nested-intended" || !projection.nestedIntent) {
+				fail("nested workflow launch is out of order", event.sequence);
+			}
+			if (input.data.childRunId !== projection.execution.childRunId) {
+				fail(
+					"nested workflow launch does not match its execution",
+					event.sequence,
+				);
+			}
+			const { executionId: _executionId, ...nestedLaunch } = input.data;
+			projection.nestedLaunch = { ...nestedLaunch, sequence: event.sequence };
+			projection.phase = "nested-launched";
+			break;
+		}
+		case "task-execution-nested-settled": {
+			const projection = nestedExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const previous = projection.nestedSettlement;
+			const reconciles =
+				previous?.status === "cleanup-blocked" &&
+				input.data.status !== "cleanup-blocked" &&
+				(projection.phase === "nested-settled" ||
+					(projection.phase === "terminal" &&
+						projection.terminal?.outcome === "cleanup-blocked" &&
+						projection.terminal.evidence.kind === "nested-workflow"));
+			if (
+				(projection.phase !== "nested-launched" && !reconciles) ||
+				!projection.nestedLaunch
+			) {
+				fail("nested workflow settlement is out of order", event.sequence);
+			}
+			if (input.data.childRunId !== projection.execution.childRunId) {
+				fail(
+					"nested workflow settlement does not match its execution",
+					event.sequence,
+				);
+			}
+			if (!isTerminalRunStatus(input.data.status)) {
+				fail(
+					"nested workflow settlement status is not terminal",
+					event.sequence,
+				);
+			}
+			const completedChild = isCompletedRunStatus(input.data.status);
+			if (
+				(input.data.outputArtifactId !== undefined) !== completedChild ||
+				(input.data.outputSha256 !== undefined) !== completedChild
+			) {
+				fail(
+					"nested workflow settlement output is inconsistent",
+					event.sequence,
+				);
+			}
+			if (reconciles) delete projection.terminal;
+			const { executionId: _executionId, ...nestedSettlement } = input.data;
+			projection.nestedSettlement = {
+				...structuredClone(nestedSettlement),
+				sequence: event.sequence,
+			};
+			projection.phase = "nested-settled";
+			break;
+		}
+		case "task-execution-nested-output-imported": {
+			const projection = nestedExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = nestedTaskSpec(state, projection, event.sequence);
+			const settlement = projection.nestedSettlement;
+			const recoversImport =
+				projection.phase === "terminal" &&
+				projection.terminal?.outcome === "cleanup-blocked" &&
+				projection.terminal.evidence.kind === "workflow" &&
+				projection.terminal.evidence.stage === "nested-import";
+			if (
+				(projection.phase !== "nested-settled" && !recoversImport) ||
+				!settlement
+			) {
+				fail("nested workflow output import is out of order", event.sequence);
+			}
+			if (!isCompletedRunStatus(settlement.status)) {
+				fail(
+					"nested workflow output import requires a completed child",
+					event.sequence,
+				);
+			}
+			if (input.data.childRunId !== projection.execution.childRunId) {
+				fail(
+					"nested workflow output import does not match its execution",
+					event.sequence,
+				);
+			}
+			const artifact = state.artifacts[input.data.artifactId];
+			if (
+				!artifact ||
+				artifact.runId !== state.runId ||
+				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.output !== "result" ||
+				artifact.mediaType !== "application/json" ||
+				artifact.sha256 !== input.data.sourceSha256 ||
+				artifact.schemaSha256 !==
+					deriveJsonValueSha256(spec.request.outputSchema) ||
+				input.data.sourceSha256 !== settlement.outputSha256 ||
+				input.data.sourceArtifactId !== settlement.outputArtifactId
+			) {
+				fail("nested workflow output artifact does not match", event.sequence);
+			}
+			if (recoversImport) delete projection.terminal;
+			const { executionId: _executionId, ...nestedOutputImport } = input.data;
+			projection.nestedOutputImport = {
+				...nestedOutputImport,
+				sequence: event.sequence,
+			};
+			projection.phase = "nested-output-imported";
+			break;
+		}
 		case "task-execution-terminal": {
 			const projection = executionProjection(
 				state,
@@ -944,7 +1277,10 @@ function applyEvent(
 			const evidence = structuredClone(input.data.evidence);
 			if (evidence.kind === "subagent") {
 				if (task.task.spec.kind !== "agent") {
-					fail("support task has subagent terminal evidence", event.sequence);
+					fail(
+						`${task.task.spec.kind} task has subagent terminal evidence`,
+						event.sequence,
+					);
 				}
 				const observation = projection.observation;
 				const expectedOutcome = subagentOutcome(evidence.status);
@@ -982,7 +1318,10 @@ function applyEvent(
 				}
 			} else if (evidence.kind === "support") {
 				if (task.task.spec.kind !== "support") {
-					fail("agent task has support terminal evidence", event.sequence);
+					fail(
+						`${task.task.spec.kind} task has support terminal evidence`,
+						event.sequence,
+					);
 				}
 				if (projection.phase !== "support-output-committed") {
 					fail(
@@ -1011,6 +1350,88 @@ function applyEvent(
 				) {
 					fail("support terminal output does not match", event.sequence);
 				}
+			} else if (evidence.kind === "nested-workflow") {
+				if (task.task.spec.kind !== "workflow") {
+					fail(
+						`${task.task.spec.kind} task has nested workflow terminal evidence`,
+						event.sequence,
+					);
+				}
+				const settlement = projection.nestedSettlement;
+				if (
+					!settlement ||
+					!isNestedExecution(projection) ||
+					evidence.childRunId !== projection.execution.childRunId ||
+					evidence.childRunId !== settlement.childRunId ||
+					evidence.status !== settlement.status ||
+					evidence.usageComplete !== settlement.usageComplete ||
+					!isDeepStrictEqual(evidence.usage, settlement.usage)
+				) {
+					fail(
+						"nested workflow terminal settlement does not match",
+						event.sequence,
+					);
+				}
+				const expectedOutcome = nestedOutcome(evidence.status);
+				if (!expectedOutcome || expectedOutcome !== input.data.outcome) {
+					fail(
+						"nested workflow terminal outcome does not match",
+						event.sequence,
+					);
+				}
+				if (expectedOutcome === "completed") {
+					const nestedImport = projection.nestedOutputImport;
+					if (projection.phase !== "nested-output-imported") {
+						fail(
+							"nested workflow terminal evidence precedes output import",
+							event.sequence,
+						);
+					}
+					if (
+						!nestedImport ||
+						evidence.artifactId !== nestedImport.artifactId ||
+						evidence.outputSha256 !== nestedImport.sourceSha256
+					) {
+						fail(
+							"nested workflow terminal artifact does not match",
+							event.sequence,
+						);
+					}
+				} else if (
+					projection.phase !== "nested-settled" ||
+					evidence.artifactId !== undefined ||
+					evidence.outputSha256 !== undefined
+				) {
+					fail(
+						"nested workflow terminal evidence is inconsistent",
+						event.sequence,
+					);
+				}
+			} else if (task.task.spec.kind === "workflow") {
+				const resolutionPhase =
+					projection.phase === "created" ||
+					projection.phase === "nested-intended";
+				const importPhase =
+					projection.phase === "nested-settled" &&
+					projection.nestedSettlement !== undefined &&
+					isCompletedRunStatus(projection.nestedSettlement.status);
+				if (
+					evidence.failureSha256 !==
+						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
+					(input.data.outcome === "failed" &&
+						((evidence.stage !== "nested-resolution" &&
+							evidence.stage !== "nested-launch") ||
+							!resolutionPhase)) ||
+					(input.data.outcome === "cleanup-blocked" &&
+						(evidence.stage !== "nested-import" || !importPhase)) ||
+					(input.data.outcome === "cancelled" &&
+						(evidence.stage !== "stop" || !resolutionPhase)) ||
+					(input.data.outcome !== "failed" &&
+						input.data.outcome !== "cancelled" &&
+						input.data.outcome !== "cleanup-blocked")
+				) {
+					fail("workflow terminal evidence is inconsistent", event.sequence);
+				}
 			} else if (task.task.spec.kind === "support") {
 				const failurePhase =
 					projection.phase === "created" ||
@@ -1032,7 +1453,10 @@ function applyEvent(
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
 			} else {
-				if (isSupportFailureStage(evidence.stage)) {
+				if (
+					isSupportFailureStage(evidence.stage) ||
+					isNestedFailureStage(evidence.stage)
+				) {
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
 				if (
@@ -1099,10 +1523,18 @@ function applyEvent(
 				? state.executions[task.currentExecutionId]
 				: undefined;
 			const supportTask = task.task.spec.kind === "support";
+			const workflowTask = task.task.spec.kind === "workflow";
 			if (input.data.to === "running" && supportTask) {
 				if (execution?.phase !== "support-intended") {
 					fail(
 						"support task became running without persisted intent",
+						event.sequence,
+					);
+				}
+			} else if (input.data.to === "running" && workflowTask) {
+				if (!execution || !isLaunchedNestedPhase(execution.phase)) {
+					fail(
+						"workflow task became running without a launched child run",
 						event.sequence,
 					);
 				}
@@ -1119,6 +1551,9 @@ function applyEvent(
 			if (input.data.to === "waiting" && supportTask) {
 				fail("support task may not wait", event.sequence);
 			}
+			if (input.data.to === "waiting" && workflowTask) {
+				fail("workflow task may not wait", event.sequence);
+			}
 			if (input.data.to === "waiting" && !execution?.launchReceipt) {
 				fail(
 					"task became waiting without a launched execution",
@@ -1130,6 +1565,19 @@ function applyEvent(
 			}
 			if (
 				input.data.to === "cancelling" &&
+				workflowTask &&
+				(state.status !== "stopping" ||
+					!execution ||
+					!isLaunchedNestedPhase(execution.phase))
+			) {
+				fail(
+					"workflow task began cancellation without stop intent and a launched child run",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.to === "cancelling" &&
+				!workflowTask &&
 				(state.status !== "stopping" || !execution?.launchReceipt)
 			) {
 				fail(
