@@ -13,6 +13,10 @@
 - Required artifact import, cleanup, and finalizers cannot be hidden by a
   successful model result.
 - Missing, duplicate, or incompatible service providers fail before work starts.
+- Support implementations run only after durable intent and exact registry
+  resolution; a completed support result replays from its digest-verified
+  artifact and is never recomputed under a drifted implementation.
+- Support tasks never launch a subagent, VM, worktree, model, or web request.
 
 ## Trust boundaries
 
@@ -25,12 +29,21 @@
 | Pi process event bus | Trusted extension-composition mechanism, not authorization |
 | SubagentService | Trusted execution service with independent authority checks |
 | Model output/external content | Untrusted data |
-| Support helper | Trusted bundle-contained code with extension-process authority |
+| Support implementation | Trusted registered package code executing in the host process with extension-process authority; not sandboxed |
+| Support constructor registry | Trusted embedder composition; authoritative for implementation identity, never persisted, resolved again on every restart |
 
 A JavaScript or TypeScript worker-thread VM is not an OS security boundary.
 Dynamic safety comes from withholding direct capabilities and validating every
-host operation. Static workflows and support helpers execute with
+host operation. Static workflows and support implementations execute with
 extension-process authority and must be trusted by source.
+
+The support purity contract (deterministic for identical parameters and inputs,
+side-effect free outside the return value, bounded, cooperative with
+`AbortSignal`, and free of network, publication, Git mutation, process
+administration, and credential access) is an obligation on trusted code. The
+runtime verifies identity digests, schemas, size bounds, and abort timing; it
+does not and cannot verify determinism or the absence of side effects, and a
+recomputation after a crash relies on that contract.
 
 The primary operational threat is accidental destructive or inconsistent
 behavior: duplicate launch after crash, stale scheduler writes, implicit data

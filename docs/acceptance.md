@@ -94,6 +94,14 @@ An in-memory-only successful drive does not satisfy the first slice.
 - optional task disposition is persisted and identity-bound; optional task or
   advisory-finalizer failure is eligible for `completed-degraded` only after all
   required work succeeds;
+- a `running` support task occupies one concurrency lane and reserves no cost,
+  tokens, or child runtime;
+- stop and deadline abort the scheduler stop signal, terminalize a running
+  support task as `cancelled` at stage `stop` after a bounded executor drain
+  that never waits for an implementation that ignores abort, reach a durable
+  terminal run status before returning, and cancel a `running` support task
+  found after restart directly; subagent cleanup and `cleanup-blocked` semantics are
+  unchanged;
 - no work begins from an uncommitted declaration or stale fencing generation.
 
 ## Structured output and support tasks
@@ -107,6 +115,35 @@ An in-memory-only successful drive does not satisfy the first slice.
   subagent preflight;
 - model prose is never parsed as control-plane JSON.
 
+### Durable support execution
+
+- a support-only workflow completes without any subagent acquisition,
+  preflight, launch, or model call;
+- support tasks chain in every direction: agent → support, support → agent,
+  and support → support inputs resolve only from digest-verified workflow-owned
+  artifacts;
+- the journal records the support execution record, support intent, result
+  artifact declaration, output commit, and support terminal evidence in order
+  before `running → completed`;
+- every crash prefix (record only, intent only, orphan blob, declared artifact,
+  committed output, terminal-only) replays to the same completed result, and
+  the implementation never runs again once output evidence exists;
+- a registry whose name, module specifier, revision, implementation digest,
+  parameters schema, or output schema differs from the persisted descriptor
+  fails a non-terminal support task at `support-resolution`, while a completed
+  support task still replays from its artifact;
+- an unregistered module specifier is rejected at workflow discovery;
+- an implementation that throws, returns non-JSON, oversized, or schema-invalid
+  output, or conflicts with existing output evidence fails with a fixed message
+  and no raw error text;
+- stop and deadline abort a running support implementation, discard its late
+  result, and terminalize it as `cancelled` at stage `stop`;
+- optional support task failure yields `completed-degraded` only after all
+  required work succeeds, and required support task failure fails the run;
+- a run without a configured executor blocks support tasks with a fixed message
+  and fails when the task is required;
+- `durationMs` is diagnostic only and never affects budgets or identity.
+
 ## Persistence and recovery
 
 - torn tail, corrupt snapshot, future version, lease loss, and stale running task
@@ -118,6 +155,9 @@ An in-memory-only successful drive does not satisfy the first slice.
 - after lease rotation, every concurrently active child is reacquired from its
   durable launch receipt without another preflight or launch;
 - dependency invalidation is crash-safe and transitive;
+- support execution recovery follows the documented crash-prefix ladder, output
+  conflict fails closed, and persistence uncertainty is thrown rather than
+  converted into task failure;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - required finalizer failure prevents success;
 - bounded private stores redact sensitive metadata.

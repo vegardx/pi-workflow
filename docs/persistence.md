@@ -34,14 +34,17 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-10 rejects revision-1 through revision-9 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 10 accepts only
-the
-declared run, workflow phase/log effect, task, artifact, barrier, output-commit,
-and task-execution events. Task-execution evidence records generation creation, the latest
-preflight before launch intent, uncertain launch and reconciled absence or a
-launch receipt, child observation, bounded terminal child settlement, artifact
-import, release intent and receipt, and terminal outcome in that order. An
+11 rejects revision-1 through revision-10 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 11 accepts only
+the declared run, workflow phase/log effect, task, artifact, barrier,
+output-commit, and task-execution events. Agent task-execution evidence records
+generation creation, the latest preflight before launch intent, uncertain launch
+and reconciled absence or a launch receipt, child observation, bounded terminal
+child settlement, artifact import, release intent and receipt, and terminal
+outcome in that order. Support task-execution evidence records generation
+creation, support intent, output commit, and terminal outcome in that order;
+subagent-shaped events are rejected on support executions and support events
+are rejected on agent executions. An
 expired preflight may be replaced only before launch intent is persisted. A
 preflight from an older workflow fencing generation is also replaced because
 pi-subagent preflight grants are intentionally process-local.
@@ -104,10 +107,12 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 10 currently admits generation 1 only; later generations
-remain unavailable until transactional invalidation lands. Each agent-task
-execution generation owns one subagent run and
-contains:
+invalidation. Revision 11 currently admits generation 1 only; later generations
+remain unavailable until transactional invalidation lands. The execution record
+is discriminated by `kind: "agent" | "support"`; both kinds share the derived
+execution ID, run, task, generation, and task identity digest.
+
+An agent execution (`kind: "agent"`) owns one subagent run and contains:
 
 - generation number and task identity;
 - budget allocation and cumulative usage baseline;
@@ -117,9 +122,56 @@ contains:
 - imported artifacts;
 - terminal classification.
 
+A support execution (`kind: "support"`) carries `implementationIdentitySha256`
+and no operation ID. It contains:
+
+- generation number and task identity;
+- the implementation identity digest derived from the persisted descriptor;
+- durable support intent: implementation, parameter, and input digests;
+- the output commit: result artifact ID and content digest;
+- terminal evidence of kind `support` (the same digests, `artifactId`,
+  `outputSha256`, and a diagnostic `durationMs`) or of kind `workflow` with a
+  `support-*` or `stop` stage.
+
+The constructor registry that supplies support implementations is never
+persisted. Every restart resolves each journaled descriptor against the new
+process's registry by exact canonical identity over name, module specifier,
+revision, implementation digest, parameters schema, and output schema; a close
+match is a mismatch.
+
 Phase 3 adds subagent retry/resume attempts and control receipts to the existing
-task execution. A new execution generation requires a new preflight, operation
-ID, launch intent, and subagent run.
+agent task execution. A new execution generation requires a new preflight,
+operation ID, launch intent, and subagent run.
+
+### Support execution recovery
+
+Restart repairs an interrupted support execution from its durable prefix:
+
+| Durable prefix | Recovery |
+| --- | --- |
+| no execution record | ordinary readiness; a fresh generation-1 record is created |
+| `task-execution-created` only | resolve the registry, persist intent, run |
+| intent only | resolve the registry, revalidate inputs and parameters against the intent digests, recompute |
+| intent and an artifact blob without `artifact-declared` | recompute; an equal output reuses the blob through the content-addressed store |
+| intent and a declared result artifact | verify provenance, digest, canonical encoding, and output schema; commit output and terminal evidence without running |
+| output committed | verify the declared artifact against the commit; append terminal evidence with `durationMs` 0 |
+| terminal evidence without the task status transition | repair the task status only |
+| completed | replay the result artifact; the implementation never runs again |
+
+Recomputation after intent rests on the digest-bound purity contract: the
+runtime proves that the implementation identity, parameters, and inputs are the
+intended ones and requires the output to satisfy the same schema and bounds,
+but it cannot prove that the implementation is deterministic. A crash after
+intent and before any output evidence therefore reruns trusted code on that
+contract, not on observed evidence.
+
+Output conflict fails closed: a second result artifact for the same producer
+terminalizes the execution as `failed` at stage `support-output`, and a
+committed artifact that disagrees with the declared one is a persistence error.
+Journal, lease, and artifact-store errors during support execution are thrown
+rather than converted into task failure. A `running` support task found after
+restart with no in-process execution is cancelled directly during stop and is
+otherwise repaired or recomputed by the ladder above.
 
 No persisted `running` field proves that a scheduler or child still exists. The
 bounded scheduler reselects work and reconstructs active concurrency slots from
@@ -148,6 +200,7 @@ concrete tool implementations and grants
 skills and context digests
 output schema
 workspace baseline
+support implementation identity (support tasks)
 subagent and workflow runtime revisions
 ```
 
@@ -158,6 +211,9 @@ immutable baseline.
 Default policy:
 
 - read-only tasks: replay allowed on full identity match;
+- support tasks: a completed result replays from its digest-verified
+  workflow-owned artifact on full identity match and is never recomputed within
+  its run; registry drift fails only non-terminal support executions;
 - isolated worktree tasks: replay allowed only with verified retained handoff
   evidence and exact baseline;
 - live-branch mutation: not supported by the workflow task contract;
@@ -181,7 +237,8 @@ Resume:
 1. acquires or reclaims the run lease with evidence;
 2. reconstructs state from journal events;
 3. validates definition, input, runtime, and service compatibility;
-4. reconciles active task executions and subagent operation IDs;
+4. reconciles active agent executions by subagent operation ID and repairs or
+   recomputes intended support executions;
 5. re-executes the workflow function from its entry point;
 6. replays matching declarations and completed results;
 7. incrementally materializes only the newly reached path;

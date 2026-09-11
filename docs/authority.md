@@ -8,7 +8,8 @@
   task grant.
 - Project workflows are trusted code only after Pi project trust.
 - Dynamic workflow code is never trusted merely because it runs in a VM.
-- Support tasks are trusted local code and must be bundle-contained.
+- Support tasks are trusted registered code executed in the host process; they
+  are bundle-contained and never sandboxed.
 - Worktree and sandbox requirements fail closed.
 - Publication, push, pull requests, merge, release, and deployment are outside
   this runtime.
@@ -78,8 +79,31 @@ object. The worker-thread VM is not an OS security boundary.
 
 ## Deterministic support tasks
 
-Support helpers are explicit bundle-relative modules with declared input and
-output schemas. Their source identity is included in task and replay identity.
-They run with extension-process authority and are trusted code, not a sandbox
-substitute. Project-local helpers require the same project trust as their
-workflow definition.
+Support implementations are registered by trusted embedding code when the
+workflow service is constructed. The registry is immutable, never persisted,
+and authoritative: a persisted descriptor executes only when a registration
+matches its exact canonical identity over name, module specifier, revision,
+implementation digest, parameters schema, and output schema. A close match is a
+mismatch and fails the execution at `support-resolution`. Implementations are
+bundle-contained: they ship with the package that registers them and are never
+loaded from a workflow file, a run directory, or a dynamic import. That
+implementation identity is part of task and replay identity.
+
+Support implementations execute in the host process with extension-process
+authority. Nothing about them is sandboxed and the runtime claims no isolation.
+They never receive or launch a subagent, VM, worktree, model, or web request;
+the execution context exposes only `parameters`, `inputs`, and `signal`.
+
+Because the runtime recomputes an intended but unfinished support task after a
+crash, every implementation must honour the purity contract:
+
+- deterministic: identical parameters and inputs yield an identical output;
+- side-effect free outside the return value;
+- bounded in time and output size, and cooperative with the supplied
+  `AbortSignal`;
+- no network access, publication, Git mutation, process administration, or
+  credential access.
+
+The runtime verifies identity digests, schemas, size bounds, and abort timing.
+It cannot verify determinism or the absence of side effects; those remain trust
+obligations of the registering package.

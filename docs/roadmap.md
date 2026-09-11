@@ -35,17 +35,25 @@ pi-subagent release.
 
 ## Phase 2 — static orchestration
 
+Delivered:
+
 - workflow-owned artifact projection between sequential read-only tasks;
-- pi-subagent handoff-export contract and workflow-owned worktree artifacts
-  before enabling writer tasks;
 - complete DAG materialization through handles;
 - parallel and settled result barriers;
 - bounded fan-out and fan-in;
 - pipeline authoring helpers;
 - phases and structured progress events;
 - run/task concurrency, token, cost, and time budgets;
-- deterministic bundle-contained support tasks;
-- nested static workflows with bounded depth.
+- deterministic bundle-contained support tasks: typed descriptor frontend,
+  constructor registry, durable intent, in-process execution, artifact commit,
+  crash-prefix recovery, and stop/deadline abort (runtime contract feature
+  `supportTaskExecution: true`).
+
+Remaining:
+
+- nested static workflows with bounded depth;
+- pi-subagent handoff-export contract and workflow-owned worktree artifacts
+  before enabling writer tasks.
 
 ## Phase 3 — durable control
 
@@ -68,7 +76,8 @@ pi-subagent release.
 ## Phase 5 — dynamic workflows
 
 - worker-thread VM and bounded RPC host API;
-- shared TaskSpec materializer;
+- shared TaskSpec materializer, including dynamic `ctx.support` declarations
+  that lower into the same `SupportTaskSpec` and constructor registry;
 - generated-source review and approval;
 - stable key, dependency, and budget enforcement;
 - incremental graph materialization from concrete results;
