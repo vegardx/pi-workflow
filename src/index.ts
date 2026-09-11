@@ -224,6 +224,16 @@ export {
 	supportRegistrationIdentity,
 } from "./support.js";
 export {
+	createWorkflowSupportTaskExecutor,
+	WorkflowSupportExecutionError,
+	type WorkflowSupportExecutionResult,
+	type WorkflowSupportFailureStage,
+	type WorkflowSupportIntentOutcome,
+	type WorkflowSupportTaskExecutor,
+	type WorkflowSupportTaskExecutorOptions,
+	type WorkflowSupportTaskOutcome,
+} from "./support-executor.js";
+export {
 	createWorkflowTaskFinalizer,
 	WorkflowTaskFinalizationError,
 	type WorkflowTaskFinalizationOutcome,
