@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import {
 	type AgentLaunchPlan,
@@ -10,15 +10,35 @@ import {
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkflowArtifactStore } from "../src/artifact-store.js";
-import type { TaskRef } from "../src/contracts.js";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
+import {
+	canonicalArtifactJson,
+	WorkflowArtifactStore,
+} from "../src/artifact-store.js";
+import type {
+	NestedWorkflowTaskRequest,
+	NestedWorkflowUsage,
+	TaskRef,
+	WorkflowArtifactRef,
+	WorkflowBudget,
+} from "../src/contracts.js";
 import type { TaskHandle } from "../src/definition.js";
 import {
+	deriveJsonValueSha256,
+	deriveNestedWorkflowRunId,
 	deriveSubagentOperationId,
 	deriveTaskExecutionId,
+	deriveWorkflowArtifactId,
 } from "../src/execution.js";
-import { WorkflowTaskMaterializer } from "../src/materializer.js";
+import {
+	type NestedWorkflowDeclaration,
+	WorkflowTaskMaterializer,
+} from "../src/materializer.js";
+import {
+	createWorkflowNestedRunExecutor,
+	type WorkflowNestedRunProvider,
+	type WorkflowNestedRunSettlement,
+} from "../src/nested-run-executor.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
 import {
 	acquireWorkflowRunLease,
@@ -394,7 +414,10 @@ describe("durable sequential scheduler", () => {
 		});
 
 		const first = scheduler.drive();
-		await vi.waitFor(() => expect(delegated.launch).toHaveBeenCalledOnce());
+		await vi.waitFor(
+			() => expect(delegated.launch).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
 		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
 		expect(delegated.launch).toHaveBeenCalledOnce();
 		waiting.resolve(
@@ -1516,7 +1539,7 @@ describe("support task scheduling", { timeout: 15_000 }, () => {
 		const first = scheduler.drive();
 		await invoked.promise;
 		const second = scheduler.drive();
-		await vi.waitFor(() => expect(wait).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(wait).toHaveBeenCalledOnce(), WAIT_FOR);
 		expect(harness.launch).toHaveBeenCalledOnce();
 		const parallel = await projection(journal);
 		expect(parallel.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("running");
@@ -2011,7 +2034,10 @@ describe("support task scheduling", { timeout: 15_000 }, () => {
 		const first = scheduler.drive();
 		await invoked.promise;
 		const second = scheduler.drive();
-		await vi.waitFor(() => expect(harness.launch).toHaveBeenCalledOnce());
+		await vi.waitFor(
+			() => expect(harness.launch).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
 		expect(
 			(await projection(journal)).tasks[tasks[0]?.ref.taskId ?? ""]?.status,
 		).toBe("running");
@@ -2035,5 +2061,1003 @@ describe("support task scheduling", { timeout: 15_000 }, () => {
 				(change) => change.to === "failed",
 			),
 		).toBe(false);
+	});
+});
+
+const childDefinitionIdentitySha256 = "d".repeat(64);
+const childDefinitionSourceSha256 = "e".repeat(64);
+const childOutputSchema = {
+	type: "object",
+	properties: { answer: { type: "string" } },
+	required: ["answer"],
+	additionalProperties: false,
+};
+const childOutputSchemaSha256 = deriveJsonValueSha256(childOutputSchema);
+const nesting = {
+	depth: 0,
+	ancestorDefinitionIdentities: [] as readonly string[],
+	definitionIdentitySha256,
+	deadlineAt: "2099-01-01T00:00:00.000Z",
+};
+const nestedUsage: NestedWorkflowUsage = {
+	cost: 0.05,
+	totalTokens: 500,
+	childRuntimeMs: 1_000,
+};
+
+function nested(
+	overrides: {
+		disposition?: "required" | "optional";
+		after?: readonly TaskRef[];
+		budget?: WorkflowBudget;
+	} = {},
+): NestedWorkflowDeclaration {
+	const input = { value: "yes" };
+	const request: NestedWorkflowTaskRequest = {
+		definitionName: "child",
+		definitionIdentitySha256: childDefinitionIdentitySha256,
+		definitionSourceSha256: childDefinitionSourceSha256,
+		definitionVersion: 1,
+		input,
+		inputSha256: deriveJsonValueSha256(input),
+		inputSchema: {
+			type: "object",
+			properties: { value: { type: "string" } },
+			required: ["value"],
+			additionalProperties: false,
+		},
+		outputSchema: childOutputSchema,
+		budget: overrides.budget ?? { cost: 0.3, childRuntimeMs: 60_000 },
+		timeoutMs: 600_000,
+		concurrency: 2,
+	};
+	return {
+		...(overrides.disposition ? { disposition: overrides.disposition } : {}),
+		...(overrides.after ? { after: overrides.after } : {}),
+		request,
+	};
+}
+
+function childRunIdOf(taskId: string) {
+	return deriveNestedWorkflowRunId("workflow_scheduler", taskId, 1);
+}
+
+function childOutput(childRunId: string, value: unknown) {
+	const content = canonicalArtifactJson(value);
+	const sha256 = createHash("sha256").update(content).digest("hex");
+	const artifact: WorkflowArtifactRef = {
+		id: deriveWorkflowArtifactId({
+			runId: childRunId,
+			schemaSha256: childOutputSchemaSha256,
+			sha256,
+		}),
+		runId: childRunId,
+		sha256,
+		bytes: content.byteLength,
+		mediaType: "application/json",
+		schemaSha256: childOutputSchemaSha256,
+	};
+	return { artifact, value };
+}
+
+type FakeNestedProvider = {
+	readonly [K in keyof WorkflowNestedRunProvider]: Mock<
+		WorkflowNestedRunProvider[K]
+	>;
+};
+
+/**
+ * In-memory nested run provider: `completed` fabricates a child-owned output
+ * artifact that `readOutput` serves back, `ended` builds any other terminal
+ * settlement. Every method is a mock the test may reprogram.
+ */
+function nestedProvider() {
+	const outputs = new Map<string, ReturnType<typeof childOutput>>();
+	const completed = (
+		childRunId: string,
+		overrides: {
+			value?: unknown;
+			usage?: Partial<NestedWorkflowUsage>;
+			usageComplete?: boolean;
+		} = {},
+	): WorkflowNestedRunSettlement => {
+		const output = childOutput(
+			childRunId,
+			overrides.value ?? { answer: "yes" },
+		);
+		outputs.set(output.artifact.id, output);
+		return {
+			status: "completed",
+			usage: { ...nestedUsage, ...overrides.usage },
+			usageComplete: overrides.usageComplete ?? true,
+			outputArtifact: output.artifact,
+		};
+	};
+	const ended = (
+		status: "failed" | "cancelled" | "interrupted" | "cleanup-blocked",
+		usage: Partial<NestedWorkflowUsage> = {},
+	): WorkflowNestedRunSettlement => ({
+		status,
+		usage: { ...nestedUsage, ...usage },
+		usageComplete: true,
+	});
+	const provider: FakeNestedProvider = {
+		launch: vi.fn<WorkflowNestedRunProvider["launch"]>(async () => undefined),
+		wait: vi.fn<WorkflowNestedRunProvider["wait"]>(async (childRunId) =>
+			completed(childRunId),
+		),
+		readOutput: vi.fn<WorkflowNestedRunProvider["readOutput"]>(
+			async (_childRunId, artifactId) => {
+				const output = outputs.get(artifactId);
+				if (!output) throw new Error("unknown child artifact");
+				return output;
+			},
+		),
+		stop: vi.fn<WorkflowNestedRunProvider["stop"]>(async () => undefined),
+		reconcile: vi.fn<WorkflowNestedRunProvider["reconcile"]>(
+			async () => undefined,
+		),
+	};
+	return { provider, completed, ended };
+}
+
+async function nestedScheduler(
+	journal: WorkflowRunJournal,
+	provider: WorkflowNestedRunProvider | undefined,
+	options: {
+		ownerClient?: SubagentClient;
+		concurrency?: number;
+		budget?: WorkflowBudget;
+		finalize?: boolean;
+	} = {},
+) {
+	const ownerClient = options.ownerClient ?? supportOnlyClient();
+	const ownerBinding = binding(ownerClient);
+	const artifacts = await WorkflowArtifactStore.open({ journal });
+	const scheduler = createWorkflowSequentialScheduler({
+		journal,
+		binding: ownerBinding,
+		...(options.finalize
+			? {
+					finalizer: createWorkflowTaskFinalizer({
+						journal,
+						artifacts,
+						binding: ownerBinding,
+					}),
+				}
+			: {}),
+		...(options.concurrency ? { concurrency: options.concurrency } : {}),
+		...(options.budget ? { budget: options.budget } : {}),
+		artifacts,
+		...(provider ? { nestedRuns: provider, nesting } : {}),
+	});
+	return { scheduler, artifacts, ownerClient };
+}
+
+/**
+ * Persists a nested task as launched (`running`, phase nested-launched)
+ * through the executor alone, the way a crashed process would have left it.
+ */
+async function seedLaunchedNestedTask(
+	journal: WorkflowRunJournal,
+	taskId: string,
+	provider: WorkflowNestedRunProvider,
+) {
+	await journal.append("run-status-changed", {
+		from: "created",
+		to: "running",
+	});
+	await journal.append("task-status-changed", {
+		taskId,
+		from: "pending",
+		to: "ready",
+	});
+	const executor = createWorkflowNestedRunExecutor({
+		journal,
+		artifacts: await WorkflowArtifactStore.open({ journal }),
+		provider,
+		nesting,
+	});
+	await expect(executor.launch(taskId)).resolves.toMatchObject({
+		state: "launched",
+	});
+	const seeded = await projection(journal);
+	expect(seeded.tasks[taskId]?.status).toBe("running");
+	expect(
+		seeded.executions[seeded.tasks[taskId]?.currentExecutionId ?? ""]?.phase,
+	).toBe("nested-launched");
+}
+
+function nestedExecutionOf(
+	state: Awaited<ReturnType<typeof projection>>,
+	taskId: string,
+) {
+	return state.executions[state.tasks[taskId]?.currentExecutionId ?? ""];
+}
+
+// vi.waitFor defaults to 1 s; under Ubuntu CI load (run 34819667769) the first
+// drive's journal appends took longer than that before the provider mock was
+// invoked, so these waits share the suite allowance.
+const WAIT_FOR = { timeout: 15_000, interval: 5 };
+
+describe("nested workflow scheduling", { timeout: 15_000 }, () => {
+	it("completes a nested-only graph through the provider without any subagent call", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { provider } = nestedProvider();
+		const { scheduler, artifacts, ownerClient } = await nestedScheduler(
+			journal,
+			provider,
+		);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect(provider.launch).toHaveBeenCalledOnce();
+		expect(provider.launch).toHaveBeenCalledWith({
+			childRunId: childRunIdOf(taskId),
+			parent: {
+				runId: "workflow_scheduler",
+				taskId,
+				executionId: deriveTaskExecutionId("workflow_scheduler", taskId, 1),
+				depth: 1,
+				ancestorDefinitionIdentities: [definitionIdentitySha256],
+			},
+			definitionName: "child",
+			definitionIdentitySha256: childDefinitionIdentitySha256,
+			definitionSourceSha256: childDefinitionSourceSha256,
+			input: { value: "yes" },
+			budget: { cost: 0.3, childRuntimeMs: 60_000 },
+			deadlineAt: expect.stringMatching(/^\d{4}-/),
+			concurrency: 2,
+		});
+		expect(provider.wait).toHaveBeenCalledExactlyOnceWith(childRunIdOf(taskId));
+		expect(provider.readOutput).toHaveBeenCalledOnce();
+		expect(provider.stop).not.toHaveBeenCalled();
+		expect(subagentCallCount(ownerClient)).toBe(0);
+		const state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[taskId]?.status).toBe("completed");
+		const results = Object.values(state.artifacts).filter(
+			(artifact) =>
+				artifact.producerTaskId === taskId && artifact.output === "result",
+		);
+		expect(results).toHaveLength(1);
+		const artifact = results[0];
+		if (!artifact) throw new Error("missing result artifact");
+		expect(artifact.runId).toBe("workflow_scheduler");
+		await expect(artifacts.readJson(artifact)).resolves.toEqual({
+			answer: "yes",
+		});
+		expect(nestedExecutionOf(state, taskId)).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "completed",
+				evidence: {
+					kind: "nested-workflow",
+					childRunId: childRunIdOf(taskId),
+					status: "completed",
+					usage: nestedUsage,
+					usageComplete: true,
+					artifactId: artifact.id,
+					outputSha256: artifact.sha256,
+				},
+			},
+		});
+	});
+
+	it("defers a nested task while an active nested reservation consumes the budget", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow(
+				"first",
+				nested({ budget: { cost: 0.4, childRuntimeMs: 60_000 } }),
+			),
+			materializer.workflow(
+				"second",
+				nested({ budget: { cost: 0.2, childRuntimeMs: 60_000 } }),
+			),
+		]);
+		const firstId = tasks[0]?.ref.taskId ?? "";
+		const secondId = tasks[1]?.ref.taskId ?? "";
+		const { provider, completed } = nestedProvider();
+		const waiting = deferred<WorkflowNestedRunSettlement>();
+		provider.wait.mockImplementation(async (childRunId) =>
+			childRunId === childRunIdOf(firstId)
+				? waiting.promise
+				: completed(childRunId),
+		);
+		const { scheduler } = await nestedScheduler(journal, provider, {
+			concurrency: 2,
+			budget: { cost: 0.5, childRuntimeMs: 600_000 },
+		});
+
+		const first = scheduler.drive();
+		await vi.waitFor(
+			() => expect(provider.wait).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
+		expect(provider.launch).toHaveBeenCalledOnce();
+		const deferredState = await projection(journal);
+		expect(deferredState.tasks[firstId]?.status).toBe("running");
+		expect(deferredState.tasks[secondId]?.status).toBe("ready");
+
+		waiting.resolve(completed(childRunIdOf(firstId), { usage: { cost: 0.1 } }));
+		await expect(first).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect(provider.launch).toHaveBeenCalledTimes(2);
+		expect(
+			provider.launch.mock.calls.map(([launch]) => launch.childRunId),
+		).toEqual([childRunIdOf(firstId), childRunIdOf(secondId)]);
+		const state = await projection(journal);
+		expect(state.tasks[firstId]?.status).toBe("completed");
+		expect(state.tasks[secondId]?.status).toBe("completed");
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").some(
+				(change) => change.to === "blocked",
+			),
+		).toBe(false);
+	});
+
+	it("blocks a nested task whose declared budget exceeds the workflow budget", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow(
+				"child",
+				nested({ budget: { cost: 0.6, childRuntimeMs: 60_000 } }),
+			),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { provider } = nestedProvider();
+		const { scheduler } = await nestedScheduler(journal, provider, {
+			budget: { cost: 0.5, childRuntimeMs: 600_000 },
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("blocked");
+		expect(state.tasks[taskId]?.currentExecutionId).toBeUndefined();
+		const events = await journal.readEvents();
+		expect(statusChanges(events, "task-status-changed").at(-1)).toEqual({
+			taskId,
+			from: "ready",
+			to: "blocked",
+			reason: "Workflow cost budget is exhausted.",
+		});
+		expect(statusChanges(events, "run-status-changed").at(-1)).toEqual({
+			from: "running",
+			to: "failed",
+			reason: "Workflow cost budget is exhausted.",
+		});
+	});
+
+	it("counts settled nested usage against a later agent task's maxima", async () => {
+		const { journal, tasks } = await fixture((materializer) => {
+			const child = materializer.workflow("child", nested());
+			const answer = materializer.agent("answer", {
+				...request({ after: [child.ref] }),
+				limits: { ...request().limits, cost: 0.2 },
+			});
+			return [child, answer];
+		});
+		const childId = tasks[0]?.ref.taskId ?? "";
+		const answerId = tasks[1]?.ref.taskId ?? "";
+		const { provider, completed } = nestedProvider();
+		provider.wait.mockImplementation(async (childRunId) =>
+			completed(childRunId, { usage: { cost: 0.4 } }),
+		);
+		const ownerClient = client();
+		const { scheduler } = await nestedScheduler(journal, provider, {
+			ownerClient,
+			budget: { cost: 0.5, childRuntimeMs: 600_000 },
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+		expect(ownerClient.launch).not.toHaveBeenCalled();
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[childId]?.status).toBe("completed");
+		expect(state.tasks[answerId]?.status).toBe("blocked");
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toEqual({
+			from: "running",
+			to: "failed",
+			reason: "Workflow cost budget is exhausted.",
+		});
+	});
+
+	it("fails the run after finalization when nested usage evidence is incomplete", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+			materializer.agent("answer", {
+				...request(),
+				limits: { ...request().limits, cost: 0.1 },
+			}),
+		]);
+		const childId = tasks[0]?.ref.taskId ?? "";
+		const answerId = tasks[1]?.ref.taskId ?? "";
+		const { provider, completed } = nestedProvider();
+		const childSettled = deferred<WorkflowNestedRunSettlement>();
+		provider.wait.mockImplementation(() => childSettled.promise);
+		const agentResult = deferred<ReturnType<typeof executionResult>>();
+		const ownerClient = client({
+			wait: vi.fn(() => agentResult.promise),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "completed" as const,
+			})),
+		});
+		const { scheduler } = await nestedScheduler(journal, provider, {
+			ownerClient,
+			concurrency: 2,
+			budget: { cost: 0.5, childRuntimeMs: 600_000 },
+			finalize: true,
+		});
+
+		const first = scheduler.drive();
+		await vi.waitFor(
+			() => expect(provider.wait).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		const second = scheduler.drive();
+		await vi.waitFor(
+			() => expect(ownerClient.wait).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		childSettled.resolve(
+			completed(childRunIdOf(childId), { usageComplete: false }),
+		);
+		await expect(first).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect((await projection(journal)).tasks[childId]?.status).toBe(
+			"completed",
+		);
+
+		agentResult.resolve(executionResult(result("completed")));
+		await expect(second).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[answerId]?.status).toBe("completed");
+		expect(nestedExecutionOf(state, childId)?.nestedSettlement).toMatchObject({
+			usageComplete: false,
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toEqual({
+			from: "waiting",
+			to: "failed",
+			reason: "Nested workflow usage evidence is incomplete.",
+		});
+	});
+
+	it("keeps an agent task out of the lane a running nested task occupies", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+			materializer.agent("answer", request()),
+		]);
+		const childId = tasks[0]?.ref.taskId ?? "";
+		const answerId = tasks[1]?.ref.taskId ?? "";
+		const { provider, completed } = nestedProvider();
+		const waiting = deferred<WorkflowNestedRunSettlement>();
+		provider.wait.mockImplementation(() => waiting.promise);
+		const ownerClient = client();
+		const { scheduler } = await nestedScheduler(journal, provider, {
+			ownerClient,
+			concurrency: 1,
+		});
+
+		const first = scheduler.drive();
+		await vi.waitFor(
+			() => expect(provider.wait).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		expect((await projection(journal)).tasks[childId]?.status).toBe("running");
+		await expect(scheduler.drive()).resolves.toMatchObject({ state: "idle" });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+		expect(ownerClient.launch).not.toHaveBeenCalled();
+		expect((await projection(journal)).tasks[answerId]?.status).toBe("pending");
+
+		waiting.resolve(completed(childRunIdOf(childId)));
+		await expect(first).resolves.toMatchObject({
+			state: "awaiting-finalization",
+			outcome: "completed",
+		});
+		expect(ownerClient.preflight).toHaveBeenCalledOnce();
+		expect(ownerClient.launch).toHaveBeenCalledOnce();
+		const state = await projection(journal);
+		expect(state.tasks[childId]?.status).toBe("completed");
+		expect(state.tasks[answerId]?.status).toBe("running");
+	});
+
+	it("blocks a required nested task and fails the run without a provider", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler, ownerClient } = await nestedScheduler(
+			journal,
+			undefined,
+		);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const message =
+			"Nested workflow execution is not configured for this workflow run.";
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("blocked");
+		expect(state.tasks[taskId]?.currentExecutionId).toBeUndefined();
+		const events = await journal.readEvents();
+		expect(statusChanges(events, "task-status-changed").at(-1)).toEqual({
+			taskId,
+			from: "ready",
+			to: "blocked",
+			reason: message,
+		});
+		expect(statusChanges(events, "run-status-changed").at(-1)).toEqual({
+			from: "running",
+			to: "failed",
+			reason: message,
+		});
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("blocks an optional nested task and proceeds without a provider", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested({ disposition: "optional" })),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler } = await nestedScheduler(journal, undefined);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[taskId]?.status).toBe("blocked");
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").at(-1),
+		).toMatchObject({
+			to: "blocked",
+			reason:
+				"Nested workflow execution is not configured for this workflow run.",
+		});
+	});
+
+	it("fails the run when a required nested run fails", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { provider, ended } = nestedProvider();
+		provider.wait.mockResolvedValue(ended("failed"));
+		const { scheduler, ownerClient } = await nestedScheduler(journal, provider);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		expect(provider.readOutput).not.toHaveBeenCalled();
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("failed");
+		expect(nestedExecutionOf(state, taskId)).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "failed",
+				evidence: {
+					kind: "nested-workflow",
+					childRunId: childRunIdOf(taskId),
+					status: "failed",
+				},
+			},
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toEqual({
+			from: "running",
+			to: "failed",
+			reason: "A required workflow task did not complete.",
+		});
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("keeps the run alive after an optional nested failure and blocks dependents", async () => {
+		const { journal, tasks } = await fixture((materializer) => {
+			const child = materializer.workflow(
+				"child",
+				nested({ disposition: "optional" }),
+			);
+			const dependent = materializer.agent(
+				"answer",
+				request({ after: [child.ref] }),
+			);
+			return [child, dependent];
+		});
+		const childId = tasks[0]?.ref.taskId ?? "";
+		const answerId = tasks[1]?.ref.taskId ?? "";
+		const { provider, ended } = nestedProvider();
+		provider.wait.mockResolvedValue(ended("failed"));
+		const { scheduler, ownerClient } = await nestedScheduler(journal, provider);
+
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[childId]?.status).toBe("failed");
+		expect(state.tasks[answerId]?.status).toBe("blocked");
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").some(
+				(change) => change.to === "failed",
+			),
+		).toBe(false);
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("interrupts the run when a required nested run is interrupted", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { provider, ended } = nestedProvider();
+		provider.wait.mockResolvedValue(ended("interrupted"));
+		const { scheduler } = await nestedScheduler(journal, provider);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "interrupted",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("interrupted");
+		expect(state.tasks[taskId]?.status).toBe("interrupted");
+		expect(nestedExecutionOf(state, taskId)?.terminal).toMatchObject({
+			outcome: "interrupted",
+			evidence: { kind: "nested-workflow", status: "interrupted" },
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toEqual({
+			from: "running",
+			to: "interrupted",
+			reason: "A required workflow task was interrupted.",
+		});
+	});
+
+	it("reconciles a cleanup-blocked nested run back into a completed task", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { provider, completed, ended } = nestedProvider();
+		provider.wait
+			.mockResolvedValueOnce(ended("cleanup-blocked"))
+			.mockImplementation(async (childRunId) => completed(childRunId));
+		const { scheduler, artifacts } = await nestedScheduler(journal, provider);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cleanup-blocked",
+		});
+		const blocked = await projection(journal);
+		expect(blocked.status).toBe("cleanup-blocked");
+		expect(blocked.tasks[taskId]?.status).toBe("cleanup-blocked");
+		expect(nestedExecutionOf(blocked, taskId)).toMatchObject({
+			phase: "terminal",
+			nestedSettlement: { status: "cleanup-blocked" },
+			terminal: {
+				outcome: "cleanup-blocked",
+				evidence: { kind: "nested-workflow", status: "cleanup-blocked" },
+			},
+		});
+		expect(provider.reconcile).not.toHaveBeenCalled();
+
+		await expect(scheduler.reconcile(taskId)).resolves.toEqual({
+			state: "idle",
+			runStatus: "running",
+		});
+		expect(provider.reconcile).toHaveBeenCalledExactlyOnceWith(
+			childRunIdOf(taskId),
+		);
+		expect(provider.wait).toHaveBeenCalledTimes(2);
+		const recovered = await projection(journal);
+		expect(recovered.status).toBe("running");
+		expect(recovered.tasks[taskId]?.status).toBe("completed");
+		expect(nestedExecutionOf(recovered, taskId)).toMatchObject({
+			phase: "terminal",
+			nestedSettlement: { status: "completed" },
+			terminal: {
+				outcome: "completed",
+				evidence: { kind: "nested-workflow", status: "completed" },
+			},
+		});
+		const results = Object.values(recovered.artifacts).filter(
+			(artifact) =>
+				artifact.producerTaskId === taskId && artifact.output === "result",
+		);
+		expect(results).toHaveLength(1);
+		const artifact = results[0];
+		if (!artifact) throw new Error("missing result artifact");
+		await expect(artifacts.readJson(artifact)).resolves.toEqual({
+			answer: "yes",
+		});
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect(provider.launch).toHaveBeenCalledOnce();
+	});
+
+	it("stops an in-flight nested run and drains its cancellation evidence", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { provider, ended } = nestedProvider();
+		const waiting = deferred<WorkflowNestedRunSettlement>();
+		provider.wait.mockImplementation(() => waiting.promise);
+		const { scheduler, ownerClient } = await nestedScheduler(journal, provider);
+
+		const drive = scheduler.drive();
+		await vi.waitFor(
+			() => expect(provider.wait).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		expect(scheduler.stopSignal.aborted).toBe(false);
+		const stop = scheduler.stop("operator stop");
+		await vi.waitFor(
+			() => expect(provider.stop).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		expect(provider.stop).toHaveBeenCalledWith(
+			childRunIdOf(taskId),
+			"operator stop",
+		);
+		expect(scheduler.stopSignal.aborted).toBe(true);
+		const stopping = await projection(journal);
+		expect(stopping.status).toBe("stopping");
+		expect(stopping.tasks[taskId]?.status).toBe("cancelling");
+
+		waiting.resolve(ended("cancelled"));
+		await expect(stop).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		await Promise.allSettled([drive]);
+		await expect(drive).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		expect(provider.wait).toHaveBeenCalledOnce();
+		const state = await projection(journal);
+		expect(state.status).toBe("cancelled");
+		expect(state.tasks[taskId]?.status).toBe("cancelled");
+		expect(nestedExecutionOf(state, taskId)).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "cancelled",
+				evidence: {
+					kind: "nested-workflow",
+					childRunId: childRunIdOf(taskId),
+					status: "cancelled",
+				},
+			},
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").map(
+				(change) => change.to,
+			),
+		).toEqual(["running", "stopping", "cancelled"]);
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("stops a launched nested run that no process is waiting on", async () => {
+		const fx = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = fx.tasks[0]?.ref.taskId ?? "";
+		const seed = nestedProvider();
+		await seedLaunchedNestedTask(fx.journal, taskId, seed.provider);
+		expect(seed.provider.launch).toHaveBeenCalledOnce();
+
+		const resumed = await rotateLease(fx);
+		const { provider, ended } = nestedProvider();
+		const waiting = deferred<WorkflowNestedRunSettlement>();
+		provider.wait.mockImplementation(() => waiting.promise);
+		provider.stop.mockImplementation(async () => {
+			waiting.resolve(ended("cancelled"));
+		});
+		const { scheduler, ownerClient } = await nestedScheduler(
+			resumed.journal,
+			provider,
+		);
+
+		await expect(scheduler.stop("operator stop")).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		expect(provider.stop).toHaveBeenCalledExactlyOnceWith(
+			childRunIdOf(taskId),
+			"operator stop",
+		);
+		expect(provider.wait).toHaveBeenCalledExactlyOnceWith(childRunIdOf(taskId));
+		const state = await projection(resumed.journal);
+		expect(state.status).toBe("cancelled");
+		expect(state.tasks[taskId]?.status).toBe("cancelled");
+		expect(nestedExecutionOf(state, taskId)).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "cancelled",
+				evidence: { kind: "nested-workflow", status: "cancelled" },
+			},
+		});
+		expect(
+			Object.values(state.executions).filter(
+				(execution) => execution.execution.taskId === taskId,
+			),
+		).toHaveLength(1);
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("resumes a launched nested run after lease rotation without relaunching", async () => {
+		const fx = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+		]);
+		const taskId = fx.tasks[0]?.ref.taskId ?? "";
+		const seed = nestedProvider();
+		await seedLaunchedNestedTask(fx.journal, taskId, seed.provider);
+
+		const resumed = await rotateLease(fx);
+		const { provider } = nestedProvider();
+		const { scheduler, ownerClient } = await nestedScheduler(
+			resumed.journal,
+			provider,
+		);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		expect(provider.wait).toHaveBeenCalledExactlyOnceWith(childRunIdOf(taskId));
+		expect(subagentCallCount(ownerClient)).toBe(0);
+		const state = await projection(resumed.journal);
+		expect(state.tasks[taskId]?.status).toBe("completed");
+		expect(
+			Object.values(state.executions).filter(
+				(execution) => execution.execution.taskId === taskId,
+			),
+		).toHaveLength(1);
+		expect(
+			Object.values(state.artifacts).filter(
+				(artifact) =>
+					artifact.producerTaskId === taskId && artifact.output === "result",
+			),
+		).toHaveLength(1);
+	});
+
+	it("re-waits a launched nested run after restart under a tight budget", async () => {
+		const fx = await fixture((materializer) => [
+			materializer.workflow(
+				"child",
+				nested({ budget: { cost: 0.4, childRuntimeMs: 60_000 } }),
+			),
+		]);
+		const taskId = fx.tasks[0]?.ref.taskId ?? "";
+		const seed = nestedProvider();
+		await seedLaunchedNestedTask(fx.journal, taskId, seed.provider);
+
+		const resumed = await rotateLease(fx);
+		const { provider } = nestedProvider();
+		const { scheduler } = await nestedScheduler(resumed.journal, provider, {
+			budget: { cost: 0.5, childRuntimeMs: 600_000 },
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		expect(provider.wait).toHaveBeenCalledExactlyOnceWith(childRunIdOf(taskId));
+		expect((await projection(resumed.journal)).tasks[taskId]?.status).toBe(
+			"completed",
+		);
+	});
+
+	it("stops and releases active children unchanged beside a completed nested task", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.workflow("child", nested()),
+			materializer.agent("first", request()),
+			materializer.agent("second", request()),
+		]);
+		const childId = tasks[0]?.ref.taskId ?? "";
+		const pending = [
+			deferred<ReturnType<typeof executionResult>>(),
+			deferred<ReturnType<typeof executionResult>>(),
+		];
+		const wait = vi.fn((runId: string) => {
+			const value = pending[Number(runId.at(-1))];
+			if (!value) throw new Error("unexpected child");
+			return value.promise;
+		});
+		const harness = concurrentClient("nestedstop", wait);
+		const interrupt = vi.fn(async (runId: string) => {
+			const index = Number(runId.at(-1));
+			pending[index]?.resolve(
+				executionResult({ ...result("cancelled"), runId }),
+			);
+			return {
+				runId,
+				attemptId: `attempt_nestedstop${index}`,
+				status: "stopping" as const,
+			};
+		});
+		const release = vi.fn(async (runId: string) => ({
+			runId,
+			attemptId: `attempt_nestedstop${Number(runId.at(-1))}`,
+			status: "cancelled" as const,
+		}));
+		const ownerClient = harness.ownerClient;
+		vi.mocked(ownerClient.interrupt).mockImplementation(interrupt);
+		vi.mocked(ownerClient.release).mockImplementation(release);
+		const { provider } = nestedProvider();
+		const { scheduler } = await nestedScheduler(journal, provider, {
+			ownerClient,
+			concurrency: 2,
+			finalize: true,
+		});
+
+		const drives = [scheduler.drive(), scheduler.drive()];
+		while (wait.mock.calls.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		expect(provider.launch).toHaveBeenCalledOnce();
+		expect((await projection(journal)).tasks[childId]?.status).toBe(
+			"completed",
+		);
+		await expect(scheduler.stop("operator stop")).resolves.toMatchObject({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		await Promise.allSettled(drives);
+		expect(interrupt).toHaveBeenCalledTimes(2);
+		expect(release).toHaveBeenCalledTimes(2);
+		expect(provider.stop).not.toHaveBeenCalled();
+		expect(provider.wait).toHaveBeenCalledOnce();
+		const state = await projection(journal);
+		expect(state.status).toBe("cancelled");
+		expect(state.tasks[childId]?.status).toBe("completed");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("cancelled");
+		expect(state.tasks[tasks[2]?.ref.taskId ?? ""]?.status).toBe("cancelled");
+		expect(nestedExecutionOf(state, childId)?.terminal).toMatchObject({
+			outcome: "completed",
+			evidence: { kind: "nested-workflow", status: "completed" },
+		});
 	});
 });
