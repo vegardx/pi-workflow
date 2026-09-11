@@ -6,6 +6,7 @@ import {
 	RunStatusSchema,
 } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
+import type { WorkflowArtifactStore } from "./artifact-store.js";
 import type {
 	SubagentTerminalEvidence,
 	TaskExecutionId,
@@ -28,6 +29,11 @@ import {
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
+import type { SupportTaskRegistration } from "./support.js";
+import {
+	createWorkflowSupportTaskExecutor,
+	type WorkflowSupportTaskExecutor,
+} from "./support-executor.js";
 import type { WorkflowTaskFinalizer } from "./task-finalizer.js";
 import {
 	createWorkflowTaskLauncher,
@@ -79,6 +85,8 @@ export type WorkflowSchedulerOutcome =
 
 export interface WorkflowSequentialScheduler {
 	readonly concurrency: number;
+	/** Aborted once durable stop intent exists; observed by support tasks. */
+	readonly stopSignal: AbortSignal;
 	drive(): Promise<WorkflowSchedulerOutcome>;
 	reconcile(taskId: WorkflowTaskId): Promise<WorkflowSchedulerOutcome>;
 	stop(reason: string): Promise<WorkflowSchedulerOutcome>;
@@ -91,7 +99,20 @@ export interface WorkflowSequentialSchedulerOptions {
 	readonly finalizer?: WorkflowTaskFinalizer;
 	readonly concurrency?: number;
 	readonly budget?: WorkflowBudget;
+	/**
+	 * Support execution: either an explicit executor, or the artifact store
+	 * plus the immutable constructor registry used to build one bound to this
+	 * scheduler's stop signal. Without either, support tasks fail closed.
+	 */
+	readonly supportExecutor?: WorkflowSupportTaskExecutor;
+	readonly artifacts?: WorkflowArtifactStore;
+	readonly supportTasks?: ReadonlyMap<string, SupportTaskRegistration>;
 }
+
+type PreparedWork =
+	| { state: "wait"; taskId: WorkflowTaskId; receipt: RunReceipt }
+	| { state: "support"; taskId: WorkflowTaskId }
+	| WorkflowSchedulerOutcome;
 
 export class WorkflowSchedulerError extends Error {
 	constructor(
@@ -249,6 +270,17 @@ export function createWorkflowSequentialScheduler(
 	const interrupting = new Set<WorkflowTaskId>();
 	const launcher =
 		options.launcher ?? createWorkflowTaskLauncher({ binding, journal });
+	const stopController = new AbortController();
+	const supportExecutor =
+		options.supportExecutor ??
+		(options.artifacts && options.supportTasks
+			? createWorkflowSupportTaskExecutor({
+					journal,
+					artifacts: options.artifacts,
+					registrations: options.supportTasks,
+					signal: () => stopController.signal,
+				})
+			: undefined);
 	const coordinationKey = journal.directory;
 
 	if (
@@ -537,10 +569,62 @@ export function createWorkflowSequentialScheduler(
 			: { allowed: true };
 	}
 
-	async function prepare(): Promise<
-		| { state: "wait"; taskId: WorkflowTaskId; receipt: RunReceipt }
-		| WorkflowSchedulerOutcome
-	> {
+	function isSupportTask(task: WorkflowTaskProjection): boolean {
+		return task.task.spec.kind === "support";
+	}
+
+	function occupiesLane(
+		current: WorkflowStateProjection,
+		task: WorkflowTaskProjection,
+	): boolean {
+		if (!ACTIVE_TASK_STATUSES.has(task.status)) return false;
+		if (isSupportTask(task)) return task.status === "running";
+		return executionFor(current, task)?.launchReceipt !== undefined;
+	}
+
+	async function failRunAfterRequiredSupportTask(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowSchedulerOutcome | undefined> {
+		const after = await state();
+		const task = after.tasks[taskId];
+		if (
+			task?.task.spec.disposition === "required" &&
+			(task.status === "failed" || task.status === "cancelled") &&
+			(after.status === "running" || after.status === "waiting")
+		) {
+			await changeRun(
+				after.status,
+				"failed",
+				"A required workflow task did not complete.",
+			);
+			return { state: "terminal", runStatus: "failed" };
+		}
+		return undefined;
+	}
+
+	async function prepareSupport(
+		selected: WorkflowTaskProjection,
+	): Promise<PreparedWork> {
+		const taskId = selected.task.id;
+		if (!supportExecutor) {
+			const message =
+				"Support task execution is not configured for this workflow run.";
+			await changeTask(taskId, selected.status, "blocked", message);
+			if (selected.task.spec.disposition === "required") {
+				await changeRun("running", "failed", message);
+				return { state: "terminal", runStatus: "failed" };
+			}
+			return prepare();
+		}
+		const intent = await supportExecutor.intend(taskId);
+		if (intent.state === "terminal") {
+			return (await failRunAfterRequiredSupportTask(taskId)) ?? prepare();
+		}
+		busy.add(taskId);
+		return { state: "support", taskId };
+	}
+
+	async function prepare(): Promise<PreparedWork> {
 		let current = await state();
 		if (
 			current.status === "completed" ||
@@ -575,10 +659,8 @@ export function createWorkflowSequentialScheduler(
 			current = await state();
 		}
 
-		const active = orderedTasks(current).filter(
-			(task) =>
-				ACTIVE_TASK_STATUSES.has(task.status) &&
-				executionFor(current, task)?.launchReceipt !== undefined,
+		const active = orderedTasks(current).filter((task) =>
+			occupiesLane(current, task),
 		);
 		let selected = active.find((task) => !busy.has(task.task.id));
 		if (!selected && active.length < concurrency) {
@@ -617,6 +699,10 @@ export function createWorkflowSequentialScheduler(
 				"selection",
 				"Selected workflow task disappeared.",
 			);
+		}
+
+		if (isSupportTask(selected)) {
+			return prepareSupport(selected);
 		}
 
 		const selectedExecution = executionFor(current, selected);
@@ -886,6 +972,35 @@ export function createWorkflowSequentialScheduler(
 		return drive();
 	}
 
+	async function continueAfterSupport(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowSchedulerOutcome> {
+		if (!supportExecutor) {
+			throw new WorkflowSchedulerError(
+				"validation",
+				"Support task executor disappeared during execution.",
+			);
+		}
+		const result = await supportExecutor.execute(taskId);
+		const failed = await failRunAfterRequiredSupportTask(taskId);
+		if (failed) return failed;
+		const after = await state();
+		if (
+			after.status === "failed" ||
+			after.status === "cancelled" ||
+			after.status === "interrupted" ||
+			after.status === "cleanup-blocked" ||
+			after.status === "completed" ||
+			after.status === "completed-degraded"
+		) {
+			return { state: "terminal", runStatus: after.status };
+		}
+		if (result.outcome === "cancelled" || after.status === "stopping") {
+			return { state: "stopping", runStatus: after.status };
+		}
+		return drive();
+	}
+
 	async function drive(): Promise<WorkflowSchedulerOutcome> {
 		const prepared = await mutate(prepare);
 		if (prepared.state === "stopping") {
@@ -893,11 +1008,20 @@ export function createWorkflowSequentialScheduler(
 		}
 		if (
 			prepared.state !== "wait" &&
+			prepared.state !== "support" &&
 			prepared.state !== "awaiting-finalization"
 		) {
 			return prepared;
 		}
 		try {
+			if (prepared.state === "support") {
+				const outcome = await continueAfterSupport(prepared.taskId);
+				if (outcome.state === "stopping") {
+					busy.delete(prepared.taskId);
+					return stop("Resume persisted workflow stop intent.");
+				}
+				return outcome;
+			}
 			if (prepared.state === "awaiting-finalization") {
 				return await continueAfterFinalization(prepared);
 			}
@@ -977,6 +1101,36 @@ export function createWorkflowSequentialScheduler(
 				await changeRun(current.status, "stopping", reason);
 				current = await state();
 			}
+			if (!stopController.signal.aborted) {
+				stopController.abort(new Error(reason));
+			}
+
+			const runningSupport = orderedTasks(current).filter(
+				(task) => isSupportTask(task) && task.status === "running",
+			);
+			for (const task of runningSupport) {
+				if (!supportExecutor) {
+					throw new WorkflowSchedulerError(
+						"stop",
+						"Running support task has no executor to cancel it.",
+					);
+				}
+				if (busy.has(task.task.id)) {
+					// An in-process execution observes the aborted stop signal and
+					// terminalizes promptly even when its implementation ignores
+					// abort; this waits only for that bounded drain, never for the
+					// implementation itself.
+					await supportExecutor.execute(task.task.id);
+					continue;
+				}
+				await supportExecutor.cancel(task.task.id, reason);
+			}
+			if (runningSupport.length > 0) {
+				current = await state();
+			}
+			const supportStillRunning = orderedTasks(current).some(
+				(task) => isSupportTask(task) && task.status === "running",
+			);
 
 			const active = orderedTasks(current).filter((task) => {
 				const execution = executionFor(current, task);
@@ -1035,6 +1189,9 @@ export function createWorkflowSequentialScheduler(
 					child: { ...receipt, status: execution.settlement.evidence.status },
 					outcome: outcomeFromStatus(execution.settlement.evidence.status),
 				} as const;
+			}
+			if (!selected && supportStillRunning) {
+				return { state: "stopping", runStatus: "stopping" } as const;
 			}
 			if (!selected) {
 				await changeRun("stopping", "cancelled", reason);
@@ -1113,5 +1270,11 @@ export function createWorkflowSequentialScheduler(
 		}
 	}
 
-	return Object.freeze({ concurrency, drive, reconcile, stop });
+	return Object.freeze({
+		concurrency,
+		stopSignal: stopController.signal,
+		drive,
+		reconcile,
+		stop,
+	});
 }

@@ -400,6 +400,8 @@ export async function createWorkflowService(
 			binding,
 			launcher,
 			finalizer,
+			artifacts,
+			supportTasks,
 			concurrency: record.concurrency,
 			budget: record.effectiveBudget,
 		});

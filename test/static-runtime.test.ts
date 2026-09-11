@@ -100,6 +100,7 @@ function schedulerFor(
 ): WorkflowSequentialScheduler & { calls: number } {
 	const scheduler = {
 		concurrency: 1,
+		stopSignal: new AbortController().signal,
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
@@ -671,6 +672,7 @@ describe("static workflow runtime", () => {
 		const message = "Subagent preflight failed before launch.";
 		const scheduler: WorkflowSequentialScheduler = {
 			concurrency: 1,
+			stopSignal: new AbortController().signal,
 			async drive() {
 				let current = reduceWorkflowEvents(await journal.readEvents());
 				if (current.status === "created") {
