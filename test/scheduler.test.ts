@@ -692,7 +692,7 @@ describe("durable sequential scheduler", () => {
 				(execution) => execution.settlement?.evidence.status === "completed",
 			),
 		).toBe(true);
-	}, 15_000);
+	});
 
 	it("reacquires every active child after lease rotation", async () => {
 		const { journal, lease, root } = await fixture((materializer) => [
@@ -754,7 +754,7 @@ describe("durable sequential scheduler", () => {
 		expect(new Set(resumedWait.mock.calls.map(([runId]) => runId))).toEqual(
 			new Set(["run_restart0", "run_restart1"]),
 		);
-	}, 15_000);
+	});
 
 	it("stops and releases every concurrently active child", async () => {
 		const { journal } = await fixture((materializer) => [
@@ -854,7 +854,7 @@ describe("durable sequential scheduler", () => {
 			"cancelled",
 			"cancelled",
 		]);
-	}, 15_000);
+	});
 
 	it("keeps parallel stop action-required after one interrupt fails", async () => {
 		const { journal } = await fixture((materializer) => [
@@ -927,7 +927,7 @@ describe("durable sequential scheduler", () => {
 		await Promise.allSettled(drives);
 		expect(interrupt).toHaveBeenCalledTimes(3);
 		expect(release).toHaveBeenCalledTimes(2);
-	}, 15_000);
+	});
 
 	it("replays a settled task without relaunching or waiting again", async () => {
 		const { journal } = await fixture();
@@ -1417,7 +1417,7 @@ function statusChanges(
 
 // Full lifecycle cases here take 1-2 s locally and exceeded the 5 s default
 // under Ubuntu CI load (run 34596885650); use the file's existing allowance.
-describe("support task scheduling", { timeout: 15_000 }, () => {
+describe("support task scheduling", () => {
 	it("completes a support-only graph without any subagent call", async () => {
 		const { journal, tasks } = await fixture((materializer) => [
 			materializer.support("left", echo({ parameters: { value: "left" } })),
@@ -1988,7 +1988,7 @@ describe("support task scheduling", { timeout: 15_000 }, () => {
 				state.tasks[tasks[0]?.ref.taskId ?? ""]?.currentExecutionId ?? ""
 			]?.terminal,
 		).toMatchObject({ outcome: "completed", evidence: { kind: "support" } });
-	}, 15_000);
+	});
 
 	it("admits an agent task against the budget while a support task is running", async () => {
 		const { journal, tasks } = await fixture((materializer) => [
@@ -2277,10 +2277,10 @@ function nestedExecutionOf(
 
 // vi.waitFor defaults to 1 s; under Ubuntu CI load (run 34819667769) the first
 // drive's journal appends took longer than that before the provider mock was
-// invoked, so these waits share the suite allowance.
-const WAIT_FOR = { timeout: 15_000, interval: 5 };
+// invoked, so these waits share the suite-wide bound from vitest.config.ts.
+const WAIT_FOR = { timeout: 60_000, interval: 5 };
 
-describe("nested workflow scheduling", { timeout: 15_000 }, () => {
+describe("nested workflow scheduling", () => {
 	it("completes a nested-only graph through the provider without any subagent call", async () => {
 		const { journal, tasks } = await fixture((materializer) => [
 			materializer.workflow("child", nested()),

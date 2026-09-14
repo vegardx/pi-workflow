@@ -607,7 +607,7 @@ describe("static workflow runtime nested workflows", () => {
 			stage: "validation",
 			message: "Nested workflow name is invalid.",
 		});
-	}, 15_000);
+	});
 
 	it("rejects nested declarations at the depth bound", async () => {
 		await expect(
@@ -626,7 +626,7 @@ describe("static workflow runtime nested workflows", () => {
 			stage: "validation",
 			message: "Nested workflow depth bound exceeded.",
 		});
-	}, 15_000);
+	});
 
 	it("rejects recursive nested declarations", async () => {
 		const child = await discoveredChild();
@@ -653,7 +653,7 @@ describe("static workflow runtime nested workflows", () => {
 			stage: "validation",
 			message: "Nested workflow recursion is not allowed.",
 		});
-	}, 15_000);
+	});
 
 	it("rejects nested input that does not match the child schema", async () => {
 		await expect(
@@ -675,7 +675,7 @@ describe("static workflow runtime nested workflows", () => {
 			stage: "validation",
 			message: "Nested workflow input is not losslessly JSON-serializable.",
 		});
-	}, 15_000);
+	});
 
 	it("declares, completes, and replays a nested workflow task", async () => {
 		const { journal, artifacts } = await fixture();
@@ -749,7 +749,7 @@ describe("static workflow runtime nested workflows", () => {
 			value: { answer: "from child" },
 		});
 		expect(scheduler.calls).toBe(1);
-	}, 15_000);
+	});
 
 	it("projects nested workflow failure into settled results", async () => {
 		const { journal, artifacts } = await fixture();
@@ -808,7 +808,7 @@ describe("static workflow runtime nested workflows", () => {
 			message: "failed",
 		});
 		expect(declaredTaskId).not.toBe("");
-	}, 15_000);
+	});
 });
 
 describe("static workflow runtime", () => {
@@ -919,7 +919,7 @@ describe("static workflow runtime", () => {
 			"completed",
 			"completed",
 		]);
-	}, 15_000);
+	});
 
 	it("returns declaration-ordered fulfilled settled results", async () => {
 		const { journal, artifacts } = await fixture();
@@ -978,7 +978,7 @@ describe("static workflow runtime", () => {
 		expect(
 			Object.values(state.tasks).map((task) => task.task.namespace),
 		).toEqual([["items"], ["items"]]);
-	}, 15_000);
+	});
 
 	it("materializes a namespace-scoped pipeline with explicit artifact flow", async () => {
 		const { journal, artifacts } = await fixture();
@@ -1032,7 +1032,7 @@ describe("static workflow runtime", () => {
 		expect(tasks[1]?.spec.after).toEqual([
 			{ runId: tasks[0]?.runId, taskId: tasks[0]?.id },
 		]);
-	}, 15_000);
+	});
 
 	it("rejects oversized pipelines and foreign final handles", async () => {
 		for (const kind of ["oversized", "foreign"] as const) {
@@ -1130,7 +1130,7 @@ describe("static workflow runtime", () => {
 			"item-1",
 		]);
 		expect(aggregate?.spec.after).toHaveLength(2);
-	}, 15_000);
+	});
 
 	it("rejects empty and duplicate-key fan-in before its barrier", async () => {
 		for (const kind of ["empty", "duplicate"] as const) {

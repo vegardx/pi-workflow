@@ -453,10 +453,7 @@ async function blockedRun(name: string) {
 	};
 }
 
-// Full-service runs with several tasks take 1-1.5 s locally and exceeded the
-// 5 s default under Ubuntu CI load (run 34595740223), so this suite uses the
-// same allowance as the scheduler lease-rotation test.
-describe("support task execution", { timeout: 15_000 }, () => {
+describe("support task execution", () => {
 	it("completes a support-only workflow without any subagent call", async () => {
 		const calls: string[] = [];
 		const fx = await fixture(

@@ -44,5 +44,5 @@ describe("package contract", () => {
 		expect(publicApi.WORKFLOW_RUNTIME_CONTRACT.schema).toBe(
 			"pi-workflow-runtime",
 		);
-	}, 30_000);
+	});
 });
