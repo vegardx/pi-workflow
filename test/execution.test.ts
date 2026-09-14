@@ -100,7 +100,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 12,
+		contractRevision: 13,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -1685,6 +1685,7 @@ function nestedTask(
 		key?: string;
 		position?: number;
 		request?: Partial<NestedWorkflowTaskRequest>;
+		after?: MaterializedNestedWorkflowTask["spec"]["after"];
 		inputs?: MaterializedNestedWorkflowTask["spec"]["inputs"];
 	} = {},
 ): MaterializedNestedWorkflowTask {
@@ -1695,7 +1696,7 @@ function nestedTask(
 		key,
 		kind: "workflow" as const,
 		disposition: "required" as const,
-		after: [],
+		after: options.after ?? [],
 		inputs: options.inputs ?? {},
 		replay: "read-only" as const,
 		request: { ...nestedRequest(), ...options.request },
@@ -1800,6 +1801,8 @@ function nestedIntent(
 			childRunId: setup.execution.childRunId,
 			definitionIdentitySha256: request.definitionIdentitySha256,
 			inputSha256: request.inputSha256,
+			inputsSha256: deriveJsonValueSha256({}),
+			resolvedInputSha256: request.inputSha256,
 			budget: structuredClone(request.budget),
 			timeoutMs: request.timeoutMs,
 			deadlineAt: "2026-09-01T00:10:00.000Z",
@@ -1927,6 +1930,59 @@ function completedLadder(setup: NestedSetup): WorkflowEventInput[] {
 	];
 }
 
+function setupNestedInputEvents(
+	options: { after?: boolean } = {},
+): NestedSetup & { producerTaskId: WorkflowTaskId } {
+	const materializer = new WorkflowTaskMaterializer({
+		runId: "workflow_execution",
+		definitionIdentitySha256,
+		inputSha256,
+	});
+	const producer = materializer.agent("answer", request());
+	const producerDeclaration = materializer
+		.closeEpoch("final", [producer])
+		.events.find((event) => event.type === "task-declared");
+	if (producerDeclaration?.type !== "task-declared") {
+		throw new Error("missing producer declaration");
+	}
+	const task = nestedTask({
+		position: 2,
+		after: options.after === false ? [] : [producer.ref],
+		inputs: { answer: producer.output.ref },
+	});
+	const record = nestedExecution(task);
+	return {
+		task,
+		execution: record,
+		producerTaskId: producer.ref.taskId,
+		events: [
+			runCreated(),
+			producerDeclaration,
+			{ type: "task-declared", data: { task } },
+			{
+				type: "barrier-reached",
+				data: { epoch: 1, kind: "final", taskIds: [task.id] },
+			},
+			{
+				type: "run-status-changed",
+				data: { from: "created", to: "running" },
+			},
+			...completedAgentEvents(
+				producer.ref.taskId,
+				execution(
+					producer.ref.taskId,
+					producerDeclaration.data.task.spec.identitySha256,
+				),
+			),
+			{
+				type: "task-status-changed",
+				data: { taskId: task.id, from: "pending", to: "ready" },
+			},
+			{ type: "task-execution-created", data: { execution: record } },
+		],
+	};
+}
+
 describe("nested workflow task execution persistence", () => {
 	it("derives a deterministic child run identity", () => {
 		const childRunId = deriveNestedWorkflowRunId(
@@ -2032,7 +2088,7 @@ describe("nested workflow task execution persistence", () => {
 					},
 				]),
 			),
-		).toThrow("event payload does not match a known workflow event");
+		).toThrow("task data dependency is unknown");
 	});
 
 	it("bounds the number of workflow tasks per run", () => {
@@ -2211,6 +2267,226 @@ describe("nested workflow task execution persistence", () => {
 				]),
 			),
 		).not.toThrow();
+	});
+
+	it("declares artifact inputs on a workflow task with their order dependency", () => {
+		const setup = setupNestedInputEvents();
+		const state = reduceWorkflowEvents(records(setup.events));
+		expect(state.tasks[setup.task.id]).toMatchObject({
+			status: "ready",
+			committed: true,
+			task: {
+				spec: {
+					inputs: {
+						answer: {
+							runId: "workflow_execution",
+							producerTaskId: setup.producerTaskId,
+							output: "result",
+						},
+					},
+				},
+			},
+		});
+		const withoutOrder = setupNestedInputEvents({ after: false });
+		expect(() =>
+			reduceWorkflowEvents(records(withoutOrder.events.slice(0, 3))),
+		).toThrow("task data dependency lacks its order dependency");
+		const unknownProducer = nestedTask({
+			inputs: {
+				answer: {
+					runId: "workflow_execution",
+					producerTaskId: `task_${"7".repeat(64)}`,
+					output: "result",
+				},
+			},
+		});
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					runCreated(),
+					{ type: "task-declared", data: { task: unknownProducer } },
+				]),
+			),
+		).toThrow("task data dependency is unknown");
+	});
+
+	it("binds nested intent input digests to the declared inputs", () => {
+		const setup = setupNestedEvents();
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...setup.events,
+					nestedIntent(setup, { inputsSha256: "9".repeat(64) }),
+				]),
+			),
+		).toThrow("nested workflow intent input artifacts do not match its task");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...setup.events,
+					nestedIntent(setup, { resolvedInputSha256: "9".repeat(64) }),
+				]),
+			),
+		).toThrow(
+			"nested workflow intent resolved input does not match its declared input",
+		);
+		const withInputs = setupNestedInputEvents();
+		const inputsSha256 = deriveJsonValueSha256({
+			answer: structuredOutputSha256,
+		});
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...withInputs.events,
+					nestedIntent(withInputs, {
+						inputsSha256: deriveJsonValueSha256({}),
+						resolvedInputSha256: "9".repeat(64),
+					}),
+				]),
+			),
+		).toThrow("nested workflow intent input artifacts do not match its task");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...withInputs.events,
+					nestedIntent(withInputs, {
+						inputsSha256: deriveJsonValueSha256({
+							answer: "9".repeat(64),
+						}),
+						resolvedInputSha256: "9".repeat(64),
+					}),
+				]),
+			),
+		).toThrow("nested workflow intent input artifacts do not match its task");
+		const state = reduceWorkflowEvents(
+			records([
+				...withInputs.events,
+				nestedIntent(withInputs, {
+					inputsSha256,
+					resolvedInputSha256: "9".repeat(64),
+				}),
+			]),
+		);
+		expect(state.executions[withInputs.execution.id]).toMatchObject({
+			phase: "nested-intended",
+			nestedIntent: {
+				inputSha256: withInputs.task.spec.request.inputSha256,
+				inputsSha256,
+				resolvedInputSha256: "9".repeat(64),
+			},
+		});
+		const missingArtifact = setupNestedInputEvents();
+		const producerArtifactIndex = missingArtifact.events.findIndex(
+			(event) => event.type === "artifact-declared",
+		);
+		expect(producerArtifactIndex).toBeGreaterThan(0);
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...missingArtifact.events.slice(0, producerArtifactIndex),
+					{
+						type: "task-status-changed",
+						data: {
+							taskId: missingArtifact.task.id,
+							from: "pending",
+							to: "ready",
+						},
+					},
+				]),
+			),
+		).toThrow("task became ready before its dependencies completed");
+	});
+
+	it("binds the nested-input failure stage to the pre-launch phases", () => {
+		const setup = setupNestedInputEvents();
+		const inputsSha256 = deriveJsonValueSha256({
+			answer: structuredOutputSha256,
+		});
+		const fromCreated = reduceWorkflowEvents(
+			records([
+				...setup.events,
+				workflowFailure(
+					setup.execution.id,
+					"failed",
+					"nested-input",
+					"input schema rejected the merged input",
+				),
+				{
+					type: "task-status-changed",
+					data: { taskId: setup.task.id, from: "ready", to: "failed" },
+				},
+			]),
+		);
+		expect(fromCreated.tasks[setup.task.id]?.status).toBe("failed");
+		expect(fromCreated.executions[setup.execution.id]?.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { stage: "nested-input" },
+		});
+		const intent = nestedIntent(setup, {
+			inputsSha256,
+			resolvedInputSha256: "9".repeat(64),
+		});
+		const fromIntended = reduceWorkflowEvents(
+			records([
+				...setup.events,
+				intent,
+				workflowFailure(
+					setup.execution.id,
+					"failed",
+					"nested-input",
+					"merged input digest changed",
+				),
+			]),
+		);
+		expect(fromIntended.executions[setup.execution.id]?.terminal).toMatchObject(
+			{ outcome: "failed", evidence: { stage: "nested-input" } },
+		);
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...setup.events,
+					intent,
+					nestedLaunched(setup),
+					workflowFailure(
+						setup.execution.id,
+						"failed",
+						"nested-input",
+						"too late",
+					),
+				]),
+			),
+		).toThrow("workflow terminal evidence is inconsistent");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...setup.events,
+					workflowFailure(
+						setup.execution.id,
+						"cancelled",
+						"nested-input",
+						"stopped",
+					),
+				]),
+			),
+		).toThrow("workflow terminal evidence is inconsistent");
+		const agent = setupEvents();
+		const support = setupSupportEvents();
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...agent.events,
+					workflowFailure(agent.execution.id, "failed", "nested-input", "x"),
+				]),
+			),
+		).toThrow("workflow terminal evidence is inconsistent");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...support.events,
+					workflowFailure(support.execution.id, "failed", "nested-input", "x"),
+				]),
+			),
+		).toThrow("workflow terminal evidence is inconsistent");
 	});
 
 	it("rejects launch and settlement out of order", () => {

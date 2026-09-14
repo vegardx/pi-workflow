@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 12 as const;
+export const WORKFLOW_CONTRACT_REVISION = 13 as const;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 export const MAX_NESTED_WORKFLOW_DEPTH = 4;
@@ -186,6 +186,30 @@ export const WorkflowArtifactIdSchema = Type.String({
 });
 export type WorkflowArtifactId = Static<typeof WorkflowArtifactIdSchema>;
 
+export const NestedWorkflowInputArtifactSchema = Type.Object(
+	{
+		runId: WorkflowRunIdSchema,
+		artifactId: WorkflowArtifactIdSchema,
+		sha256: Sha256Schema,
+	},
+	{ additionalProperties: false },
+);
+export type NestedWorkflowInputArtifact = Static<
+	typeof NestedWorkflowInputArtifactSchema
+>;
+
+export const NestedWorkflowInputArtifactsSchema = Type.Record(
+	TaskKeySchema,
+	NestedWorkflowInputArtifactSchema,
+	{
+		additionalProperties: false,
+		maxProperties: 64,
+	},
+);
+export type NestedWorkflowInputArtifacts = Static<
+	typeof NestedWorkflowInputArtifactsSchema
+>;
+
 export const WorkflowArtifactRefSchema = Type.Object(
 	{
 		id: WorkflowArtifactIdSchema,
@@ -346,10 +370,7 @@ export const NestedWorkflowTaskSpecSchema = Type.Object(
 			maxItems: 256,
 			uniqueItems: true,
 		}),
-		inputs: Type.Record(TaskKeySchema, WorkflowArtifactHandleRefSchema, {
-			additionalProperties: false,
-			maxProperties: 0,
-		}),
+		inputs: TaskInputsSchema,
 		replay: ReplayPolicySchema,
 		request: NestedWorkflowTaskRequestSchema,
 		identitySha256: Sha256Schema,
@@ -514,6 +535,7 @@ export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
 			Type.Literal("nested-resolution"),
 			Type.Literal("nested-launch"),
 			Type.Literal("nested-import"),
+			Type.Literal("nested-input"),
 		]),
 		failureSha256: Sha256Schema,
 		message: Type.String({ minLength: 1, maxLength: 4096 }),
@@ -617,6 +639,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				worktrees: Type.Boolean(),
 				supportTaskExecution: Type.Boolean(),
 				nestedWorkflows: Type.Boolean(),
+				nestedArtifactInputs: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -673,6 +696,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			worktrees: false,
 			supportTaskExecution: true,
 			nestedWorkflows: true,
+			nestedArtifactInputs: true,
 		}),
 	},
 );

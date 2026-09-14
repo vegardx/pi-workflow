@@ -167,6 +167,8 @@ function nestedSchedulerFor(
 				childRunId,
 				definitionIdentitySha256: spec.request.definitionIdentitySha256,
 				inputSha256: spec.request.inputSha256,
+				inputsSha256: deriveJsonValueSha256({}),
+				resolvedInputSha256: spec.request.inputSha256,
 				budget: structuredClone(spec.request.budget),
 				timeoutMs: spec.request.timeoutMs,
 				deadlineAt: new Date(Date.now() + 1_000).toISOString(),

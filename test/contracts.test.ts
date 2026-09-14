@@ -9,6 +9,8 @@ import {
 	MAX_NESTED_WORKFLOW_TASKS,
 	MaterializedAgentTaskSchema,
 	MaterializedWorkflowTaskSchema,
+	NestedWorkflowInputArtifactSchema,
+	NestedWorkflowInputArtifactsSchema,
 	NestedWorkflowTaskSpecSchema,
 	NestedWorkflowTerminalEvidenceSchema,
 	SupportTaskTerminalEvidenceSchema,
@@ -120,14 +122,15 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 12 and rejects revision 11 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(12);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(12);
+	it("publishes revision 13 and rejects revision 12 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(13);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(13);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 12,
+			contractRevision: 13,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -142,12 +145,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 11,
+				contractRevision: 12,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 12,
+			contractRevision: 13,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -171,9 +174,57 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 11,
+				contractRevision: 12,
 			}),
 		).toBe(false);
+	});
+
+	it("publishes the nested artifact input feature and its schemas", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
+		expect(
+			isWorkflowRuntimeContract({
+				...WORKFLOW_RUNTIME_CONTRACT,
+				features: {
+					...WORKFLOW_RUNTIME_CONTRACT.features,
+					nestedArtifactInputs: undefined,
+				},
+			}),
+		).toBe(false);
+		const artifact = {
+			runId: "workflow_parent",
+			artifactId: `artifact_${sha}`,
+			sha256: sha,
+		};
+		expect(Value.Check(NestedWorkflowInputArtifactSchema, artifact)).toBe(true);
+		expect(
+			Value.Check(NestedWorkflowInputArtifactSchema, {
+				...artifact,
+				producerTaskId: "task_abc123",
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(NestedWorkflowInputArtifactSchema, {
+				...artifact,
+				artifactId: "artifact_short",
+			}),
+		).toBe(false);
+		expect(Value.Check(NestedWorkflowInputArtifactsSchema, {})).toBe(true);
+		expect(
+			Value.Check(NestedWorkflowInputArtifactsSchema, { answer: artifact }),
+		).toBe(true);
+		expect(
+			Value.Check(NestedWorkflowInputArtifactsSchema, {
+				"Answer 1": artifact,
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowExecutionFailureEvidenceSchema, {
+				kind: "workflow",
+				stage: "nested-input",
+				failureSha256: sha,
+				message: "failed",
+			}),
+		).toBe(true);
 	});
 
 	it("discriminates execution records and terminal evidence by kind", () => {
@@ -289,7 +340,31 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(NestedWorkflowTaskSpecSchema, {
 				...spec,
+				inputs: {
+					answer: {
+						runId: "workflow_abc123",
+						producerTaskId: "task_abc123",
+						output: "result",
+					},
+				},
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(NestedWorkflowTaskSpecSchema, {
+				...spec,
 				inputs: { answer: artifactRef() },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(NestedWorkflowTaskSpecSchema, {
+				...spec,
+				inputs: {
+					"Answer 1": {
+						runId: "workflow_abc123",
+						producerTaskId: "task_abc123",
+						output: "result",
+					},
+				},
 			}),
 		).toBe(false);
 		expect(
@@ -356,6 +431,7 @@ describe("workflow contracts", () => {
 			"nested-resolution",
 			"nested-launch",
 			"nested-import",
+			"nested-input",
 		]) {
 			expect(
 				Value.Check(WorkflowExecutionFailureEvidenceSchema, {

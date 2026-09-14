@@ -7,7 +7,9 @@ import { Value } from "typebox/value";
 import {
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_WORKFLOW_CONCURRENCY,
+	NestedWorkflowInputArtifactsSchema,
 	TaskExecutionIdSchema,
+	TaskKeySchema,
 	WORKFLOW_CONTRACT_REVISION,
 	WorkflowBudgetSchema,
 	WorkflowDefinitionNameSchema,
@@ -34,6 +36,7 @@ export const WorkflowRunRecordSchema = Type.Object(
 						Type.String({ pattern: "^[a-f0-9]{64}$" }),
 						{ minItems: 1, maxItems: MAX_NESTED_WORKFLOW_DEPTH - 1 },
 					),
+					inputArtifacts: NestedWorkflowInputArtifactsSchema,
 				},
 				{ additionalProperties: false },
 			),
@@ -74,10 +77,15 @@ export class WorkflowRunRecordError extends Error {
 
 function hasValidLineage(record: WorkflowRunRecord): boolean {
 	if (record.parent === undefined) return record.depth === 0;
+	const parent = record.parent;
 	return (
 		record.depth >= 1 &&
-		record.parent.runId !== record.runId &&
-		record.parent.ancestorDefinitionIdentities.length === record.depth
+		parent.runId !== record.runId &&
+		parent.ancestorDefinitionIdentities.length === record.depth &&
+		Object.entries(parent.inputArtifacts).every(
+			([name, artifact]) =>
+				Value.Check(TaskKeySchema, name) && artifact.runId === parent.runId,
+		)
 	);
 }
 

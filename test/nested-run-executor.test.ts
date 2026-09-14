@@ -372,6 +372,8 @@ async function intendedByHand(fx: Fixture): Promise<void> {
 		childRunId: fx.childRunId,
 		definitionIdentitySha256: request.definitionIdentitySha256,
 		inputSha256: request.inputSha256,
+		inputsSha256: deriveJsonValueSha256({}),
+		resolvedInputSha256: request.inputSha256,
 		budget: request.budget,
 		timeoutMs: request.timeoutMs,
 		deadlineAt: new Date(Date.now() + request.timeoutMs).toISOString(),
