@@ -2310,6 +2310,7 @@ describe("nested workflow scheduling", () => {
 			definitionIdentitySha256: childDefinitionIdentitySha256,
 			definitionSourceSha256: childDefinitionSourceSha256,
 			input: { value: "yes" },
+			inputArtifacts: {},
 			budget: { cost: 0.3, childRuntimeMs: 60_000 },
 			deadlineAt: expect.stringMatching(/^\d{4}-/),
 			concurrency: 2,

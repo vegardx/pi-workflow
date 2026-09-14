@@ -651,6 +651,7 @@ describe("nested run executor launch", () => {
 			definitionIdentitySha256: childIdentitySha256,
 			definitionSourceSha256: childSourceSha256,
 			input: CHILD_INPUT,
+			inputArtifacts: {},
 			budget: spec.request.budget,
 			deadlineAt: intent.deadlineAt,
 			concurrency: spec.request.concurrency,
