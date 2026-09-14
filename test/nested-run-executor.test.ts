@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import {
@@ -8,6 +10,7 @@ import {
 } from "../src/artifact-store.js";
 import type {
 	MaterializedNestedWorkflowTask,
+	NestedWorkflowInputArtifacts,
 	NestedWorkflowTaskRequest,
 	NestedWorkflowUsage,
 	WorkflowArtifactRef,
@@ -46,6 +49,7 @@ import {
 } from "../src/persistence/run-lease.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
 import { defineSupportTask } from "../src/support.js";
+import { createWorkflowSupportTaskExecutor } from "../src/support-executor.js";
 
 const RUN_ID = "workflow_nestedrunexecutor";
 const parentIdentitySha256 = "a".repeat(64);
@@ -467,7 +471,12 @@ async function expectLaunched(fx: Fixture): Promise<TaskExecutionProjection> {
 async function expectWorkflowFailure(
 	fx: Fixture,
 	outcome: "failed" | "cancelled" | "cleanup-blocked",
-	stage: "nested-resolution" | "nested-launch" | "nested-import" | "stop",
+	stage:
+		| "nested-resolution"
+		| "nested-input"
+		| "nested-launch"
+		| "nested-import"
+		| "stop",
 	message: string,
 ): Promise<WorkflowStateProjection> {
 	const state = await projection(fx);
@@ -1579,5 +1588,565 @@ describe("nested run executor validation", () => {
 			depth: 2,
 			ancestorDefinitionIdentities: ["e".repeat(64), parentIdentitySha256],
 		});
+	});
+});
+
+describe("nested artifact inputs", () => {
+	const AUTHORED_INPUT = { mode: "fast" };
+	const DOC_SCHEMA = {
+		type: "object",
+		properties: { text: { type: "string" } },
+		required: ["text"],
+		additionalProperties: false,
+	};
+	const schemaMessage = "Nested workflow input does not match its schema.";
+	const boundMessage =
+		"Nested workflow input exceeds the workflow input bound.";
+	const readMessage = "Nested workflow inputs could not be read and verified.";
+	const objectMessage =
+		"Nested workflow artifact inputs require an object input.";
+	const collisionMessage =
+		"Nested workflow input name collides with the authored input.";
+	const driftMessage =
+		"Nested workflow resolved input drifted from durable intent.";
+
+	const docHelper = defineSupportTask({
+		name: "@vegardx/workflow-tools/doc",
+		moduleSpecifier: "@vegardx/workflow-tools",
+		revision: 1,
+		implementationSha256: "9".repeat(64),
+		parametersSchema: Type.Object({
+			text: Type.String(),
+			repeat: Type.Integer({ minimum: 1 }),
+		}),
+		outputSchema: Type.Object({ text: Type.String() }),
+	});
+	const docRegistration = docHelper.registration(({ parameters }) => ({
+		text: parameters.text.repeat(parameters.repeat),
+	}));
+
+	type DocParameters = { text: string; repeat: number };
+
+	interface InputFixture extends Fixture {
+		/** Producer task ids keyed by the child's input name. */
+		readonly producers: Readonly<Record<string, WorkflowTaskId>>;
+		readonly authored: unknown;
+	}
+
+	interface InputFixtureOptions {
+		/** Input names in declaration order; each gets its own producer. */
+		readonly names?: readonly string[];
+		readonly parameters?: Readonly<Record<string, DocParameters>>;
+		readonly input?: unknown;
+		readonly inputSchema?: NestedWorkflowTaskRequest["inputSchema"];
+	}
+
+	function inputSchemaFor(
+		names: readonly string[],
+	): NestedWorkflowTaskRequest["inputSchema"] {
+		return {
+			type: "object",
+			properties: {
+				mode: { type: "string" },
+				...Object.fromEntries(names.map((name) => [name, DOC_SCHEMA])),
+			},
+			required: ["mode", ...names],
+			additionalProperties: false,
+		};
+	}
+
+	async function inputFixture(
+		options: InputFixtureOptions = {},
+	): Promise<InputFixture> {
+		const names = options.names ?? ["doc"];
+		const authored = options.input ?? AUTHORED_INPUT;
+		const root = path.resolve(
+			".pi",
+			"test-nested-run-executor",
+			`run-${randomUUID()}`,
+		);
+		const { lease, journal } = await openJournal(root, "nested-executor-test");
+		await journal.append("run-created", {
+			definitionIdentitySha256: parentIdentitySha256,
+			inputSha256,
+		});
+		const materializer = new WorkflowTaskMaterializer({
+			runId: RUN_ID,
+			definitionIdentitySha256: parentIdentitySha256,
+			inputSha256,
+		});
+		const producers = names.map((name) => ({
+			name,
+			handle: materializer.support(
+				`producer-${name}`,
+				docHelper({
+					parameters: options.parameters?.[name] ?? { text: name, repeat: 1 },
+				}),
+			),
+		}));
+		const child = materializer.workflow("child", {
+			request: nestedRequest({
+				input: authored,
+				inputSha256: deriveJsonValueSha256(authored),
+				inputSchema: options.inputSchema ?? inputSchemaFor([...names].sort()),
+			}),
+			inputs: Object.fromEntries(
+				producers.map(({ name, handle }) => [name, handle.output]),
+			),
+		});
+		for (const event of materializer.closeEpoch("final", [child]).events) {
+			await journal.appendEvent(event);
+		}
+		await journal.append("run-status-changed", {
+			from: "created",
+			to: "running",
+		});
+		for (const { handle } of producers) {
+			await journal.append("task-status-changed", {
+				taskId: handle.ref.taskId,
+				from: "pending",
+				to: "ready",
+			});
+		}
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		return {
+			root,
+			lease,
+			journal,
+			artifacts,
+			taskId: child.ref.taskId,
+			supportId: undefined,
+			executionId: deriveTaskExecutionId(RUN_ID, child.ref.taskId, 1),
+			childRunId: deriveNestedWorkflowRunId(RUN_ID, child.ref.taskId, 1),
+			producers: Object.fromEntries(
+				producers.map(({ name, handle }) => [name, handle.ref.taskId]),
+			),
+			authored,
+		};
+	}
+
+	async function readyChild(fx: InputFixture): Promise<void> {
+		await fx.journal.append("task-status-changed", {
+			taskId: fx.taskId,
+			from: "pending",
+			to: "ready",
+		});
+	}
+
+	/** Completes every producer through the real support executor. */
+	async function completeProducers(
+		fx: InputFixture,
+	): Promise<Record<string, WorkflowArtifactRef>> {
+		const support = createWorkflowSupportTaskExecutor({
+			journal: fx.journal,
+			artifacts: fx.artifacts,
+			registrations: new Map([[docRegistration.name, docRegistration]]),
+			signal: () => new AbortController().signal,
+		});
+		const produced: Record<string, WorkflowArtifactRef> = {};
+		for (const [name, producerId] of Object.entries(fx.producers)) {
+			expect((await support.intend(producerId)).state).toBe("intended");
+			expect((await support.execute(producerId)).outcome).toBe("completed");
+			const [artifact] = resultArtifacts(await projection(fx), producerId);
+			if (!artifact) throw new Error(`producer ${name} has no artifact`);
+			produced[name] = artifact;
+		}
+		await readyChild(fx);
+		return produced;
+	}
+
+	function artifactOf(
+		produced: Record<string, WorkflowArtifactRef>,
+		name: string,
+	): WorkflowArtifactRef {
+		const artifact = produced[name];
+		if (!artifact) throw new Error(`no artifact for ${name}`);
+		return artifact;
+	}
+
+	function lineageOf(
+		produced: Record<string, WorkflowArtifactRef>,
+	): NestedWorkflowInputArtifacts {
+		return Object.fromEntries(
+			Object.entries(produced).map(([name, artifact]) => [
+				name,
+				{ runId: RUN_ID, artifactId: artifact.id, sha256: artifact.sha256 },
+			]),
+		);
+	}
+
+	function digestsOf(
+		produced: Record<string, WorkflowArtifactRef>,
+	): Record<string, string> {
+		return Object.fromEntries(
+			Object.entries(produced).map(([name, artifact]) => [
+				name,
+				artifact.sha256,
+			]),
+		);
+	}
+
+	function launchOf(provider: ProviderSpies, index = 0) {
+		const request = provider.launch.mock.calls[index]?.[0];
+		if (!request) throw new Error(`provider.launch call ${index} is missing`);
+		return request;
+	}
+
+	async function expectInputFailure(
+		fx: InputFixture,
+		message: string,
+	): Promise<void> {
+		const before = await eventTypes(fx);
+		const provider = fakeProvider();
+		expect(await executor(fx, provider).launch(fx.taskId)).toEqual({
+			taskId: fx.taskId,
+			executionId: fx.executionId,
+			state: "terminal",
+			outcome: "failed",
+			runStatus: "running",
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		const state = await expectWorkflowFailure(
+			fx,
+			"failed",
+			"nested-input",
+			message,
+		);
+		expect(view(state, fx.taskId).execution?.nestedIntent).toBeUndefined();
+		expect((await eventTypes(fx)).slice(before.length)).toEqual([
+			"task-execution-created",
+			"task-execution-terminal",
+			"task-status-changed",
+		]);
+	}
+
+	/** Leaves a durable intent with no launch, as a crash between them would. */
+	async function intentOnlyPrefix(fx: InputFixture): Promise<ProviderSpies> {
+		const crashed = fakeProvider();
+		crashed.launch.mockRejectedValueOnce(new Error("crashed before launch"));
+		await expect(executor(fx, crashed).launch(fx.taskId)).rejects.toThrow(
+			"crashed before launch",
+		);
+		const { task, execution } = await current(fx);
+		expect(task.status).toBe("ready");
+		expect(execution?.phase).toBe("nested-intended");
+		return crashed;
+	}
+
+	it("launches with the authored input merged with one verified artifact value", async () => {
+		const fx = await inputFixture();
+		const produced = await completeProducers(fx);
+		const doc = artifactOf(produced, "doc");
+		const before = await eventTypes(fx);
+		const provider = fakeProvider();
+		expect(await executor(fx, provider).launch(fx.taskId)).toEqual({
+			taskId: fx.taskId,
+			executionId: fx.executionId,
+			state: "launched",
+			runStatus: "running",
+		});
+
+		const merged = { mode: "fast", doc: { text: "doc" } };
+		const { spec, execution } = await current(fx);
+		expect(spec.inputs).toEqual({
+			doc: {
+				runId: RUN_ID,
+				producerTaskId: fx.producers.doc,
+				output: "result",
+			},
+		});
+		expect(spec.after).toEqual([{ runId: RUN_ID, taskId: fx.producers.doc }]);
+		expect(spec.request.input).toEqual(AUTHORED_INPUT);
+		expect(doc.producerTaskId).toBe(fx.producers.doc);
+		expect(await fx.artifacts.readJson(doc)).toEqual({ text: "doc" });
+		const intent = execution?.nestedIntent;
+		if (!intent) throw new Error("missing intent");
+		expect(intent.inputSha256).toBe(deriveJsonValueSha256(AUTHORED_INPUT));
+		expect(intent.inputsSha256).toBe(
+			deriveJsonValueSha256({ doc: doc.sha256 }),
+		);
+		expect(intent.resolvedInputSha256).toBe(deriveJsonValueSha256(merged));
+		expect(intent.resolvedInputSha256).not.toBe(intent.inputSha256);
+
+		expect(provider.launch).toHaveBeenCalledTimes(1);
+		expect(provider.launch).toHaveBeenCalledWith({
+			childRunId: fx.childRunId,
+			parent: {
+				runId: RUN_ID,
+				taskId: fx.taskId,
+				executionId: fx.executionId,
+				depth: 1,
+				ancestorDefinitionIdentities: [parentIdentitySha256],
+			},
+			definitionName: "child",
+			definitionIdentitySha256: childIdentitySha256,
+			definitionSourceSha256: childSourceSha256,
+			input: merged,
+			inputArtifacts: {
+				doc: { runId: RUN_ID, artifactId: doc.id, sha256: doc.sha256 },
+			},
+			budget: spec.request.budget,
+			deadlineAt: intent.deadlineAt,
+			concurrency: spec.request.concurrency,
+		});
+		await expectLaunched(fx);
+		expect((await eventTypes(fx)).slice(before.length)).toEqual([
+			"task-execution-created",
+			"task-execution-nested-intended",
+			"task-execution-nested-launched",
+			"task-status-changed",
+		]);
+	});
+
+	it("injects two inputs under their names in sorted order", async () => {
+		const fx = await inputFixture({ names: ["notes", "doc"] });
+		const produced = await completeProducers(fx);
+		const doc = artifactOf(produced, "doc");
+		const notes = artifactOf(produced, "notes");
+		expect(doc.sha256).not.toBe(notes.sha256);
+		const provider = fakeProvider();
+		expect((await executor(fx, provider).launch(fx.taskId)).state).toBe(
+			"launched",
+		);
+
+		const { spec, execution } = await current(fx);
+		expect(Object.keys(spec.inputs)).toEqual(["doc", "notes"]);
+		expect(spec.after).toEqual(
+			[fx.producers.doc, fx.producers.notes]
+				.sort()
+				.map((taskId) => ({ runId: RUN_ID, taskId })),
+		);
+		const launch = launchOf(provider);
+		expect(launch.input).toEqual({
+			mode: "fast",
+			doc: { text: "doc" },
+			notes: { text: "notes" },
+		});
+		expect(Object.keys(launch.inputArtifacts)).toEqual(["doc", "notes"]);
+		expect(launch.inputArtifacts).toEqual({
+			doc: { runId: RUN_ID, artifactId: doc.id, sha256: doc.sha256 },
+			notes: { runId: RUN_ID, artifactId: notes.id, sha256: notes.sha256 },
+		});
+		expect(execution?.nestedIntent).toMatchObject({
+			inputSha256: deriveJsonValueSha256(AUTHORED_INPUT),
+			inputsSha256: deriveJsonValueSha256({
+				doc: doc.sha256,
+				notes: notes.sha256,
+			}),
+			resolvedInputSha256: deriveJsonValueSha256(launch.input),
+		});
+		await expectLaunched(fx);
+	});
+
+	it.each([
+		["the authored keys violate the child schema", { input: { mode: 5 } }],
+		[
+			"an injected value violates the child schema",
+			{
+				inputSchema: {
+					type: "object",
+					properties: {
+						mode: { type: "string" },
+						doc: {
+							type: "object",
+							properties: { text: { type: "integer" } },
+							required: ["text"],
+							additionalProperties: false,
+						},
+					},
+					required: ["mode", "doc"],
+					additionalProperties: false,
+				},
+			},
+		],
+	] as const)("fails the launch when %s", async (_label, options) => {
+		const fx = await inputFixture(options);
+		await completeProducers(fx);
+		await expectInputFailure(fx, schemaMessage);
+	});
+
+	it("fails the launch when the authored input is not an object", async () => {
+		// The materializer accepts any JSON input; only ctx.workflow rejects
+		// this at declaration, so a hand-materialized spec reaches the executor.
+		const fx = await inputFixture({ input: "plain" });
+		expect((await current(fx)).spec.request.input).toBe("plain");
+		await completeProducers(fx);
+		await expectInputFailure(fx, objectMessage);
+	});
+
+	it("fails the launch when an authored key collides with an input name", async () => {
+		const fx = await inputFixture({ input: { mode: "fast", doc: "mine" } });
+		await completeProducers(fx);
+		await expectInputFailure(fx, collisionMessage);
+	});
+
+	it("fails the launch when the producer artifact is corrupt on disk", async () => {
+		const fx = await inputFixture();
+		const doc = artifactOf(await completeProducers(fx), "doc");
+		await writeFile(
+			path.join(fx.artifacts.root, `${doc.sha256}.json`),
+			"corrupt",
+		);
+		await expectInputFailure(fx, readMessage);
+	});
+
+	it("fails the launch when the merged input exceeds the input bound", async () => {
+		const fx = await inputFixture({
+			parameters: { doc: { text: "x", repeat: 900 * 1024 } },
+		});
+		const doc = artifactOf(await completeProducers(fx), "doc");
+		expect(doc.bytes).toBeGreaterThan(900 * 1024);
+		await expectInputFailure(fx, boundMessage);
+	});
+
+	it("recovers from an intent-only prefix by re-resolving the same merged input", async () => {
+		const fx = await inputFixture();
+		const produced = await completeProducers(fx);
+		const crashed = await intentOnlyPrefix(fx);
+		const intent = (await current(fx)).execution?.nestedIntent;
+		if (!intent) throw new Error("missing intent");
+		const before = await eventTypes(fx);
+
+		const provider = fakeProvider();
+		const ex = executor(await reopen(fx), provider);
+		expect((await ex.launch(fx.taskId)).state).toBe("launched");
+		expect(provider.launch).toHaveBeenCalledTimes(1);
+		const launch = launchOf(provider);
+		expect(launch.input).toEqual({ mode: "fast", doc: { text: "doc" } });
+		expect(launch.inputArtifacts).toEqual(lineageOf(produced));
+		expect(launch).toEqual(launchOf(crashed));
+		expect(deriveJsonValueSha256(launch.input)).toBe(
+			intent.resolvedInputSha256,
+		);
+		expect(deriveJsonValueSha256(digestsOf(produced))).toBe(
+			intent.inputsSha256,
+		);
+		const execution = await expectLaunched(fx);
+		expect(execution.nestedIntent).toEqual(intent);
+		expect((await eventTypes(fx)).slice(before.length)).toEqual([
+			"task-execution-nested-launched",
+			"task-status-changed",
+		]);
+	});
+
+	it("fails closed when the durable intent carries a foreign resolved digest", async () => {
+		const fx = await inputFixture();
+		const produced = await completeProducers(fx);
+		await createdByHand(fx);
+		const { spec } = await current(fx);
+		await fx.journal.append("task-execution-nested-intended", {
+			executionId: fx.executionId,
+			childRunId: fx.childRunId,
+			definitionIdentitySha256: spec.request.definitionIdentitySha256,
+			inputSha256: spec.request.inputSha256,
+			inputsSha256: deriveJsonValueSha256(digestsOf(produced)),
+			resolvedInputSha256: deriveJsonValueSha256({
+				mode: "fast",
+				doc: { text: "tampered" },
+			}),
+			budget: spec.request.budget,
+			timeoutMs: spec.request.timeoutMs,
+			deadlineAt: new Date(Date.now() + spec.request.timeoutMs).toISOString(),
+			concurrency: spec.request.concurrency,
+		});
+		const before = await eventTypes(fx);
+
+		const provider = fakeProvider();
+		const failure = await executor(await reopen(fx), provider)
+			.launch(fx.taskId)
+			.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+		expect(failure).toBeInstanceOf(WorkflowNestedRunError);
+		expect(failure).toMatchObject({
+			stage: "persistence",
+			message: driftMessage,
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		expect(await eventTypes(fx)).toEqual(before);
+		const { task, execution } = await current(fx);
+		expect(task.status).toBe("ready");
+		expect(execution?.phase).toBe("nested-intended");
+		expect(execution?.terminal).toBeUndefined();
+	});
+
+	it("fails closed when an intended input artifact is corrupted before launch", async () => {
+		const fx = await inputFixture();
+		const doc = artifactOf(await completeProducers(fx), "doc");
+		await intentOnlyPrefix(fx);
+		await writeFile(
+			path.join(fx.artifacts.root, `${doc.sha256}.json`),
+			"corrupt",
+		);
+		const before = await eventTypes(fx);
+
+		const provider = fakeProvider();
+		const failure = await executor(await reopen(fx), provider)
+			.launch(fx.taskId)
+			.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+		expect(failure).toBeInstanceOf(WorkflowNestedRunError);
+		expect(failure).toMatchObject({
+			stage: "persistence",
+			message: driftMessage,
+			cause: {
+				name: "WorkflowNestedRunError",
+				stage: "input",
+				message: readMessage,
+			},
+		});
+		expect(provider.launch).not.toHaveBeenCalled();
+		expect(await eventTypes(fx)).toEqual(before);
+		expect((await current(fx)).execution?.terminal).toBeUndefined();
+	});
+
+	it("repeats the identical lineage to a provider that pins an existing child", async () => {
+		const fx = await inputFixture();
+		const produced = await completeProducers(fx);
+		const provider = fakeProvider();
+		let pinned: NestedWorkflowInputArtifacts | undefined;
+		provider.launch.mockImplementation(async (request) => {
+			if (!pinned) {
+				pinned = structuredClone(request.inputArtifacts);
+				throw new Error("crashed after the child recorded its lineage");
+			}
+			if (!isDeepStrictEqual(request.inputArtifacts, pinned)) {
+				throw new WorkflowNestedRunError("launch", "child lineage mismatch");
+			}
+		});
+		await expect(executor(fx, provider).launch(fx.taskId)).rejects.toThrow(
+			"crashed after the child recorded its lineage",
+		);
+		expect(pinned).toEqual(lineageOf(produced));
+
+		expect(
+			(await executor(await reopen(fx), provider).launch(fx.taskId)).state,
+		).toBe("launched");
+		expect(provider.launch).toHaveBeenCalledTimes(2);
+		expect(launchOf(provider, 1).inputArtifacts).toEqual(lineageOf(produced));
+		expect(launchOf(provider, 1)).toEqual(launchOf(provider, 0));
+		await expectLaunched(fx);
+	});
+
+	it("launches a child without inputs with empty lineage and the authored digest", async () => {
+		const fx = await fixture();
+		const provider = fakeProvider();
+		expect((await executor(fx, provider).launch(fx.taskId)).state).toBe(
+			"launched",
+		);
+		const { spec, execution } = await current(fx);
+		expect(spec.inputs).toEqual({});
+		const launch = launchOf(provider);
+		expect(launch.input).toEqual(CHILD_INPUT);
+		expect(launch.inputArtifacts).toEqual({});
+		expect(execution?.nestedIntent).toMatchObject({
+			inputSha256: spec.request.inputSha256,
+			inputsSha256: deriveJsonValueSha256({}),
+			resolvedInputSha256: spec.request.inputSha256,
+		});
+		expect(spec.request.inputSha256).toBe(deriveJsonValueSha256(CHILD_INPUT));
 	});
 });
