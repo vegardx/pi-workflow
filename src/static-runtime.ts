@@ -704,11 +704,34 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					request.input,
 					"Nested workflow input",
 				);
-				if (!validator(childInputSchema)(childInput)) {
-					throw new StaticWorkflowRuntimeError(
-						"validation",
-						"Nested workflow input does not match its schema.",
-					);
+				const inputNames = Object.keys(request.inputs ?? {});
+				if (inputNames.length === 0) {
+					if (!validator(childInputSchema)(childInput)) {
+						throw new StaticWorkflowRuntimeError(
+							"validation",
+							"Nested workflow input does not match its schema.",
+						);
+					}
+				} else {
+					// Artifact inputs are merged into the authored input at launch,
+					// so the merged value is validated against the child schema
+					// there; declaration only checks the merge is well-formed.
+					if (
+						typeof childInput !== "object" ||
+						childInput === null ||
+						Array.isArray(childInput)
+					) {
+						throw new StaticWorkflowRuntimeError(
+							"validation",
+							"Nested workflow artifact inputs require an object input.",
+						);
+					}
+					if (inputNames.some((name) => Object.hasOwn(childInput, name))) {
+						throw new StaticWorkflowRuntimeError(
+							"validation",
+							"Nested workflow input name collides with the authored input.",
+						);
+					}
 				}
 				const meta = child.definition.meta;
 				const nestedRequest: NestedWorkflowTaskRequest = {
@@ -732,6 +755,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 						? {}
 						: { disposition: request.disposition }),
 					...(request.after === undefined ? {} : { after: request.after }),
+					...(request.inputs === undefined ? {} : { inputs: request.inputs }),
 					...(request.replay === undefined ? {} : { replay: request.replay }),
 				});
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);

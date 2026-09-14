@@ -31,6 +31,7 @@ import {
 	StaticWorkflowRuntimeError,
 	type StaticWorkflowRuntimeOptions,
 } from "../src/static-runtime.js";
+import { defineSupportTask } from "../src/support.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
 const planIdentitySha256 = "b".repeat(64);
@@ -144,6 +145,20 @@ function nestedSchedulerFor(
 			if (!outcome) throw new Error("missing fake nested outcome");
 			const spec = task.task.spec;
 			const taskId = task.task.id;
+			const inputDigests: Record<string, string> = {};
+			const merged: Record<string, unknown> = {
+				...(spec.request.input as Record<string, unknown>),
+			};
+			for (const [name, input] of Object.entries(spec.inputs)) {
+				const artifact = Object.values(current.artifacts).find(
+					(candidate) =>
+						candidate.producerTaskId === input.producerTaskId &&
+						candidate.output === "result",
+				);
+				if (!artifact) throw new Error("missing fake nested input artifact");
+				inputDigests[name] = artifact.sha256;
+				merged[name] = await artifacts.readJson(artifact);
+			}
 			await journal.append("task-status-changed", {
 				taskId,
 				from: "pending",
@@ -167,8 +182,11 @@ function nestedSchedulerFor(
 				childRunId,
 				definitionIdentitySha256: spec.request.definitionIdentitySha256,
 				inputSha256: spec.request.inputSha256,
-				inputsSha256: deriveJsonValueSha256({}),
-				resolvedInputSha256: spec.request.inputSha256,
+				inputsSha256: deriveJsonValueSha256(inputDigests),
+				resolvedInputSha256:
+					Object.keys(spec.inputs).length === 0
+						? spec.request.inputSha256
+						: deriveJsonValueSha256(merged),
 				budget: structuredClone(spec.request.budget),
 				timeoutMs: spec.request.timeoutMs,
 				deadlineAt: new Date(Date.now() + 1_000).toISOString(),
@@ -254,6 +272,46 @@ function nestedSchedulerFor(
 		},
 		async reconcile() {
 			throw new Error("fake nested workflow has no cleanup-blocked task");
+		},
+		async stop() {
+			return { state: "terminal", runStatus: "cancelled" } as const;
+		},
+	};
+	return scheduler;
+}
+
+function mixedSchedulerFor(
+	journal: WorkflowRunJournal,
+	artifacts: WorkflowArtifactStore,
+	agentOutputs: ReadonlyMap<string, unknown>,
+	nestedOutcomes: ReadonlyMap<
+		string,
+		{ status: "completed"; output: unknown } | { status: "failed" }
+	>,
+): WorkflowSequentialScheduler & { calls: number } {
+	const agents = schedulerFor(journal, artifacts, agentOutputs);
+	const nested = nestedSchedulerFor(journal, artifacts, nestedOutcomes);
+	const scheduler = {
+		concurrency: 1,
+		stopSignal: new AbortController().signal,
+		calls: 0,
+		async drive(): Promise<WorkflowSchedulerOutcome> {
+			scheduler.calls += 1;
+			const current = reduceWorkflowEvents(await journal.readEvents());
+			const task = Object.values(current.tasks)
+				.sort(
+					(left, right) =>
+						left.task.materializationSequence -
+						right.task.materializationSequence,
+				)
+				.find(
+					(candidate) =>
+						candidate.status !== "completed" && candidate.status !== "failed",
+				);
+			return task?.task.spec.kind === "agent" ? agents.drive() : nested.drive();
+		},
+		async reconcile() {
+			throw new Error("fake mixed workflow has no cleanup-blocked task");
 		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;
@@ -676,6 +734,223 @@ describe("static workflow runtime nested workflows", () => {
 		).resolves.toMatchObject({
 			stage: "validation",
 			message: "Nested workflow input is not losslessly JSON-serializable.",
+		});
+	});
+
+	it("declares nested artifact inputs and defers schema validation to launch", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: parentMeta("nested-inputs"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				const producer = ctx.agent("producer", {
+					...request("Produce the child value"),
+					outputSchema: Type.String(),
+				});
+				return ctx.workflow<{ answer: string }>("child", {
+					workflow: "child",
+					input: {},
+					inputs: { value: producer.output },
+				});
+			},
+		});
+		const scheduler = mixedSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["producer", "from agent"]]),
+			new Map([
+				[
+					"child",
+					{ status: "completed" as const, output: { answer: "from child" } },
+				],
+			]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+			nesting: await nesting(),
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { answer: "from child" },
+		});
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const tasks = Object.values(state.tasks).sort(
+			(left, right) =>
+				left.task.materializationSequence - right.task.materializationSequence,
+		);
+		expect(tasks.map((task) => task.status)).toEqual([
+			"completed",
+			"completed",
+		]);
+		const producer = tasks[0]?.task;
+		const child = tasks[1]?.task;
+		if (producer?.spec.kind !== "agent" || child?.spec.kind !== "workflow") {
+			throw new Error("expected an agent producer and a workflow child");
+		}
+		expect(child.spec.inputs).toEqual({
+			value: {
+				runId: journal.runId,
+				producerTaskId: producer.id,
+				output: "result",
+			},
+		});
+		expect(child.spec.after).toEqual([
+			{ runId: journal.runId, taskId: producer.id },
+		]);
+		expect(child.spec.request.input).toEqual({});
+		expect(child.spec.request.inputSha256).toBe(deriveJsonValueSha256({}));
+		const intent = Object.values(state.executions).find(
+			(execution) => execution.execution.taskId === child.id,
+		)?.nestedIntent;
+		expect(intent?.inputsSha256).toBe(
+			deriveJsonValueSha256({
+				value: Object.values(state.artifacts).find(
+					(artifact) => artifact.producerTaskId === producer.id,
+				)?.sha256,
+			}),
+		);
+		expect(intent?.resolvedInputSha256).toBe(
+			deriveJsonValueSha256({ value: "from agent" }),
+		);
+		const calls = scheduler.calls;
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { answer: "from child" },
+		});
+		expect(scheduler.calls).toBe(calls);
+	});
+
+	it("persists support-sourced nested inputs at the declaring barrier", async () => {
+		const { journal, artifacts } = await fixture();
+		const summarize = defineSupportTask({
+			name: "@vegardx/workflow-tools/summarize",
+			moduleSpecifier: "@vegardx/workflow-tools",
+			revision: 1,
+			implementationSha256: "f".repeat(64),
+			parametersSchema: Type.Object({ strict: Type.Boolean() }),
+			outputSchema: Type.String(),
+		});
+		const definition = defineWorkflow({
+			meta: parentMeta("nested-support-inputs"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				const summary = ctx.support(
+					"summary",
+					summarize({ parameters: { strict: true } }),
+				);
+				return ctx.workflow<{ answer: string }>("child", {
+					workflow: "child",
+					input: {},
+					inputs: { value: summary.output },
+				});
+			},
+		});
+		const sentinel = new Error("scheduler stopped by test");
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: {
+				concurrency: 1,
+				stopSignal: new AbortController().signal,
+				async drive() {
+					throw sentinel;
+				},
+				async reconcile() {
+					throw sentinel;
+				},
+				async stop() {
+					return { state: "terminal", runStatus: "cancelled" } as const;
+				},
+			},
+			nesting: await nesting(),
+		});
+		await expect(runtime.drive()).rejects.toBe(sentinel);
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const tasks = Object.values(state.tasks).sort(
+			(left, right) =>
+				left.task.materializationSequence - right.task.materializationSequence,
+		);
+		const summary = tasks[0]?.task;
+		const child = tasks[1]?.task;
+		if (summary?.spec.kind !== "support" || child?.spec.kind !== "workflow") {
+			throw new Error("expected a support producer and a workflow child");
+		}
+		expect(child.spec.inputs).toEqual({
+			value: {
+				runId: journal.runId,
+				producerTaskId: summary.id,
+				output: "result",
+			},
+		});
+		expect(child.spec.after).toEqual([
+			{ runId: journal.runId, taskId: summary.id },
+		]);
+	});
+
+	it("rejects non-object and colliding authored input with artifact inputs", async () => {
+		for (const input of ["text", 42, null, ["value"]]) {
+			await expect(
+				nestedDeclarationFailure({ nesting: await nesting() }, (ctx) => {
+					const producer = ctx.agent("producer", request());
+					ctx.workflow("child", {
+						workflow: "child",
+						input,
+						inputs: { value: producer.output },
+					});
+				}),
+			).resolves.toMatchObject({
+				stage: "validation",
+				message: "Nested workflow artifact inputs require an object input.",
+			});
+		}
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) => {
+				const producer = ctx.agent("producer", request());
+				ctx.workflow("child", {
+					workflow: "child",
+					input: { value: "authored" },
+					inputs: { value: producer.output },
+				});
+			}),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow input name collides with the authored input.",
+		});
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) => {
+				const producer = ctx.agent("producer", request());
+				ctx.workflow("child", {
+					workflow: "child",
+					input: { extra: undefined },
+					inputs: { value: producer.output },
+				});
+			}),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow input is not losslessly JSON-serializable.",
+		});
+	});
+
+	it("validates authored input at declaration when artifact inputs are empty", async () => {
+		await expect(
+			nestedDeclarationFailure({ nesting: await nesting() }, (ctx) =>
+				ctx.workflow("child", { workflow: "child", input: {}, inputs: {} }),
+			),
+		).resolves.toMatchObject({
+			stage: "validation",
+			message: "Nested workflow input does not match its schema.",
 		});
 	});
 

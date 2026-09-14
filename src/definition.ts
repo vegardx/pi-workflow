@@ -136,6 +136,7 @@ export interface NestedWorkflowRequest<TInput = unknown> {
 	readonly input: TInput;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
+	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
 	readonly replay?: ReplayPolicy;
 }
 

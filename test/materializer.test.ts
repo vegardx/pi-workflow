@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { NestedWorkflowTaskRequest } from "../src/contracts.js";
+import { createTaskHandle } from "../src/definition.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import { deriveJsonValueSha256 } from "../src/execution.js";
 import {
@@ -433,6 +434,148 @@ describe("nested workflow task materialization", () => {
 		}
 		expect(declared.data.task.spec.after).toEqual([first.ref]);
 		expect(declared.data.task.spec.disposition).toBe("optional");
+	});
+
+	it("declares artifact inputs from seen producers and orders after them", () => {
+		const runtime = materializer();
+		const producer = runtime.agent("producer", request());
+		const summary = runtime.support(
+			"summary",
+			supportHelper({ parameters: { strict: true } }),
+		);
+		const child = runtime.workflow("child", {
+			request: nestedRequest({}),
+			inputs: { zeta: summary.output, alpha: producer.output },
+		});
+		const commit = runtime.closeEpoch("final", [child]);
+		const declarations = commit.events.filter(
+			(event) => event.type === "task-declared",
+		);
+		expect(declarations).toHaveLength(3);
+		const declared = declarations[2];
+		if (declared?.type !== "task-declared") {
+			throw new Error("missing declaration");
+		}
+		const task = declared.data.task;
+		if (task.spec.kind !== "workflow") throw new Error("wrong task kind");
+		expect(task.spec.inputs).toEqual({
+			alpha: producer.output.ref,
+			zeta: summary.output.ref,
+		});
+		expect(Object.keys(task.spec.inputs)).toEqual(["alpha", "zeta"]);
+		expect(task.spec.after).toEqual(
+			[producer.ref, summary.ref].sort((left, right) =>
+				left.taskId < right.taskId ? -1 : 1,
+			),
+		);
+		expect(task.spec.request).toEqual(nestedRequest({}));
+		const { identitySha256, ...specWithoutIdentity } = task.spec;
+		expect(identitySha256).toBe(
+			deriveNestedWorkflowTaskIdentity({
+				definitionIdentitySha256,
+				inputSha256,
+				namespace: [],
+				spec: specWithoutIdentity,
+			}),
+		);
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[task.id]?.task).toEqual(task);
+		const plain = materializer();
+		plain.agent("producer", request());
+		plain.support("summary", supportHelper({ parameters: { strict: true } }));
+		const plainChild = plain.workflow("child", { request: nestedRequest({}) });
+		const plainDeclaration = plain
+			.closeEpoch("final", [plainChild])
+			.events.filter((event) => event.type === "task-declared")[2];
+		if (plainDeclaration?.type !== "task-declared") {
+			throw new Error("missing declaration");
+		}
+		expect(plainDeclaration.data.task.id).toBe(task.id);
+		expect(plainDeclaration.data.task.spec.inputs).toEqual({});
+		expect(plainDeclaration.data.task.spec.after).toEqual([]);
+		expect(plainDeclaration.data.task.spec.identitySha256).not.toBe(
+			identitySha256,
+		);
+	});
+
+	it("rejects unknown, foreign, or invalidly named artifact inputs", () => {
+		const runtime = materializer();
+		const producer = runtime.agent("producer", request());
+		const message =
+			"task data dependency is invalid, unknown, or belongs to another run";
+		const unknown = createTaskHandle(
+			{ runId: "workflow_materializer", taskId: "task_unknown" },
+			{
+				runId: "workflow_materializer",
+				producerTaskId: "task_unknown",
+				output: "result",
+			},
+		);
+		expect(() =>
+			runtime.workflow("unknown", {
+				request: nestedRequest({}),
+				inputs: { value: unknown.output },
+			}),
+		).toThrow(message);
+		const foreign = createTaskHandle(
+			{ runId: "workflow_other", taskId: producer.ref.taskId },
+			{
+				runId: "workflow_other",
+				producerTaskId: producer.ref.taskId,
+				output: "result",
+			},
+		);
+		expect(() =>
+			runtime.workflow("foreign", {
+				request: nestedRequest({}),
+				inputs: { value: foreign.output },
+			}),
+		).toThrow(message);
+		expect(() =>
+			runtime.workflow("named", {
+				request: nestedRequest({}),
+				inputs: { "Bad Name": producer.output },
+			}),
+		).toThrow(message);
+		expect(runtime.closeEpoch("final", []).events).toHaveLength(2);
+	});
+
+	it("rejects replay prefix drift on changed artifact inputs", () => {
+		const initial = materializer();
+		const producer = initial.agent("producer", request());
+		const child = initial.workflow("child", {
+			request: nestedRequest({}),
+			inputs: { value: producer.output },
+		});
+		const previousState = reduceWorkflowEvents(
+			records(initial.closeEpoch("result", [child]).events),
+		);
+		const message =
+			"task declaration does not match the persisted ordered prefix";
+		const dropped = materializer(previousState);
+		const droppedProducer = dropped.agent("producer", request());
+		expect(() =>
+			dropped.workflow("child", {
+				request: nestedRequest({}),
+				after: [droppedProducer.ref],
+			}),
+		).toThrow(message);
+		const renamed = materializer(previousState);
+		const renamedProducer = renamed.agent("producer", request());
+		expect(() =>
+			renamed.workflow("child", {
+				request: nestedRequest({}),
+				inputs: { other: renamedProducer.output },
+			}),
+		).toThrow(message);
+		const replay = materializer(previousState);
+		const replayedProducer = replay.agent("producer", request());
+		const replayed = replay.workflow("child", {
+			request: nestedRequest({}),
+			inputs: { value: replayedProducer.output },
+		});
+		expect(replayed.ref).toEqual(child.ref);
+		expect(replay.closeEpoch("result", [replayed]).events).toEqual([]);
 	});
 
 	it("rejects replay prefix drift on changed child input", () => {
