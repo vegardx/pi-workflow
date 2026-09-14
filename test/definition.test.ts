@@ -9,13 +9,28 @@ import {
 
 describe("workflow definitions", () => {
 	it("exposes typed nested workflow requests on the workflow context", () => {
+		const producerTaskId = `task_${"b".repeat(64)}`;
+		const producer = createTaskHandle<string>(
+			{ runId: "workflow_definition", taskId: producerTaskId },
+			{
+				runId: "workflow_definition",
+				producerTaskId,
+				output: "result",
+			},
+		);
 		const request: NestedWorkflowRequest<{ value: string }> = {
 			workflow: "child",
 			input: { value: "yes" },
 			disposition: "optional",
 			after: [],
+			inputs: { detail: producer.output },
 			replay: "read-only",
 		};
+		expect(request.inputs?.detail?.ref).toEqual({
+			runId: "workflow_definition",
+			producerTaskId,
+			output: "result",
+		});
 		const definition = defineWorkflow({
 			meta: {
 				name: "parent",

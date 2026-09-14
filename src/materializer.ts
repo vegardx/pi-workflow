@@ -29,10 +29,12 @@ import {
 	TaskKeySchema,
 	type TaskRef,
 	WORKFLOW_CONTRACT_REVISION,
+	type WorkflowArtifactHandleRef,
 	type WorkflowRunId,
 } from "./contracts.js";
 import {
 	type AgentTaskAuthoringRequest,
+	type ArtifactHandle,
 	createTaskHandle,
 	type TaskHandle,
 	validateJsonSchemaDocument,
@@ -159,6 +161,7 @@ export interface NestedWorkflowDeclaration {
 	readonly request: NestedWorkflowTaskRequest;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
+	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
 	readonly replay?: ReplayPolicy;
 }
 
@@ -306,27 +309,7 @@ export class WorkflowTaskMaterializer {
 			}
 			after.set(dependency.taskId, dependency);
 		}
-		const inputs = Object.fromEntries(
-			Object.entries(request.inputs ?? {})
-				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-				.map(([name, handle]) => {
-					const ref = handle.ref;
-					if (
-						!Value.Check(TaskKeySchema, name) ||
-						ref.runId !== this.runId ||
-						!this.seen.has(ref.producerTaskId)
-					) {
-						throw new WorkflowMaterializationError(
-							"task data dependency is invalid, unknown, or belongs to another run",
-						);
-					}
-					after.set(ref.producerTaskId, {
-						runId: this.runId,
-						taskId: ref.producerTaskId,
-					});
-					return [name, ref];
-				}),
-		);
+		const inputs = this.resolveInputs(after, request.inputs);
 		const outputSchema = validateJsonSchemaDocument(
 			request.outputSchema,
 			"agent task output schema",
@@ -455,27 +438,7 @@ export class WorkflowTaskMaterializer {
 			}
 			after.set(dependency.taskId, dependency);
 		}
-		const inputs = Object.fromEntries(
-			Object.entries(descriptor.inputs ?? {})
-				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-				.map(([name, handle]) => {
-					const ref = handle.ref;
-					if (
-						!Value.Check(TaskKeySchema, name) ||
-						ref.runId !== this.runId ||
-						!this.seen.has(ref.producerTaskId)
-					) {
-						throw new WorkflowMaterializationError(
-							"task data dependency is invalid, unknown, or belongs to another run",
-						);
-					}
-					after.set(ref.producerTaskId, {
-						runId: this.runId,
-						taskId: ref.producerTaskId,
-					});
-					return [name, ref];
-				}),
-		);
+		const inputs = this.resolveInputs(after, descriptor.inputs);
 		const parametersSchema = validateJsonSchemaDocument(
 			descriptor.parametersSchema,
 			"support task parameters schema",
@@ -613,7 +576,7 @@ export class WorkflowTaskMaterializer {
 			}
 			after.set(dependency.taskId, dependency);
 		}
-		const inputs: NestedWorkflowTaskSpec["inputs"] = {};
+		const inputs = this.resolveInputs(after, declaration.inputs);
 		const request = declaration.request;
 		if (!Value.Check(NestedWorkflowTaskRequestSchema, request)) {
 			throw new WorkflowMaterializationError(
@@ -697,6 +660,33 @@ export class WorkflowTaskMaterializer {
 				producerTaskId: selected.id,
 				output: "result",
 			},
+		);
+	}
+
+	private resolveInputs(
+		after: Map<string, TaskRef>,
+		inputs: Readonly<Record<TaskKey, ArtifactHandle<unknown>>> | undefined,
+	): Record<TaskKey, WorkflowArtifactHandleRef> {
+		return Object.fromEntries(
+			Object.entries(inputs ?? {})
+				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+				.map(([name, handle]) => {
+					const ref = handle.ref;
+					if (
+						!Value.Check(TaskKeySchema, name) ||
+						ref.runId !== this.runId ||
+						!this.seen.has(ref.producerTaskId)
+					) {
+						throw new WorkflowMaterializationError(
+							"task data dependency is invalid, unknown, or belongs to another run",
+						);
+					}
+					after.set(ref.producerTaskId, {
+						runId: this.runId,
+						taskId: ref.producerTaskId,
+					});
+					return [name, ref];
+				}),
 		);
 	}
 

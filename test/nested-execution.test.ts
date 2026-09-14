@@ -16,7 +16,10 @@ import type {
 	WorkflowStateProjection,
 	WorkflowTaskProjection,
 } from "../src/events.js";
-import { deriveNestedWorkflowRunId } from "../src/execution.js";
+import {
+	deriveJsonValueSha256,
+	deriveNestedWorkflowRunId,
+} from "../src/execution.js";
 import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
 import { acquireWorkflowRunLease } from "../src/persistence/run-lease.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
@@ -360,8 +363,22 @@ const BLOCKING_BODY = `return new Promise((resolve) => {
       ctx.signal.addEventListener("abort", () => resolve({ answer: "aborted" }), { once: true });
     });`;
 
+const CONSUMER_CHILD = `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "consumer-child", description: "Consumes an injected artifact", version: 1, budget: ${DEFAULT_BUDGET}, timeoutMs: 600000, concurrency: 2 },
+  inputSchema: { type: "object", properties: { prefix: { type: "string" }, doc: ${ANSWER_SCHEMA} }, required: ["prefix", "doc"], additionalProperties: false },
+  outputSchema: ${ANSWER_SCHEMA},
+  run(ctx) { return { answer: ctx.input.prefix + ctx.input.doc.answer + ">" }; }
+};
+`;
+
+const INPUT_PARENT_BODY = `const first = ctx.workflow("first", { workflow: "echo-child", input: { value: ctx.input.value } });
+    return ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<" }, inputs: { doc: first.output } });`;
+
 const DEFINITIONS = {
 	"echo-child": definition("echo-child", ECHO_BODY),
+	"consumer-child": CONSUMER_CHILD,
+	"input-parent": definition("input-parent", INPUT_PARENT_BODY),
 	"nest-parent": nester("nest-parent", "echo-child"),
 	mid: nester("mid", "echo-child"),
 	top: nester("top", "mid"),
@@ -615,6 +632,83 @@ async function blockedNestedRun(name: string) {
 }
 
 describe("nested workflow execution", () => {
+	it("injects a sibling child's verified output as an artifact input", async () => {
+		const calls: string[] = [];
+		const bound: string[] = [];
+		const fx = await fixture("artifact-input", [
+			"echo-child",
+			"consumer-child",
+			"input-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider(calls, bound),
+		});
+		const receipt = await service.run("input-parent", { value: "yes" });
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "completed",
+			output: { answer: "<YES>" },
+		});
+		expect(calls).toEqual([]);
+		const parentState = await stateOf(fx.storeRoot, receipt.runId);
+		const firstTask = Object.values(parentState.tasks).find(
+			(task) => task.task.spec.key === "first",
+		);
+		const secondTask = Object.values(parentState.tasks).find(
+			(task) => task.task.spec.key === "second",
+		);
+		expect(firstTask?.status).toBe("completed");
+		expect(secondTask?.task.spec.kind).toBe("workflow");
+		expect(secondTask?.task.spec.after).toEqual([
+			{ runId: receipt.runId, taskId: firstTask?.task.id },
+		]);
+		const firstArtifact = Object.values(parentState.artifacts).find(
+			(artifact) =>
+				artifact.producerTaskId === firstTask?.task.id &&
+				artifact.output === "result",
+		);
+		const secondExecution = secondTask?.currentExecutionId
+			? parentState.executions[secondTask.currentExecutionId]
+			: undefined;
+		expect(secondExecution?.nestedIntent).toMatchObject({
+			inputsSha256: deriveJsonValueSha256({ doc: firstArtifact?.sha256 }),
+			resolvedInputSha256: deriveJsonValueSha256({
+				prefix: "<",
+				doc: { answer: "YES" },
+			}),
+		});
+		const childRunId = deriveNestedWorkflowRunId(
+			receipt.runId,
+			secondTask?.task.id ?? "",
+			1,
+		);
+		await expect(service.status(childRunId)).resolves.toMatchObject({
+			status: "completed",
+			depth: 1,
+			parent: {
+				runId: receipt.runId,
+				taskId: secondTask?.task.id,
+				inputArtifacts: {
+					doc: {
+						runId: receipt.runId,
+						artifactId: firstArtifact?.id,
+						sha256: firstArtifact?.sha256,
+					},
+				},
+			},
+			output: { answer: "<YES>" },
+		});
+		const childRecord = JSON.parse(
+			await readFile(
+				path.join(fx.storeRoot, "runs", childRunId, "service.json"),
+				"utf8",
+			),
+		) as { input: unknown };
+		expect(childRecord.input).toEqual({ prefix: "<", doc: { answer: "YES" } });
+		await service.shutdown();
+	});
+
 	it("runs a child workflow as a linked run and returns its output", async () => {
 		const calls: string[] = [];
 		const bound: string[] = [];
