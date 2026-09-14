@@ -847,7 +847,10 @@ the parent reserves the intent budget; settlement replaces the reservation with
 the child's summed usage. Incomplete child usage fails closed and stops further
 spending. The child's effective budget is the minimum of its declaration, the
 parent's reservation, and service caps; its effective concurrency is the
-minimum of its declaration, the intent, and the service maximum.
+minimum of its declaration, the intent, and the service maximum. Because the
+child's full declared budget is reserved at admission, a parent that performs
+any agent or support work before launching a child must declare headroom above
+the child's declared budget, or the child is deferred or blocked.
 
 The child's deadline is the earlier of its own timeout and the parent's
 deadline. The executor computes intent `timeoutMs` as the minimum of the

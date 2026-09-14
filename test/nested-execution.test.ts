@@ -135,6 +135,38 @@ function provider(calls: string[], bound: string[]): WorkflowSubagentProvider {
 	};
 }
 
+/**
+ * Like `provider`, but `bind` for the nth run id awaits the gate. The service
+ * binds a child's owner inside `nestedProvider.launch`, after the parent's
+ * `task-execution-nested-intended` is durable and before
+ * `task-execution-nested-launched`, so a blocked bind parks the parent
+ * exactly between intent and launch.
+ */
+function gatedProvider(
+	bound: string[],
+	blockedOrdinal: number,
+	gate: Promise<void>,
+): { provider: WorkflowSubagentProvider; blocked: string[] } {
+	const blocked: string[] = [];
+	return {
+		blocked,
+		provider: {
+			bind: vi.fn(async (runId: string) => {
+				bound.push(runId);
+				if (bound.length === blockedOrdinal) {
+					blocked.push(runId);
+					await gate;
+				}
+				return {
+					workflowRunId: runId,
+					ownerId: `pi-workflow:${runId}`,
+					client: strictClient([]),
+				} satisfies WorkflowSubagentBinding;
+			}),
+		},
+	};
+}
+
 const CHILD_USAGE = Object.freeze({
 	input: 3,
 	output: 2,
@@ -347,7 +379,7 @@ function logging(name: string, declare: string): string {
 	);
 }
 
-const AGENT_BODY = `return ctx.agent("answer", {
+const AGENT_REQUEST = `{
       agent: "researcher",
       task: { goal: "Answer", context: [], instructions: ["Return structured output."] },
       contextMode: "fresh",
@@ -357,7 +389,9 @@ const AGENT_BODY = `return ctx.agent("answer", {
       workspace: { mode: "read-only", cwd: ctx.cwd },
       outputSchema: ${ANSWER_SCHEMA},
       limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 0, retries: 0, resumes: 0 }
-    });`;
+    }`;
+
+const AGENT_BODY = `return ctx.agent("answer", ${AGENT_REQUEST});`;
 
 const BLOCKING_BODY = `return new Promise((resolve) => {
       ctx.signal.addEventListener("abort", () => resolve({ answer: "aborted" }), { once: true });
@@ -372,13 +406,79 @@ const CONSUMER_CHILD = `export default {
 };
 `;
 
-const INPUT_PARENT_BODY = `const first = ctx.workflow("first", { workflow: "echo-child", input: { value: ctx.input.value } });
+/** Like `consumer-child`, but its schema also requires `doc.extra`, which no producer emits. */
+const STRICT_CONSUMER_CHILD = `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "strict-consumer-child", description: "Requires a field no producer emits", version: 1, budget: ${DEFAULT_BUDGET}, timeoutMs: 600000, concurrency: 2 },
+  inputSchema: { type: "object", properties: { prefix: { type: "string" }, doc: { type: "object", properties: { answer: { type: "string" }, extra: { type: "string" } }, required: ["answer", "extra"], additionalProperties: false } }, required: ["prefix", "doc"], additionalProperties: false },
+  outputSchema: ${ANSWER_SCHEMA},
+  run(ctx) { return { answer: ctx.input.prefix + ctx.input.doc.answer + ctx.input.doc.extra }; }
+};
+`;
+
+const FIRST_ECHO = `const first = ctx.workflow("first", { workflow: "echo-child", input: { value: ctx.input.value } });`;
+
+const INPUT_PARENT_BODY = `${FIRST_ECHO}
     return ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<" }, inputs: { doc: first.output } });`;
+
+const AGENT_INPUT_PARENT_BODY = `const answer = ctx.agent("answer", ${AGENT_REQUEST});
+    return ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<" }, inputs: { doc: answer.output } });`;
+
+const SUPPORT_INPUT_PARENT_BODY = `const doc = ctx.support("doc", slow({ parameters: {} }));
+    return ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<" }, inputs: { doc: doc.output } });`;
+
+const CHAIN_PARENT_BODY = `${FIRST_ECHO}
+    const second = ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<" }, inputs: { doc: first.output } });
+    return ctx.workflow("third", { workflow: "consumer-child", input: { prefix: "[" }, inputs: { doc: second.output } });`;
+
+const FOREIGN_HANDLE = `{ ref: { runId: "workflow_other", producerTaskId: first.output.ref.producerTaskId, output: "result" } }`;
 
 const DEFINITIONS = {
 	"echo-child": definition("echo-child", ECHO_BODY),
 	"consumer-child": CONSUMER_CHILD,
 	"input-parent": definition("input-parent", INPUT_PARENT_BODY),
+	// The scheduler reserves the consumer child's full declared budget (cost
+	// 100, child runtime 3 600 000 ms) against what remains after the agent
+	// task settled its own cost and runtime, so the parent declares headroom
+	// for both on each axis.
+	"agent-input-parent": definition(
+		"agent-input-parent",
+		AGENT_INPUT_PARENT_BODY,
+		{ budget: "{ cost: 200, childRuntimeMs: 7200000 }" },
+	),
+	"support-input-parent": definition(
+		"support-input-parent",
+		SUPPORT_INPUT_PARENT_BODY,
+		{ imports: `import { slow } from ${JSON.stringify(TOOLS_MODULE)};\n` },
+	),
+	"chain-parent": definition("chain-parent", CHAIN_PARENT_BODY),
+	"non-object-parent": logging(
+		"non-object-parent",
+		`${FIRST_ECHO}
+      ctx.workflow("second", { workflow: "consumer-child", input: "text", inputs: { doc: first.output } });`,
+	),
+	"collision-parent": logging(
+		"collision-parent",
+		`${FIRST_ECHO}
+      ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<", doc: { answer: "authored" } }, inputs: { doc: first.output } });`,
+	),
+	"foreign-parent": logging(
+		"foreign-parent",
+		`${FIRST_ECHO}
+      ctx.workflow("second", { workflow: "consumer-child", input: { prefix: "<" }, inputs: { doc: ${FOREIGN_HANDLE} } });`,
+	),
+	"strict-consumer-child": STRICT_CONSUMER_CHILD,
+	"strict-input-parent": definition(
+		"strict-input-parent",
+		`${FIRST_ECHO}
+    return ctx.workflow("second", { workflow: "strict-consumer-child", input: { prefix: "<" }, inputs: { doc: first.output } });`,
+	),
+	"lenient-input-parent": definition(
+		"lenient-input-parent",
+		`${FIRST_ECHO}
+    ctx.workflow("second", { workflow: "strict-consumer-child", input: { prefix: "<" }, inputs: { doc: first.output }, disposition: "optional" });
+    return { answer: "fallback" };`,
+	),
 	"nest-parent": nester("nest-parent", "echo-child"),
 	mid: nester("mid", "echo-child"),
 	top: nester("top", "mid"),
@@ -469,7 +569,13 @@ async function journalEvents(
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 		throw error;
 	}
-	return journal
+	// The service may be appending while a test polls; only newline-terminated
+	// records are complete, so a torn trailing line is ignored here exactly as
+	// the journal reader treats it.
+	const complete = journal.endsWith("\n")
+		? journal
+		: journal.slice(0, journal.lastIndexOf("\n") + 1);
+	return complete
 		.split("\n")
 		.filter((line) => line.length > 0)
 		.map((line) => JSON.parse(line) as WorkflowJournalEvent);
@@ -493,6 +599,67 @@ async function recordOf(
 	return JSON.parse(
 		await readFile(path.join(storeRoot, "runs", runId, "service.json"), "utf8"),
 	) as WorkflowRunRecord;
+}
+
+function taskByKey(
+	state: WorkflowStateProjection,
+	key: string,
+): WorkflowTaskProjection {
+	const task = Object.values(state.tasks).find(
+		(candidate) => candidate.task.spec.key === key,
+	);
+	if (!task) throw new Error(`missing task ${key}`);
+	return task;
+}
+
+function executionOf(
+	state: WorkflowStateProjection,
+	task: WorkflowTaskProjection,
+): TaskExecutionProjection {
+	const execution = task.currentExecutionId
+		? state.executions[task.currentExecutionId]
+		: undefined;
+	if (!execution)
+		throw new Error(`missing execution for ${task.task.spec.key}`);
+	return execution;
+}
+
+/** The task's verified `result` artifact as declared in the parent journal. */
+function resultArtifactOf(
+	state: WorkflowStateProjection,
+	task: WorkflowTaskProjection,
+): { id: string; sha256: string } {
+	const matches = Object.values(state.artifacts).filter(
+		(artifact) =>
+			artifact.producerTaskId === task.task.id && artifact.output === "result",
+	);
+	const artifact = matches[0];
+	if (matches.length !== 1 || !artifact) {
+		throw new Error(`missing result artifact for ${task.task.spec.key}`);
+	}
+	return { id: artifact.id, sha256: artifact.sha256 };
+}
+
+function childRunIdOf(
+	parentRunId: WorkflowRunId,
+	task: WorkflowTaskProjection,
+): WorkflowRunId {
+	return deriveNestedWorkflowRunId(parentRunId, task.task.id, 1);
+}
+
+/** Journal sequences of events matching the predicate, in journal order. */
+function sequencesOf(
+	events: readonly WorkflowJournalEvent[],
+	type: WorkflowJournalEvent["type"],
+	predicate: (data: Record<string, unknown>) => boolean,
+): number[] {
+	return events
+		.filter(
+			(event) =>
+				event.type === type &&
+				predicate(event.data as unknown as Record<string, unknown>),
+		)
+		.map((event) => event.sequence);
 }
 
 function nestedTaskOf(state: WorkflowStateProjection): WorkflowTaskProjection {
@@ -706,6 +873,534 @@ describe("nested workflow execution", () => {
 			),
 		) as { input: unknown };
 		expect(childRecord.input).toEqual({ prefix: "<", doc: { answer: "YES" } });
+		await service.shutdown();
+	});
+
+	it("feeds a parent agent task's verified output into a consumer child", async () => {
+		const fx = await fixture("agent-input", [
+			"consumer-child",
+			"agent-input-parent",
+		]);
+		const delegated = agentProvider();
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		const receipt = await service.run("agent-input-parent", { value: "yes" });
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "completed",
+			output: { answer: "<from child>" },
+		});
+		const parentState = await stateOf(fx.storeRoot, receipt.runId);
+		const answerTask = taskByKey(parentState, "answer");
+		const secondTask = taskByKey(parentState, "second");
+		expect(answerTask.task.spec.kind).toBe("agent");
+		expect(answerTask.status).toBe("completed");
+		expect(secondTask.task.spec.after).toEqual([
+			{ runId: receipt.runId, taskId: answerTask.task.id },
+		]);
+		const artifact = resultArtifactOf(parentState, answerTask);
+		const childRunId = childRunIdOf(receipt.runId, secondTask);
+		expect(delegated.bound).toEqual([receipt.runId, childRunId]);
+		const parentClient = delegated.clients.get(receipt.runId);
+		const childClient = delegated.clients.get(childRunId);
+		if (!parentClient || !childClient) throw new Error("missing clients");
+		expect(parentClient.preflight).toHaveBeenCalledOnce();
+		const preflight = vi.mocked(parentClient.preflight).mock.results[0];
+		if (preflight?.type !== "return") throw new Error("preflight failed");
+		expect((await preflight.value).launchPlan.ownerId).toBe(
+			`pi-workflow:${receipt.runId}`,
+		);
+		for (const method of ["preflight", "launch", "wait", "release"] as const) {
+			expect(childClient[method]).not.toHaveBeenCalled();
+		}
+		const childRecord = await recordOf(fx.storeRoot, childRunId);
+		expect(childRecord.input).toEqual({
+			prefix: "<",
+			doc: { answer: "from child" },
+		});
+		expect(childRecord.parent?.inputArtifacts).toEqual({
+			doc: {
+				runId: receipt.runId,
+				artifactId: artifact.id,
+				sha256: artifact.sha256,
+			},
+		});
+		expect(artifact.sha256).toBe(
+			deriveJsonValueSha256({ answer: "from child" }),
+		);
+		await expect(service.status(childRunId)).resolves.toMatchObject({
+			status: "completed",
+			definitionName: "consumer-child",
+			depth: 1,
+			parent: { runId: receipt.runId, taskId: secondTask.task.id },
+			output: { answer: "<from child>" },
+		});
+		await service.shutdown();
+	});
+
+	it("feeds a parent support task's verified output into a consumer child", async () => {
+		const execute = vi.fn((_context: EmptyContext) => ({
+			answer: "from support",
+		}));
+		const calls: string[] = [];
+		const bound: string[] = [];
+		const fx = await fixture("support-input", [
+			"consumer-child",
+			"support-input-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider(calls, bound),
+			supportTasks: [slow.registration(execute)],
+		});
+		const receipt = await service.run("support-input-parent", { value: "yes" });
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "completed",
+			output: { answer: "<from support>" },
+		});
+		expect(calls).toEqual([]);
+		expect(execute).toHaveBeenCalledOnce();
+		const parentState = await stateOf(fx.storeRoot, receipt.runId);
+		const docTask = taskByKey(parentState, "doc");
+		const secondTask = taskByKey(parentState, "second");
+		expect(docTask.task.spec.kind).toBe("support");
+		expect(docTask.status).toBe("completed");
+		expect(secondTask.task.spec.after).toEqual([
+			{ runId: receipt.runId, taskId: docTask.task.id },
+		]);
+		const artifact = resultArtifactOf(parentState, docTask);
+		const childRunId = childRunIdOf(receipt.runId, secondTask);
+		expect(bound).toEqual([receipt.runId, childRunId]);
+		const childRecord = await recordOf(fx.storeRoot, childRunId);
+		expect(childRecord.input).toEqual({
+			prefix: "<",
+			doc: { answer: "from support" },
+		});
+		expect(childRecord.parent?.inputArtifacts).toEqual({
+			doc: {
+				runId: receipt.runId,
+				artifactId: artifact.id,
+				sha256: artifact.sha256,
+			},
+		});
+		await expect(service.status(childRunId)).resolves.toMatchObject({
+			status: "completed",
+			definitionName: "consumer-child",
+			depth: 1,
+			parent: {
+				runId: receipt.runId,
+				taskId: secondTask.task.id,
+				inputArtifacts: { doc: { artifactId: artifact.id } },
+			},
+			output: { answer: "<from support>" },
+		});
+		await service.shutdown();
+	});
+
+	it("chains three nested children, each consuming the previous child's imported result", async () => {
+		const bound: string[] = [];
+		const fx = await fixture("chain", [
+			"echo-child",
+			"consumer-child",
+			"chain-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], bound),
+		});
+		const receipt = await service.run("chain-parent", { value: "yes" });
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "completed",
+			output: { answer: "[<YES>>" },
+		});
+		const parentState = await stateOf(fx.storeRoot, receipt.runId);
+		const first = taskByKey(parentState, "first");
+		const second = taskByKey(parentState, "second");
+		const third = taskByKey(parentState, "third");
+		for (const task of [first, second, third]) {
+			expect(task.task.spec.kind).toBe("workflow");
+			expect(task.status).toBe("completed");
+		}
+		expect(second.task.spec.after).toEqual([
+			{ runId: receipt.runId, taskId: first.task.id },
+		]);
+		expect(third.task.spec.after).toEqual([
+			{ runId: receipt.runId, taskId: second.task.id },
+		]);
+		const firstArtifact = resultArtifactOf(parentState, first);
+		const secondArtifact = resultArtifactOf(parentState, second);
+		expect(bound).toEqual([
+			receipt.runId,
+			childRunIdOf(receipt.runId, first),
+			childRunIdOf(receipt.runId, second),
+			childRunIdOf(receipt.runId, third),
+		]);
+		const secondRecord = await recordOf(
+			fx.storeRoot,
+			childRunIdOf(receipt.runId, second),
+		);
+		expect(secondRecord.input).toEqual({ prefix: "<", doc: { answer: "YES" } });
+		expect(secondRecord.parent?.inputArtifacts).toEqual({
+			doc: {
+				runId: receipt.runId,
+				artifactId: firstArtifact.id,
+				sha256: firstArtifact.sha256,
+			},
+		});
+		const thirdRecord = await recordOf(
+			fx.storeRoot,
+			childRunIdOf(receipt.runId, third),
+		);
+		expect(thirdRecord.input).toEqual({
+			prefix: "[",
+			doc: { answer: "<YES>" },
+		});
+		expect(thirdRecord.parent?.inputArtifacts).toEqual({
+			doc: {
+				runId: receipt.runId,
+				artifactId: secondArtifact.id,
+				sha256: secondArtifact.sha256,
+			},
+		});
+		// The imported result of each stage is exactly what the next stage consumed.
+		expect(secondArtifact.sha256).toBe(
+			deriveJsonValueSha256({ answer: "<YES>" }),
+		);
+		expect(executionOf(parentState, third).nestedIntent).toMatchObject({
+			inputsSha256: deriveJsonValueSha256({ doc: secondArtifact.sha256 }),
+			resolvedInputSha256: deriveJsonValueSha256(thirdRecord.input),
+		});
+		await service.shutdown();
+	});
+
+	it("rejects malformed artifact input declarations before anything is declared", async () => {
+		const bound: string[] = [];
+		const fx = await fixture("input-declaration-errors", [
+			"echo-child",
+			"consumer-child",
+			"non-object-parent",
+			"collision-parent",
+			"foreign-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], bound),
+		});
+		const cases = [
+			[
+				"non-object-parent",
+				"Nested workflow artifact inputs require an object input.",
+			],
+			[
+				"collision-parent",
+				"Nested workflow input name collides with the authored input.",
+			],
+			[
+				"foreign-parent",
+				"task data dependency is invalid, unknown, or belongs to another run",
+			],
+		] as const;
+		for (const [name, message] of cases) {
+			const receipt = await service.run(name, { value: "yes" });
+			await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+				status: "failed",
+			});
+			const state = await stateOf(fx.storeRoot, receipt.runId);
+			expect(logsOf(state)).toEqual([message]);
+			expect(
+				runReasons(await journalEvents(fx.storeRoot, receipt.runId)),
+			).toContain("Static workflow source execution failed.");
+			// The rejection precedes the first barrier, so neither the producer
+			// nor the consumer was persisted and no child run was bound.
+			expect(Object.keys(state.tasks)).toHaveLength(0);
+			expect(bound.at(-1)).toBe(receipt.runId);
+		}
+		expect(bound).toHaveLength(cases.length);
+		await service.shutdown();
+	});
+
+	it("fails the consumer at launch when the merged input misses the child schema", async () => {
+		const bound: string[] = [];
+		const fx = await fixture("launch-schema", [
+			"echo-child",
+			"strict-consumer-child",
+			"strict-input-parent",
+			"lenient-input-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], bound),
+		});
+		const strict = await service.run("strict-input-parent", { value: "yes" });
+		await expect(service.wait(strict.runId)).resolves.toMatchObject({
+			status: "failed",
+		});
+		const strictState = await stateOf(fx.storeRoot, strict.runId);
+		const strictFirst = taskByKey(strictState, "first");
+		const strictSecond = taskByKey(strictState, "second");
+		expect(strictFirst.status).toBe("completed");
+		expect(strictSecond.status).toBe("failed");
+		expect(strictSecond.task.spec.disposition).toBe("required");
+		expect(terminalOf(strictState, strictSecond)).toMatchObject({
+			outcome: "failed",
+			evidence: {
+				kind: "workflow",
+				stage: "nested-input",
+				message: "Nested workflow input does not match its schema.",
+			},
+		});
+		// The failure precedes intent, so no child run was bound or created.
+		expect(executionOf(strictState, strictSecond).nestedIntent).toBeUndefined();
+		expect(bound).toEqual([
+			strict.runId,
+			childRunIdOf(strict.runId, strictFirst),
+		]);
+		await expect(
+			service.status(childRunIdOf(strict.runId, strictSecond)),
+		).rejects.toThrow();
+		expect(
+			runReasons(await journalEvents(fx.storeRoot, strict.runId)),
+		).toContain("A required workflow task did not complete.");
+
+		const lenient = await service.run("lenient-input-parent", { value: "yes" });
+		await expect(service.wait(lenient.runId)).resolves.toMatchObject({
+			status: "completed-degraded",
+			output: { answer: "fallback" },
+		});
+		const lenientState = await stateOf(fx.storeRoot, lenient.runId);
+		const lenientSecond = taskByKey(lenientState, "second");
+		expect(lenientSecond.task.spec.disposition).toBe("optional");
+		expect(lenientSecond.status).toBe("failed");
+		expect(terminalOf(lenientState, lenientSecond)).toMatchObject({
+			outcome: "failed",
+			evidence: {
+				kind: "workflow",
+				stage: "nested-input",
+				message: "Nested workflow input does not match its schema.",
+			},
+		});
+		expect(bound).toHaveLength(4);
+		await service.shutdown();
+	});
+
+	it("launches the consumer exactly once after a restart between intent and launch", async () => {
+		const gate = deferred<void>();
+		const fx = await fixture("restart-intent", [
+			"echo-child",
+			"consumer-child",
+			"input-parent",
+		]);
+		const firstBound: string[] = [];
+		// Binds arrive as parent, producer child, consumer child; the third
+		// bind parks the parent between the consumer's intent and its launch.
+		const gated = gatedProvider(firstBound, 3, gate.promise);
+		const first = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: gated.provider,
+		});
+		const receipt = await first.run("input-parent", { value: "yes" });
+		await until(() => gated.blocked.length > 0);
+		const parentState = await stateOf(fx.storeRoot, receipt.runId);
+		const producer = taskByKey(parentState, "first");
+		const consumer = taskByKey(parentState, "second");
+		const producerRunId = childRunIdOf(receipt.runId, producer);
+		const consumerRunId = childRunIdOf(receipt.runId, consumer);
+		expect(gated.blocked).toEqual([consumerRunId]);
+		expect(producer.status).toBe("completed");
+		const consumerExecution = executionOf(parentState, consumer);
+		expect(consumerExecution.phase).toBe("nested-intended");
+		expect(consumerExecution.nestedLaunch).toBeUndefined();
+		const storeRoot = await crashSnapshot(fx, [receipt.runId, producerRunId]);
+		const isConsumer = (data: Record<string, unknown>) =>
+			data.executionId === consumerExecution.execution.id;
+		expect(
+			sequencesOf(
+				await journalEvents(storeRoot, receipt.runId),
+				"task-execution-nested-intended",
+				isConsumer,
+			),
+		).toHaveLength(1);
+
+		const bound: string[] = [];
+		const service = await createWorkflowService({
+			...fx,
+			storeRoot,
+			projectTrusted: () => true,
+			subagents: provider([], bound),
+		});
+		try {
+			await expect(
+				bounded(service.wait(receipt.runId), "parent wait"),
+			).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "<YES>" },
+			});
+			expect(bound.filter((runId) => runId === consumerRunId)).toHaveLength(1);
+			const events = await journalEvents(storeRoot, receipt.runId);
+			expect(
+				sequencesOf(events, "task-execution-nested-intended", isConsumer),
+			).toHaveLength(1);
+			expect(
+				sequencesOf(events, "task-execution-nested-launched", isConsumer),
+			).toHaveLength(1);
+			expect(
+				(await eventTypes(storeRoot, consumerRunId)).filter(
+					(type) => type === "run-created",
+				),
+			).toHaveLength(1);
+			const resumedState = await stateOf(storeRoot, receipt.runId);
+			const artifact = resultArtifactOf(resumedState, producer);
+			const childRecord = await recordOf(storeRoot, consumerRunId);
+			expect(childRecord.input).toEqual({
+				prefix: "<",
+				doc: { answer: "YES" },
+			});
+			expect(deriveJsonValueSha256(childRecord.input)).toBe(
+				consumerExecution.nestedIntent?.resolvedInputSha256,
+			);
+			expect(childRecord.parent?.inputArtifacts).toEqual({
+				doc: {
+					runId: receipt.runId,
+					artifactId: artifact.id,
+					sha256: artifact.sha256,
+				},
+			});
+			await expect(service.status(consumerRunId)).resolves.toMatchObject({
+				status: "completed",
+				depth: 1,
+				parent: { runId: receipt.runId, taskId: consumer.task.id },
+				output: { answer: "<YES>" },
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown").catch(() => undefined);
+			gate.resolve();
+			await bounded(first.shutdown(), "first shutdown").catch(() => undefined);
+		}
+	});
+
+	it("exposes injected artifact identities under the child's lineage view", async () => {
+		const fx = await fixture("input-lineage", [
+			"echo-child",
+			"consumer-child",
+			"input-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], []),
+		});
+		const receipt = await service.run("input-parent", { value: "yes" });
+		await service.wait(receipt.runId);
+		const parentState = await stateOf(fx.storeRoot, receipt.runId);
+		const producer = taskByKey(parentState, "first");
+		const consumer = taskByKey(parentState, "second");
+		const artifact = resultArtifactOf(parentState, producer);
+		const consumerRunId = childRunIdOf(receipt.runId, consumer);
+		const expected = {
+			runId: receipt.runId,
+			taskId: consumer.task.id,
+			inputArtifacts: {
+				doc: {
+					runId: receipt.runId,
+					artifactId: artifact.id,
+					sha256: artifact.sha256,
+				},
+			},
+		};
+		const view = await service.status(consumerRunId);
+		expect(view.parent).toEqual(expected);
+		expect(Object.keys(view.parent?.inputArtifacts.doc ?? {}).sort()).toEqual([
+			"artifactId",
+			"runId",
+			"sha256",
+		]);
+		// The producer child injected nothing and says so explicitly.
+		await expect(
+			service.status(childRunIdOf(receipt.runId, producer)),
+		).resolves.toMatchObject({
+			parent: { runId: receipt.runId, inputArtifacts: {} },
+		});
+		await service.shutdown();
+		// `workflow_status` is `service.status` on a fresh instance: the same
+		// lineage must come back from durable state alone.
+		const reopened = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], []),
+		});
+		const reread = await reopened.status(consumerRunId);
+		expect(reread.parent).toEqual(expected);
+		expect(reread).toMatchObject({
+			status: "completed",
+			depth: 1,
+			output: { answer: "<YES>" },
+		});
+		await reopened.shutdown();
+	});
+
+	it("does not launch the consumer before its producer completes", async () => {
+		const bound: string[] = [];
+		const fx = await fixture("input-readiness", [
+			"echo-child",
+			"consumer-child",
+			"input-parent",
+		]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], bound),
+		});
+		const receipt = await service.run("input-parent", { value: "yes" });
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "completed",
+		});
+		const state = await stateOf(fx.storeRoot, receipt.runId);
+		const producer = taskByKey(state, "first");
+		const consumer = taskByKey(state, "second");
+		const consumerExecutionId = executionOf(state, consumer).execution.id;
+		const events = await journalEvents(fx.storeRoot, receipt.runId);
+		const producerCompleted = sequencesOf(
+			events,
+			"task-status-changed",
+			(data) => data.taskId === producer.task.id && data.to === "completed",
+		);
+		expect(producerCompleted).toHaveLength(1);
+		const isConsumer = (data: Record<string, unknown>) =>
+			data.executionId === consumerExecutionId;
+		const [consumerCreated] = sequencesOf(
+			events,
+			"task-execution-created",
+			(data) =>
+				(data.execution as { id?: string } | undefined)?.id ===
+				consumerExecutionId,
+		);
+		const [consumerIntended] = sequencesOf(
+			events,
+			"task-execution-nested-intended",
+			isConsumer,
+		);
+		const [consumerLaunched] = sequencesOf(
+			events,
+			"task-execution-nested-launched",
+			isConsumer,
+		);
+		const completedAt = producerCompleted[0] as number;
+		expect(consumerCreated).toBeGreaterThan(completedAt);
+		expect(consumerIntended).toBeGreaterThan(completedAt);
+		expect(consumerLaunched).toBeGreaterThan(consumerIntended as number);
+		// Child runs were bound in dependency order.
+		expect(bound).toEqual([
+			receipt.runId,
+			childRunIdOf(receipt.runId, producer),
+			childRunIdOf(receipt.runId, consumer),
+		]);
 		await service.shutdown();
 	});
 
