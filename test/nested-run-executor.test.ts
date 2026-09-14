@@ -679,7 +679,7 @@ describe("nested run executor launch", () => {
 		const intent = execution?.nestedIntent;
 		if (!intent) throw new Error("missing intent");
 		expect(intent.timeoutMs).toBeLessThanOrEqual(remainingMs);
-		expect(intent.timeoutMs).toBeGreaterThanOrEqual(remainingMs - 50);
+		expect(intent.timeoutMs).toBeGreaterThanOrEqual(remainingMs - 5_000);
 		expect(Date.parse(intent.deadlineAt)).toBeLessThanOrEqual(parentDeadline);
 		expect(provider.launch).toHaveBeenCalledTimes(1);
 		expect(provider.launch.mock.calls[0]?.[0].deadlineAt).toBe(

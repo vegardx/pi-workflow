@@ -67,10 +67,13 @@ async function until(predicate: () => boolean | Promise<boolean>) {
 }
 
 /** Fails fast instead of hanging the whole suite when a drain never settles. */
+// Fails fast with a named label instead of the suite timeout; the bound
+// follows the suite-wide allowance in vitest.config.ts because stop cascades
+// are fsync-bound and exceeded 3 s under Ubuntu CI load (run 34821692078).
 function bounded<T>(
 	promise: Promise<T>,
 	label: string,
-	ms = 3_000,
+	ms = 30_000,
 ): Promise<T> {
 	let timer: NodeJS.Timeout | undefined;
 	const timeout = new Promise<never>((_, reject) => {
@@ -611,7 +614,7 @@ async function blockedNestedRun(name: string) {
 	};
 }
 
-describe("nested workflow execution", { timeout: 15_000 }, () => {
+describe("nested workflow execution", () => {
 	it("runs a child workflow as a linked run and returns its output", async () => {
 		const calls: string[] = [];
 		const bound: string[] = [];
@@ -1032,7 +1035,7 @@ describe("nested workflow execution", { timeout: 15_000 }, () => {
 				Date.parse(parentRecord.deadlineAt),
 			);
 			await expect(
-				bounded(service.wait(receipt.runId), "parent wait", 8_000),
+				bounded(service.wait(receipt.runId), "parent wait"),
 			).resolves.toMatchObject({ status: "cancelled" });
 			await expect(service.status(childRunId)).resolves.toMatchObject({
 				status: "cancelled",
