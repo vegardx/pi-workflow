@@ -87,16 +87,23 @@ else fails at `nested-resolution`.
 The parent scheduler routes by kind to the nested run executor; the child
 composes the same runtime as a root run and re-executes its own trusted source.
 There is no second scheduler class, no persisted continuation, and no shared
-in-memory state between parent and child. The child receives only the concrete
-input captured at declaration, a budget no larger than the parent's reservation
-and the service caps, and a deadline no later than the parent's. Depth is
+in-memory state between parent and child. The child receives only the authored
+input captured at declaration, merged at launch with verified copies of the
+parent artifacts named as its `inputs`, a budget no larger than the parent's
+reservation and the service caps, and a deadline no later than the parent's. Depth is
 bounded (0 through 3), each run may declare at most 64 workflow tasks, and a
 definition already on the ancestor chain is rejected at declaration.
 
+Values cross the run boundary in either direction only as verified copies.
 Child output enters the parent only by copying verified bytes into the parent
 artifact store, bound to the parent task and the captured output schema, before
-the parent task completes. Cross-run artifact references remain impossible
-otherwise, and artifact inputs into a child are not supported in this revision.
+the parent task completes. Parent artifacts enter a child only by being read
+through the parent's verified input path at launch, merged into the child's
+input, validated against the child's input schema, and bound by digest into
+the child's run record as `parent.inputArtifacts`. Those identities are
+provenance, not capabilities: the child holds no handle into the parent
+store, the parent holds none into the child's, and no cross-run read authority
+exists in any direction.
 
 ## Dynamic workflow host API
 

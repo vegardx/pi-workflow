@@ -22,8 +22,12 @@
   captured in the parent's task identity, under a budget and deadline no larger
   than the parent's; nesting depth, per-run workflow task count, and recursion
   along the ancestor chain are bounded at declaration.
-- Child output reaches the parent only as verified bytes copied into the
-  parent store; no cross-run artifact reference exists.
+- Values cross the run boundary only as verified copies: child output reaches
+  the parent as verified bytes copied into the parent store, and parent
+  artifacts reach a child only as values read through the parent's verified
+  input path, merged into the child input, and bound by digest into the
+  child's run record. The injected artifact identities the child record
+  carries are provenance; no cross-run read authority exists.
 
 ## Trust boundaries
 
@@ -75,7 +79,9 @@ declare at most 64 workflow tasks, and a child whose definition identity is
 already on the ancestor chain is rejected at declaration. Unbounded recursion
 remains a non-goal. A child can never spend beyond its parent's reservation or
 outlive its parent's deadline, and a child run directory that does not match
-the parent's durable intent is never adopted.
+the parent's durable intent, including its injected input artifacts, is never
+adopted. A merged input that no longer recomputes to the intended digests is
+treated as evidence corruption and fails closed rather than launching.
 
 ## Service provider
 

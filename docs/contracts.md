@@ -4,8 +4,8 @@ This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
 nested run executor, artifact store, and static source runtime implement the
 current subset; later interfaces remain design contracts. The runtime contract
-is revision 12 and declares the feature flags `supportTaskExecution: true` and
-`nestedWorkflows: true`.
+is revision 13 and declares the feature flags `supportTaskExecution: true`,
+`nestedWorkflows: true`, and `nestedArtifactInputs: true`.
 
 ## Static definition
 
@@ -97,7 +97,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 12 identities cover the complete definition module but not a
+Contract revision 13 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
 `typebox`, and the module specifiers present in the constructor-injected
 support registry; every other static import, dynamic import, CommonJS require,
@@ -430,7 +430,8 @@ discovered definition as a linked child run:
 ```ts
 interface NestedWorkflowRequest<TInput = unknown> {
 	readonly workflow: string; // child definition name
-	readonly input: TInput; // concrete JSON value, validated at declaration
+	readonly input: TInput; // authored JSON value
+	readonly inputs?: Record<TaskKey, ArtifactHandle<unknown>>; // ≤ 64
 	readonly disposition?: "required" | "optional";
 	readonly after?: readonly TaskRef[];
 	readonly replay?: "auto" | "off" | "read-only";
@@ -439,9 +440,14 @@ interface NestedWorkflowRequest<TInput = unknown> {
 
 The child is resolved by name from the same discovery pass and trust gate as
 the parent. The returned handle's `output` is an ordinary parent-owned result
-artifact that later parent tasks may consume as a named input. Nested requests
-carry no artifact `inputs` in this revision; see
-[Nested workflow tasks](#nested-workflow-tasks).
+artifact that later parent tasks may consume as a named input. `inputs` names
+parent artifact handles exactly as agent and support requests do: each
+producer must belong to the same run and already be declared, and each becomes
+an order dependency. When `inputs` is empty, `input` is validated against the
+child's input schema at declaration. When it is not, `input` must be a JSON
+object with no key equal to an input name, and the verified artifact values
+are merged into it as top-level keys at launch, where the merged object is
+validated instead; see [Nested workflow tasks](#nested-workflow-tasks).
 
 Settled-parallel is a typed authoring helper that materializes ordinary task
 nodes and dependencies. They are not separate
@@ -474,7 +480,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow"` in revision 12; a checkpoint task
+`kind` is `"agent" | "support" | "workflow"` in revision 13; a checkpoint task
 kind remains a design contract. Keys are unique within a workflow namespace.
 Pipelines and fan-out create explicit child namespaces; a nested workflow task
 is one node in its parent's namespace whose child run owns a separate graph.
@@ -666,11 +672,11 @@ own trusted source from entry exactly like a root run.
 
 ### Authoring and declaration
 
-`ctx.workflow(key, { workflow, input, disposition?, after?, replay? })`
+`ctx.workflow(key, { workflow, input, inputs?, disposition?, after?, replay? })`
 resolves the child by name from the same discovery pass and trust gate as the
 parent. At declaration the runtime captures the child's identity, source
 digest, version, input and output schemas, declared budget, timeout, and
-concurrency, validates `input` against the child's input schema, and lowers
+concurrency, resolves every named artifact input to its producer, and lowers
 everything into the persisted spec:
 
 ```ts
@@ -679,15 +685,15 @@ interface NestedWorkflowTaskSpec {
 	kind: "workflow";
 	disposition: "required" | "optional";
 	after: TaskRef[];
-	inputs: {}; // no artifact inputs in this revision
+	inputs: Record<string, ArtifactRef>; // ≤ 64 named parent artifacts
 	replay: "auto" | "off" | "read-only";
 	request: {
 		definitionName: string;
 		definitionIdentitySha256: string;
 		definitionSourceSha256: string;
 		definitionVersion: number;
-		input: unknown;
-		inputSha256: string; // canonical digest of input
+		input: unknown; // authored input only
+		inputSha256: string; // canonical digest of the authored input
 		inputSchema: JsonSchemaDocument;
 		outputSchema: JsonSchemaDocument;
 		budget: WorkflowBudget; // the child's declared meta.budget
@@ -701,13 +707,40 @@ interface NestedWorkflowTaskSpec {
 Task identity hashes the same canonical envelope as support tasks (contract
 revision, parent definition identity, parent input digest, namespace, and the
 spec without its identity); the reducer re-derives it on `task-declared` and
-requires `inputSha256` to equal the digest of `input`. Only a concrete
-`input` value is supported: artifact inputs into a child are not available in
-this revision (`inputs` must be `{}`; `after` is allowed). The nested result is
-an ordinary parent-owned artifact and may be consumed by later parent tasks as
-a named input. Because the child's identity and source digest are part of the
-task identity, child source drift fails replay of the parent as declaration
-drift.
+requires `inputSha256` to equal the digest of the authored `input`. The nested
+result is an ordinary parent-owned artifact and may be consumed by later parent
+tasks as a named input. Because the child's identity and source digest are
+part of the task identity, child source drift fails replay of the parent as
+declaration drift.
+
+`inputs` follows the same rules as agent and support inputs: at most 64 names,
+each a valid task key, each producer a task of the same run declared before
+the nested task, and each producer added to `after` as an order dependency.
+The reducer applies the generic input checks on `task-declared` (the producer
+exists in the run and every data dependency has its order dependency).
+Declaration-time validation depends on whether `inputs` is empty:
+
+- empty `inputs`: the authored `input` is validated against the child's input
+  schema at declaration, unchanged from earlier revisions;
+- non-empty `inputs`: the authored `input` must be a JSON object
+  ("Nested workflow artifact inputs require an object input.") and no authored
+  key may equal an input name ("Nested workflow input name collides with the
+  authored input."); validation against the child's input schema is deferred to
+  launch because the artifact values are not known at declaration.
+
+### Launch-time input resolution
+
+At launch the nested run executor resolves the child input before persisting
+intent. For every declared input it locates the producer's unique `result`
+artifact in the parent journal, reads the value through the same verified path
+as agent and support inputs (`readWorkflowArtifactInputs`: provenance, digest,
+canonical encoding, and producer-schema revalidation from the parent-owned
+store), and merges the values into the authored input as top-level keys
+(`{ ...input, [name]: value }`). The merged object must be losslessly JSON
+serializable, must not exceed the 900 KiB nested input bound, and must satisfy
+`request.inputSchema`. The child is launched with the merged value and sees it
+as plain `ctx.input`; it has no handle to, and no read path into, the parent
+store. When `inputs` is empty the authored input is launched unchanged.
 
 Bounds are fixed: `MAX_NESTED_WORKFLOW_DEPTH = 4`, so runs exist at depth 0
 through 3 and a run at depth 3 may not declare workflow tasks;
@@ -726,8 +759,8 @@ which the reducer verifies on `task-execution-created`. Four
 ```text
 task-execution-created (kind workflow, childRunId)
 → task-execution-nested-intended
-    { childRunId, definitionIdentitySha256, inputSha256, budget,
-      timeoutMs, deadlineAt, concurrency }
+    { childRunId, definitionIdentitySha256, inputSha256, inputsSha256,
+      resolvedInputSha256, budget, timeoutMs, deadlineAt, concurrency }
 → task-execution-nested-launched { childRunId }   // child record durable
 → task-status-changed ready→running
 → task-execution-nested-settled
@@ -745,7 +778,16 @@ nested-output-imported → terminal`. Intent and launch happen under the
 scheduler mutation lock; the wait, settlement, and import run outside it,
 serialized per task. The intent's budget, timeout, and concurrency may not
 exceed the declaration, and `deadlineAt` must be within `timeoutMs` of the
-event timestamp. `outputArtifactId` and `outputSha256` are present exactly when
+event timestamp. `inputSha256` is the digest of the authored input and must
+equal the declaration; `inputsSha256` is the canonical digest of
+`{ [inputName]: <sha256 of the producer's unique result artifact> }` over
+`spec.inputs` (empty inputs hash `{}`), which the reducer recomputes from
+journaled artifact state and rejects on disagreement; `resolvedInputSha256` is
+the canonical digest of the merged input actually launched. When `inputs` is
+empty the reducer requires `resolvedInputSha256 === inputSha256`; when it is
+not, the reducer accepts any well-formed digest because artifact contents are
+not journaled and the merged value cannot be recomputed from events alone. The
+executor, not the reducer, re-verifies that digest on resume. `outputArtifactId` and `outputSha256` are present exactly when
 the child status is `completed` or `completed-degraded`; the import event
 requires a parent-owned `application/json` artifact whose digest equals the
 settlement's `outputSha256` and whose schema digest equals the digest of
@@ -779,13 +821,18 @@ import.
 | `cleanup-blocked` | `cleanup-blocked` |
 
 Failure evidence of kind `workflow` on a workflow task uses stage
-`nested-resolution` (the child could not be resolved exactly by name, identity,
-and source digest at launch), `nested-launch` (no remaining time before the
-parent deadline, lease or record creation failure, or an existing child run
-whose lineage, definition, or input does not match the intent), or
-`nested-import` (the child completed but its output could not be read,
-verified, validated, or stored; outcome `cleanup-blocked`). Cancellation before
-launch uses stage `stop`. Agent and support stages are rejected on workflow
+`nested-input` (an input's producer artifact is missing or ambiguous, the
+authored input is not an object or collides with an input name, an input could
+not be read and verified, or the merged input is not lossless JSON, exceeds
+the 900 KiB bound, or fails the child's input schema; accepted from phases
+`created` and `nested-intended`), `nested-resolution` (the child could not be
+resolved exactly by name, identity, and source digest at launch),
+`nested-launch` (no remaining time before the parent deadline, lease or record
+creation failure, or an existing child run whose lineage, definition, input,
+or injected input artifacts do not match the intent), or `nested-import` (the
+child completed but its output could not be read, verified, validated, or
+stored; outcome `cleanup-blocked`). Cancellation before launch uses stage
+`stop`. Agent and support stages are rejected on workflow
 tasks and vice versa. A required task that ends `failed` or `cancelled` fails
 the run, `interrupted` interrupts it, and `cleanup-blocked` marks the run
 `cleanup-blocked`.
@@ -852,8 +899,15 @@ Workflow definition
 
 A workflow task of kind `workflow` owns one task execution whose deterministic
 `childRunId` names the linked child run. The child run record persists `depth`
-and `parent { runId, taskId, executionId, ancestorDefinitionIdentities }`, so
-the lineage is recoverable from either side.
+and `parent { runId, taskId, executionId, ancestorDefinitionIdentities,
+inputArtifacts }`, so the lineage is recoverable from either side.
+`inputArtifacts` maps each injected input name to
+`{ runId, artifactId, sha256 }` of the parent artifact whose verified value
+was merged into the child input (`{}` when none); every `runId` must equal
+`parent.runId`. On resume an existing child record must match the launch's
+`inputArtifacts` exactly, in addition to its lineage, definition identity,
+source digest, and merged input. These identities are provenance records,
+not references the child can dereference.
 
 Phase 3 retry control will call the owner client's `retry` on the same subagent
 run and record the fresh attempt and VM under the same task execution. Resume
@@ -921,8 +975,9 @@ provider before creating durable state, then returns a run ID immediately.
 `status` is a journal projection, `wait` reconstructs nonterminal work after
 restart, and `stop` persists run/task intent before delegated interruption,
 support abort, and child-run stop. Every run view carries `depth` and, for a
-linked child run, `parent: { runId, taskId }`; a child run is addressable by
-its own run ID for status, wait, stop, and reconcile. `createWorkflowService`
+linked child run, `parent: { runId, taskId, inputArtifacts }`, where
+`inputArtifacts` is the record's injected artifact identity map; a child run
+is addressable by its own run ID for status, wait, stop, and reconcile. `createWorkflowService`
 accepts an optional `supportTasks` registration list that becomes the frozen
 constructor registry and supplies the nested run provider to every run it
 composes.

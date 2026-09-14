@@ -117,9 +117,21 @@ export default defineWorkflow({
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
 	run(ctx) {
+		const task = ctx.agent("draft", {
+			agent: "researcher",
+			task: { goal: "Draft the document", context: [], instructions: [] },
+			contextMode: "fresh",
+			tools: ["read"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: ctx.cwd },
+			limits: limits.readOnly,
+			outputSchema: DocSchema,
+		});
 		return ctx.workflow("child", {
 			workflow: "echo-child",
 			input: { value: ctx.input.value },
+			inputs: { doc: task.output },
 		});
 	},
 });
@@ -127,18 +139,25 @@ export default defineWorkflow({
 
 The child is resolved by name from the same discovery pass and trust gate as
 the parent. Its identity, source digest, schemas, budget, timeout, and
-concurrency are captured at declaration together with the validated concrete
-`input`, and the task is lowered into a `kind: "workflow"` record. Execution
-launches a separate durable run with its own journal, lease, artifact store,
-and subagent owner binding; the parent reserves the child's declared budget,
-caps the child's deadline at its own, and imports the child's verified output
-as a parent-owned artifact before the task completes. Depth is bounded at
-0 through 3, a run may declare at most 64 workflow tasks, and recursion along
-the ancestor chain is rejected. Artifact inputs into children are not
-supported in this revision. The public entry points are
-`createWorkflowNestedRunExecutor`, `deriveNestedWorkflowRunId`,
-`NestedWorkflowTaskSpecSchema`, `NestedWorkflowTerminalEvidenceSchema`, and
-`MAX_NESTED_WORKFLOW_DEPTH`; see
+concurrency are captured at declaration together with the authored `input`
+and any named artifact `inputs`, and the task is lowered into a
+`kind: "workflow"` record. Artifact inputs follow the merged-input rule: each
+producer becomes an order dependency, the authored `input` must be an object
+without a key equal to an input name, and at launch every verified artifact
+value is merged into it as a top-level key (`{ value, doc }` above), validated
+against the child's input schema and the 900 KiB bound, and launched as the
+child's plain `ctx.input`. Without artifact inputs the authored input is
+validated at declaration. Execution launches a separate durable run with its
+own journal, lease, artifact store, and subagent owner binding; the parent
+reserves the child's declared budget, caps the child's deadline at its own,
+records the injected artifact identities in the child's run record, and
+imports the child's verified output as a parent-owned artifact before the task
+completes. Depth is bounded at 0 through 3, a run may declare at most 64
+workflow tasks, and recursion along the ancestor chain is rejected. The public
+entry points are `createWorkflowNestedRunExecutor`,
+`deriveNestedWorkflowRunId`, `NestedWorkflowTaskSpecSchema`,
+`NestedWorkflowInputArtifactsSchema`, `NestedWorkflowTerminalEvidenceSchema`,
+and `MAX_NESTED_WORKFLOW_DEPTH`; see
 [Contracts](docs/contracts.md#nested-workflow-tasks).
 
 ## Development

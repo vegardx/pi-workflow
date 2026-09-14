@@ -12,12 +12,12 @@
 | Subagent launch/runtime | Child startup, provider, tool, timeout | Classified retry policy |
 | Structured output | Terminating schema repair exhausted | Task failure |
 | Support task | Unregistered or drifted implementation (`support-resolution`); missing input evidence, input digest mismatch, unreadable inputs, or parameters failing the registered schema (`support-input`); implementation exception (`support-execution`); non-JSON, oversized, schema-invalid, or conflicting output (`support-output`) | Task failure with a fixed message; a required task fails the run |
-| Nested workflow | Undiscovered name, depth bound, recursion, or schema-invalid input at declaration (materialization failure); child not resolvable by exact identity and source at launch (`nested-resolution`); no remaining time before the parent deadline, lease or record creation failure, or an existing child run that does not match the intent (`nested-launch`); child output unreadable, unverifiable, or schema-invalid (`nested-import`) | Declaration failures fail the run closed; `nested-resolution` and `nested-launch` fail the task; `nested-import` leaves the task `cleanup-blocked` until reconciliation; a required task propagates to the run |
+| Nested workflow | Undiscovered name, depth bound, recursion, schema-invalid input without artifact inputs, non-object authored input or an authored key colliding with an input name when artifact inputs are declared, or an unknown, foreign, or undeclared input producer at declaration (materialization failure); missing or ambiguous producer artifact, unreadable or unverifiable input, or a merged input that is not lossless JSON, exceeds 900 KiB, or fails the child schema at launch (`nested-input`); child not resolvable by exact identity and source at launch (`nested-resolution`); no remaining time before the parent deadline, lease or record creation failure, or an existing child run whose lineage, definition, merged input, or injected artifacts do not match the intent (`nested-launch`); child output unreadable, unverifiable, or schema-invalid (`nested-import`) | Declaration failures fail the run closed; `nested-input`, `nested-resolution`, and `nested-launch` fail the task; `nested-import` leaves the task `cleanup-blocked` until reconciliation; a required task propagates to the run |
 | Checkpoint | No approver, expired, headless block | Waiting or blocked |
 | Budget | Cost, optional total-token, or cumulative child-runtime cap reached; a nested child's declared budget does not fit the parent's remaining budget | Reserve before launch; block inadmissible task; fail post-settlement overage; incomplete child usage fails closed |
 | Deadline | Persisted workflow wall deadline reached | Stop and drain; abort in-process support work; stop linked child runs through their parent tasks; cleanup uncertainty remains cleanup-blocked |
 | Lease loss | Scheduler ownership lost | Interrupt and reconcile |
-| Persistence | Journal, snapshot, intent, receipt, or artifact durability failure | Fail closed |
+| Persistence | Journal, snapshot, intent, receipt, or artifact durability failure; a nested input that cannot be recomputed to the intended digests after intent | Fail closed |
 | Resource/source drift | Workflow, helper, tool, skill, model, or service changed | Invalidate or refuse resume; registry drift fails non-terminal support executions at `support-resolution`; child source drift fails replay of the parent as declaration drift |
 | Finalizer | Required artifact import, cleanup, or release failed | Cleanup-blocked or failed |
 | Unknown | Unclassified or unprovable state | Interrupt and reconcile |
@@ -94,7 +94,7 @@ ended:      | interrupted | cleanup-blocked)
           → task-status-changed running|cancelling→<outcome>
 
 failure:  task-execution-terminal (outcome failed, evidence kind workflow,
-          stage nested-resolution | nested-launch)
+          stage nested-input | nested-resolution | nested-launch)
           → task-status-changed ready|running→failed
 
 import:   task-execution-terminal (outcome cleanup-blocked, evidence kind
@@ -120,6 +120,18 @@ child has. The parent deadline uses the same stop path, and the child's
 deadline is the earlier of its own timeout and the parent's, so a child never
 outlives its parent's deadline. A child with under one second remaining at
 launch fails at `nested-launch` without being created.
+
+Artifact inputs are resolved at launch, before intent. A missing or ambiguous
+producer artifact, an authored input that is not an object or collides with an
+input name, an input that cannot be read and verified from the parent store,
+or a merged input that is not lossless JSON, exceeds the 900 KiB bound, or
+fails the child's input schema terminalizes the task as `failed` at stage
+`nested-input` with a fixed message before any intent is persisted. Once
+intent is durable, the merged input is recomputed from the same immutable
+artifacts on every launch attempt; a read failure or a digest that differs
+from `inputsSha256` or `resolvedInputSha256` is evidence drift and is thrown
+as a persistence error ("Nested workflow resolved input drifted from durable
+intent."), never converted into a task failure.
 
 Import failure yields `cleanup-blocked` at stage `nested-import`; explicit
 parent reconciliation retries the import. A child that itself settled

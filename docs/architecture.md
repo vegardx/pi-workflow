@@ -162,25 +162,30 @@ cancelled and discards a late result.
 ## Nested workflows
 
 A nested workflow task (`kind: "workflow"`) is declared through
-`ctx.workflow(key, { workflow, input })` in the same effect frontend as agent
-and support tasks. The child definition is referenced by name and resolved from
+`ctx.workflow(key, { workflow, input, inputs? })` in the same effect frontend
+as agent and support tasks. The child definition is referenced by name and resolved from
 the same discovery pass and trust gate as the parent; nothing is loaded from a
 run directory or a dynamic import. At declaration the runtime captures the
 child's definition identity, source digest, version, input and output schemas,
-declared budget, timeout, and concurrency, validates the concrete `input`
-against the child's input schema, and binds all of it into the task identity.
-Child source drift therefore fails replay of the parent. Artifact inputs into
-a child are not supported in this revision: `input` is a concrete JSON value,
-while the nested result artifact is parent-owned and may be consumed by later
-parent tasks as an ordinary input.
+declared budget, timeout, and concurrency, resolves any named artifact
+`inputs` to their producers (each becoming an order dependency), and binds all
+of it into the task identity. Child source drift therefore fails replay of the
+parent. Without artifact inputs the authored `input` is validated against the
+child's input schema at declaration; with them it must be an object free of
+input-name collisions, and the verified artifact values are merged into it as
+top-level keys at launch, where the merged object is validated against the
+child schema and the 900 KiB bound. The nested result artifact is parent-owned
+and may be consumed by later parent tasks as an ordinary input.
 
 Execution is a **linked child run**. The parent scheduler routes the task by
 kind to the nested run executor, which persists the workflow-kind execution
 record with a deterministic `childRunId`, durable launch intent (budget,
-timeout, deadline, concurrency), and then asks the service to create a separate
-run: its own journal, lease, artifact store, subagent owner binding
+timeout, deadline, concurrency, and the digests of the input artifacts and
+merged input), and then asks the service to create a separate run: its own
+journal, lease, artifact store, subagent owner binding
 `pi-workflow:<childRunId>`, and immutable run record carrying `depth` and
-`parent { runId, taskId, executionId, ancestorDefinitionIdentities }`. The
+`parent { runId, taskId, executionId, ancestorDefinitionIdentities,
+inputArtifacts }`. The
 child composes the same launcher, finalizer, support executor, scheduler, and
 static runtime as a root run and re-executes its own trusted source from entry;
 there is no second scheduler class and no persisted continuation. Depth is
