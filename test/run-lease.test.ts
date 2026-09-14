@@ -30,7 +30,10 @@ function worker(leaseRoot: string, runId: string): ChildProcess {
 function record(child: ChildProcess): Promise<WorkflowRunLeaseRecord> {
 	return new Promise((resolve, reject) => {
 		let output = "";
-		const timeout = setTimeout(() => reject(new Error(output)), 20_000);
+		// The worker spawns a tsx child process; under full-suite load its 20 s
+		// allowance fired (a third load-related failure in this repository) while
+		// the isolated run takes about 3 s, so it shares the suite-wide bound.
+		const timeout = setTimeout(() => reject(new Error(output)), 60_000);
 		child.once("error", reject);
 		child.once("exit", (code) => {
 			if (code) reject(new Error(`worker exited ${code}: ${output}`));
