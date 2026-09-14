@@ -37,7 +37,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 12 as const,
+			contractRevision: 13 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -63,7 +63,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const root = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 12 as const,
+			contractRevision: 13 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -85,6 +85,7 @@ describe("workflow run record", () => {
 			taskId: `task_${"b".repeat(64)}`,
 			executionId: `execution_${"c".repeat(64)}`,
 			ancestorDefinitionIdentities: ["d".repeat(64)],
+			inputArtifacts: {},
 		};
 		await expect(store.create({ ...root, depth: 1 })).rejects.toThrow(
 			"invalid workflow run record",
@@ -118,11 +119,91 @@ describe("workflow run record", () => {
 			}),
 		).rejects.toThrow("invalid workflow run record");
 		await expect(
-			store.create({ ...root, contractRevision: 11 as unknown as 12 }),
+			store.create({ ...root, contractRevision: 12 as unknown as 13 }),
 		).rejects.toThrow("invalid workflow run record");
 		const nested = { ...root, depth: 1, parent };
 		await store.create(nested);
 		expect(await store.read()).toEqual(nested);
+	});
+
+	it("binds injected input artifacts to the parent run", async () => {
+		const { store } = await fixture();
+		const parent = {
+			runId: "workflow_parent",
+			taskId: `task_${"b".repeat(64)}`,
+			executionId: `execution_${"c".repeat(64)}`,
+			ancestorDefinitionIdentities: ["d".repeat(64)],
+			inputArtifacts: {},
+		};
+		const nested = {
+			schema: "pi-workflow-run" as const,
+			contractRevision: 13 as const,
+			runId: "workflow_record" as const,
+			depth: 1,
+			parent,
+			definitionName: "example",
+			definitionPath: "/repo/workflows/example.workflow.ts",
+			definitionIdentitySha256: hash,
+			definitionSourceSha256: hash,
+			concurrency: 4,
+			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			declaredTimeoutMs: 3600000,
+			effectiveTimeoutMs: 3600000,
+			deadlineAt: "2026-09-01T01:00:00.000Z",
+			cwd: "/repo",
+			input: { question: "why", answer: { value: "because" } },
+			createdAt: "2026-09-01T00:00:00.000Z",
+		};
+		const artifact = {
+			runId: "workflow_parent",
+			artifactId: `artifact_${"e".repeat(64)}`,
+			sha256: "f".repeat(64),
+		};
+		const { inputArtifacts: _omitted, ...withoutInputArtifacts } = parent;
+		await expect(
+			store.create({
+				...nested,
+				parent: withoutInputArtifacts as unknown as typeof parent,
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({
+				...nested,
+				parent: {
+					...parent,
+					inputArtifacts: {
+						answer: { ...artifact, runId: "workflow_other" },
+					},
+				},
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({
+				...nested,
+				parent: {
+					...parent,
+					inputArtifacts: {
+						answer: { ...artifact, runId: "workflow_record" },
+					},
+				},
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({
+				...nested,
+				parent: {
+					...parent,
+					inputArtifacts: { "Answer 1": artifact },
+				},
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		const injected = {
+			...nested,
+			parent: { ...parent, inputArtifacts: { answer: artifact } },
+		};
+		await store.create(injected);
+		expect(await store.read()).toEqual(injected);
 	});
 
 	it("rejects corruption and oversized input", async () => {
@@ -132,7 +213,7 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 12,
+				contractRevision: 13,
 				runId: "workflow_record",
 				depth: 0,
 				definitionName: "example",

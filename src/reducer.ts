@@ -249,9 +249,9 @@ function supportTaskSpec(
 	return spec;
 }
 
-function supportInputsSha256(
+function taskInputsSha256(
 	state: WorkflowStateProjection,
-	spec: SupportTaskSpec,
+	spec: SupportTaskSpec | NestedWorkflowTaskSpec,
 	sequence: number,
 ): string {
 	const inputs: Record<string, string> = {};
@@ -263,7 +263,10 @@ function supportInputsSha256(
 		);
 		const artifact = candidates[0];
 		if (!artifact || candidates.length !== 1) {
-			fail("support task input artifact is missing or ambiguous", sequence);
+			fail(
+				`${spec.kind === "support" ? "support" : "workflow"} task input artifact is missing or ambiguous`,
+				sequence,
+			);
 		}
 		inputs[name] = artifact.sha256;
 	}
@@ -334,7 +337,8 @@ function isNestedFailureStage(stage: string): boolean {
 	return (
 		stage === "nested-resolution" ||
 		stage === "nested-launch" ||
-		stage === "nested-import"
+		stage === "nested-import" ||
+		stage === "nested-input"
 	);
 }
 
@@ -453,9 +457,6 @@ function applyEvent(
 						"workflow task count exceeds the nested workflow bound",
 						event.sequence,
 					);
-				}
-				if (Object.keys(spec.inputs).length > 0) {
-					fail("workflow task may not declare artifact inputs", event.sequence);
 				}
 				if (
 					spec.request.inputSha256 !== deriveJsonValueSha256(spec.request.input)
@@ -1030,7 +1031,7 @@ function applyEvent(
 				input.data.parametersSha256 !==
 					deriveJsonValueSha256(spec.request.parameters) ||
 				input.data.inputsSha256 !==
-					supportInputsSha256(state, spec, event.sequence)
+					taskInputsSha256(state, spec, event.sequence)
 			) {
 				fail("support task intent does not match its task", event.sequence);
 			}
@@ -1089,6 +1090,30 @@ function applyEvent(
 				input.data.inputSha256 !== spec.request.inputSha256
 			) {
 				fail("nested workflow intent does not match its task", event.sequence);
+			}
+			if (
+				input.data.inputsSha256 !==
+				taskInputsSha256(state, spec, event.sequence)
+			) {
+				fail(
+					"nested workflow intent input artifacts do not match its task",
+					event.sequence,
+				);
+			}
+			// Without artifact inputs the launched child input is the authored
+			// input, so its digest must equal the declared inputSha256. With
+			// artifact inputs the launched input is the authored input merged
+			// with artifact contents that are stored outside the journal, so the
+			// reducer cannot recompute the merged digest; the executor re-derives
+			// and re-verifies it against this intent before launch.
+			if (
+				Object.keys(spec.inputs).length === 0 &&
+				input.data.resolvedInputSha256 !== spec.request.inputSha256
+			) {
+				fail(
+					"nested workflow intent resolved input does not match its declared input",
+					event.sequence,
+				);
 			}
 			const declared = spec.request.budget;
 			const intended = input.data.budget;
@@ -1420,7 +1445,8 @@ function applyEvent(
 						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
 					(input.data.outcome === "failed" &&
 						((evidence.stage !== "nested-resolution" &&
-							evidence.stage !== "nested-launch") ||
+							evidence.stage !== "nested-launch" &&
+							evidence.stage !== "nested-input") ||
 							!resolutionPhase)) ||
 					(input.data.outcome === "cleanup-blocked" &&
 						(evidence.stage !== "nested-import" || !importPhase)) ||

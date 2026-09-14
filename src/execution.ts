@@ -113,7 +113,8 @@ export function deriveWorkflowFailureSha256(
 		| "support-output"
 		| "nested-resolution"
 		| "nested-launch"
-		| "nested-import",
+		| "nested-import"
+		| "nested-input",
 	message: string,
 ): string {
 	return sha256({ message, stage });

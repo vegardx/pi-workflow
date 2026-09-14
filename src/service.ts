@@ -887,6 +887,7 @@ export async function createWorkflowService(
 						ancestorDefinitionIdentities: [
 							...request.parent.ancestorDefinitionIdentities,
 						],
+						inputArtifacts: {},
 					},
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);
