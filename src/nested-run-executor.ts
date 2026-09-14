@@ -1,10 +1,16 @@
+import { isDeepStrictEqual } from "node:util";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
 import { Value } from "typebox/value";
+import {
+	readWorkflowArtifactInputs,
+	WorkflowArtifactInputError,
+} from "./artifact-input.js";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
 import {
 	type MaterializedNestedWorkflowTask,
+	type NestedWorkflowInputArtifacts,
 	type NestedWorkflowUsage,
 	type TaskExecutionOutcome,
 	type WorkflowArtifactId,
@@ -56,7 +62,10 @@ export interface WorkflowNestedRunLaunch {
 	readonly definitionName: string;
 	readonly definitionIdentitySha256: string;
 	readonly definitionSourceSha256: string;
+	/** The merged child input: authored input plus injected artifact values. */
 	readonly input: unknown;
+	/** Source identities of every injected artifact value, keyed by input name. */
+	readonly inputArtifacts: NestedWorkflowInputArtifacts;
 	readonly budget: WorkflowBudget;
 	readonly deadlineAt: string;
 	readonly concurrency: number;
@@ -89,6 +98,7 @@ export class WorkflowNestedRunError extends Error {
 		readonly stage:
 			| "validation"
 			| "resolution"
+			| "input"
 			| "launch"
 			| "import"
 			| "persistence",
@@ -152,7 +162,38 @@ const MESSAGES = Object.freeze({
 	launch: "Nested workflow run could not be launched.",
 	import: "Nested workflow output could not be imported.",
 	outputSchema: "Nested workflow output does not match its output schema.",
+	inputArtifact: "Nested workflow input artifact evidence is incomplete.",
+	inputRead: "Nested workflow inputs could not be read and verified.",
+	inputObject: "Nested workflow artifact inputs require an object input.",
+	inputCollision:
+		"Nested workflow input name collides with the authored input.",
+	inputSchema: "Nested workflow input does not match its schema.",
+	inputBound: "Nested workflow input exceeds the workflow input bound.",
+	inputDrift: "Nested workflow resolved input drifted from durable intent.",
 });
+
+const MAX_NESTED_INPUT_BYTES = 900 * 1024;
+
+function compareNames(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		(Object.getPrototypeOf(value) === Object.prototype ||
+			Object.getPrototypeOf(value) === null)
+	);
+}
+
+interface ResolvedChildInput {
+	readonly merged: unknown;
+	readonly inputsSha256: string;
+	readonly resolvedInputSha256: string;
+	readonly inputArtifacts: NestedWorkflowInputArtifacts;
+}
 
 interface NestedSelection {
 	readonly task: WorkflowTaskProjection & {
@@ -221,7 +262,7 @@ export function createWorkflowNestedRunExecutor(
 	const chains = new Map<WorkflowTaskId, Promise<unknown>>();
 	const validators = new Map<string, (value: unknown) => boolean>();
 
-	function outputValidator(schema: unknown): (value: unknown) => boolean {
+	function schemaValidator(schema: unknown): (value: unknown) => boolean {
 		const key = deriveJsonValueSha256(schema);
 		let validator = validators.get(key);
 		if (!validator) {
@@ -233,6 +274,97 @@ export function createWorkflowNestedRunExecutor(
 
 	async function state(): Promise<WorkflowStateProjection> {
 		return reduceWorkflowEvents(await journal.readEvents());
+	}
+
+	/**
+	 * Resolves the child input from the authored input plus verified artifact
+	 * values. Throws a WorkflowNestedRunError with stage "input" for any
+	 * declaration, evidence, verification, schema, or bound problem.
+	 */
+	async function resolveChildInput(
+		current: WorkflowStateProjection,
+		selection: NestedSelection,
+	): Promise<ResolvedChildInput> {
+		const task = selection.task.task;
+		const spec = task.spec;
+		const names = Object.keys(spec.inputs).sort(compareNames);
+		const digests: Record<string, string> = {};
+		const inputArtifacts: Record<
+			string,
+			{ runId: WorkflowRunId; artifactId: WorkflowArtifactId; sha256: string }
+		> = {};
+		for (const name of names) {
+			const input = spec.inputs[name];
+			if (!input) continue;
+			const matches = Object.values(current.artifacts).filter(
+				(artifact) =>
+					artifact.producerTaskId === input.producerTaskId &&
+					artifact.output === "result",
+			);
+			const artifact = matches[0];
+			if (matches.length !== 1 || !artifact) {
+				throw new WorkflowNestedRunError("input", MESSAGES.inputArtifact);
+			}
+			digests[name] = artifact.sha256;
+			inputArtifacts[name] = {
+				runId: journal.runId,
+				artifactId: artifact.id,
+				sha256: artifact.sha256,
+			};
+		}
+		let merged: unknown = spec.request.input;
+		if (names.length > 0) {
+			const authored = spec.request.input;
+			if (!isPlainObject(authored)) {
+				throw new WorkflowNestedRunError("input", MESSAGES.inputObject);
+			}
+			if (names.some((name) => Object.hasOwn(authored, name))) {
+				throw new WorkflowNestedRunError("input", MESSAGES.inputCollision);
+			}
+			let values: Readonly<Record<string, unknown>>;
+			try {
+				values = await readWorkflowArtifactInputs({
+					task,
+					state: current,
+					artifacts,
+				});
+			} catch (error) {
+				if (error instanceof WorkflowArtifactInputError) {
+					throw new WorkflowNestedRunError("input", MESSAGES.inputRead, {
+						cause: error,
+					});
+				}
+				throw error;
+			}
+			const combined: Record<string, unknown> = { ...authored };
+			for (const name of names) combined[name] = values[name];
+			merged = combined;
+		}
+		let serialized: string | undefined;
+		try {
+			serialized = JSON.stringify(merged);
+		} catch {
+			serialized = undefined;
+		}
+		if (
+			typeof serialized !== "string" ||
+			!isDeepStrictEqual(JSON.parse(serialized), merged)
+		) {
+			throw new WorkflowNestedRunError("input", MESSAGES.inputSchema);
+		}
+		if (Buffer.byteLength(serialized, "utf8") > MAX_NESTED_INPUT_BYTES) {
+			throw new WorkflowNestedRunError("input", MESSAGES.inputBound);
+		}
+		const plain = JSON.parse(serialized) as unknown;
+		if (!schemaValidator(spec.request.inputSchema)(plain)) {
+			throw new WorkflowNestedRunError("input", MESSAGES.inputSchema);
+		}
+		return {
+			merged: plain,
+			inputsSha256: deriveJsonValueSha256(digests),
+			resolvedInputSha256: deriveJsonValueSha256(plain),
+			inputArtifacts,
+		};
 	}
 
 	async function append(input: WorkflowEventInput): Promise<void> {
@@ -301,7 +433,12 @@ export function createWorkflowNestedRunExecutor(
 	async function terminalizeWorkflowFailure(
 		execution: TaskExecutionProjection,
 		outcome: "failed" | "cancelled" | "cleanup-blocked",
-		stage: "nested-resolution" | "nested-launch" | "nested-import" | "stop",
+		stage:
+			| "nested-resolution"
+			| "nested-input"
+			| "nested-launch"
+			| "nested-import"
+			| "stop",
 		message: string,
 	): Promise<void> {
 		await append({
@@ -410,6 +547,24 @@ export function createWorkflowNestedRunExecutor(
 				);
 				return done(execution, "terminal", "failed");
 			}
+			let resolved: ResolvedChildInput;
+			try {
+				resolved = await resolveChildInput(current, selection);
+			} catch (error) {
+				if (
+					error instanceof WorkflowNestedRunError &&
+					error.stage === "input"
+				) {
+					await terminalizeWorkflowFailure(
+						execution,
+						"failed",
+						"nested-input",
+						error.message,
+					);
+					return done(execution, "terminal", "failed");
+				}
+				throw error;
+			}
 			await append({
 				type: "task-execution-nested-intended",
 				data: {
@@ -417,8 +572,8 @@ export function createWorkflowNestedRunExecutor(
 					childRunId,
 					definitionIdentitySha256: spec.request.definitionIdentitySha256,
 					inputSha256: spec.request.inputSha256,
-					inputsSha256: deriveJsonValueSha256({}),
-					resolvedInputSha256: spec.request.inputSha256,
+					inputsSha256: resolved.inputsSha256,
+					resolvedInputSha256: resolved.resolvedInputSha256,
 					budget: structuredClone(spec.request.budget),
 					timeoutMs,
 					deadlineAt: new Date(now + timeoutMs).toISOString(),
@@ -437,6 +592,22 @@ export function createWorkflowNestedRunExecutor(
 					"Nested workflow intent is missing from the projection.",
 				);
 			}
+			let resolved: ResolvedChildInput;
+			try {
+				resolved = await resolveChildInput(current, selection);
+			} catch (error) {
+				// Intent is durable and artifacts are immutable; a failure here
+				// is evidence corruption rather than an ordinary task failure.
+				throw new WorkflowNestedRunError("persistence", MESSAGES.inputDrift, {
+					cause: error,
+				});
+			}
+			if (
+				resolved.inputsSha256 !== intent.inputsSha256 ||
+				resolved.resolvedInputSha256 !== intent.resolvedInputSha256
+			) {
+				throw new WorkflowNestedRunError("persistence", MESSAGES.inputDrift);
+			}
 			try {
 				await provider.launch({
 					childRunId,
@@ -453,7 +624,8 @@ export function createWorkflowNestedRunExecutor(
 					definitionName: spec.request.definitionName,
 					definitionIdentitySha256: spec.request.definitionIdentitySha256,
 					definitionSourceSha256: spec.request.definitionSourceSha256,
-					input: spec.request.input,
+					input: resolved.merged,
+					inputArtifacts: resolved.inputArtifacts,
 					budget: intent.budget,
 					deadlineAt: intent.deadlineAt,
 					concurrency: intent.concurrency,
@@ -672,7 +844,7 @@ export function createWorkflowNestedRunExecutor(
 				throw new WorkflowNestedRunError("import", MESSAGES.import);
 			}
 			value = source.value;
-			if (!outputValidator(spec.request.outputSchema)(value)) {
+			if (!schemaValidator(spec.request.outputSchema)(value)) {
 				throw new WorkflowNestedRunError("import", MESSAGES.outputSchema);
 			}
 		} catch (error) {

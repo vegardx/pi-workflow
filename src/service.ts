@@ -9,6 +9,7 @@ import { Value } from "typebox/value";
 import { WorkflowArtifactStore } from "./artifact-store.js";
 import {
 	MAX_WORKFLOW_CONCURRENCY,
+	type NestedWorkflowInputArtifacts,
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
@@ -88,7 +89,11 @@ export type WorkflowServiceRunView = WorkflowServiceRunReceipt & {
 	readonly definitionName: string;
 	readonly createdAt: string;
 	readonly depth: number;
-	readonly parent?: { readonly runId: WorkflowRunId; readonly taskId: string };
+	readonly parent?: {
+		readonly runId: WorkflowRunId;
+		readonly taskId: string;
+		readonly inputArtifacts: NestedWorkflowInputArtifacts;
+	};
 	readonly output?: unknown;
 	readonly outputArtifactId?: string;
 };
@@ -660,13 +665,16 @@ export async function createWorkflowService(
 	}
 
 	function lineageOf(record: WorkflowRunRecord): {
-		parent?: { runId: WorkflowRunId; taskId: string };
+		parent?: NonNullable<WorkflowServiceRunView["parent"]>;
 	} {
 		return record.parent
 			? {
 					parent: Object.freeze({
 						runId: record.parent.runId,
 						taskId: record.parent.taskId,
+						inputArtifacts: Object.freeze(
+							structuredClone(record.parent.inputArtifacts),
+						),
 					}),
 				}
 			: {};
@@ -683,7 +691,8 @@ export async function createWorkflowService(
 			record.parent.executionId !== request.parent.executionId ||
 			record.definitionIdentitySha256 !== request.definitionIdentitySha256 ||
 			record.definitionSourceSha256 !== request.definitionSourceSha256 ||
-			!isDeepStrictEqual(record.input, request.input)
+			!isDeepStrictEqual(record.input, request.input) ||
+			!isDeepStrictEqual(record.parent.inputArtifacts, request.inputArtifacts)
 		) {
 			throw new WorkflowNestedRunError(
 				"launch",
@@ -887,7 +896,7 @@ export async function createWorkflowService(
 						ancestorDefinitionIdentities: [
 							...request.parent.ancestorDefinitionIdentities,
 						],
-						inputArtifacts: {},
+						inputArtifacts: structuredClone(request.inputArtifacts),
 					},
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);

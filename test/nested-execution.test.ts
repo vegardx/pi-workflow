@@ -1193,7 +1193,11 @@ describe("nested workflow execution", () => {
 			depth: 1,
 			parent: { runId: receipt.runId, taskId },
 		});
-		expect(Object.keys(view.parent ?? {}).sort()).toEqual(["runId", "taskId"]);
+		expect(Object.keys(view.parent ?? {}).sort()).toEqual([
+			"inputArtifacts",
+			"runId",
+			"taskId",
+		]);
 		const record = await recordOf(fx.storeRoot, childRunId);
 		expect(record.parent).toMatchObject({ runId: receipt.runId, taskId });
 		expect(record.parent?.ancestorDefinitionIdentities).toEqual([
