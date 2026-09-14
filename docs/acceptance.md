@@ -158,8 +158,9 @@ An in-memory-only successful drive does not satisfy the first slice.
 - the child's validated output is imported as a parent-owned result artifact,
   the parent returns it as its own output, and a later parent task may consume
   it as an ordinary named input;
-- status views report `depth` for every run and `parent { runId, taskId }` for
-  a child; a child run is addressable by its own run ID;
+- status views report `depth` for every run and
+  `parent { runId, taskId, inputArtifacts }` for a child; a child run is
+  addressable by its own run ID;
 - admission reserves the child's declared budget against the parent's settled
   usage and active reservations, defers or blocks a child that does not fit,
   requires a `totalTokens` declaration under a parent token budget, and settles
@@ -172,14 +173,16 @@ An in-memory-only successful drive does not satisfy the first slice.
 - a `running` or `cancelling` nested task occupies one parent lane;
 - declaration rejects an undiscovered name, a depth-3 run declaring a workflow
   task, more than 64 workflow tasks in one run, a definition already on the
-  ancestor chain, and input that fails the child's input schema;
+  ancestor chain, and, when no artifact inputs are declared, input that fails
+  the child's input schema;
 - parent stop marks the task `cancelling`, stops the child, and reaches a
   terminal parent status only after the child's terminal state; the parent
   deadline cascades the same way and the child deadline is never later;
 - restart with a launched child resumes that child from its own journal and
   never launches it again; an intent without a child directory relaunches
-  under the same child run ID; an existing child whose lineage, definition, or
-  input differs from the intent fails at `nested-launch`;
+  under the same child run ID; an existing child whose lineage, definition,
+  input, or injected input artifacts differ from the intent fails at
+  `nested-launch`;
 - child source drift fails replay of the parent as declaration drift while a
   completed nested task still replays from its imported artifact;
 - import failure yields `cleanup-blocked` at `nested-import` and parent
@@ -192,6 +195,40 @@ An in-memory-only successful drive does not satisfy the first slice.
   cancelled through their parents;
 - a run without a configured nested run provider blocks workflow tasks with a
   fixed message and fails when the task is required.
+
+### Artifact inputs into nested children
+
+- a nested task declared with `inputs` accepts producers of every kind: an
+  agent task, a support task, and a sibling nested workflow task each feed a
+  child, the producer is recorded in `after`, and the child is not ready until
+  every producer has completed;
+- the child's launched input is the authored object with each verified
+  artifact value merged in as a top-level key, the merged value is validated
+  against the child's input schema and the 900 KiB bound at launch, and the
+  child sees it as plain `ctx.input` and persists it in its own run record;
+- the nested intent records `inputsSha256` equal to the canonical digest of the
+  producer result artifact digests keyed by input name and
+  `resolvedInputSha256` equal to the digest of the merged input; the reducer
+  rejects an `inputsSha256` that disagrees with journaled artifacts and, for
+  empty inputs, a `resolvedInputSha256` that differs from the authored digest;
+- the child run record and its service view carry
+  `parent.inputArtifacts` with `{ runId, artifactId, sha256 }` per input name;
+  a record whose injected artifact names a different run or an invalid key is
+  rejected, and a root record carries no lineage;
+- restart between intent and launch recomputes the merged input from the same
+  artifacts and relaunches exactly once with an input and `inputArtifacts`
+  identical to the intent, without a second intent;
+- an input that cannot be recomputed to the intended digests after intent is
+  thrown as a persistence error, never converted into task failure;
+- declaration rejects a non-object authored input and an authored key that
+  collides with an input name when artifact inputs are declared, and defers
+  child schema validation to launch; with empty inputs the authored input is
+  validated at declaration;
+- a missing or ambiguous producer artifact, an unverifiable input, or a merged
+  input that fails the child schema or bound fails the task at `nested-input`
+  with a fixed message and no intent;
+- the runtime contract publishes `nestedArtifactInputs: true` and exports
+  `NestedWorkflowInputArtifactsSchema`.
 
 ## Persistence and recovery
 
@@ -209,7 +246,7 @@ An in-memory-only successful drive does not satisfy the first slice.
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-12 stores reject revision 1 through 11 records;
+  and revision-13 stores reject revision 1 through 12 records;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - required finalizer failure prevents success;
 - bounded private stores redact sensitive metadata.

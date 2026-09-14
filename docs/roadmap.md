@@ -54,12 +54,20 @@ Delivered:
   capping from the parent, verified output import, stop/deadline cascades,
   restart resume, and reconciliation (runtime contract feature
   `nestedWorkflows: true`, depth 0 through 3, at most 64 workflow tasks per
-  run, recursion rejected).
+  run, recursion rejected);
+- artifact inputs into nested children: `ctx.workflow` accepts `inputs` from
+  agent, support, and nested producers, values are read through the verified
+  input path at launch and merged into the authored input, the merged input is
+  validated against the child schema and bound, and intent carries the
+  artifact digest map and merged-input digest (runtime contract feature
+  `nestedArtifactInputs: true`, contract revision 13);
+- cross-run artifact references as provenance: the child run record and view
+  carry `parent.inputArtifacts` identifying the exact parent artifacts merged
+  into its input, re-verified on resume; these are provenance records, not a
+  read path, and no live cross-run artifact read exists.
 
 Remaining:
 
-- artifact inputs into nested children (only concrete `input` is supported);
-- cross-run artifact references beyond the verified output import;
 - pi-subagent handoff-export contract and workflow-owned worktree artifacts
   before enabling writer tasks.
 

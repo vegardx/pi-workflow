@@ -26,8 +26,13 @@ is an immutable bounded private record containing the exact workflow definition
 provenance, project root, input, effective concurrency limit, declared and
 effective workflow budgets, declared and effective timeout, absolute deadline,
 creation identity, nesting `depth`, and (exactly when `depth >= 1`) the
-`parent { runId, taskId, executionId, ancestorDefinitionIdentities }` lineage
-needed for restart reconstruction. It is written before workflow source
+`parent { runId, taskId, executionId, ancestorDefinitionIdentities,
+inputArtifacts }` lineage needed for restart reconstruction. For a child run,
+`input` is the merged input actually launched and `inputArtifacts` maps each
+injected input name to the `{ runId, artifactId, sha256 }` of the parent
+artifact whose verified value was merged in (`{}` when none); every such
+`runId` must equal `parent.runId` and every name must be a valid task key, or
+the record is rejected on read. It is written before workflow source
 starts. A linked child workflow run is a peer directory under the same
 `runs/` root, named by its deterministic child run ID.
 Credential-shaped metadata is redacted. Source-derived sensitive content that
@@ -37,8 +42,8 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-12 rejects revision-1 through revision-11 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 12 accepts only
+13 rejects revision-1 through revision-12 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 13 accepts only
 the declared run, workflow phase/log effect, task, artifact, barrier,
 output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent, uncertain launch
@@ -114,7 +119,7 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 12 currently admits generation 1 only; later generations
+invalidation. Revision 13 currently admits generation 1 only; later generations
 remain unavailable until transactional invalidation lands. The execution record
 is discriminated by `kind: "agent" | "support" | "workflow"`; all kinds share
 the derived execution ID, run, task, generation, and task identity digest.
@@ -151,21 +156,30 @@ A nested workflow execution (`kind: "workflow"`) carries a deterministic
 operation ID. It contains:
 
 - generation number and task identity;
-- durable nested intent: child definition identity, input digest, the budget
-  reserved from the parent, effective timeout, absolute deadline, and
-  concurrency;
+- durable nested intent: child definition identity, authored input digest
+  (`inputSha256`), the digest map of the producer result artifacts named by
+  `spec.inputs` (`inputsSha256`, `{}` when none), the digest of the merged
+  input actually launched (`resolvedInputSha256`), the budget reserved from
+  the parent, effective timeout, absolute deadline, and concurrency; the
+  reducer recomputes `inputsSha256` from journaled artifact state and, when
+  `spec.inputs` is empty, requires `resolvedInputSha256` to equal
+  `inputSha256`, but it cannot recompute the merged contents when inputs
+  exist because artifact values are not journaled;
 - the nested launch receipt, recorded once the child run record is durable;
 - the nested settlement: the child's terminal status, summed usage,
   `usageComplete`, and (for a completed child) the child-owned output artifact
   ID and digest;
 - the output import: the parent-owned result artifact and its child source;
 - terminal evidence of kind `nested-workflow` or of kind `workflow` with a
-  `nested-resolution`, `nested-launch`, `nested-import`, or `stop` stage.
+  `nested-input`, `nested-resolution`, `nested-launch`, `nested-import`, or
+  `stop` stage.
 
 The child run is a separate durable run with its own journal, lease, artifact
 store, and run record; the parent journal never embeds child events. The
 parent's execution record and the child's run record reference each other by
-identity only.
+identity only. The child record additionally carries `parent.inputArtifacts`,
+the identities of the parent artifacts whose verified values were merged into
+its input; the parent's intent carries the matching digest map.
 
 Phase 3 adds subagent retry/resume attempts and control receipts to the existing
 agent task execution. A new execution generation requires a new preflight,
@@ -209,9 +223,10 @@ prefix in the parent journal together with the child run directory:
 | Durable prefix | Recovery |
 | --- | --- |
 | no execution record | ordinary readiness; a fresh generation-1 record with the derived `childRunId` is created |
-| `task-execution-created` only | recompute intent from the declaration and the parent deadline; under one second remaining fails at `nested-launch` |
-| intent only, no child run directory | the atomic child record write never happened; launch is retried under the same `childRunId` |
-| intent only, child run directory present | the existing child must match its lineage (`depth`, parent run, task, execution), definition identity, source digest, and input exactly, otherwise the task fails at `nested-launch`; a directory whose record is missing or unreadable is a persistence error and is thrown, not converted into task failure |
+| `task-execution-created` only | recompute intent from the declaration and the parent deadline; under one second remaining fails at `nested-launch`; resolve every declared artifact input through the verified path, merge, and validate the merged input, failing at `nested-input` on any problem |
+| intent only | recompute the merged input from the same parent artifacts and require both `inputsSha256` and `resolvedInputSha256` to equal the intent; artifacts are immutable, so any read failure or digest disagreement is evidence corruption and fails closed as a thrown persistence error, never as a task failure |
+| intent only, no child run directory | the atomic child record write never happened; launch is retried once under the same `childRunId` with the identical merged input and `inputArtifacts` |
+| intent only, child run directory present | the existing child must match its lineage (`depth`, parent run, task, execution), definition identity, source digest, merged input, and `inputArtifacts` exactly, otherwise the task fails at `nested-launch`; a directory whose record is missing or unreadable is a persistence error and is thrown, not converted into task failure |
 | launched | the child is resumed from its own journal and driven to terminal state; it is never launched again |
 | settled, non-completed | terminal evidence is appended with the mapped outcome |
 | settled, completed, not imported | the child output is reread with full verification and imported; failure is `cleanup-blocked` at `nested-import` |
@@ -256,7 +271,8 @@ skills and context digests
 output schema
 workspace baseline
 support implementation identity (support tasks)
-child definition identity, source digest, and input digest (workflow tasks)
+child definition identity, source digest, authored input digest, and
+  injected input artifact identities (workflow tasks)
 subagent and workflow runtime revisions
 ```
 
@@ -348,9 +364,23 @@ child's declared output by rereading it through the child's own store with
 provenance, digest, canonical-encoding, media-type, and schema verification,
 validating it against the output schema captured at declaration, and writing it
 as a parent-owned result artifact bound to the parent task before the parent
-task completes. Cross-run artifact references remain impossible otherwise: a
-parent handle never points into a child store, and a child never reads its
-parent's store.
+task completes. Values flow the other way by the same copy discipline: each
+artifact input declared on a nested task is read from the parent-owned store
+through the verified path at launch and merged into the child's input, which
+is then persisted in the child's own `service.json`. A parent handle never
+points into a child store, and a child never reads its parent's store.
+
+### Cross-run provenance
+
+The injected artifact identities recorded in a child's
+`parent.inputArtifacts` (`{ runId, artifactId, sha256 }` per input name) are
+the only cross-run artifact references the runtime persists. They are
+provenance: they bind the child's input to the exact parent artifacts it was
+derived from, are re-verified against the parent's intent on resume, and are
+exposed on the child's service view. They are not handles. No live cross-run
+read path exists: a child cannot dereference them, the artifact store never
+resolves an id from another run, and a value crosses the run boundary only as
+a verified copy bound by digest into the receiving run's record or store.
 
 The initial read-only slice imports structured/output artifacts only. Worktree
 execution is rejected until pi-subagent exposes bounded handoff content through
