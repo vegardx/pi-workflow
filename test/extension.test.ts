@@ -7,6 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import workflowExtension from "../src/extension.js";
+import { WORKFLOW_TOOL_DECLARATIONS } from "../src/tools.js";
 
 describe("workflow Pi extension", () => {
 	it("registers bounded workflow tools and lazy lifecycle cleanup", async () => {
@@ -27,6 +28,9 @@ describe("workflow Pi extension", () => {
 		} as unknown as ExtensionAPI;
 
 		workflowExtension(api);
+		expect(tools.map((tool) => tool.name)).toEqual(
+			WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name),
+		);
 		expect(tools.map((tool) => tool.name)).toEqual([
 			"workflow_list",
 			"workflow_validate",
@@ -36,6 +40,20 @@ describe("workflow Pi extension", () => {
 			"workflow_stop",
 			"workflow_reconcile",
 		]);
+		for (const tool of tools) {
+			const declaration = WORKFLOW_TOOL_DECLARATIONS.find(
+				(candidate) => candidate.name === tool.name,
+			);
+			expect(tool.parameters).toBe(declaration?.parameters);
+			expect(tool.label).toBe(declaration?.label);
+			expect(tool.description).toBe(declaration?.description);
+		}
+		expect(
+			tools.find((tool) => tool.name === "workflow_list")?.promptSnippet,
+		).toBe("List trusted durable workflows");
+		expect(
+			tools.find((tool) => tool.name === "workflow_run")?.promptSnippet,
+		).toBeUndefined();
 		expect(commands).toEqual(["workflows", "workflow-status"]);
 		expect([...handlers.keys()]).toEqual(["session_shutdown"]);
 		expect(
@@ -79,8 +97,9 @@ describe("workflow Pi extension", () => {
 				undefined,
 				context as never,
 			),
-		).resolves.toMatchObject({
-			content: [{ type: "text" }],
+		).resolves.toEqual({
+			content: [{ type: "text", text: "[]" }],
+			details: [],
 		});
 		await handlers.get("session_shutdown")?.({}, context);
 	});

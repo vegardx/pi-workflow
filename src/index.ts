@@ -316,3 +316,16 @@ export {
 	type WorkflowTaskRetrier,
 	type WorkflowTaskRetrierOptions,
 } from "./task-retrier.js";
+export {
+	WORKFLOW_TOOL_DECLARATIONS,
+	WorkflowDefinitionSummaryListSchema,
+	WorkflowDefinitionSummarySchema,
+	WorkflowRootScopeSchema,
+	WorkflowServiceRunReceiptSchema,
+	WorkflowServiceRunViewSchema,
+	WorkflowServiceTaskViewSchema,
+	type WorkflowToolDeclaration,
+	type WorkflowToolName,
+	type WorkflowToolOutput,
+	WorkflowValidationResultSchema,
+} from "./tools.js";
