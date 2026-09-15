@@ -34,6 +34,7 @@ function client(): SubagentClient {
 		pin: vi.fn(),
 		unpin: vi.fn(),
 		exportArtifact: vi.fn(),
+		exportHandoff: vi.fn(),
 	} as unknown as SubagentClient;
 }
 
@@ -132,6 +133,35 @@ describe("workflow subagent provider", () => {
 		);
 		expect("shutdown" in binding.client).toBe(false);
 		expect(shutdown).not.toHaveBeenCalled();
+	});
+
+	it("requires and exposes the handoff export capability", async () => {
+		const revisionFiveEvents = createEventBus();
+		const revisionFive = client() as unknown as Record<string, unknown>;
+		delete revisionFive.exportHandoff;
+		registerSubagentServiceProvider(revisionFiveEvents, async () =>
+			service(revisionFive as unknown as SubagentClient),
+		);
+		await expect(
+			createWorkflowSubagentProvider(revisionFiveEvents, context).bind(
+				"workflow_nohandoff",
+			),
+		).rejects.toMatchObject({
+			code: "incompatible",
+			message: "The pi-subagent service returned an invalid owner client.",
+		});
+
+		const events = createEventBus();
+		const owner = client();
+		registerSubagentServiceProvider(events, async () => service(owner));
+		const binding = await createWorkflowSubagentProvider(events, context).bind(
+			"workflow_handoff",
+		);
+		expect(typeof binding.client.exportHandoff).toBe("function");
+		await binding.client.exportHandoff("run_child", { maxBytes: 1 });
+		expect(owner.exportHandoff).toHaveBeenCalledWith("run_child", {
+			maxBytes: 1,
+		});
 	});
 
 	it("rejects malformed services and owner clients", async () => {

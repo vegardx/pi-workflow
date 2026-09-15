@@ -54,6 +54,7 @@ const CLIENT_METHOD_NAMES = [
 	"pin",
 	"unpin",
 	"exportArtifact",
+	"exportHandoff",
 ] as const satisfies readonly (keyof SubagentClient)[];
 const CLIENT_METHODS: CompleteMethodList<
 	SubagentClient,
@@ -94,6 +95,7 @@ function restrictClient(client: SubagentClient): SubagentClient {
 		pin: client.pin.bind(client),
 		unpin: client.unpin.bind(client),
 		exportArtifact: client.exportArtifact.bind(client),
+		exportHandoff: client.exportHandoff.bind(client),
 	});
 }
 

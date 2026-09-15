@@ -1,24 +1,26 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
 	currentSubagentAttemptId,
 	settledAgentUsage,
 } from "../src/attempts.js";
-import type {
-	AgentTaskExecutionRecord,
-	MaterializedNestedWorkflowTask,
-	MaterializedSupportTask,
-	NestedWorkflowTaskExecutionRecord,
-	NestedWorkflowTaskRequest,
-	NestedWorkflowTerminalEvidence,
-	SubagentTerminalEvidence,
-	SupportTaskExecutionRecord,
-	SupportTaskTerminalEvidence,
-	WorkflowArtifactRef,
-	WorkflowRunStatus,
-	WorkflowTaskId,
+import {
+	type AgentTaskExecutionRecord,
+	type MaterializedNestedWorkflowTask,
+	type MaterializedSupportTask,
+	type NestedWorkflowTaskExecutionRecord,
+	type NestedWorkflowTaskRequest,
+	type NestedWorkflowTerminalEvidence,
+	type SubagentTerminalEvidence,
+	type SupportTaskExecutionRecord,
+	type SupportTaskTerminalEvidence,
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
+	type WorkflowArtifactRef,
+	type WorkflowRunStatus,
+	type WorkflowTaskId,
 } from "../src/contracts.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import {
@@ -26,10 +28,12 @@ import {
 	deriveNestedWorkflowRunId,
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
+	deriveSubagentSettlementEvidence,
 	deriveSupportImplementationIdentitySha256,
 	deriveTaskExecutionId,
 	deriveWorkflowArtifactId,
 	deriveWorkflowFailureSha256,
+	deriveWorkflowHandoffDescriptor,
 } from "../src/execution.js";
 import {
 	deriveNestedWorkflowTaskIdentity,
@@ -104,7 +108,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 16,
+		contractRevision: 17,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -190,6 +194,8 @@ function preflightEvents(
 				plannedSubagentRunId: "run_child",
 				plannedSubagentAttemptId: "attempt_child",
 				expiresAt: "2026-09-01T01:00:00.000Z",
+				workspaceMode: "read-only",
+				workspaceBaselineSha256: "c".repeat(64),
 			},
 		},
 		{
@@ -1490,6 +1496,8 @@ describe("support task execution persistence", () => {
 					plannedSubagentRunId: "run_child",
 					plannedSubagentAttemptId: "attempt_child",
 					expiresAt: "2026-09-01T01:00:00.000Z",
+					workspaceMode: "read-only",
+					workspaceBaselineSha256: "c".repeat(64),
 				},
 			},
 			{
@@ -2889,6 +2897,8 @@ describe("nested workflow task execution persistence", () => {
 					plannedSubagentRunId: "run_child",
 					plannedSubagentAttemptId: "attempt_child",
 					expiresAt: "2026-09-01T01:00:00.000Z",
+					workspaceMode: "read-only",
+					workspaceBaselineSha256: "c".repeat(64),
 				},
 			},
 			{
@@ -4142,5 +4152,158 @@ describe("task execution attempts", () => {
 		expect(first.executions[setup.execution.id]?.priorSettlements).toHaveLength(
 			1,
 		);
+	});
+});
+
+describe("handoff derivations", () => {
+	const baselineHead = "1".repeat(40);
+	const handoffCommit = "2".repeat(40);
+	const worktreeRecord = {
+		schema: "pi-subagent-worktree",
+		contractRevision: 6,
+		runId: "run_child",
+		attemptId: "attempt_first",
+		repositoryRoot: "/private/repo",
+		worktreePath: "/private/repo/.worktrees/run_child",
+		recordPath: "/private/records/run_child.json",
+		branch: "pi-subagent/run_child/attempt_first",
+		baselineHead,
+		createdAt: "2026-09-01T00:00:00.000Z",
+		handoffCommit,
+		handoffRef: "refs/pi-subagent/handoffs/run_child/attempt_first",
+	};
+	const result = {
+		runId: "run_child",
+		status: "completed" as const,
+		structuredOutput: { answer: "yes" },
+		usage: {
+			input: 10,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+			cost: 0.01,
+		},
+		usageComplete: true,
+		runtimeMs: 1000,
+		sandboxCleanup: "proved" as const,
+		workspaceCleanup: "proved" as const,
+		truncated: false,
+	};
+
+	it("projects only the handoff identity into settlement evidence", () => {
+		const evidence = deriveSubagentSettlementEvidence(
+			{ result, handoff: worktreeRecord },
+			1,
+		);
+		expect(evidence.handoff).toEqual({
+			attemptId: "attempt_first",
+			baselineHead,
+			handoffCommit,
+		});
+		expect(JSON.stringify(evidence)).not.toMatch(/private|refs\/|branch/);
+		const readOnly = deriveSubagentSettlementEvidence({ result }, 1);
+		expect("handoff" in readOnly).toBe(false);
+		expect({ ...evidence, handoff: undefined }).toEqual({
+			...readOnly,
+			handoff: undefined,
+		});
+		const { handoffCommit: _omitted, ...noChanges } = worktreeRecord;
+		expect(
+			"handoff" in
+				deriveSubagentSettlementEvidence({ result, handoff: noChanges }, 1),
+		).toBe(false);
+	});
+
+	it("rejects malformed handoff records", () => {
+		for (const handoff of [
+			null,
+			"attempt_first",
+			{ ...worktreeRecord, attemptId: "first" },
+			{ ...worktreeRecord, baselineHead: "main" },
+			{ ...worktreeRecord, handoffCommit: "HEAD" },
+			{ ...worktreeRecord, handoffCommit: baselineHead },
+		]) {
+			expect(() =>
+				deriveSubagentSettlementEvidence({ result, handoff }, 1),
+			).toThrow("subagent handoff record is invalid");
+		}
+	});
+
+	it("derives the handoff descriptor from the import and its artifact", () => {
+		const execution = {
+			kind: "agent" as const,
+			id: `execution_${"3".repeat(64)}`,
+			runId: "workflow_handoff",
+			taskId: "task_writer",
+			generation: 1 as const,
+			taskIdentitySha256: planIdentitySha256,
+			operationId: `workflow-op_${"4".repeat(64)}`,
+		};
+		const sha256 = "5".repeat(64);
+		const ref: WorkflowArtifactRef = {
+			id: deriveWorkflowArtifactId({
+				runId: execution.runId,
+				producerTaskId: execution.taskId,
+				producerExecutionId: execution.id,
+				output: "handoff",
+				schemaSha256: WORKFLOW_HANDOFF_FORMAT_SHA256,
+				sha256,
+			}),
+			runId: execution.runId,
+			producerTaskId: execution.taskId,
+			producerExecutionId: execution.id,
+			output: "handoff",
+			sha256,
+			bytes: 512,
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			schemaSha256: WORKFLOW_HANDOFF_FORMAT_SHA256,
+		};
+		const handoffImport = {
+			subagentRunId: "run_child",
+			subagentAttemptId: "attempt_first",
+			artifactId: ref.id,
+			handoffCommit,
+			baselineHead,
+			sha256,
+			bytes: 512,
+			sequence: 9,
+		};
+		expect(
+			deriveWorkflowHandoffDescriptor(ref, { execution, handoffImport }),
+		).toEqual({
+			artifactId: ref.id,
+			runId: execution.runId,
+			producerTaskId: execution.taskId,
+			producerExecutionId: execution.id,
+			subagentRunId: "run_child",
+			subagentAttemptId: "attempt_first",
+			baselineHead,
+			handoffCommit,
+			format: "git-format-patch",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			sha256,
+			bytes: 512,
+		});
+		expect(() => deriveWorkflowHandoffDescriptor(ref, { execution })).toThrow(
+			"workflow handoff descriptor requires a handoff import",
+		);
+		expect(() =>
+			deriveWorkflowHandoffDescriptor(
+				{ ...ref, output: "result" },
+				{ execution, handoffImport },
+			),
+		).toThrow("workflow handoff descriptor requires a handoff artifact");
+		for (const mismatch of [
+			{ ...ref, bytes: 511 },
+			{ ...ref, sha256: "6".repeat(64) },
+			{ ...ref, producerExecutionId: `execution_${"7".repeat(64)}` },
+			{ ...ref, mediaType: "application/json" },
+			{ ...ref, schemaSha256: planIdentitySha256 },
+		]) {
+			expect(() =>
+				deriveWorkflowHandoffDescriptor(mismatch, { execution, handoffImport }),
+			).toThrow("workflow handoff artifact does not match its import");
+		}
 	});
 });
