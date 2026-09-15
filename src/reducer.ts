@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import {
 	currentSubagentAttempt,
@@ -17,6 +18,8 @@ import {
 	type SupportTaskSpec,
 	type TaskExecutionId,
 	type TaskExecutionOutcome,
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
+	type WorkflowArtifactOutput,
 	type WorkflowArtifactRef,
 	type WorkflowTaskId,
 } from "./contracts.js";
@@ -160,19 +163,37 @@ function currentExecutionIsActive(
 	return execution !== undefined && execution.phase !== "terminal";
 }
 
-/** The result artifact produced by the task's current execution, if any. */
-function currentResultArtifact(
+/** The named output artifact produced by the task's current execution, if any. */
+function currentOutputArtifact(
 	state: WorkflowStateProjection,
 	taskId: WorkflowTaskId,
+	output: WorkflowArtifactOutput,
 ): WorkflowArtifactRef | undefined {
 	const task = state.tasks[taskId];
 	if (!task?.currentExecutionId) return undefined;
 	return Object.values(state.artifacts).find(
 		(artifact) =>
 			artifact.producerTaskId === taskId &&
-			artifact.output === "result" &&
+			artifact.output === output &&
 			artifact.producerExecutionId === task.currentExecutionId,
 	);
+}
+
+/** The result artifact produced by the task's current execution, if any. */
+function currentResultArtifact(
+	state: WorkflowStateProjection,
+	taskId: WorkflowTaskId,
+): WorkflowArtifactRef | undefined {
+	return currentOutputArtifact(state, taskId, "result");
+}
+
+/** A worktree agent task: the only producer of handoff artifacts. */
+function isWorktreeTaskSpec(
+	spec: WorkflowStateProjection["tasks"][string]["task"]["spec"] | undefined,
+): spec is AgentTaskSpec & {
+	request: { workspace: { mode: "worktree" } };
+} {
+	return spec?.kind === "agent" && spec.request.workspace.mode === "worktree";
 }
 
 export interface WorkflowInvalidationClosure {
@@ -404,7 +425,11 @@ function taskInputsSha256(
 ): string {
 	const inputs: Record<string, string> = {};
 	for (const [name, input] of Object.entries(spec.inputs)) {
-		const artifact = currentResultArtifact(state, input.producerTaskId);
+		const artifact = currentOutputArtifact(
+			state,
+			input.producerTaskId,
+			input.output,
+		);
 		if (!artifact) {
 			fail(
 				`${spec.kind === "support" ? "support" : "workflow"} task input artifact is missing or ambiguous`,
@@ -461,7 +486,8 @@ function validSubagentSettlement(evidence: SubagentTerminalEvidence): boolean {
 			evidence.failure.origin === "operator" &&
 			evidence.failure.retry === "never" &&
 			evidence.output === undefined &&
-			evidence.structuredOutputSha256 === undefined
+			evidence.structuredOutputSha256 === undefined &&
+			evidence.handoff === undefined
 		);
 	}
 	return cleanupIsProved;
@@ -694,6 +720,15 @@ function applyEvent(
 				if (task.spec.role === "task" && isFinalizer(producer)) {
 					fail("ordinary task may not depend on a finalizer", event.sequence);
 				}
+				if (
+					inputRef.output === "handoff" &&
+					!isWorktreeTaskSpec(producer.task.spec)
+				) {
+					fail(
+						"task input names a handoff of a non-worktree task",
+						event.sequence,
+					);
+				}
 				if (!explicitDependencies.has(inputRef.producerTaskId)) {
 					fail(
 						"task data dependency lacks its order dependency",
@@ -751,6 +786,20 @@ function applyEvent(
 					artifact.producerTaskId
 				) {
 					fail("artifact producer execution does not match", event.sequence);
+				}
+				if (artifact.output === "handoff") {
+					if (!isWorktreeTaskSpec(producer.task.spec)) {
+						fail(
+							"handoff artifact requires a worktree producer",
+							event.sequence,
+						);
+					}
+					if (
+						artifact.mediaType !== HANDOFF_EXPORT_MEDIA_TYPE ||
+						artifact.schemaSha256 !== WORKFLOW_HANDOFF_FORMAT_SHA256
+					) {
+						fail("handoff artifact format is invalid", event.sequence);
+					}
 				}
 				if (
 					artifact.output !== undefined &&
@@ -977,6 +1026,15 @@ function applyEvent(
 			) {
 				fail("task execution preflight is out of order", event.sequence);
 			}
+			if (
+				input.data.workspaceMode !==
+				agentTaskSpec(state, projection, event.sequence).request.workspace.mode
+			) {
+				fail(
+					"task execution preflight workspace does not match its task",
+					event.sequence,
+				);
+			}
 			const { executionId: _executionId, ...preflight } = input.data;
 			projection.preflight = {
 				...preflight,
@@ -1141,6 +1199,18 @@ function applyEvent(
 					"task execution child settlement attempt ordinal does not match",
 					event.sequence,
 				);
+			}
+			if (evidence.handoff !== undefined) {
+				if (
+					!isWorktreeTaskSpec(agentTaskSpec(state, projection, event.sequence))
+				) {
+					fail("read-only task settlement carries a handoff", event.sequence);
+				}
+				if (
+					evidence.handoff.attemptId !== currentSubagentAttemptId(projection)
+				) {
+					fail("settlement handoff names another attempt", event.sequence);
+				}
 			}
 			projection.settlement = { evidence, sequence: event.sequence };
 			projection.phase =
@@ -1464,6 +1534,107 @@ function applyEvent(
 			projection.phase = "artifact-imported";
 			break;
 		}
+		case "task-execution-handoff-imported": {
+			const projection = agentExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (
+				!isWorktreeTaskSpec(agentTaskSpec(state, projection, event.sequence))
+			) {
+				fail("handoff import requires a worktree task", event.sequence);
+			}
+			const receipt = projection.launchReceipt;
+			const observation = projection.observation;
+			const settlement = projection.settlement;
+			const recoversHandoffImport =
+				projection.phase === "terminal" &&
+				projection.terminal?.outcome === "cleanup-blocked" &&
+				projection.terminal.evidence.kind === "workflow" &&
+				projection.terminal.evidence.stage === "handoff-import";
+			if (
+				(projection.phase !== "artifact-imported" && !recoversHandoffImport) ||
+				!receipt ||
+				!observation ||
+				!settlement ||
+				observation.status !== "completed" ||
+				input.data.subagentRunId !== receipt.subagentRunId ||
+				input.data.subagentAttemptId !== currentSubagentAttemptId(projection)
+			) {
+				fail("task execution handoff import is invalid", event.sequence);
+			}
+			const settledHandoff = settlement.evidence.handoff;
+			if (
+				!settledHandoff ||
+				settledHandoff.attemptId !== input.data.subagentAttemptId ||
+				settledHandoff.baselineHead !== input.data.baselineHead ||
+				settledHandoff.handoffCommit !== input.data.handoffCommit
+			) {
+				fail(
+					"handoff import does not match the settlement handoff",
+					event.sequence,
+				);
+			}
+			const artifact = state.artifacts[input.data.artifactId];
+			if (
+				!artifact ||
+				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.producerExecutionId !== projection.execution.id ||
+				artifact.output !== "handoff" ||
+				artifact.mediaType !== HANDOFF_EXPORT_MEDIA_TYPE ||
+				artifact.schemaSha256 !== WORKFLOW_HANDOFF_FORMAT_SHA256 ||
+				artifact.sha256 !== input.data.sha256 ||
+				artifact.bytes !== input.data.bytes
+			) {
+				fail("handoff import artifact does not match", event.sequence);
+			}
+			if (recoversHandoffImport) delete projection.terminal;
+			const { executionId: _executionId, ...handoffImport } = input.data;
+			projection.handoffImport = {
+				...handoffImport,
+				sequence: event.sequence,
+			};
+			projection.phase = "handoff-resolved";
+			break;
+		}
+		case "task-execution-handoff-absent": {
+			const projection = agentExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			if (
+				!isWorktreeTaskSpec(agentTaskSpec(state, projection, event.sequence))
+			) {
+				fail("handoff import requires a worktree task", event.sequence);
+			}
+			const receipt = projection.launchReceipt;
+			const observation = projection.observation;
+			const settlement = projection.settlement;
+			// Absence is never a recovery: a blocked import is retried, not waived.
+			if (
+				projection.phase !== "artifact-imported" ||
+				!receipt ||
+				!observation ||
+				!settlement ||
+				observation.status !== "completed" ||
+				input.data.subagentRunId !== receipt.subagentRunId ||
+				input.data.subagentAttemptId !== currentSubagentAttemptId(projection)
+			) {
+				fail("task execution handoff import is invalid", event.sequence);
+			}
+			if (settlement.evidence.handoff !== undefined) {
+				fail("handoff absence contradicts a captured handoff", event.sequence);
+			}
+			const { executionId: _executionId, ...handoffAbsent } = input.data;
+			projection.handoffAbsent = {
+				...handoffAbsent,
+				sequence: event.sequence,
+			};
+			projection.phase = "handoff-resolved";
+			break;
+		}
 		case "task-execution-release-intended": {
 			const projection = agentExecutionProjection(
 				state,
@@ -1477,8 +1648,14 @@ function applyEvent(
 				projection.terminal?.outcome === "cleanup-blocked" &&
 				projection.terminal.evidence.kind === "workflow" &&
 				projection.terminal.evidence.stage === "release";
+			// A completed worktree child must hold its handoff evidence before the
+			// workflow declares it disposable; read-only children need the result.
 			const expectedPhase =
-				observation?.status === "completed" ? "artifact-imported" : "settled";
+				observation?.status !== "completed"
+					? "settled"
+					: isWorktreeTaskSpec(agentTaskSpec(state, projection, event.sequence))
+						? "handoff-resolved"
+						: "artifact-imported";
 			if (
 				(projection.phase !== expectedPhase && !recoversRelease) ||
 				!receipt ||
@@ -1874,6 +2051,44 @@ function applyEvent(
 				) {
 					fail("subagent terminal artifact does not match", event.sequence);
 				}
+				// A completed worktree child terminalizes on subagent evidence only
+				// with its imported handoff. A no-handoff completion completes only
+				// under an optional handoff policy with the absence recorded; under a
+				// required policy it terminalizes on workflow evidence at stage
+				// handoff-import instead.
+				if (
+					evidence.status === "completed" &&
+					isWorktreeTaskSpec(task.task.spec) &&
+					!(
+						projection.handoffAbsent !== undefined &&
+						projection.handoffImport === undefined &&
+						evidence.handoff === undefined &&
+						task.task.spec.request.handoff === "optional"
+					)
+				) {
+					const handoffImport = projection.handoffImport;
+					const handoffArtifact = handoffImport
+						? state.artifacts[handoffImport.artifactId]
+						: undefined;
+					if (
+						!handoffImport ||
+						projection.handoffAbsent !== undefined ||
+						!evidence.handoff ||
+						evidence.handoff.attemptId !== handoffImport.subagentAttemptId ||
+						evidence.handoff.baselineHead !== handoffImport.baselineHead ||
+						evidence.handoff.handoffCommit !== handoffImport.handoffCommit ||
+						!handoffArtifact ||
+						handoffArtifact.producerTaskId !== projection.execution.taskId ||
+						handoffArtifact.producerExecutionId !== projection.execution.id ||
+						handoffArtifact.output !== "handoff" ||
+						handoffArtifact.mediaType !== HANDOFF_EXPORT_MEDIA_TYPE ||
+						handoffArtifact.schemaSha256 !== WORKFLOW_HANDOFF_FORMAT_SHA256 ||
+						handoffArtifact.sha256 !== handoffImport.sha256 ||
+						handoffArtifact.bytes !== handoffImport.bytes
+					) {
+						fail("subagent terminal handoff does not match", event.sequence);
+					}
+				}
 			} else if (evidence.kind === "support") {
 				if (task.task.spec.kind !== "support") {
 					fail(
@@ -2018,12 +2233,35 @@ function applyEvent(
 				) {
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
+				const worktreeTask = isWorktreeTaskSpec(task.task.spec);
+				// Stage handoff-import: a blocked import (cleanup-blocked, before
+				// release) or a required handoff that was never captured (failed,
+				// after release, with the fixed message).
+				const blockedHandoffImport =
+					input.data.outcome === "cleanup-blocked" &&
+					worktreeTask &&
+					projection.phase === "artifact-imported";
+				const absentRequiredHandoff =
+					input.data.outcome === "failed" &&
+					worktreeTask &&
+					projection.phase === "released" &&
+					projection.handoffAbsent !== undefined &&
+					task.task.spec.request.handoff === "required" &&
+					evidence.message === "Completed worktree task captured no handoff.";
+				if (
+					evidence.stage === "handoff-import" &&
+					!blockedHandoffImport &&
+					!absentRequiredHandoff
+				) {
+					fail("workflow terminal evidence is inconsistent", event.sequence);
+				}
 				if (
 					evidence.failureSha256 !==
 						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
 					(input.data.outcome === "cleanup-blocked" &&
 						evidence.stage !== "artifact-import" &&
-						evidence.stage !== "release") ||
+						evidence.stage !== "release" &&
+						evidence.stage !== "handoff-import") ||
 					(input.data.outcome === "cancelled" && evidence.stage !== "stop") ||
 					(input.data.outcome === "failed" &&
 						(evidence.stage === "stop" ||

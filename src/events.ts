@@ -1,7 +1,9 @@
 import { type Static, Type } from "typebox";
 import {
+	GitObjectIdSchema,
 	MAX_TASK_ATTEMPTS,
 	MAX_WORKFLOW_CONCURRENCY,
+	MAX_WORKFLOW_HANDOFF_BYTES,
 	MaterializedWorkflowTaskSchema,
 	NestedWorkflowUsageSchema,
 	SubagentAttemptIdSchema,
@@ -26,6 +28,14 @@ export const MAX_WORKFLOW_EVENT_INPUT_BYTES = 60 * 1024;
 export const MAX_WORKFLOW_STATE_BYTES = 900 * 1024;
 
 const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const WorkspaceModeSchema = Type.Union([
+	Type.Literal("read-only"),
+	Type.Literal("worktree"),
+]);
+const HandoffBytesSchema = Type.Integer({
+	minimum: 1,
+	maximum: MAX_WORKFLOW_HANDOFF_BYTES,
+});
 
 const RunCreatedEventSchema = Type.Object(
 	{
@@ -127,6 +137,10 @@ const TaskExecutionPreflightedEventSchema = Type.Object(
 				supersedesPreflightId: Type.Optional(
 					Type.String({ minLength: 1, maxLength: 128 }),
 				),
+				/** The launch plan's workspace mode; must equal the task request. */
+				workspaceMode: WorkspaceModeSchema,
+				/** pi-subagent's digest of the clean checkout baseline; opaque here. */
+				workspaceBaselineSha256: Sha256Schema,
 			},
 			{ additionalProperties: false },
 		),
@@ -310,6 +324,41 @@ const TaskExecutionArtifactImportedEventSchema = Type.Object(
 				subagentRunId: SubagentRunIdSchema,
 				artifactId: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
 				sourceResultSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionHandoffImportedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-handoff-imported"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				subagentAttemptId: SubagentAttemptIdSchema,
+				artifactId: WorkflowArtifactIdSchema,
+				handoffCommit: GitObjectIdSchema,
+				baselineHead: GitObjectIdSchema,
+				sha256: Sha256Schema,
+				bytes: HandoffBytesSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionHandoffAbsentEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-handoff-absent"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				subagentAttemptId: SubagentAttemptIdSchema,
 			},
 			{ additionalProperties: false },
 		),
@@ -558,6 +607,8 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionAttemptReceiptedEventSchema,
 	TaskExecutionAttemptDeclinedEventSchema,
 	TaskExecutionArtifactImportedEventSchema,
+	TaskExecutionHandoffImportedEventSchema,
+	TaskExecutionHandoffAbsentEventSchema,
 	TaskExecutionReleaseIntendedEventSchema,
 	TaskExecutionReleasedEventSchema,
 	TaskExecutionSupportIntendedEventSchema,
@@ -601,6 +652,7 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("settled"),
 	Type.Literal("attempt-intended"),
 	Type.Literal("artifact-imported"),
+	Type.Literal("handoff-resolved"),
 	Type.Literal("release-intended"),
 	Type.Literal("released"),
 	Type.Literal("support-intended"),
@@ -623,6 +675,8 @@ const SequencedPreflightSchema = Type.Object(
 		supersedesPreflightId: Type.Optional(
 			Type.String({ minLength: 1, maxLength: 128 }),
 		),
+		workspaceMode: WorkspaceModeSchema,
+		workspaceBaselineSha256: Sha256Schema,
 		fencingGeneration: Type.Integer({
 			minimum: 1,
 			maximum: Number.MAX_SAFE_INTEGER,
@@ -712,6 +766,29 @@ const SequencedArtifactImportSchema = Type.Object(
 		subagentRunId: SubagentRunIdSchema,
 		artifactId: Type.String({ pattern: "^artifact_[a-f0-9]{64}$" }),
 		sourceResultSha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedHandoffImportSchema = Type.Object(
+	{
+		subagentRunId: SubagentRunIdSchema,
+		subagentAttemptId: SubagentAttemptIdSchema,
+		artifactId: WorkflowArtifactIdSchema,
+		handoffCommit: GitObjectIdSchema,
+		baselineHead: GitObjectIdSchema,
+		sha256: Sha256Schema,
+		bytes: HandoffBytesSchema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedHandoffAbsentSchema = Type.Object(
+	{
+		subagentRunId: SubagentRunIdSchema,
+		subagentAttemptId: SubagentAttemptIdSchema,
 		sequence: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
@@ -830,6 +907,8 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		),
 		attemptsClosed: Type.Optional(Type.Literal(true)),
 		artifactImport: Type.Optional(SequencedArtifactImportSchema),
+		handoffImport: Type.Optional(SequencedHandoffImportSchema),
+		handoffAbsent: Type.Optional(SequencedHandoffAbsentSchema),
 		releaseIntent: Type.Optional(SequencedReleaseIntentSchema),
 		release: Type.Optional(SequencedReleaseSchema),
 		supportIntent: Type.Optional(SequencedSupportIntentSchema),

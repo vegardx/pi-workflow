@@ -71,7 +71,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 16,
+		contractRevision: 17,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -316,6 +316,8 @@ function executionLadder(
 				executionId: execution.id,
 				operationId: execution.operationId,
 				preflightId: `preflight-${execution.generation}`,
+				workspaceMode: "read-only" as const,
+				workspaceBaselineSha256: "c".repeat(64),
 				planIdentitySha256,
 				plannedSubagentRunId: child.subagentRunId,
 				plannedSubagentAttemptId: child.subagentAttemptId,
