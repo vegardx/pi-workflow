@@ -42,9 +42,9 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-14 rejects revision-1 through revision-13 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 14 accepts only
-the declared run, workflow phase/log effect, task, artifact, barrier,
+15 rejects revision-1 through revision-14 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 15 accepts
+only the declared run, workflow phase/log effect, task, artifact, barrier,
 output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent, uncertain launch
 and reconciled absence or a launch receipt, child observation, bounded terminal
@@ -107,24 +107,37 @@ barrier position; changed, inserted, removed, or barrier-crossing replay effects
 fail closed. Each declaration records its global materialization sequence,
 epoch, and position within that epoch. Materialization rejects epochs whose
 individual events or resulting projection exceed persistence bounds before any
-of that epoch is appended. The still-valid ordered prefix must match exactly. A
-new suffix
-may extend the last reached path. Explicit re-execution that replaces a concrete result transactionally
-invalidates its downstream epochs before a different branch can materialize;
-those prior records become abandoned history. The current reducer validates and
-records exact transitive invalidation, while materializer replay of invalidated
-state remains unavailable until task-execution generations 2 and later land for
-re-execution after invalidation.
-Duplicate keys, ambiguous
-matches, changed requests, or insertion/removal/reordering inside a valid prefix
-fail closed.
+of that epoch is appended. The on-path ordered prefix must match exactly. A
+new suffix may extend the last on-path barrier. Explicit invalidation
+transactionally abandons the downstream epochs before a different branch can
+materialize: one `task-invalidated` event records the exact closure and the
+exact abandoned epochs (every on-path epoch after the exposing barrier), and
+the reducer marks those barriers, the tasks declared in them, and every effect
+sequenced after the exposing barrier `abandoned: true`. Abandoned records stay
+in the journal and projection as history; they keep their epoch numbers and
+sequences and are never scheduled. New epochs are numbered from the current
+epoch upward, after every persisted barrier, and a new or readopted
+declaration takes materialization sequence `max + 1` over every persisted
+task; effect ordinals continue after every persisted effect. A declaration
+beyond the prefix whose `(namespace, key)` matches an abandoned task with an
+equal identity digest readopts that task ID with fresh sequence, epoch, and
+position fields; the same key with a different identity fails closed with
+"abandoned task key re-declared with a changed request". Duplicate keys,
+ambiguous matches, changed requests, or insertion/removal/reordering inside a
+valid prefix fail closed.
 
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 14 admits generation 1 only; generations 2 and later
-remain reserved for re-execution after invalidation and are unavailable until
-transactional invalidation lands. The execution record
+invalidation. Revision 15 admits generations 1 through
+`MAX_TASK_EXECUTION_GENERATIONS = 16`. `task-execution-created` requires the
+generation to equal one more than the executions already recorded for the
+task, the task to be `ready` and on-path, and no current execution:
+re-materialization detaches the terminal previous execution, and the new
+execution becomes `currentExecutionId` while every prior execution keeps its
+evidence. The
+execution ID, subagent operation ID, and nested `childRunId` are derived per
+generation. The execution record
 is discriminated by `kind: "agent" | "support" | "workflow"`; all kinds share
 the derived execution ID, run, task, generation, and task identity digest.
 
@@ -186,9 +199,10 @@ identity only. The child record additionally carries `parent.inputArtifacts`,
 the identities of the parent artifacts whose verified values were merged into
 its input; the parent's intent carries the matching digest map.
 
-Revision 14 records subagent retry and resume attempts under the existing
-agent task execution. A new execution generation requires a new preflight,
-operation ID, launch intent, and subagent run.
+Revision 15 records subagent retry and resume attempts under the existing
+agent task execution. A new execution generation, created only after explicit
+invalidation re-materialized the task, requires a new preflight, operation ID,
+launch intent, and subagent run.
 
 ### Agent attempt recovery
 
@@ -231,7 +245,7 @@ Restart repairs an interrupted support execution from its durable prefix:
 
 | Durable prefix | Recovery |
 | --- | --- |
-| no execution record | ordinary readiness; a fresh generation-1 record is created |
+| no current execution record | ordinary readiness; a fresh record for the task's next generation (1 for a first execution, otherwise one past the executions already recorded) is created |
 | `task-execution-created` only | resolve the registry, persist intent, run |
 | intent only | resolve the registry, revalidate inputs and parameters against the intent digests, recompute |
 | intent and an artifact blob without `artifact-declared` | recompute; an equal output reuses the blob through the content-addressed store |
@@ -262,7 +276,7 @@ prefix in the parent journal together with the child run directory:
 
 | Durable prefix | Recovery |
 | --- | --- |
-| no execution record | ordinary readiness; a fresh generation-1 record with the derived `childRunId` is created |
+| no current execution record | ordinary readiness; a fresh record for the task's next generation with its derived `childRunId` is created |
 | `task-execution-created` only | recompute intent from the declaration and the parent deadline; under one second remaining fails at `nested-launch`; resolve every declared artifact input through the verified path, merge, and validate the merged input, failing at `nested-input` on any problem |
 | intent only | recompute the merged input from the same parent artifacts and require both `inputsSha256` and `resolvedInputSha256` to equal the intent; artifacts are immutable, so any read failure or digest disagreement is evidence corruption and fails closed as a thrown persistence error, never as a task failure |
 | intent only, no child run directory | the atomic child record write never happened; launch is retried once under the same `childRunId` with the identical merged input and `inputArtifacts` |
@@ -380,11 +394,12 @@ attempts of their kind against `policy.attempts`, never exceed
 changes the execution generation. Resuming an interrupted workflow run is a
 separate concern: it reconstructs state and continues scheduling, and a child
 attempt happens only when the task policy allows it. Re-execution after
-explicit dependency invalidation creates a new workflow task-execution
-generation, preflight, operation ID, and child run. All paths preserve prior
-evidence: each superseded attempt's settlement is retained in
-`priorSettlements`, and settled usage is summed across every attempt of the
-execution.
+explicit invalidation, triggered through the service's `invalidate`, creates a
+new workflow task-execution generation with its own preflight, operation ID,
+and subagent or child run. All paths preserve prior evidence: each superseded
+attempt's settlement is retained in `priorSettlements`, every prior generation
+keeps its execution record and artifacts, and settled usage is summed across
+every attempt of every generation of the task.
 
 ## Artifact ownership
 
@@ -392,8 +407,16 @@ Workflow result artifacts are canonical JSON blobs under the private run
 artifact directory. Writes are content-addressed, bounded per blob and per run,
 serialized process-wide, written through fsync and atomic rename, and fenced by
 the workflow lease. Reads revalidate metadata, canonical encoding, size, and
-content digest. Artifact identity separately binds run, producer task, output
-name, schema digest, and content digest. Before downstream preflight, each
+content digest. Artifact identity separately binds run, producer task,
+producer execution (`producerExecutionId`, required exactly when a producer
+task is named), output name, schema digest, and content digest, so a new
+generation's result is a distinct artifact even when its bytes equal the prior
+generation's; identical canonical bytes share one content-addressed blob on
+disk while the references differ. Downstream reads select the artifact whose
+`producerExecutionId` is the producer's current execution; prior-generation
+artifacts stay in the journal as provenance, and a child run record's
+`inputArtifacts` keeps naming the exact artifact its input was derived from.
+Before downstream preflight, each
 explicitly named input is reread from this store and checked against its handle,
 producer task, producer output schema, and journaled artifact reference. The
 canonical value is projected into a bounded delegated context envelope; store

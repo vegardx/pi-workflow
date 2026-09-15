@@ -197,6 +197,23 @@ are `createWorkflowTaskRetrier`, `AgentRetryPolicySchema`,
 `currentSubagentAttemptId`; see
 [Contracts](docs/contracts.md#retry-and-resume-attempts).
 
+## Invalidation and re-execution
+
+A durably `failed` or `interrupted` run can be re-driven from a chosen task
+with `service.invalidate(runId, causeTaskId, reason)`. One `task-invalidated`
+event records the cause, its exact transitive dependents, and the epochs
+abandoned after the barrier that exposed them; the restarted drive replays the
+on-path prefix exactly, re-materializes the invalidated tasks, and executes
+each as a new task-execution generation with a fresh preflight, operation ID,
+and subagent or child run. Abandoned declarations stay as history and are never
+scheduled, a later declaration may readopt an abandoned key with an unchanged
+request, result artifacts bind to the execution that produced them, and every
+generation's settled usage counts against the budget. The public entry points
+are `invalidationClosure` and `MAX_TASK_EXECUTION_GENERATIONS`; the run view
+lists every task with its generation and abandoned marker, and there is no Pi
+tool for invalidation yet; see
+[Contracts](docs/contracts.md#durable-effect-interpretation).
+
 ## Development
 
 Until `@vegardx/pi-subagent` is published, development resolves it from the
