@@ -33,6 +33,8 @@ import {
 } from "../src/run-projection.js";
 import type { WorkflowRunRecord } from "../src/run-record.js";
 import {
+	MAX_WORKFLOW_LOG_MESSAGE_LENGTH,
+	MAX_WORKFLOW_TASK_KEY_LENGTH,
 	WorkflowArtifactViewSchema,
 	WorkflowBarrierViewSchema,
 	WorkflowBudgetViewSchema,
@@ -1620,6 +1622,54 @@ describe("runLogs", () => {
 	it("produces an empty page for an empty journal", () => {
 		const page = runLogs([], undefined, {}, RUN_ID);
 		expect(page).toEqual({ runId: RUN_ID, entries: [], lastSequence: 0 });
+	});
+
+	it("keeps a task key at the contract bounds and its status message within the schema", () => {
+		// 32 namespace entries of 128 characters plus a 128-character key is the
+		// deepest, longest task the contract admits; the id is bounded separately.
+		const segment = "k".repeat(128);
+		const deep: MaterializedAgentTask = {
+			...agentTask(segment, 1, {
+				namespace: Array.from({ length: 32 }, () => segment),
+			}),
+			id: "task_deep",
+		};
+		const state = stateOf({
+			status: "running",
+			entries: [{ task: deep, status: "cleanup-blocked" }],
+		});
+		const page = runLogs(
+			[
+				event(1, {
+					type: "task-status-changed",
+					data: { taskId: deep.id, from: "cancelling", to: "cleanup-blocked" },
+				}),
+			],
+			state,
+			{},
+		);
+		const [entry] = page.entries;
+		expect(MAX_WORKFLOW_TASK_KEY_LENGTH).toBe(32 * (128 + 1) + 128);
+		expect(MAX_WORKFLOW_LOG_MESSAGE_LENGTH).toBe(
+			"Task  changed from  to .".length +
+				MAX_WORKFLOW_TASK_KEY_LENGTH +
+				2 * "cleanup-blocked".length,
+		);
+		expect(entry?.taskKey).toBe(`${deep.namespace.join("/")}/${segment}`);
+		expect(entry?.taskKey).toHaveLength(MAX_WORKFLOW_TASK_KEY_LENGTH);
+		expect(entry?.message).toBe(
+			`Task ${entry?.taskKey} changed from cancelling to cleanup-blocked.`,
+		);
+		// Longer than the former fixed 4096 bound, so the derived bound matters.
+		expect(entry?.message.length).toBeGreaterThan(4096);
+		expect(entry?.message.length).toBeLessThanOrEqual(
+			MAX_WORKFLOW_LOG_MESSAGE_LENGTH,
+		);
+		expect(Value.Check(WorkflowLogEntrySchema, entry)).toBe(true);
+		expect(Value.Check(WorkflowLogPageSchema, page)).toBe(true);
+		expect(
+			Value.Check(WorkflowServiceTaskViewSchema, taskViews(state)[0]),
+		).toBe(true);
 	});
 });
 

@@ -30,10 +30,12 @@ import type {
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
-	const promise = new Promise<T>((accept) => {
+	let reject!: (error: unknown) => void;
+	const promise = new Promise<T>((accept, fail) => {
 		resolve = accept;
+		reject = fail;
 	});
-	return { promise, resolve };
+	return { promise, resolve, reject };
 }
 
 function root(name: string): string {
@@ -420,6 +422,104 @@ describe("workflow service", () => {
 		await expect(stopping).resolves.toMatchObject({ status: "cancelled" });
 		expect(delegated.ownerClient.interrupt).toHaveBeenCalledOnce();
 		await service.shutdown();
+	});
+
+	it("restarts the drive when a stop on a settled run leaves it non-terminal", async () => {
+		// A settled owned run that is durably `stopping`: the drive's child
+		// observation fails after an operator stop persisted stop intent and is
+		// still draining the child, so the runtime settles without terminal
+		// state. A second stop then finds no drive to drain what the scheduler
+		// left non-terminal and restarts one before returning the view.
+		const fixture = await taskWorkflowFixture();
+		const delegated = taskProvider();
+		type ChildWait = Awaited<ReturnType<SubagentClient["wait"]>>;
+		const observed = deferred<ChildWait>();
+		const drained = deferred<ChildWait>();
+		let waits = 0;
+		vi.mocked(delegated.ownerClient.wait).mockImplementation(async () => {
+			waits += 1;
+			return waits === 1 ? observed.promise : drained.promise;
+		});
+		vi.mocked(delegated.ownerClient.interrupt).mockResolvedValue({
+			runId: "run_servicechild",
+			attemptId: "attempt_servicechild",
+			status: "stopping",
+		});
+		vi.mocked(delegated.ownerClient.release).mockResolvedValue({
+			runId: "run_servicechild",
+			attemptId: "attempt_servicechild",
+			status: "cancelled",
+		});
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("agent-task", {});
+			await until(() => waits === 1);
+			const firstStop = service.stop(receipt.runId, "operator stop");
+			// The stop interrupted the child and now awaits its terminal result.
+			await until(() => waits === 2);
+			observed.reject(new Error("child observation lost"));
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).rejects.toMatchObject({
+				code: "execution",
+				message: "Workflow drive ended without durable terminal state.",
+			});
+			await expect(service.status(receipt.runId)).resolves.toMatchObject({
+				status: "stopping",
+			});
+			// The settled run's second stop reaches the scheduler, which reports
+			// the still-draining task as non-terminal; the restarted drive settles
+			// again and the view is returned instead of hanging or throwing.
+			const secondStop = await bounded(
+				service.stop(receipt.runId, "operator stop again"),
+				"second stop",
+			);
+			expect(secondStop.status).toBe("stopping");
+			expect(delegated.ownerClient.interrupt).toHaveBeenCalledOnce();
+			drained.resolve({
+				result: {
+					runId: "run_servicechild",
+					status: "cancelled",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: 0,
+					},
+					usageComplete: true,
+					runtimeMs: 10,
+					failure: {
+						code: "cancellation",
+						origin: "operator",
+						retry: "never",
+						message: "cancelled",
+						guidance: "Start another run if needed.",
+					},
+					sandboxCleanup: "proved",
+					workspaceCleanup: "not-needed",
+					truncated: false,
+				},
+				output: "",
+				sessionFile: undefined,
+				handoff: undefined,
+				structuredOutput: undefined,
+				error: "cancelled",
+			});
+			await expect(bounded(firstStop, "first stop")).resolves.toMatchObject({
+				status: "cancelled",
+			});
+			await expect(
+				bounded(service.wait(receipt.runId), "final wait"),
+			).resolves.toMatchObject({ status: "cancelled" });
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
 	});
 
 	it("reconstructs and reconciles a completed run after service restart", async () => {

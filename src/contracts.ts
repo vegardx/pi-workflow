@@ -113,10 +113,15 @@ export const SubagentOperationIdSchema = Type.String({
 });
 export type SubagentOperationId = Static<typeof SubagentOperationIdSchema>;
 
+/** Longest task key; namespace entries are task keys too. */
+export const MAX_TASK_KEY_LENGTH = 128;
+/** Deepest task namespace. */
+export const MAX_TASK_NAMESPACE_DEPTH = 32;
+
 export const TaskKeySchema = Type.String({
 	pattern: "^[a-z][a-z0-9-]*$",
 	minLength: 1,
-	maxLength: 128,
+	maxLength: MAX_TASK_KEY_LENGTH,
 });
 export type TaskKey = Static<typeof TaskKeySchema>;
 
@@ -429,7 +434,9 @@ export const MaterializedAgentTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
 		runId: WorkflowRunIdSchema,
-		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
+		namespace: Type.Array(TaskKeySchema, {
+			maxItems: MAX_TASK_NAMESPACE_DEPTH,
+		}),
 		spec: AgentTaskSpecSchema,
 		definitionIdentitySha256: Sha256Schema,
 		materializationSequence: Type.Integer({ minimum: 1 }),
@@ -444,7 +451,9 @@ export const MaterializedSupportTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
 		runId: WorkflowRunIdSchema,
-		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
+		namespace: Type.Array(TaskKeySchema, {
+			maxItems: MAX_TASK_NAMESPACE_DEPTH,
+		}),
 		spec: SupportTaskSpecSchema,
 		definitionIdentitySha256: Sha256Schema,
 		materializationSequence: Type.Integer({ minimum: 1 }),
@@ -461,7 +470,9 @@ export const MaterializedNestedWorkflowTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
 		runId: WorkflowRunIdSchema,
-		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
+		namespace: Type.Array(TaskKeySchema, {
+			maxItems: MAX_TASK_NAMESPACE_DEPTH,
+		}),
 		spec: NestedWorkflowTaskSpecSchema,
 		definitionIdentitySha256: Sha256Schema,
 		materializationSequence: Type.Integer({ minimum: 1 }),

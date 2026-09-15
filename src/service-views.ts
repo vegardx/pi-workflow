@@ -1,5 +1,7 @@
 import { type Static, type TSchema, Type } from "typebox";
 import {
+	MAX_TASK_KEY_LENGTH,
+	MAX_TASK_NAMESPACE_DEPTH,
 	NestedWorkflowInputArtifactsSchema,
 	SubagentOperationIdSchema,
 	SubagentRunStatusSchema,
@@ -46,6 +48,26 @@ export const MAX_WORKFLOW_RUN_LIST_ISSUES = 16;
 export const MAX_WORKFLOW_INSPECTION_ITEMS = 256;
 export const MAX_WORKFLOW_LOG_PAGE_SIZE = 500;
 export const MAX_WORKFLOW_WAIT_TIMEOUT_MS = 2_147_483_647;
+/**
+ * `${namespace.join("/")}/${key}` at the contract bounds: every namespace
+ * entry is followed by "/" and the key closes the path (4256).
+ */
+export const MAX_WORKFLOW_TASK_KEY_LENGTH =
+	MAX_TASK_NAMESPACE_DEPTH * (MAX_TASK_KEY_LENGTH + 1) + MAX_TASK_KEY_LENGTH;
+/** Longest task status name (`cleanup-blocked`). */
+const MAX_TASK_STATUS_LENGTH = Math.max(
+	...WorkflowTaskStatusSchema.anyOf.map((status) => status.const.length),
+);
+/**
+ * The longest log message is `Task ${taskKey} changed from ${from} to ${to}.`:
+ * its fixed text, a maximal task key, and two task status names (4310).
+ * Every other message embeds only fixed words, ordinals, and journaled
+ * strings already bounded to 4096 characters.
+ */
+export const MAX_WORKFLOW_LOG_MESSAGE_LENGTH =
+	"Task  changed from  to .".length +
+	MAX_WORKFLOW_TASK_KEY_LENGTH +
+	2 * MAX_TASK_STATUS_LENGTH;
 
 export const WorkflowRunActionSchema = Type.Union([
 	Type.Literal("stop"),
@@ -126,6 +148,8 @@ export const WorkflowRunListIssueKindSchema = Type.Union([
 	Type.Literal("corrupt-journal"),
 	Type.Literal("invalid-projection"),
 	Type.Literal("torn-tail"),
+	/** Reading the run failed for a reason other than the kinds above (e.g. permissions); `"Workflow run could not be read."` */
+	Type.Literal("unreadable"),
 ]);
 
 export const WorkflowRunListIssueSchema = Type.Object(
@@ -202,7 +226,9 @@ export type WorkflowSettlementView = View<typeof WorkflowSettlementViewSchema>;
 export const WorkflowServiceTaskViewSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
-		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
+		namespace: Type.Array(TaskKeySchema, {
+			maxItems: MAX_TASK_NAMESPACE_DEPTH,
+		}),
 		key: TaskKeySchema,
 		kind: TaskKindSchema,
 		role: TaskRoleSchema,
@@ -574,8 +600,13 @@ export const WorkflowLogEntrySchema = Type.Object(
 		kind: WorkflowLogKindSchema,
 		taskId: Type.Optional(WorkflowTaskIdSchema),
 		/** `${namespace.join("/")}/${key}` when `taskId` is present and known. */
-		taskKey: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
-		message: Type.String({ minLength: 1, maxLength: 4096 }),
+		taskKey: Type.Optional(
+			Type.String({ minLength: 1, maxLength: MAX_WORKFLOW_TASK_KEY_LENGTH }),
+		),
+		message: Type.String({
+			minLength: 1,
+			maxLength: MAX_WORKFLOW_LOG_MESSAGE_LENGTH,
+		}),
 		/** Run status, task status, subagent status, or execution outcome per kind. */
 		status: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
 		/** Journaled reason: fixed workflow strings or an operator-authored reason. */

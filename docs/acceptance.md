@@ -212,8 +212,10 @@ An in-memory-only successful drive does not satisfy the first slice.
 
 - `listRuns` reads every run without taking a lease, reports per-directory
   problems (`invalid-directory`, `missing-record`, `invalid-record`,
-  `corrupt-journal`, `invalid-projection`, `torn-tail`) as at most 16 sorted
-  issues plus a truncated count instead of failing, filters by status and
+  `corrupt-journal`, `invalid-projection`, `torn-tail`, `unreadable`) as at
+  most 16 sorted issues plus a truncated count instead of failing (a corrupt
+  owned journal and an unreadable record are issues, not errors), filters by
+  status and
   depth, orders newest first, and pages through an opaque position cursor
   that rejects foreign values;
 - a run leased by another live service, or whose lease port occupant cannot

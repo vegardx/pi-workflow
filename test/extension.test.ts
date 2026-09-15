@@ -5,6 +5,7 @@ import type {
 	ExtensionAPI,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import workflowExtension from "../src/extension.js";
 import { WORKFLOW_TOOL_DECLARATIONS } from "../src/tools.js";
@@ -66,6 +67,22 @@ describe("workflow Pi extension", () => {
 		expect(
 			tools.find((tool) => tool.name === "workflow_stop")?.description,
 		).toContain("Persist stop intent");
+		const reconcile = tools.find((tool) => tool.name === "workflow_reconcile");
+		if (!reconcile) throw new Error("workflow_reconcile missing");
+		const runId = "workflow_reconcileparams";
+		expect(Value.Check(reconcile.parameters, { runId })).toBe(true);
+		expect(
+			Value.Check(reconcile.parameters, { runId, taskId: "task_abcdef" }),
+		).toBe(true);
+		expect(Value.Check(reconcile.parameters, { runId, taskId: "bad" })).toBe(
+			false,
+		);
+		expect(Value.Check(reconcile.parameters, { runId, extra: true })).toBe(
+			false,
+		);
+		expect(Value.Check(reconcile.parameters, { taskId: "task_abcdef" })).toBe(
+			false,
+		);
 		await handlers.get("session_shutdown")?.({}, {});
 		expect(api.events.on).not.toHaveBeenCalled();
 	});
