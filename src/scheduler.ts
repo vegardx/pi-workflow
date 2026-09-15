@@ -1,13 +1,19 @@
 import { isDeepStrictEqual } from "node:util";
 import {
 	isRunResult,
+	type ReconcileResult,
 	type RunReceipt,
 	type RunResult,
 	RunStatusSchema,
 } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
-import { currentSubagentAttemptId, settledAgentUsage } from "./attempts.js";
+import { currentSubagentAttemptId } from "./attempts.js";
+import {
+	budgetExceededReason,
+	settledWorkflowUsage,
+	workflowUsage,
+} from "./budget.js";
 import type {
 	SubagentTerminalEvidence,
 	TaskExecutionId,
@@ -94,12 +100,23 @@ export type WorkflowSchedulerOutcome =
 				| "cleanup-blocked";
 	  };
 
+/** pi-subagent reconcile facts for the child that was reconciled. */
+export type WorkflowSchedulerReconcileFacts = Pick<
+	ReconcileResult,
+	"sandboxProcess" | "workspace"
+>;
+
+export type WorkflowSchedulerReconcileOutcome = WorkflowSchedulerOutcome & {
+	/** Absent for nested-run reconciliation. */
+	readonly subagent?: WorkflowSchedulerReconcileFacts;
+};
+
 export interface WorkflowSequentialScheduler {
 	readonly concurrency: number;
 	/** Aborted once durable stop intent exists; observed by support tasks. */
 	readonly stopSignal: AbortSignal;
 	drive(): Promise<WorkflowSchedulerOutcome>;
-	reconcile(taskId: WorkflowTaskId): Promise<WorkflowSchedulerOutcome>;
+	reconcile(taskId: WorkflowTaskId): Promise<WorkflowSchedulerReconcileOutcome>;
 	stop(reason: string): Promise<WorkflowSchedulerOutcome>;
 }
 
@@ -514,36 +531,7 @@ export function createWorkflowSequentialScheduler(
 	function settledBudgetReason(
 		current: WorkflowStateProjection,
 	): string | undefined {
-		let cost = 0;
-		let totalTokens = 0;
-		let childRuntimeMs = 0;
-		for (const execution of Object.values(current.executions)) {
-			if (execution.nestedSettlement) {
-				if (!execution.nestedSettlement.usageComplete) {
-					return "Nested workflow usage evidence is incomplete.";
-				}
-				cost += execution.nestedSettlement.usage.cost;
-				totalTokens += execution.nestedSettlement.usage.totalTokens;
-				childRuntimeMs += execution.nestedSettlement.usage.childRuntimeMs;
-				continue;
-			}
-			if (!execution.settlement) continue;
-			const usage = settledAgentUsage(execution);
-			if (!usage.usageComplete) {
-				return "Workflow child usage evidence is incomplete.";
-			}
-			cost += usage.cost;
-			totalTokens += usage.totalTokens;
-			childRuntimeMs += usage.runtimeMs;
-		}
-		if (cost > budget.cost) return "Workflow cost budget was exceeded.";
-		if (budget.totalTokens !== undefined && totalTokens > budget.totalTokens) {
-			return "Workflow total-token budget was exceeded.";
-		}
-		if (childRuntimeMs > budget.childRuntimeMs) {
-			return "Workflow child-runtime budget was exceeded.";
-		}
-		return undefined;
+		return budgetExceededReason(settledWorkflowUsage(current), budget);
 	}
 
 	function budgetAdmission(
@@ -552,100 +540,22 @@ export function createWorkflowSequentialScheduler(
 	): { allowed: true } | { allowed: false; deferred: boolean; reason: string } {
 		const candidateSpec = candidate.task.spec;
 		if (candidateSpec.kind === "support") return { allowed: true };
-		let settledCost = 0;
-		let settledTotalTokens = 0;
-		let settledChildRuntimeMs = 0;
-		let reservedCost = 0;
-		let reservedTotalTokens = 0;
-		let reservedChildRuntimeMs = 0;
-		for (const execution of Object.values(current.executions)) {
-			// The candidate's own active execution is what admission is deciding
-			// on; counting it as a reservation would double-charge a task that is
-			// re-selected after restart.
-			if (
-				execution.execution.taskId === candidate.task.id &&
-				!execution.settlement &&
-				!execution.nestedSettlement
-			) {
-				continue;
-			}
-			if (execution.settlement) {
-				const usage = settledAgentUsage(execution);
-				if (!usage.usageComplete) {
-					return {
-						allowed: false,
-						deferred: false,
-						reason: "Workflow child usage evidence is incomplete.",
-					};
-				}
-				settledCost += usage.cost;
-				settledTotalTokens += usage.totalTokens;
-				settledChildRuntimeMs += usage.runtimeMs;
-				continue;
-			}
-			if (execution.nestedSettlement) {
-				if (!execution.nestedSettlement.usageComplete) {
-					return {
-						allowed: false,
-						deferred: false,
-						reason: "Nested workflow usage evidence is incomplete.",
-					};
-				}
-				settledCost += execution.nestedSettlement.usage.cost;
-				settledTotalTokens += execution.nestedSettlement.usage.totalTokens;
-				settledChildRuntimeMs +=
-					execution.nestedSettlement.usage.childRuntimeMs;
-				continue;
-			}
-			if (execution.nestedLaunch && execution.nestedIntent) {
-				if (
-					budget.totalTokens !== undefined &&
-					execution.nestedIntent.budget.totalTokens === undefined
-				) {
-					return {
-						allowed: false,
-						deferred: false,
-						reason:
-							"Active nested workflow has no total-token budget for its reservation.",
-					};
-				}
-				reservedCost += execution.nestedIntent.budget.cost;
-				reservedTotalTokens += execution.nestedIntent.budget.totalTokens ?? 0;
-				reservedChildRuntimeMs += execution.nestedIntent.budget.childRuntimeMs;
-				continue;
-			}
-			if (!execution.launchReceipt) continue;
-			const task = current.tasks[execution.execution.taskId];
-			if (!task) {
-				return {
-					allowed: false,
-					deferred: false,
-					reason: "Workflow budget reservation has no task declaration.",
-				};
-			}
-			if (task.task.spec.kind !== "agent") {
-				return {
-					allowed: false,
-					deferred: false,
-					reason: "Workflow budget reservation is not an agent task.",
-				};
-			}
-			if (
-				budget.totalTokens !== undefined &&
-				task.task.spec.request.limits.totalTokens === undefined
-			) {
-				return {
-					allowed: false,
-					deferred: false,
-					reason:
-						"Active workflow task has no total-token maximum for its reservation.",
-				};
-			}
-			reservedCost += task.task.spec.request.limits.cost;
-			reservedTotalTokens += task.task.spec.request.limits.totalTokens ?? 0;
-			reservedChildRuntimeMs +=
-				task.task.spec.request.limits.cumulativeRuntimeMs;
+		// The candidate's own active execution is what admission is deciding
+		// on; counting it as a reservation would double-charge a task that is
+		// re-selected after restart.
+		const usage = workflowUsage(current, {
+			budget,
+			excludeTaskId: candidate.task.id,
+		});
+		if (usage.refusal !== undefined) {
+			return { allowed: false, deferred: false, reason: usage.refusal };
 		}
+		const settledCost = usage.settled.cost;
+		const settledTotalTokens = usage.settled.totalTokens;
+		const settledChildRuntimeMs = usage.settled.childRuntimeMs;
+		const reservedCost = usage.reserved.cost;
+		const reservedTotalTokens = usage.reserved.totalTokens;
+		const reservedChildRuntimeMs = usage.reserved.childRuntimeMs;
 		const candidateMaximum =
 			candidateSpec.kind === "workflow"
 				? {
@@ -1391,7 +1301,7 @@ export function createWorkflowSequentialScheduler(
 
 	async function reconcile(
 		taskId: WorkflowTaskId,
-	): Promise<WorkflowSchedulerOutcome> {
+	): Promise<WorkflowSchedulerReconcileOutcome> {
 		const prepared = await mutate(async () => {
 			const current = await state();
 			if (current.status !== "cleanup-blocked") {
@@ -1425,12 +1335,17 @@ export function createWorkflowSequentialScheduler(
 					"Subagent reconciliation returned another child identity.",
 				);
 			}
-			return { taskId, receipt: child };
+			const subagent: WorkflowSchedulerReconcileFacts = Object.freeze({
+				sandboxProcess: result.sandboxProcess,
+				workspace: result.workspace,
+			});
+			return { taskId, receipt: child, subagent };
 		});
 		if ("nested" in prepared) return reconcileNested(taskId);
-		return continueAfterFinalization(
+		const outcome = await continueAfterFinalization(
 			await settle(prepared.taskId, prepared.receipt),
 		);
+		return { ...outcome, subagent: prepared.subagent };
 	}
 
 	async function stop(reason: string): Promise<WorkflowSchedulerOutcome> {
