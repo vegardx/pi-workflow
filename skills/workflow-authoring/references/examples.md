@@ -661,3 +661,111 @@ export default defineWorkflow({
 	},
 });
 ```
+
+## Finalizers: required record and advisory announcement
+
+Both finalizers are declared and never awaited or returned; the run returns
+the ordinary `report` handle. They execute only after the output is committed:
+the required support finalizer must complete for the run to succeed, while a
+failing advisory agent finalizer only degrades it.
+
+```ts
+import { defineSupportTask, defineWorkflow } from "@vegardx/pi-workflow";
+import { Type } from "typebox";
+
+const InputSchema = Type.Object(
+	{ topic: Type.String({ minLength: 1 }) },
+	{ additionalProperties: false },
+);
+const ReportSchema = Type.Object(
+	{ title: Type.String(), body: Type.String() },
+	{ additionalProperties: false },
+);
+const RecordSchema = Type.Object(
+	{ recorded: Type.Boolean() },
+	{ additionalProperties: false },
+);
+const AnnouncementSchema = Type.Object(
+	{ summary: Type.String() },
+	{ additionalProperties: false },
+);
+const limits = {
+	cumulativeRuntimeMs: 600_000,
+	attemptTimeoutMs: 300_000,
+	cost: 2,
+	outputBytes: 65_536,
+	workspaceWriteBytes: 0,
+	retries: 0,
+	resumes: 0,
+};
+
+const record = defineSupportTask({
+	name: "record-report",
+	moduleSpecifier: "@example/workflow-support",
+	revision: 1,
+	implementationSha256:
+		"d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+	parametersSchema: Type.Object(
+		{ channel: Type.String({ minLength: 1 }) },
+		{ additionalProperties: false },
+	),
+	outputSchema: RecordSchema,
+});
+
+export default defineWorkflow({
+	meta: {
+		name: "finalized-report",
+		description: "Write a report, then record and announce it",
+		version: 1,
+		budget: { cost: 6, childRuntimeMs: 1_800_000 },
+		timeoutMs: 3_600_000,
+	},
+	inputSchema: InputSchema,
+	outputSchema: ReportSchema,
+	run(ctx) {
+		const report = ctx.agent("report", {
+			agent: "researcher",
+			task: {
+				goal: `Write a short report about ${ctx.input.topic}`,
+				context: [],
+				instructions: ["Use only facts from the repository."],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: ctx.cwd },
+			outputSchema: ReportSchema,
+			limits,
+		});
+		ctx.finalize("record", {
+			kind: "required",
+			support: record({
+				parameters: { channel: "audit" },
+				inputs: { report: report.output },
+			}),
+		});
+		ctx.finalize("announce", {
+			kind: "advisory",
+			agent: {
+				agent: "researcher",
+				task: {
+					goal: "Summarize the report supplied as the `report` input in one sentence",
+					context: [],
+					instructions: ["Do not add facts that the report does not contain."],
+				},
+				contextMode: "fresh",
+				tools: [],
+				preloadSkills: [],
+				contextScopes: ["project"],
+				workspace: { mode: "read-only", cwd: ctx.cwd },
+				outputSchema: AnnouncementSchema,
+				limits,
+				after: [report.ref],
+				inputs: { report: report.output },
+			},
+		});
+		return report;
+	},
+});
+```

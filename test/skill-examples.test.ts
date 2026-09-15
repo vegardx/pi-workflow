@@ -25,6 +25,7 @@ const EXPECTED_EXAMPLE_NAMES = [
 	"nested-parent",
 	"nested-child",
 	"resilient-draft",
+	"finalized-report",
 ];
 
 function fencedTypeScript(markdown: string): string[] {
@@ -70,12 +71,36 @@ describe("workflow authoring skill", () => {
 			"description: Use when creating, modifying, validating, or debugging a static pi-workflow *.workflow.ts definition; not for operating runs.",
 		);
 		expect(skill).toContain("references/examples.md");
-		for (const unavailable of [
+		const unavailable = skill.match(
+			/Not available in revision 16:([\s\S]*?)\. Do not author against/,
+		)?.[1];
+		if (!unavailable) throw new Error("no unavailable-API statement");
+		for (const api of [
 			"`ctx.checkpoint`",
 			"`ctx.artifact`",
-			"`ctx.finalize`",
+			"dynamic\nworkflows",
+			"writer (non-read-only) agent tasks",
+			"operator-triggered\nretry or resume tools",
+			"a Pi tool for invalidation",
 		]) {
-			expect(skill).toContain(unavailable);
+			expect(unavailable).toContain(api);
+		}
+		expect(unavailable).not.toContain("ctx.finalize");
+		expect(skill).toContain("## Finalizers");
+		expect(skill).toContain(
+			"`ctx.finalize(key, { kind, support | agent | workflow })`",
+		);
+		for (const message of [
+			"invalid finalizer kind",
+			"finalizer requires exactly one of support, agent, or workflow",
+			"finalizer disposition is its kind",
+			"ordinary task may not depend on a finalizer",
+			"a finalizer cannot be a barrier target",
+			"Required finalizer did not complete:",
+			"invalidation after output commit may only cover finalizers",
+			"Interrupted child retained for recovery; no release performed.",
+		]) {
+			expect(skill).toContain(message);
 		}
 		for (const tool of [
 			"workflow_list",
@@ -97,6 +122,8 @@ describe("workflow authoring skill", () => {
 			expect(example).toContain('from "@vegardx/pi-workflow"');
 			expect(example).toContain("export default defineWorkflow({");
 		}
+		expect(examples.at(-1)).toContain('ctx.finalize("record", {');
+		expect(examples.at(-1)).toContain('ctx.finalize("announce", {');
 		const project = await projectWithExamples(examples);
 		const workflows = await discoverWorkflows({
 			...project,
@@ -129,7 +156,7 @@ describe("workflow authoring skill", () => {
 		await expect(
 			discoverWorkflows({ ...project, projectTrusted: true }),
 		).rejects.toThrow(
-			"workflow import node:fs is not identity-bound by contract revision 15",
+			"workflow import node:fs is not identity-bound by contract revision 16",
 		);
 	});
 });

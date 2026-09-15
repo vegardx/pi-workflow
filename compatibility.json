@@ -3,7 +3,7 @@
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
 		"version": "0.1.0",
-		"contractRevision": 15
+		"contractRevision": 16
 	},
 	"piSubagent": {
 		"package": "@vegardx/pi-subagent",

@@ -218,5 +218,30 @@ describe("workflow tool declarations", () => {
 				depth: 4,
 			}),
 		).toBe(false);
+		const finalizer = {
+			id: "task_abcdef",
+			namespace: [],
+			key: "cleanup",
+			kind: "support",
+			role: "finalizer",
+			status: "completed",
+			generation: 1,
+		};
+		const { role: _role, ...roleless } = finalizer;
+		expect(
+			Value.Check(WorkflowServiceRunViewSchema, {
+				...view,
+				tasks: [finalizer],
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(WorkflowServiceRunViewSchema, { ...view, tasks: [roleless] }),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowServiceRunViewSchema, {
+				...view,
+				tasks: [{ ...finalizer, role: "cleanup" }],
+			}),
+		).toBe(false);
 	});
 });
