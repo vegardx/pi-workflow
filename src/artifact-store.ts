@@ -10,8 +10,11 @@ import {
 	rename,
 } from "node:fs/promises";
 import path from "node:path";
+import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import {
+	MAX_WORKFLOW_HANDOFF_BYTES,
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
 	type WorkflowArtifactRef,
 	WorkflowArtifactRefSchema,
 } from "./contracts.js";
@@ -21,6 +24,10 @@ import type { WorkflowRunJournal } from "./persistence/journal.js";
 export const MAX_WORKFLOW_ARTIFACT_BYTES = 16 * 1024 * 1024;
 export const MAX_WORKFLOW_ARTIFACT_STORE_BYTES = 256 * 1024 * 1024;
 
+/** git's fixed mbox separator line; the object id is checked by the importer. */
+const HANDOFF_PATCH_FIRST_LINE =
+	/^From [a-f0-9]{40,64} Mon Sep 17 00:00:00 2001$/;
+
 const artifactMutations = new Map<string, Promise<void>>();
 
 export class WorkflowArtifactStoreError extends Error {
@@ -28,6 +35,15 @@ export class WorkflowArtifactStoreError extends Error {
 		super(message, options);
 		this.name = "WorkflowArtifactStoreError";
 	}
+}
+
+export interface WorkflowHandoffArtifactMetadata {
+	runId: WorkflowArtifactRef["runId"];
+	producerTaskId: NonNullable<WorkflowArtifactRef["producerTaskId"]>;
+	producerExecutionId: NonNullable<WorkflowArtifactRef["producerExecutionId"]>;
+	output: "handoff";
+	mediaType: typeof HANDOFF_EXPORT_MEDIA_TYPE;
+	schemaSha256: typeof WORKFLOW_HANDOFF_FORMAT_SHA256;
 }
 
 function sha256(content: Buffer): string {
@@ -98,6 +114,19 @@ async function syncDirectory(directory: string): Promise<void> {
 	}
 }
 
+function producerFieldsAppearTogether(metadata: {
+	producerTaskId?: unknown;
+	producerExecutionId?: unknown;
+	output?: unknown;
+}): boolean {
+	return (
+		(metadata.producerTaskId === undefined) ===
+			(metadata.output === undefined) &&
+		(metadata.producerTaskId === undefined) ===
+			(metadata.producerExecutionId === undefined)
+	);
+}
+
 export class WorkflowArtifactStore {
 	readonly root: string;
 	readonly runId: WorkflowArtifactRef["runId"];
@@ -157,10 +186,15 @@ export class WorkflowArtifactStore {
 		});
 	}
 
+	/** The per-blob bound of a handoff: the store bound capped by the contract bound. */
+	private get maxHandoffBytes(): number {
+		return Math.min(this.maxArtifactBytes, MAX_WORKFLOW_HANDOFF_BYTES);
+	}
+
 	private async totalBytes(): Promise<number> {
 		let total = 0;
 		for (const entry of await readdir(this.root)) {
-			if (!entry.endsWith(".json")) {
+			if (!entry.endsWith(".json") && !entry.endsWith(".patch")) {
 				throw new WorkflowArtifactStoreError(
 					`invalid workflow artifact entry: ${entry}`,
 				);
@@ -181,6 +215,69 @@ export class WorkflowArtifactStore {
 		return total;
 	}
 
+	/**
+	 * Serializes a store mutation behind every earlier mutation of the same
+	 * directory (process-wide) and fences it on the current lease.
+	 */
+	private mutate<T>(operation: () => Promise<T>): Promise<T> {
+		const predecessor = artifactMutations.get(this.root) ?? Promise.resolve();
+		const result = predecessor.then(() => this.journal.withCurrent(operation));
+		const settled = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		artifactMutations.set(this.root, settled);
+		void settled.then(() => {
+			if (artifactMutations.get(this.root) === settled) {
+				artifactMutations.delete(this.root);
+			}
+		});
+		return result;
+	}
+
+	/**
+	 * Writes a content-addressed blob unless an identical one already exists.
+	 * Must run inside {@link mutate}.
+	 */
+	private async persist(
+		content: Buffer,
+		digest: string,
+		extension: ".json" | ".patch",
+	): Promise<void> {
+		const target = path.join(this.root, `${digest}${extension}`);
+		try {
+			const existing = await lstat(target);
+			if (
+				!existing.isFile() ||
+				existing.isSymbolicLink() ||
+				existing.size !== content.byteLength ||
+				sha256(await readFile(target)) !== digest
+			) {
+				throw new WorkflowArtifactStoreError(
+					"existing workflow artifact does not match its digest",
+				);
+			}
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		if ((await this.totalBytes()) + content.byteLength > this.maxTotalBytes) {
+			throw new WorkflowArtifactStoreError(
+				"workflow artifact store total limit exceeded",
+			);
+		}
+		const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+		const handle = await open(temporary, "wx", 0o600);
+		try {
+			await handle.writeFile(content);
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await rename(temporary, target);
+		await syncDirectory(this.root);
+	}
+
 	putJson(
 		value: unknown,
 		metadata: {
@@ -193,102 +290,115 @@ export class WorkflowArtifactStore {
 			schemaSha256: string;
 		},
 	): Promise<WorkflowArtifactRef> {
-		if (
-			(metadata.producerTaskId === undefined) !==
-				(metadata.output === undefined) ||
-			(metadata.producerTaskId === undefined) !==
-				(metadata.producerExecutionId === undefined)
-		) {
+		if (!producerFieldsAppearTogether(metadata)) {
 			throw new WorkflowArtifactStoreError(
 				"artifact producer, execution, and output must appear together",
 			);
 		}
 		const content = canonicalArtifactJson(value);
-		const predecessor = artifactMutations.get(this.root) ?? Promise.resolve();
-		const operation = predecessor.then(() =>
-			this.journal.withCurrent(async () => {
-				if (content.byteLength > this.maxArtifactBytes) {
-					throw new WorkflowArtifactStoreError(
-						"workflow artifact exceeds byte limit",
-					);
-				}
-				const digest = sha256(content);
-				const ref: WorkflowArtifactRef = {
-					id: deriveWorkflowArtifactId({ ...metadata, sha256: digest }),
-					runId: metadata.runId,
-					...(metadata.producerTaskId === undefined
-						? {}
-						: {
-								producerTaskId: metadata.producerTaskId,
-								producerExecutionId: metadata.producerExecutionId,
-								output: metadata.output,
-							}),
-					sha256: digest,
-					bytes: content.byteLength,
-					mediaType: "application/json",
-					schemaSha256: metadata.schemaSha256,
-				};
-				if (!Value.Check(WorkflowArtifactRefSchema, ref)) {
-					throw new WorkflowArtifactStoreError(
-						"invalid workflow artifact metadata",
-					);
-				}
-				const target = path.join(this.root, `${digest}.json`);
-				try {
-					const existing = await lstat(target);
-					if (
-						!existing.isFile() ||
-						existing.isSymbolicLink() ||
-						existing.size !== content.byteLength ||
-						sha256(await readFile(target)) !== digest
-					) {
-						throw new WorkflowArtifactStoreError(
-							"existing workflow artifact does not match its digest",
-						);
-					}
-					return ref;
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				}
-				if (
-					(await this.totalBytes()) + content.byteLength >
-					this.maxTotalBytes
-				) {
-					throw new WorkflowArtifactStoreError(
-						"workflow artifact store total limit exceeded",
-					);
-				}
-				const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-				const handle = await open(temporary, "wx", 0o600);
-				try {
-					await handle.writeFile(content);
-					await handle.sync();
-				} finally {
-					await handle.close();
-				}
-				await rename(temporary, target);
-				await syncDirectory(this.root);
-				return ref;
-			}),
-		);
-		const settled = operation.then(
-			() => undefined,
-			() => undefined,
-		);
-		artifactMutations.set(this.root, settled);
-		void settled.then(() => {
-			if (artifactMutations.get(this.root) === settled) {
-				artifactMutations.delete(this.root);
+		return this.mutate(async () => {
+			if (content.byteLength > this.maxArtifactBytes) {
+				throw new WorkflowArtifactStoreError(
+					"workflow artifact exceeds byte limit",
+				);
 			}
+			const digest = sha256(content);
+			const ref: WorkflowArtifactRef = {
+				id: deriveWorkflowArtifactId({ ...metadata, sha256: digest }),
+				runId: metadata.runId,
+				...(metadata.producerTaskId === undefined
+					? {}
+					: {
+							producerTaskId: metadata.producerTaskId,
+							producerExecutionId: metadata.producerExecutionId,
+							output: metadata.output,
+						}),
+				sha256: digest,
+				bytes: content.byteLength,
+				mediaType: "application/json",
+				schemaSha256: metadata.schemaSha256,
+			};
+			if (!Value.Check(WorkflowArtifactRefSchema, ref)) {
+				throw new WorkflowArtifactStoreError(
+					"invalid workflow artifact metadata",
+				);
+			}
+			await this.persist(content, digest, ".json");
+			return ref;
 		});
-		return operation;
 	}
 
-	async readJson(ref: WorkflowArtifactRef): Promise<unknown> {
+	/**
+	 * Stores an exported pi-subagent handoff as a content-addressed `.patch`
+	 * blob. The store verifies bounds and metadata only; the importer proves
+	 * the patch identity before calling this.
+	 */
+	async putBytes(
+		content: Buffer,
+		metadata: WorkflowHandoffArtifactMetadata,
+	): Promise<WorkflowArtifactRef> {
+		if (!producerFieldsAppearTogether(metadata)) {
+			throw new WorkflowArtifactStoreError(
+				"artifact producer, execution, and output must appear together",
+			);
+		}
 		if (
-			!Value.Check(WorkflowArtifactRefSchema, ref) ||
-			ref.runId !== this.journal.runId ||
-			ref.id !==
+			metadata.producerTaskId === undefined ||
+			metadata.producerExecutionId === undefined ||
+			metadata.output !== "handoff" ||
+			metadata.mediaType !== HANDOFF_EXPORT_MEDIA_TYPE ||
+			metadata.schemaSha256 !== WORKFLOW_HANDOFF_FORMAT_SHA256
+		) {
+			throw new WorkflowArtifactStoreError(
+				"invalid workflow handoff artifact metadata",
+			);
+		}
+		if (content.byteLength < 1) {
+			throw new WorkflowArtifactStoreError(
+				"workflow handoff artifact is empty",
+			);
+		}
+		if (content.byteLength > this.maxHandoffBytes) {
+			throw new WorkflowArtifactStoreError(
+				"workflow handoff artifact exceeds byte limit",
+			);
+		}
+		return this.mutate(async () => {
+			const digest = sha256(content);
+			const ref: WorkflowArtifactRef = {
+				id: deriveWorkflowArtifactId({
+					runId: metadata.runId,
+					producerTaskId: metadata.producerTaskId,
+					producerExecutionId: metadata.producerExecutionId,
+					output: metadata.output,
+					schemaSha256: metadata.schemaSha256,
+					sha256: digest,
+				}),
+				runId: metadata.runId,
+				producerTaskId: metadata.producerTaskId,
+				producerExecutionId: metadata.producerExecutionId,
+				output: metadata.output,
+				sha256: digest,
+				bytes: content.byteLength,
+				mediaType: metadata.mediaType,
+				schemaSha256: metadata.schemaSha256,
+			};
+			if (!Value.Check(WorkflowArtifactRefSchema, ref)) {
+				throw new WorkflowArtifactStoreError(
+					"invalid workflow handoff artifact metadata",
+				);
+			}
+			await this.persist(content, digest, ".patch");
+			return ref;
+		});
+	}
+
+	/** Schema, run, and deterministic-id checks shared by every reader. */
+	private isOwnReference(ref: WorkflowArtifactRef): boolean {
+		return (
+			Value.Check(WorkflowArtifactRefSchema, ref) &&
+			ref.runId === this.journal.runId &&
+			ref.id ===
 				deriveWorkflowArtifactId({
 					runId: ref.runId,
 					...(ref.producerTaskId === undefined
@@ -300,19 +410,16 @@ export class WorkflowArtifactStore {
 							}),
 					schemaSha256: ref.schemaSha256,
 					sha256: ref.sha256,
-				}) ||
-			ref.mediaType !== "application/json"
-		) {
-			throw new WorkflowArtifactStoreError(
-				"invalid workflow artifact reference",
-			);
-		}
-		if (ref.bytes > this.maxArtifactBytes) {
-			throw new WorkflowArtifactStoreError(
-				"workflow artifact read exceeds byte limit",
-			);
-		}
-		const target = path.join(this.root, `${ref.sha256}.json`);
+				})
+		);
+	}
+
+	/** lstat regular-file/non-symlink/size and sha256 verification of a blob. */
+	private async readVerified(
+		ref: WorkflowArtifactRef,
+		extension: ".json" | ".patch",
+	): Promise<Buffer> {
+		const target = path.join(this.root, `${ref.sha256}${extension}`);
 		const metadata = await lstat(target);
 		if (
 			!metadata.isFile() ||
@@ -327,6 +434,21 @@ export class WorkflowArtifactStore {
 		if (sha256(content) !== ref.sha256) {
 			throw new WorkflowArtifactStoreError("workflow artifact digest mismatch");
 		}
+		return content;
+	}
+
+	async readJson(ref: WorkflowArtifactRef): Promise<unknown> {
+		if (!this.isOwnReference(ref) || ref.mediaType !== "application/json") {
+			throw new WorkflowArtifactStoreError(
+				"invalid workflow artifact reference",
+			);
+		}
+		if (ref.bytes > this.maxArtifactBytes) {
+			throw new WorkflowArtifactStoreError(
+				"workflow artifact read exceeds byte limit",
+			);
+		}
+		const content = await this.readVerified(ref, ".json");
 		let value: unknown;
 		try {
 			value = JSON.parse(content.toString("utf8"));
@@ -344,5 +466,38 @@ export class WorkflowArtifactStore {
 			);
 		}
 		return value;
+	}
+
+	/**
+	 * Reads a handoff blob and verifies its digest and git-format-patch shape.
+	 * The embedded object id is compared to the settled handoff by the caller.
+	 */
+	async readBytes(ref: WorkflowArtifactRef): Promise<Buffer> {
+		if (
+			!this.isOwnReference(ref) ||
+			ref.producerTaskId === undefined ||
+			ref.output !== "handoff" ||
+			ref.mediaType !== HANDOFF_EXPORT_MEDIA_TYPE ||
+			ref.schemaSha256 !== WORKFLOW_HANDOFF_FORMAT_SHA256 ||
+			ref.bytes < 1 ||
+			ref.bytes > this.maxHandoffBytes
+		) {
+			throw new WorkflowArtifactStoreError(
+				"invalid workflow artifact reference",
+			);
+		}
+		const content = await this.readVerified(ref, ".patch");
+		const newline = content.indexOf(0x0a);
+		if (
+			newline === -1 ||
+			!HANDOFF_PATCH_FIRST_LINE.test(
+				content.subarray(0, newline).toString("utf8"),
+			)
+		) {
+			throw new WorkflowArtifactStoreError(
+				"workflow handoff artifact is not a git-format-patch",
+			);
+		}
+		return content;
 	}
 }
