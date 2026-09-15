@@ -7,6 +7,7 @@ import {
 } from "../run-actions.js";
 import type { WorkflowService } from "../service.js";
 import type {
+	WorkflowInvalidationPreview,
 	WorkflowLogEntry,
 	WorkflowLogPage,
 	WorkflowRunSummary,
@@ -373,21 +374,10 @@ export const ACTION_CONSEQUENCES: Record<"stop" | "retry" | "resume", string> =
 export const CONFIRMED_ACTIONS: ReadonlySet<OperatorAction> =
 	new Set<OperatorAction>(["stop", "invalidate", "retry", "resume"]);
 
-/** The closure `previewInvalidation` reports when the service implements it. */
-export interface InvalidationPreviewLike {
-	readonly taskIds: readonly string[];
-	readonly taskKeys: readonly string[];
-	readonly abandonedEpochs: readonly number[];
-	readonly abandonedTaskIds: readonly string[];
-}
-
+/** The confirmation text for `invalidate`, from the service's preview only. */
 export function invalidateConsequence(
-	taskKey: string,
-	preview: InvalidationPreviewLike | undefined,
+	preview: WorkflowInvalidationPreview,
 ): string {
-	if (!preview) {
-		return `${taskKey} and its live transitive dependents re-execute as new generations. Epochs after the exposing barrier are abandoned, retiring their declarations, and effects after that barrier are marked abandoned.`;
-	}
 	const keys = preview.taskKeys.map(normalizeTaskKey);
 	const more = keys.length - 6;
 	return `${preview.taskIds.length} task(s) re-execute as new generations: ${keys
@@ -417,7 +407,7 @@ export interface ActionRequest {
 	readonly reason?: string;
 	readonly timeoutMs?: number;
 	/** Closure already fetched for the confirmation dialog. */
-	readonly preview?: InvalidationPreviewLike;
+	readonly preview?: WorkflowInvalidationPreview;
 }
 
 export interface ActionOutcome {
@@ -428,27 +418,6 @@ export interface ActionOutcome {
 /** A service method that a build may not ship, looked up at call time. */
 function implemented(service: object, name: string): boolean {
 	return typeof (service as Record<string, unknown>)[name] === "function";
-}
-
-/**
- * `previewInvalidation` is not part of every service build; when present it
- * supplies the closure for confirmations and messages.
- */
-export async function previewInvalidationIfAvailable(
-	service: object,
-	runId: WorkflowRunId,
-	taskId: WorkflowTaskId,
-): Promise<InvalidationPreviewLike | undefined> {
-	if (!implemented(service, "previewInvalidation")) return undefined;
-	const preview = (
-		service as {
-			previewInvalidation(
-				runId: WorkflowRunId,
-				taskId: WorkflowTaskId,
-			): Promise<InvalidationPreviewLike>;
-		}
-	).previewInvalidation;
-	return preview.call(service, runId, taskId);
 }
 
 /**
@@ -505,19 +474,18 @@ export async function performRunAction(
 			if (!request.taskId) {
 				usage("Usage: /workflow invalidate <run-prefix> <task-key> [reason]");
 			}
+			// The service's preview is the only source of the closure; it raises
+			// the same refusal invalidate would, before anything is appended.
 			const preview =
 				request.preview ??
-				(await previewInvalidationIfAvailable(service, runId, request.taskId));
+				(await service.previewInvalidation(runId, request.taskId));
 			const view = await service.invalidate(
 				runId,
 				request.taskId,
 				request.reason ?? DEFAULT_INVALIDATE_REASON,
 			);
-			const dependents = preview
-				? `${Math.max(0, preview.taskIds.length - 1)} dependent(s)`
-				: "its dependents";
 			return {
-				message: `invalidate accepted for ${runId}: ${request.taskKey ?? request.taskId} and ${dependents} re-execute; run is ${view.status}.`,
+				message: `invalidate accepted for ${runId}: ${request.taskKey ?? request.taskId} and ${Math.max(0, preview.taskIds.length - 1)} dependent(s) re-execute; run is ${view.status}.`,
 				level: "info",
 			};
 		}

@@ -9,6 +9,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { WorkflowRunId } from "./contracts.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
 import type {
+	WorkflowInvalidationPreview,
 	WorkflowRunSummary,
 	WorkflowServiceTaskView,
 } from "./service-views.js";
@@ -20,14 +21,12 @@ import {
 	actionUnavailableMessage,
 	CONFIRMED_ACTIONS,
 	collectLogTail,
-	type InvalidationPreviewLike,
 	invalidateConsequence,
 	type OperatorAction,
 	type ParsedWorkflowCommand,
 	parseWorkflowCommand,
 	parseWorkflowInput,
 	performRunAction,
-	previewInvalidationIfAvailable,
 	resolveRunPrefix,
 	resolveTaskKey,
 	WORKFLOW_COMMAND,
@@ -69,12 +68,11 @@ function operatorOutput(
 
 function consequenceFor(
 	action: OperatorAction,
-	task: WorkflowServiceTaskView | undefined,
-	preview: InvalidationPreviewLike | undefined,
+	preview: WorkflowInvalidationPreview | undefined,
 ): string {
 	switch (action) {
 		case "invalidate":
-			return invalidateConsequence(task ? taskPath(task) : "The task", preview);
+			return preview ? invalidateConsequence(preview) : "";
 		case "stop":
 		case "retry":
 		case "resume":
@@ -266,7 +264,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			: undefined;
 		const preview =
 			action === "invalidate" && task
-				? await previewInvalidationIfAvailable(runtime, run.runId, task.id)
+				? await runtime.previewInvalidation(run.runId, task.id)
 				: undefined;
 		const request: ActionRequest = {
 			action,
@@ -283,7 +281,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			CONFIRMED_ACTIONS.has(action) &&
 			!(await ctx.ui.confirm(
 				`${action} ${shortId(run.runId)}?`,
-				consequenceFor(action, task, preview),
+				consequenceFor(action, preview),
 			))
 		) {
 			return;

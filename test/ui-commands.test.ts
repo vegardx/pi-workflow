@@ -123,6 +123,14 @@ function fakeService(overrides: Partial<Record<string, unknown>> = {}) {
 		wait: vi.fn(async () => view("completed")),
 		reconcile: vi.fn(async () => ({ ...view("completed"), reconciled: [{}] })),
 		invalidate: vi.fn(async () => view("running")),
+		previewInvalidation: vi.fn(async () => ({
+			runId: "workflow_abcdef0123",
+			causeTaskId: "task_report",
+			taskIds: ["task_report", "task_summary"],
+			taskKeys: ["/report", "/summary"],
+			abandonedEpochs: [],
+			abandonedTaskIds: [],
+		})),
 		...overrides,
 	} as unknown as WorkflowService;
 }
@@ -655,7 +663,7 @@ describe("action dispatch", () => {
 			}),
 		).resolves.toEqual({
 			message:
-				"invalidate accepted for workflow_abcdef0123: report and its dependents re-execute; run is running.",
+				"invalidate accepted for workflow_abcdef0123: report and 1 dependent(s) re-execute; run is running.",
 			level: "info",
 		});
 		expect(service.invalidate).toHaveBeenLastCalledWith(
@@ -670,6 +678,8 @@ describe("action dispatch", () => {
 				taskId: "task_report",
 				reason: "bad input",
 				preview: {
+					runId: "workflow_abcdef0123",
+					causeTaskId: "task_report",
 					taskIds: ["task_report", "task_summary", "task_publish"],
 					taskKeys: ["/report", "/summary", "/publish"],
 					abandonedEpochs: [],
@@ -688,8 +698,24 @@ describe("action dispatch", () => {
 		);
 	});
 
-	it("uses previewInvalidation when the service ships it", async () => {
+	it("sources the invalidate closure from the service and forwards its refusal", async () => {
+		const refusing = fakeService({
+			previewInvalidation: vi.fn(async () => {
+				throw new Error("invalidation cause is already invalidated");
+			}),
+		});
+		await expect(
+			performRunAction(refusing, {
+				action: "invalidate",
+				run: summary("failed", { availableActions: ["invalidate"] }),
+				taskId: "task_report",
+			}),
+		).rejects.toThrow("invalidation cause is already invalidated");
+		expect(refusing.invalidate).not.toHaveBeenCalled();
+
 		const previewInvalidation = vi.fn(async () => ({
+			runId: "workflow_abcdef0123",
+			causeTaskId: "task_report",
 			taskIds: ["task_report", "task_summary"],
 			taskKeys: ["/report", "/summary"],
 			abandonedEpochs: [2],
@@ -718,12 +744,11 @@ describe("action dispatch", () => {
 		);
 	});
 
-	it("composes the invalidate consequence with and without a preview", () => {
-		expect(invalidateConsequence("report", undefined)).toBe(
-			"report and its live transitive dependents re-execute as new generations. Epochs after the exposing barrier are abandoned, retiring their declarations, and effects after that barrier are marked abandoned.",
-		);
+	it("composes the invalidate consequence from the service's preview", () => {
 		expect(
-			invalidateConsequence("report", {
+			invalidateConsequence({
+				runId: "workflow_abcdef0123",
+				causeTaskId: "task_report",
 				taskIds: ["task_report", "task_summary"],
 				taskKeys: ["/report", "/summary"],
 				abandonedEpochs: [3],
@@ -733,7 +758,9 @@ describe("action dispatch", () => {
 			"2 task(s) re-execute as new generations: report, summary. 1 epoch(s) after the exposing barrier are abandoned, retiring 1 declaration(s). Effects after that barrier are marked abandoned.",
 		);
 		expect(
-			invalidateConsequence("a", {
+			invalidateConsequence({
+				runId: "workflow_abcdef0123",
+				causeTaskId: "task_0",
 				taskIds: Array.from({ length: 8 }, (_, index) => `task_${index}`),
 				taskKeys: Array.from({ length: 8 }, (_, index) => `/t${index}`),
 				abandonedEpochs: [],

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkflowStateProjection } from "../src/events.js";
 import { deriveTaskExecutionId } from "../src/execution.js";
@@ -17,6 +18,7 @@ import {
 	type WorkflowService,
 	WorkflowServiceError,
 } from "../src/service.js";
+import { WorkflowInvalidationPreviewSchema } from "../src/service-views.js";
 import type { WorkflowSubagentProvider } from "../src/subagent-provider.js";
 import {
 	attemptProvider,
@@ -1110,6 +1112,126 @@ describe("operator retry", () => {
 			expect(countOf(events, "task-invalidated")).toBe(0);
 		} finally {
 			await shutdownQuietly(pair.service);
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// previewInvalidation
+// ---------------------------------------------------------------------------
+
+describe("invalidation preview", () => {
+	it("reports the closure the reducer journals and the declarations it retires", async () => {
+		const fixture = await operatorFixture();
+		const run = await settledRun(fixture, "chain", (launch) =>
+			launch === 1 ? [INTERRUPTED] : [COMPLETED],
+		);
+		const { service, runId, state } = run;
+		try {
+			expect(run.first.status).toBe("interrupted");
+			const a = taskIdOf(state, "a");
+			const preview = await service.previewInvalidation(runId, a);
+			expect(Value.Check(WorkflowInvalidationPreviewSchema, preview)).toBe(
+				true,
+			);
+			expect(preview).toEqual({
+				runId,
+				causeTaskId: a,
+				taskIds: [a],
+				taskKeys: ["/a"],
+				abandonedEpochs: [2],
+				abandonedTaskIds: [],
+			});
+			// A preview appends nothing and changes no status.
+			const before = await journalEvents(fixture.storeRoot, runId);
+			expect(countOf(before, "task-invalidated")).toBe(0);
+			await expect(service.status(runId)).resolves.toMatchObject({
+				status: "interrupted",
+			});
+
+			// The subsequent invalidation journals exactly the previewed closure
+			// and abandons exactly the previewed declarations.
+			await bounded(service.retry(runId, a, "operator re-run"), "retry");
+			await bounded(service.wait(runId), "wait");
+			const events = await journalEvents(fixture.storeRoot, runId);
+			const invalidated = events.find(
+				(event) => event.type === "task-invalidated",
+			);
+			expect(invalidated?.data).toMatchObject({
+				causeTaskId: a,
+				taskIds: preview.taskIds,
+				abandonedEpochs: preview.abandonedEpochs,
+			});
+			const after = await stateOf(fixture.storeRoot, runId);
+			expect(
+				Object.values(after.tasks)
+					.filter(
+						(task) =>
+							task.abandoned === true &&
+							state.tasks[task.task.id]?.abandoned !== true,
+					)
+					.map((task) => task.task.id),
+			).toEqual(preview.abandonedTaskIds);
+
+			// Legality is not the preview's concern: the completed run still
+			// previews (availableActions decides whether invalidate is offered),
+			// and the re-executed source readopted the epoch after the barrier.
+			const inspection = await service.inspect(runId);
+			expect(inspection.run.availableActions).toEqual([]);
+			await expect(service.previewInvalidation(runId, a)).resolves.toEqual({
+				runId,
+				causeTaskId: a,
+				taskIds: [a],
+				taskKeys: ["/a"],
+				abandonedEpochs: after.barriers
+					.filter((barrier) => barrier.abandoned !== true && barrier.epoch > 1)
+					.map((barrier) => barrier.epoch),
+				abandonedTaskIds: [],
+			});
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("validates its arguments and raises the reducer's refusals", async () => {
+		const fixture = await operatorFixture();
+		const run = await settledRun(fixture, "attempts", [
+			{ status: "failed", failure: childFailure("manual") },
+		]);
+		const { service, runId, state } = run;
+		try {
+			const taskId = taskIdOf(state, "answer");
+			await expectServiceError(
+				service.previewInvalidation("nope", taskId),
+				"validation",
+				"Invalid workflow run ID.",
+			);
+			await expectServiceError(
+				service.previewInvalidation(runId, "not a task"),
+				"validation",
+				"Invalid workflow task ID.",
+			);
+			await expectServiceError(
+				service.previewInvalidation(runId, "task_unknown0000"),
+				"validation",
+				"invalidation cause task is unknown",
+			);
+			await expectServiceError(
+				service.previewInvalidation(`workflow_${"c".repeat(32)}`, taskId),
+				"not-found",
+				`Workflow run not found: workflow_${"c".repeat(32)}`,
+			);
+			await expect(
+				service.previewInvalidation(runId, taskId),
+			).resolves.toMatchObject({ taskIds: [taskId], abandonedEpochs: [] });
+			await bounded(service.shutdown(), "shutdown");
+			await expectServiceError(
+				service.previewInvalidation(runId, taskId),
+				"conflict",
+				"Workflow service is closed.",
+			);
+		} finally {
+			await shutdownQuietly(service);
 		}
 	});
 });

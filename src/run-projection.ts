@@ -21,6 +21,7 @@ import type {
 import { deriveWorkflowHandoffDescriptor } from "./execution.js";
 import type { WorkflowJournalEvent } from "./persistence/journal.js";
 import { WorkflowPersistenceCorruptionError } from "./persistence/run-lease.js";
+import { invalidationClosure } from "./reducer.js";
 import {
 	availableWorkflowRunActions,
 	requiresAttention,
@@ -37,6 +38,7 @@ import {
 	type WorkflowExecutionAttemptView,
 	type WorkflowExecutionView,
 	type WorkflowInspectSection,
+	type WorkflowInvalidationPreview,
 	type WorkflowLogEntry,
 	type WorkflowLogPage,
 	type WorkflowRunInspection,
@@ -202,6 +204,44 @@ export function taskViews(
 			});
 		}),
 	);
+}
+
+/**
+ * The exact closure `invalidate(runId, causeTaskId, …)` would journal, read
+ * from the same reducer function the append validates against, plus the
+ * on-path tasks the reducer would mark abandoned for those epochs. Throws the
+ * reducer's own refusal for an unknown or already-invalidated cause and for
+ * an exhausted generation bound; the caller maps it.
+ */
+export function invalidationPreview(
+	state: WorkflowStateProjection,
+	causeTaskId: WorkflowTaskId,
+): WorkflowInvalidationPreview {
+	const closure = invalidationClosure(state, causeTaskId);
+	const abandonedEpochs = new Set(closure.abandonedEpochs);
+	return Object.freeze({
+		runId: state.runId,
+		causeTaskId,
+		taskIds: Object.freeze([...closure.taskIds]),
+		taskKeys: Object.freeze(
+			closure.taskIds.map((taskId) => {
+				const task = state.tasks[taskId];
+				return task
+					? `${task.task.namespace.join("/")}/${task.task.spec.key}`
+					: taskId;
+			}),
+		),
+		abandonedEpochs: Object.freeze([...closure.abandonedEpochs]),
+		abandonedTaskIds: Object.freeze(
+			orderedTasks(state)
+				.filter(
+					(task) =>
+						task.abandoned !== true &&
+						abandonedEpochs.has(task.task.materializationEpoch),
+				)
+				.map((task) => task.task.id),
+		),
+	});
 }
 
 function taskCounts(

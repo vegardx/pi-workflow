@@ -326,6 +326,10 @@ An in-memory-only successful drive does not satisfy the first slice.
   transition and attempt;
 - `workflow_retry` and `workflow_resume` forward to the service, validate
   their run-view output against the schema, and render from the table;
+- `previewInvalidation(runId, taskId)` returns exactly the `taskIds` and
+  `abandonedEpochs` the subsequent invalidation journals and the task ids it
+  marks abandoned, raises the reducer's refusals unchanged, reads a run leased
+  elsewhere, and never appends; no UI module computes a closure of its own;
 - the unified `/workflow` command, the `pi-workflow` widget, and the `alt+w`
   inspector consume `availableActions`, `requiresAttention`, `ownership`, and
   `leasedElsewhere` from the service; no UI module imports the legality

@@ -166,6 +166,8 @@ if (
 	!workflow.WorkflowRunPageSchema ||
 	!workflow.WorkflowRunInspectionSchema ||
 	!workflow.WorkflowLogPageSchema ||
+	typeof workflow.WorkflowInvalidationPreviewSchema !== "object" ||
+	typeof workflow.invalidationPreview !== "function" ||
 	typeof workflow.workflowToolText !== "function" ||
 	!workflow.WorkflowDefinitionSummarySchema
 ) throw new Error("packed tool declaration table is unavailable or incomplete");
