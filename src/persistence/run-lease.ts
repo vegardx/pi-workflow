@@ -65,18 +65,86 @@ function sha256(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
-function leasePort(storeRoot: string, runId: WorkflowRunId): number {
+const LEASE_PORT_BASE = 20_000;
+const LEASE_PORT_SPAN = 20_000;
+/** Coprime with the span, so the candidate walk never repeats a port. */
+const LEASE_PORT_STRIDE = 7_919;
+const LEASE_PORT_CANDIDATES = 64;
+const LEASE_BANNER_PREFIX = "pi-workflow-lease/1 ";
+const LEASE_PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * Names this lease on the wire. The listener proves which run holds a port,
+ * so an unrelated run that hashed to the same port is not mistaken for the
+ * live owner of this one.
+ */
+function leaseIdentity(storeRoot: string, runId: WorkflowRunId): string {
+	return sha256(`${storeRoot}\0${runId}`);
+}
+
+/**
+ * Deterministic ports to try, in order. The port space is far smaller than
+ * the identity space, so unrelated runs collide; every acquirer walks the
+ * same sequence and skips ports proved to belong to another run.
+ */
+function leasePortCandidates(
+	storeRoot: string,
+	runId: WorkflowRunId,
+): readonly number[] {
 	const value = createHash("sha256")
 		.update(storeRoot)
 		.update("\0")
 		.update(runId)
 		.digest()
 		.readUInt32BE(0);
-	return 20_000 + (value % 20_000);
+	const base = value % LEASE_PORT_SPAN;
+	return Array.from(
+		{ length: LEASE_PORT_CANDIDATES },
+		(_, index) =>
+			LEASE_PORT_BASE + ((base + index * LEASE_PORT_STRIDE) % LEASE_PORT_SPAN),
+	);
 }
 
-async function bind(port: number): Promise<net.Server | undefined> {
-	const server = net.createServer((socket) => socket.destroy());
+/**
+ * Reads the banner of whatever holds a port. Returns undefined when the
+ * occupant cannot be proved to be another run's lease; callers then fail
+ * closed rather than binding a second listener for the same run.
+ */
+async function probeIdentity(port: number): Promise<string | undefined> {
+	return new Promise<string | undefined>((resolve) => {
+		const socket = net.connect({ host: "127.0.0.1", port });
+		let banner = "";
+		const finish = (value: string | undefined) => {
+			socket.destroy();
+			resolve(value);
+		};
+		socket.setTimeout(LEASE_PROBE_TIMEOUT_MS, () => finish(undefined));
+		socket.once("error", () => finish(undefined));
+		socket.on("data", (chunk) => {
+			banner += chunk.toString("utf8");
+			const end = banner.indexOf("\n");
+			if (end < 0) {
+				if (banner.length > LEASE_BANNER_PREFIX.length + 64) finish(undefined);
+				return;
+			}
+			const line = banner.slice(0, end);
+			finish(
+				line.startsWith(LEASE_BANNER_PREFIX)
+					? line.slice(LEASE_BANNER_PREFIX.length)
+					: undefined,
+			);
+		});
+		socket.once("end", () => finish(undefined));
+	});
+}
+
+async function bind(
+	port: number,
+	identity: string,
+): Promise<net.Server | undefined> {
+	const server = net.createServer((socket) => {
+		socket.end(`${LEASE_BANNER_PREFIX}${identity}\n`);
+	});
 	try {
 		await new Promise<void>((resolve, reject) => {
 			const onError = (error: NodeJS.ErrnoException) => {
@@ -266,25 +334,46 @@ export async function acquireWorkflowRunLease(options: {
 	await chmod(canonicalLeaseRoot, 0o700);
 	await syncDirectory(storeRoot);
 	await syncDirectory(canonicalLeaseRoot);
-	const port = leasePort(storeRoot, options.runId);
-	const server = await bind(port);
-	if (!server) throw new WorkflowRunLeaseUnavailableError(options.runId);
 	const recordPath = path.join(
 		canonicalLeaseRoot,
 		`${options.runId}.lease.json`,
 	);
-	try {
-		const existing = await readRecord(recordPath);
-		if (
-			existing &&
-			(existing.storeRootSha256 !== sha256(storeRoot) ||
-				existing.runId !== options.runId ||
-				existing.port !== port)
-		) {
-			throw new WorkflowPersistenceCorruptionError(
-				"workflow run lease identity mismatch",
-			);
+	const existing = await readRecord(recordPath);
+	const identity = leaseIdentity(storeRoot, options.runId);
+	const candidates = leasePortCandidates(storeRoot, options.runId);
+	if (
+		existing &&
+		(existing.storeRootSha256 !== sha256(storeRoot) ||
+			existing.runId !== options.runId ||
+			!candidates.includes(existing.port))
+	) {
+		throw new WorkflowPersistenceCorruptionError(
+			"workflow run lease identity mismatch",
+		);
+	}
+	// The recorded port is tried first so a later acquirer meets the live
+	// owner where it actually listens, then the shared walk covers the rest.
+	const ordered =
+		existing === undefined
+			? candidates
+			: [existing.port, ...candidates.filter((c) => c !== existing.port)];
+	let server: net.Server | undefined;
+	let port = 0;
+	for (const candidate of ordered) {
+		server = await bind(candidate, identity);
+		if (server) {
+			port = candidate;
+			break;
 		}
+		const occupant = await probeIdentity(candidate);
+		// Held by this very run, or by something that cannot identify itself:
+		// either way this process must not become a second writer.
+		if (occupant === identity || occupant === undefined) {
+			throw new WorkflowRunLeaseUnavailableError(options.runId);
+		}
+	}
+	if (!server) throw new WorkflowRunLeaseUnavailableError(options.runId);
+	try {
 		if (existing?.generation === Number.MAX_SAFE_INTEGER) {
 			throw new WorkflowPersistenceCorruptionError(
 				"workflow run lease generation is exhausted",
