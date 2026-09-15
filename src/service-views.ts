@@ -11,8 +11,10 @@ import {
 	TaskKeySchema,
 	TaskRoleSchema,
 	WorkflowArtifactIdSchema,
+	WorkflowArtifactOutputSchema,
 	WorkflowBudgetSchema,
 	WorkflowDefinitionNameSchema,
+	WorkflowHandoffDescriptorSchema,
 	WorkflowRunIdSchema,
 	WorkflowRunStatusSchema,
 	WorkflowTaskIdSchema,
@@ -244,6 +246,12 @@ export const WorkflowServiceTaskViewSchema = Type.Object(
 		outcome: Type.Optional(TaskExecutionOutcomeSchema),
 		/** Declared in an abandoned epoch and not readopted by the current path. */
 		abandoned: Type.Optional(Type.Literal(true)),
+		/**
+		 * The imported handoff of a completed worktree agent task, derived from
+		 * durable state alone; absent for read-only tasks and for a completed
+		 * worktree task that recorded no handoff under the optional policy.
+		 */
+		handoff: Type.Optional(WorkflowHandoffDescriptorSchema),
 		/** Sorted `after` dependency ids; inspection only. */
 		dependsOn: Type.Optional(
 			Type.Array(WorkflowTaskIdSchema, { maxItems: 256, uniqueItems: true }),
@@ -544,7 +552,7 @@ export const WorkflowArtifactViewSchema = Type.Object(
 		id: WorkflowArtifactIdSchema,
 		producerTaskId: Type.Optional(WorkflowTaskIdSchema),
 		producerExecutionId: Type.Optional(TaskExecutionIdSchema),
-		output: Type.Optional(Type.Literal("result")),
+		output: Type.Optional(WorkflowArtifactOutputSchema),
 		sha256: Sha256Schema,
 		bytes: CountSchema,
 		mediaType: Type.String({ minLength: 1, maxLength: 256 }),

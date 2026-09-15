@@ -127,7 +127,13 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 16 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 17 ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
+	!workflow.WorkflowHandoffDescriptorSchema ||
+	workflow.MAX_WORKFLOW_HANDOFF_BYTES !== 16 * 1024 * 1024 ||
+	typeof workflow.verifyWorkflowHandoffEvidence !== "function" ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 6 ||
 	workflow.MAX_NESTED_WORKFLOW_DEPTH !== 4 ||
 	workflow.MAX_TASK_EXECUTION_GENERATIONS !== 16 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution !== true ||

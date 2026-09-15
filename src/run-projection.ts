@@ -7,6 +7,7 @@ import {
 import type {
 	TaskExecutionOutcome,
 	WorkflowArtifactId,
+	WorkflowHandoffDescriptor,
 	WorkflowRunId,
 	WorkflowTaskId,
 	WorkflowTaskStatus,
@@ -17,7 +18,9 @@ import type {
 	WorkflowStateProjection,
 	WorkflowTaskProjection,
 } from "./events.js";
+import { deriveWorkflowHandoffDescriptor } from "./execution.js";
 import type { WorkflowJournalEvent } from "./persistence/journal.js";
+import { WorkflowPersistenceCorruptionError } from "./persistence/run-lease.js";
 import {
 	availableWorkflowRunActions,
 	requiresAttention,
@@ -107,6 +110,45 @@ export interface TaskViewOptions {
 	readonly graph?: boolean;
 }
 
+export function isCompletedWorktreeTask(task: WorkflowTaskProjection): boolean {
+	return (
+		task.status === "completed" &&
+		task.abandoned !== true &&
+		task.task.spec.kind === "agent" &&
+		task.task.spec.request.workspace.mode === "worktree"
+	);
+}
+
+/**
+ * The descriptor of a completed worktree task's imported handoff, from durable
+ * metadata only: status views acquire neither the artifact nor the subagent.
+ * The reducer already proved the import and its artifact agree, so a
+ * disagreement here is journal corruption rather than a view detail.
+ */
+function taskHandoffView(
+	state: WorkflowStateProjection,
+	task: WorkflowTaskProjection,
+): WorkflowHandoffDescriptor | undefined {
+	if (!isCompletedWorktreeTask(task)) return undefined;
+	const execution = currentExecution(state, task);
+	const handoffImport = execution?.handoffImport;
+	if (!execution || !handoffImport) return undefined;
+	const artifact = state.artifacts[handoffImport.artifactId];
+	if (!artifact) {
+		throw new WorkflowPersistenceCorruptionError(
+			"Workflow handoff artifact metadata is missing.",
+		);
+	}
+	try {
+		return deriveWorkflowHandoffDescriptor(artifact, execution);
+	} catch (error) {
+		throw new WorkflowPersistenceCorruptionError(
+			"Workflow handoff artifact metadata is inconsistent.",
+			{ cause: error },
+		);
+	}
+}
+
 export function taskViews(
 	state: WorkflowStateProjection,
 	options: TaskViewOptions = {},
@@ -124,6 +166,7 @@ export function taskViews(
 			const settlement = execution ? settlementView(execution) : undefined;
 			const outcome: TaskExecutionOutcome | undefined =
 				execution?.terminal?.outcome;
+			const handoff = taskHandoffView(state, task);
 			return Object.freeze({
 				id: task.task.id,
 				namespace: Object.freeze([...task.task.namespace]),
@@ -140,6 +183,7 @@ export function taskViews(
 				...(settlement ? { settlement } : {}),
 				...(outcome ? { outcome } : {}),
 				...(task.abandoned === true ? { abandoned: true as const } : {}),
+				...(handoff === undefined ? {} : { handoff: Object.freeze(handoff) }),
 				...(options.graph
 					? {
 							dependsOn: Object.freeze(

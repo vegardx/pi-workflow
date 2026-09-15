@@ -1,17 +1,22 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	HANDOFF_EXPORT_MEDIA_TYPE,
+	type HandoffRef,
 	RetryBackoffError,
 	type RunReceipt,
 	type RunResult,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentRequest,
+	type WorktreeRecord,
 } from "@vegardx/pi-subagent";
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
+import { WorkflowHandoffDescriptorSchema } from "../src/contracts.js";
 import type { WorkflowStateProjection } from "../src/events.js";
 import { deriveJsonValueSha256 } from "../src/execution.js";
 import {
@@ -22,7 +27,11 @@ import { acquireWorkflowRunLease } from "../src/persistence/run-lease.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
 import { discoverWorkflows } from "../src/registry.js";
 import { WorkflowRunRecordStore } from "../src/run-record.js";
-import { createWorkflowService, WorkflowServiceError } from "../src/service.js";
+import {
+	createWorkflowService,
+	type WorkflowService,
+	WorkflowServiceError,
+} from "../src/service.js";
 import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
@@ -572,7 +581,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 16,
+			contractRevision: 17,
 			runId,
 			depth: 0,
 			definitionName: "pending",
@@ -1584,6 +1593,333 @@ describe("reconciliation of runs this service owns", () => {
 				code: "validation",
 				message: "Workflow task is not cleanup-blocked.",
 			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+});
+
+const HANDOFF_BASELINE_HEAD = "b".repeat(40);
+const HANDOFF_COMMIT = "d".repeat(40);
+const HANDOFF_MBOX_DATE = "Mon Sep 17 00:00:00 2001";
+
+function sha256Of(content: Buffer): string {
+	return createHash("sha256").update(content).digest("hex");
+}
+
+function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
+	return Buffer.from(
+		`From ${commit} ${HANDOFF_MBOX_DATE}\nFrom: Agent <agent@example.com>\nSubject: [PATCH] change\n\n---\n a.txt | 1 +\n`,
+	);
+}
+
+/** pi-subagent's private worktree record; only its identity may be persisted. */
+function worktreeRecord(handoffCommit?: string): WorktreeRecord {
+	return {
+		schema: "pi-subagent-worktree",
+		contractRevision: 6,
+		runId: "run_servicechild",
+		attemptId: "attempt_servicechild",
+		repositoryRoot: "/private/repo",
+		worktreePath: "/private/repo/.pi/worktrees/run_servicechild",
+		recordPath: "/private/repo/.pi/worktrees/run_servicechild.json",
+		branch: "pi-subagent/reservations/run_servicechild",
+		baselineHead: HANDOFF_BASELINE_HEAD,
+		createdAt: "2026-01-01T00:00:00.000Z",
+		...(handoffCommit === undefined
+			? {}
+			: {
+					handoffCommit,
+					handoffRef: `refs/pi-subagent/handoffs/run_servicechild/attempt_servicechild`,
+				}),
+	};
+}
+
+function handoffRefOf(content: Buffer): HandoffRef {
+	return {
+		runId: "run_servicechild",
+		attemptId: "attempt_servicechild",
+		baselineHead: HANDOFF_BASELINE_HEAD,
+		handoffCommit: HANDOFF_COMMIT,
+		format: "git-format-patch",
+		sha256: sha256Of(content),
+		bytes: content.byteLength,
+		mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+	};
+}
+
+async function worktreeWorkflowFixture(policy?: "required" | "optional") {
+	const fixture = await workflowFixture("worktree-task");
+	await writeFile(
+		fixture.definitionPath,
+		`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "worktree-task", description: "Worktree task workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run(ctx) {
+    return ctx.agent("write", {
+      agent: "writer",
+      task: { goal: "Change", context: [], instructions: ["Edit and return structured output."] },
+      contextMode: "fresh",
+      tools: ["read", "write"],
+      preloadSkills: [],
+      contextScopes: ["project"],
+      workspace: { mode: "worktree", cwd: ctx.cwd },
+      ${policy ? `handoff: ${JSON.stringify(policy)},` : ""}
+      outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+      limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 1024, retries: 0, resumes: 0 }
+    });
+  }
+};\n`,
+	);
+	return fixture;
+}
+
+/**
+ * Owner client whose completed child settles with a worktree record and whose
+ * `exportHandoff` renders that record's commit as a single-commit patch.
+ */
+function worktreeProvider(content = handoffPatch()) {
+	const delegated = taskProvider();
+	vi.mocked(delegated.ownerClient.wait).mockImplementation(async () => ({
+		...childResult({ status: "completed" }),
+		handoff: worktreeRecord(HANDOFF_COMMIT),
+	}));
+	const exportHandoff = vi.fn(async () => ({
+		ref: handoffRefOf(content),
+		content,
+	}));
+	(delegated.ownerClient as unknown as Record<string, unknown>).exportHandoff =
+		exportHandoff;
+	return { ...delegated, exportHandoff, content };
+}
+
+function worktreeTaskOf(view: Awaited<ReturnType<WorkflowService["status"]>>) {
+	const task = view.tasks?.find((candidate) => candidate.kind === "agent");
+	if (!task) throw new Error("missing agent task view");
+	return task;
+}
+
+describe("worktree handoffs", () => {
+	it("imports the handoff before release, exposes it on the view, and exports verified bytes", async () => {
+		const fixture = await worktreeWorkflowFixture();
+		const delegated = worktreeProvider();
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		let runId: string | undefined;
+		try {
+			const receipt = await service.run("worktree-task", {});
+			runId = receipt.runId;
+			const view = await bounded(service.wait(receipt.runId), "wait");
+			expect(view).toMatchObject({
+				status: "completed",
+				output: { answer: "from child" },
+			});
+			expect(delegated.exportHandoff).toHaveBeenCalledExactlyOnceWith(
+				"run_servicechild",
+				{ maxBytes: 16 * 1024 * 1024 },
+			);
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-handoff-imported")).toBe(1);
+			expect(countOf(types, "task-execution-handoff-absent")).toBe(0);
+			expect(types.indexOf("task-execution-handoff-imported")).toBeGreaterThan(
+				types.indexOf("task-execution-artifact-imported"),
+			);
+			expect(types.indexOf("task-execution-handoff-imported")).toBeLessThan(
+				types.indexOf("task-execution-release-intended"),
+			);
+			const task = worktreeTaskOf(view);
+			const { execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			const expectedDescriptor = {
+				artifactId: expect.stringMatching(/^artifact_/),
+				runId: receipt.runId,
+				producerTaskId: task.id,
+				producerExecutionId: execution.execution.id,
+				subagentRunId: "run_servicechild",
+				subagentAttemptId: "attempt_servicechild",
+				baselineHead: HANDOFF_BASELINE_HEAD,
+				handoffCommit: HANDOFF_COMMIT,
+				format: "git-format-patch",
+				mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+				sha256: sha256Of(delegated.content),
+				bytes: delegated.content.byteLength,
+			};
+			expect(task.status).toBe("completed");
+			expect(task.handoff).toEqual(expectedDescriptor);
+			expect(Value.Check(WorkflowHandoffDescriptorSchema, task.handoff)).toBe(
+				true,
+			);
+			// The descriptor is the only JSON face of a handoff: no private paths.
+			expect(JSON.stringify(task.handoff)).not.toMatch(
+				/private|worktrees|refs\//,
+			);
+
+			const exported = await service.exportHandoff(receipt.runId, task.id);
+			expect(exported.descriptor).toEqual(task.handoff);
+			expect(Buffer.isBuffer(exported.content)).toBe(true);
+			expect(exported.content.equals(delegated.content)).toBe(true);
+			expect(sha256Of(exported.content)).toBe(exported.descriptor.sha256);
+			expect(exported.content.byteLength).toBe(exported.descriptor.bytes);
+			expect(exported.content.toString("utf8").split("\n")[0]).toBe(
+				`From ${HANDOFF_COMMIT} ${HANDOFF_MBOX_DATE}`,
+			);
+			// The export re-verifies the durable artifact; pi-subagent is not
+			// asked again.
+			expect(delegated.exportHandoff).toHaveBeenCalledOnce();
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+		if (!runId) throw new Error("run did not start");
+
+		// The inactive-open path serves the same descriptor and bytes without
+		// acquiring a subagent binding.
+		const restarted = provider();
+		const second = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: restarted,
+		});
+		try {
+			const view = await second.status(runId);
+			const task = worktreeTaskOf(view);
+			expect(task.handoff).toMatchObject({
+				handoffCommit: HANDOFF_COMMIT,
+				sha256: sha256Of(delegated.content),
+			});
+			const exported = await second.exportHandoff(runId, task.id);
+			expect(exported.descriptor).toEqual(task.handoff);
+			expect(exported.content.equals(delegated.content)).toBe(true);
+			expect(restarted.bind).not.toHaveBeenCalled();
+			await expect(second.exportHandoff("bad", task.id)).rejects.toMatchObject({
+				code: "validation",
+				message: "Invalid workflow run ID.",
+			});
+			await expect(second.exportHandoff(runId, "bad")).rejects.toMatchObject({
+				code: "validation",
+				message: "Invalid workflow task ID.",
+			});
+			await expect(
+				second.exportHandoff(runId, "task_missing"),
+			).rejects.toMatchObject({ code: "not-found" });
+		} finally {
+			await bounded(second.shutdown(), "shutdown");
+		}
+	});
+
+	it("refuses to export a handoff for a read-only task", async () => {
+		const fixture = await taskWorkflowFixture();
+		const delegated = taskProvider();
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("agent-task", {});
+			const view = await bounded(service.wait(receipt.runId), "wait");
+			expect(view.status).toBe("completed");
+			const task = worktreeTaskOf(view);
+			expect(task.status).toBe("completed");
+			expect(task).not.toHaveProperty("handoff");
+			await expect(
+				service.exportHandoff(receipt.runId, task.id),
+			).rejects.toMatchObject({
+				code: "validation",
+				message: "Workflow task has no handoff artifact.",
+			});
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-handoff-imported")).toBe(0);
+			expect(countOf(types, "task-execution-handoff-absent")).toBe(0);
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("refuses to export a handoff while the worktree task is incomplete", async () => {
+		const fixture = await worktreeWorkflowFixture();
+		const delegated = worktreeProvider();
+		const terminal = deferred<Awaited<ReturnType<SubagentClient["wait"]>>>();
+		vi.mocked(delegated.ownerClient.wait).mockImplementation(
+			async () => terminal.promise,
+		);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("worktree-task", {});
+			await until(
+				() => vi.mocked(delegated.ownerClient.wait).mock.calls.length > 0,
+			);
+			const view = await service.status(receipt.runId);
+			const task = worktreeTaskOf(view);
+			expect(task.status).not.toBe("completed");
+			expect(task).not.toHaveProperty("handoff");
+			await expect(
+				service.exportHandoff(receipt.runId, task.id),
+			).rejects.toMatchObject({
+				code: "validation",
+				message: "Workflow task has no handoff artifact.",
+			});
+			expect(delegated.exportHandoff).not.toHaveBeenCalled();
+			terminal.resolve({
+				...childResult({ status: "completed" }),
+				handoff: worktreeRecord(HANDOFF_COMMIT),
+			});
+			const completed = await bounded(service.wait(receipt.runId), "wait");
+			expect(completed.status).toBe("completed");
+			expect(worktreeTaskOf(completed).handoff).toMatchObject({
+				handoffCommit: HANDOFF_COMMIT,
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("surfaces a corrupt handoff blob as a persistence failure while the view stays metadata-only", async () => {
+		const fixture = await worktreeWorkflowFixture();
+		const delegated = worktreeProvider();
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("worktree-task", {});
+			const view = await bounded(service.wait(receipt.runId), "wait");
+			expect(view.status).toBe("completed");
+			const task = worktreeTaskOf(view);
+			const descriptor = task.handoff;
+			if (!descriptor) throw new Error("missing handoff descriptor");
+			const blob = path.join(
+				fixture.storeRoot,
+				"runs",
+				receipt.runId,
+				"artifacts",
+				`${descriptor.sha256}.patch`,
+			);
+			// Same length and first line, different bytes: only the digest tells.
+			const forged = Buffer.from(delegated.content);
+			forged[forged.byteLength - 1] = 0x21;
+			expect(forged.equals(delegated.content)).toBe(false);
+			await writeFile(blob, forged);
+			await expect(
+				service.exportHandoff(receipt.runId, task.id),
+			).rejects.toMatchObject({
+				code: "persistence",
+				message: "Completed worktree task has no verified handoff artifact.",
+			});
+			// The status view derives the descriptor from durable state alone.
+			expect(
+				worktreeTaskOf(await service.status(receipt.runId)).handoff,
+			).toEqual(descriptor);
 		} finally {
 			await bounded(service.shutdown(), "shutdown");
 		}
