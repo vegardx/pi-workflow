@@ -12,6 +12,7 @@ import { deriveTaskExecutionId } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
 import {
+	invalidationClosure,
 	reduceWorkflowEvents,
 	WorkflowEventReductionError,
 } from "../src/reducer.js";
@@ -46,7 +47,7 @@ function journalEvents(inputs: readonly WorkflowEventInput[]) {
 	return inputs.map(
 		(input, index): WorkflowJournalEvent => ({
 			schema: "pi-workflow-event",
-			contractRevision: 14,
+			contractRevision: 15,
 			sequence: index + 1,
 			eventId: `event-${index + 1}`,
 			timestamp: "2026-08-20T00:00:00.000Z",
@@ -154,6 +155,11 @@ describe("workflow event reducer", () => {
 								id: `artifact_${"c".repeat(64)}`,
 								runId: "workflow_reducer",
 								producerTaskId: first.ref.taskId,
+								producerExecutionId: deriveTaskExecutionId(
+									"workflow_reducer",
+									first.ref.taskId,
+									1,
+								),
 								output: "result",
 								sha256: "d".repeat(64),
 								bytes: 2,
@@ -179,10 +185,15 @@ describe("workflow event reducer", () => {
 					runCreated(),
 					declaration,
 					{
+						type: "run-status-changed",
+						data: { from: "created", to: "running" },
+					},
+					{
 						type: "task-invalidated",
 						data: {
 							causeTaskId: first.ref.taskId,
 							taskIds: [first.ref.taskId],
+							abandonedEpochs: [],
 							reason: "re-execute",
 						},
 					},
@@ -193,7 +204,18 @@ describe("workflow event reducer", () => {
 
 	it("requires invalidation to cover the exact transitive closure", () => {
 		const { first, second, commit } = committedGraph();
-		const base = [runCreated(), ...commit.events] as WorkflowEventInput[];
+		const base: WorkflowEventInput[] = [
+			runCreated(),
+			...commit.events,
+			{
+				type: "run-status-changed",
+				data: { from: "created", to: "running" },
+			},
+		];
+		const closure = invalidationClosure(
+			reduceWorkflowEvents(journalEvents(base)),
+			first.ref.taskId,
+		);
 		expect(() =>
 			reduceWorkflowEvents(
 				journalEvents([
@@ -203,6 +225,7 @@ describe("workflow event reducer", () => {
 						data: {
 							causeTaskId: first.ref.taskId,
 							taskIds: [first.ref.taskId],
+							abandonedEpochs: closure.abandonedEpochs,
 							reason: "re-execute",
 						},
 					},
@@ -217,6 +240,7 @@ describe("workflow event reducer", () => {
 					data: {
 						causeTaskId: first.ref.taskId,
 						taskIds: [first.ref.taskId, second.ref.taskId],
+						abandonedEpochs: closure.abandonedEpochs,
 						reason: "re-execute",
 					},
 				},
@@ -315,19 +339,27 @@ describe("workflow event reducer", () => {
 
 	it("allows cancellation after tasks are invalidated", () => {
 		const { first, second, commit } = committedGraph();
+		const running: WorkflowEventInput[] = [
+			runCreated(),
+			...commit.events,
+			{
+				type: "run-status-changed",
+				data: { from: "created", to: "running" },
+			},
+		];
+		const closure = invalidationClosure(
+			reduceWorkflowEvents(journalEvents(running)),
+			first.ref.taskId,
+		);
 		const state = reduceWorkflowEvents(
 			journalEvents([
-				runCreated(),
-				...commit.events,
-				{
-					type: "run-status-changed",
-					data: { from: "created", to: "running" },
-				},
+				...running,
 				{
 					type: "task-invalidated",
 					data: {
 						causeTaskId: first.ref.taskId,
 						taskIds: [first.ref.taskId, second.ref.taskId],
+						abandonedEpochs: closure.abandonedEpochs,
 						reason: "re-execute",
 					},
 				},
