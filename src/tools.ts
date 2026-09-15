@@ -34,7 +34,9 @@ export type WorkflowToolName =
 	| "workflow_runs"
 	| "workflow_inspect"
 	| "workflow_logs"
-	| "workflow_invalidate";
+	| "workflow_invalidate"
+	| "workflow_retry"
+	| "workflow_resume";
 
 type DeepReadonly<T> = T extends readonly (infer U)[]
 	? readonly DeepReadonly<U>[]
@@ -67,6 +69,10 @@ export interface WorkflowToolDeclaration<
 	 * Absent for tools that use the shared rule (see `workflowToolText`).
 	 */
 	text?(value: WorkflowToolOutput<TOutput>): string;
+	/** One line shown next to the tool name while the call renders. */
+	summarizeCall(params: Static<TParams>): string;
+	/** One line shown for the collapsed result; the value is the typed result `details`. */
+	summarizeResult(value: WorkflowToolOutput<TOutput>): string;
 }
 
 /** Every tool text block fits this many bytes of pretty-printed JSON. */
@@ -257,6 +263,14 @@ const RunParametersSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** Shared collapsed-result line for every tool that returns a run view. */
+function runStatusSummary(value: {
+	readonly runId: string;
+	readonly status: string;
+}): string {
+	return `${value.runId} ${value.status}`;
+}
+
 function declare<TParams extends TSchema, TOutput extends TSchema>(
 	declaration: WorkflowToolDeclaration<TParams, TOutput>,
 ): WorkflowToolDeclaration<TParams, TOutput> {
@@ -283,6 +297,8 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				return service.list();
 			},
 			text: legacyListText,
+			summarizeCall: () => "",
+			summarizeResult: (value) => `${value.length} workflow(s)`,
 		}),
 		declare({
 			name: "workflow_validate",
@@ -303,6 +319,9 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 					? service.validate(params.ref)
 					: service.validate(params.ref, params.input);
 			},
+			summarizeCall: (params) => params.ref,
+			summarizeResult: (value) =>
+				`valid: ${value.workflow.name} v${value.workflow.version}`,
 		}),
 		declare({
 			name: "workflow_run",
@@ -321,6 +340,8 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			execute(service, params) {
 				return service.run(params.ref, params.input);
 			},
+			summarizeCall: (params) => params.ref,
+			summarizeResult: runStatusSummary,
 		}),
 		declare({
 			name: "workflow_status",
@@ -332,6 +353,8 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			execute(service, params) {
 				return service.status(params.runId);
 			},
+			summarizeCall: (params) => params.runId,
+			summarizeResult: runStatusSummary,
 		}),
 		declare({
 			name: "workflow_wait",
@@ -353,6 +376,12 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				const { runId, ...options } = params;
 				return service.wait(runId, options);
 			},
+			summarizeCall: (params) =>
+				params.timeoutMs
+					? `${params.runId} · ${params.timeoutMs} ms`
+					: params.runId,
+			summarizeResult: (value) =>
+				`${runStatusSummary(value)}${value.timedOut ? " (timed out)" : ""}`,
 		}),
 		declare({
 			name: "workflow_stop",
@@ -368,6 +397,8 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			execute(service, params) {
 				return service.stop(params.runId, params.reason);
 			},
+			summarizeCall: (params) => params.runId,
+			summarizeResult: runStatusSummary,
 		}),
 		declare({
 			name: "workflow_reconcile",
@@ -384,6 +415,10 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				const { runId, ...options } = params;
 				return service.reconcile(runId, options);
 			},
+			summarizeCall: (params) =>
+				params.taskId ? `${params.runId} · ${params.taskId}` : params.runId,
+			summarizeResult: (value) =>
+				`${runStatusSummary(value)} · ${value.reconciled.length} reconciled`,
 		}),
 		declare({
 			name: "workflow_runs",
@@ -397,6 +432,18 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				return service.listRuns(params);
 			},
 			text: runsPageText,
+			summarizeCall: (params) =>
+				[
+					params.statuses?.join(","),
+					params.includeChildren ? "children" : undefined,
+					params.cursor ? "page" : undefined,
+				]
+					.filter(Boolean)
+					.join(" · "),
+			summarizeResult: (value) =>
+				`${value.runs.length} of ${value.total} run(s)${
+					value.issues.length ? ` · ${value.issues.length} issue(s)` : ""
+				}`,
 		}),
 		declare({
 			name: "workflow_inspect",
@@ -423,6 +470,12 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				}
 				return serialized;
 			},
+			summarizeCall: (params) =>
+				[params.runId, params.include?.join(","), params.taskId]
+					.filter(Boolean)
+					.join(" · "),
+			summarizeResult: (value) =>
+				`${runStatusSummary(value.run)} · ${value.run.taskCounts.total} task(s)`,
 		}),
 		declare({
 			name: "workflow_logs",
@@ -440,6 +493,14 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				return service.logs(runId, options);
 			},
 			text: logPageText,
+			summarizeCall: (params) =>
+				params.afterSequence
+					? `${params.runId} · after ${params.afterSequence}`
+					: params.runId,
+			summarizeResult: (value) =>
+				`${value.entries.length} entr${
+					value.entries.length === 1 ? "y" : "ies"
+				} · seq ${value.lastSequence}`,
 		}),
 		declare({
 			name: "workflow_invalidate",
@@ -455,5 +516,47 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			execute(service, params) {
 				return service.invalidate(params.runId, params.taskId, params.reason);
 			},
+			summarizeCall: (params) => `${params.runId} · ${params.taskId}`,
+			summarizeResult: runStatusSummary,
+		}),
+		declare({
+			name: "workflow_retry",
+			label: "Retry Workflow Task",
+			description:
+				"Re-execute a failed or interrupted task as a fresh generation with a new subagent run. Equivalent to workflow_invalidate with the failed task as cause.",
+			promptGuidelines: [
+				"Use workflow_retry only on a durably failed or interrupted root run; inspect first with workflow_inspect and name a task whose current execution failed or was interrupted.",
+			],
+			parameters: Type.Object(
+				{ runId: RunId, taskId: TaskId, reason: Reason },
+				{ additionalProperties: false },
+			),
+			output: WorkflowServiceRunViewSchema,
+			execute(service, params) {
+				return service.retry(params.runId, params.taskId, params.reason);
+			},
+			summarizeCall: (params) => `${params.runId} · ${params.taskId}`,
+			summarizeResult: runStatusSummary,
+		}),
+		declare({
+			name: "workflow_resume",
+			label: "Resume Workflow Task",
+			description:
+				"Resume an interrupted agent task on its existing subagent run and attempt, preserving the child session; use workflow_retry to start over.",
+			promptGuidelines: [
+				"Use workflow_resume only on a durably interrupted root run; inspect first with workflow_inspect and pass taskId when more than one task is resumable.",
+			],
+			parameters: Type.Object(
+				{ runId: RunId, reason: Reason, taskId: Type.Optional(TaskId) },
+				{ additionalProperties: false },
+			),
+			output: WorkflowServiceRunViewSchema,
+			execute(service, params) {
+				const { runId, reason, ...options } = params;
+				return service.resume(runId, reason, options);
+			},
+			summarizeCall: (params) =>
+				params.taskId ? `${params.runId} · ${params.taskId}` : params.runId,
+			summarizeResult: runStatusSummary,
 		}),
 	]);

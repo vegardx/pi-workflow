@@ -53,6 +53,14 @@ try {
 		"dist/task-retrier.js",
 		"dist/tools.d.ts",
 		"dist/tools.js",
+		"dist/ui/commands.d.ts",
+		"dist/ui/commands.js",
+		"dist/ui/format.d.ts",
+		"dist/ui/format.js",
+		"dist/ui/inspector.d.ts",
+		"dist/ui/inspector.js",
+		"dist/ui/widget.d.ts",
+		"dist/ui/widget.js",
 		"package.json",
 	]) {
 		if (!paths.has(required)) {
@@ -152,8 +160,8 @@ if (
 if (
 	!Array.isArray(workflow.WORKFLOW_TOOL_DECLARATIONS) ||
 	!Object.isFrozen(workflow.WORKFLOW_TOOL_DECLARATIONS) ||
-	workflow.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name).join(",") !== "workflow_list,workflow_validate,workflow_run,workflow_status,workflow_wait,workflow_stop,workflow_reconcile,workflow_runs,workflow_inspect,workflow_logs,workflow_invalidate" ||
-	!workflow.WORKFLOW_TOOL_DECLARATIONS.every((tool) => typeof tool.execute === "function" && tool.parameters?.type === "object" && typeof tool.output?.type === "string") ||
+	workflow.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name).join(",") !== "workflow_list,workflow_validate,workflow_run,workflow_status,workflow_wait,workflow_stop,workflow_reconcile,workflow_runs,workflow_inspect,workflow_logs,workflow_invalidate,workflow_retry,workflow_resume" ||
+	!workflow.WORKFLOW_TOOL_DECLARATIONS.every((tool) => typeof tool.execute === "function" && tool.parameters?.type === "object" && typeof tool.output?.type === "string" && typeof tool.summarizeCall === "function" && typeof tool.summarizeResult === "function") ||
 	!workflow.WorkflowServiceRunViewSchema ||
 	!workflow.WorkflowRunPageSchema ||
 	!workflow.WorkflowRunInspectionSchema ||
