@@ -48,10 +48,19 @@ An in-memory-only successful drive does not satisfy the first slice.
   encountered;
 - result-dependent branches materialize incrementally after validated results;
 - restart re-executes from entry and reuses matching declarations;
-- insertion, removal, or reordering inside a valid materialization-epoch prefix
-  fails, while a new suffix and a branch after transactional invalidation are
-  handled as documented;
-- abandoned effects never reappear as active results;
+- insertion, removal, or reordering inside the on-path materialization-epoch
+  prefix fails, while a new suffix after the last on-path barrier is admitted;
+- after an invalidation the on-path prefix replays exactly, an invalidated path
+  task is re-materialized `invalidated → pending` when its epoch's barrier is
+  matched, and a divergent suffix is numbered from the current epoch with
+  materialization sequence `max + 1`;
+- a declaration beyond the prefix readopts an abandoned task with the same
+  `(namespace, key)` and identity digest under its original task ID with fresh
+  position fields, the same key with a changed identity fails with "abandoned
+  task key re-declared with a changed request", and a path task's key remains
+  a duplicate;
+- abandoned declarations, barriers, and effects never reappear as active
+  results, are never scheduled, and never count as unsettled or required work;
 - nested workflow, pipeline, and fan-out namespaces are collision-free.
 
 ## Subagent boundary
@@ -84,8 +93,9 @@ An in-memory-only successful drive does not satisfy the first slice.
 - checkpoint waits can be stopped and resumed;
 - child retry and resume record fresh attempts under the existing workflow task
   execution (see [Retry and resume attempts](#retry-and-resume-attempts)),
-  while explicit invalidation creates a new execution generation, preflight,
-  operation ID, and child run;
+  while explicit invalidation creates a new execution generation with a fresh
+  preflight, operation ID, and subagent or child run (see
+  [Invalidation and re-execution](#invalidation-and-re-execution));
 - declared and effective workflow budgets plus the absolute deadline survive
   restart;
 - task admission reserves declared maxima against settled usage and active
@@ -109,7 +119,7 @@ An in-memory-only successful drive does not satisfy the first slice.
 
 - a `failed` child classified `backoff` under a `retry` policy is retried
   through the owner client's `retry` on the same child run, the fresh attempt
-  is recorded under the same generation-1 execution, and a completed retry
+  is recorded under the same execution, and a completed retry
   imports its result and completes the task;
 - a policy is exhausted after `attempts` receipted attempts of its kind: the
   next settlement of that kind proceeds to release and its terminal outcome
@@ -142,6 +152,45 @@ An in-memory-only successful drive does not satisfy the first slice.
   attempt (`currentSubagentAttemptId`), not the launch receipt's attempt;
 - the runtime contract publishes `retryAttempts: true` and
   `resumeAttempts: true`, and no operator retry surface exists.
+
+## Invalidation and re-execution
+
+- `task-invalidated` carries the exact closure (the cause plus its transitive
+  dependents through `after` and `inputs`, abandoned tasks included, minus
+  tasks already `invalidated`) and the exact abandoned epochs (every on-path
+  epoch after the first on-path barrier exposing the closure); the reducer
+  recomputes both with `invalidationClosure` and rejects any other set, an
+  unknown cause, or a cause already `invalidated`;
+- invalidation is refused while any current execution is non-terminal or while
+  the run status is outside `running`, `waiting`, `failed`, and `interrupted`;
+- abandoned barriers, tasks, and effects are marked in the projection, keep
+  their epoch numbers and sequences, are never scheduled, never counted as
+  unsettled or required work, never satisfy or block path dependencies, may
+  not execute or change status, and still count their settled usage against
+  the budget;
+- a `failed` or `interrupted` run moves to `running` only while an on-path
+  task is `invalidated`, and re-materialization `invalidated → pending`
+  requires the task's current execution to be absent or terminal and detaches
+  it;
+- generation 2 is rejected while generation 1 is active and admitted after a
+  terminal execution plus invalidation; it receives a fresh preflight,
+  operation ID, and subagent run or child run, generations are contiguous and
+  bounded by `MAX_TASK_EXECUTION_GENERATIONS`, an abandoned task never
+  executes, and the prior execution's evidence and artifacts are retained;
+- a result artifact binds its producing execution, completion and every
+  downstream read select the current execution's artifact, and identical bytes
+  from two generations share one blob under distinct references;
+- settled usage of every generation counts against the run budget;
+- the service `invalidate` call validates the run ID, task ID, and reason,
+  rejects a run that is still being driven (`conflict`), not durably
+  `failed` or `interrupted`, a nested child run, a run already awaiting
+  recovery, or a run past its deadline (`validation`), refuses a closure task
+  at the generation bound before anything is appended, appends one
+  `task-invalidated`
+  event followed by the `failed|interrupted → running` recovery transition,
+  restarts the drive without awaiting it, and reports every task's generation
+  and abandoned marker in the run view; `wait` drives such a run after a crash
+  between the two appends.
 
 ## Structured output and support tasks
 
@@ -279,13 +328,18 @@ An in-memory-only successful drive does not satisfy the first slice.
   uncertain outcomes;
 - after lease rotation, every concurrently active child is reacquired from its
   durable launch receipt without another preflight or launch;
-- dependency invalidation is crash-safe and transitive;
+- explicit invalidation is one durable `task-invalidated` event followed by a
+  separate recovery transition, transitive, and verified exactly by the
+  reducer on every replay;
+- a readopted declaration persisted without its barrier is re-materialized by
+  the next replay's barrier commit, so a crash inside a readoption commit
+  never leaves an on-path task `invalidated`;
 - support execution recovery follows the documented crash-prefix ladder, output
   conflict fails closed, and persistence uncertainty is thrown rather than
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-14 stores reject revision 1 through 13 records;
+  and revision-15 stores reject revision 1 through 14 records;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - required finalizer failure prevents success;
 - bounded private stores redact sensitive metadata.

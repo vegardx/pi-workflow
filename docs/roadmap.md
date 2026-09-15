@@ -80,13 +80,22 @@ Delivered:
   decline events, backoff waited under the stop signal and deadline, settled
   usage summed across attempts (runtime contract features
   `retryAttempts: true` and `resumeAttempts: true`, contract revision 14);
-- interrupted-child resume through the `resume` policy.
+- interrupted-child resume through the `resume` policy;
+- task-execution generations 2 and later: contiguous generations bounded by
+  `MAX_TASK_EXECUTION_GENERATIONS = 16`, each with fresh derived execution,
+  operation, and child run identities, result artifacts bound to their
+  producing execution, and settled usage summed across generations (runtime
+  contract feature `executionGenerations: true`, contract revision 15);
+- replay identity and transactional invalidation: `invalidationClosure`, the
+  exact-closure and exact-abandoned-epoch `task-invalidated` event, abandoned
+  history, exact on-path prefix replay with a divergent suffix and readoption,
+  and the service `invalidate` trigger on settled failed or interrupted runs
+  (runtime contract feature `transactionalInvalidation: true`, contract
+  revision 15).
 
 Remaining:
 
-- task-execution generations 2 and later for re-execution after invalidation;
 - operator-triggered retry;
-- replay identity and transitive invalidation;
 - required and advisory finalizers;
 - checkpoints and immutable decisions;
 - richer logs and reconciliation controls;
@@ -95,7 +104,8 @@ Remaining:
 ## Phase 4 — product surface
 
 - persistent widget and inspector;
-- complete workflow command/tool surface;
+- complete workflow command/tool surface, including operator-triggered retry
+  and invalidate tools over the service;
 - workflow authoring skill;
 - packed integration matrix with pi-subagent;
 - first stable static-workflow API.

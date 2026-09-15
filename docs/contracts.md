@@ -4,9 +4,10 @@ This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
 nested run executor, artifact store, and static source runtime implement the
 current subset; later interfaces remain design contracts. The runtime contract
-is revision 14 and declares the feature flags `supportTaskExecution: true`,
+is revision 15 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
-and `resumeAttempts: true`.
+`resumeAttempts: true`, `executionGenerations: true`, and
+`transactionalInvalidation: true`.
 
 ## Static definition
 
@@ -98,7 +99,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 14 identities cover the complete definition module but not a
+Contract revision 15 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
 `typebox`, and the module specifiers present in the constructor-injected
 support registry; every other static import, dynamic import, CommonJS require,
@@ -481,7 +482,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow"` in revision 14; a checkpoint task
+`kind` is `"agent" | "support" | "workflow"` in revision 15; a checkpoint task
 kind remains a design contract. Keys are unique within a workflow namespace.
 Pipelines and fan-out create explicit child namespaces; a nested workflow task
 is one node in its parent's namespace whose child run owns a separate graph.
@@ -532,20 +533,46 @@ Static workflows are re-executed from their entry point after restart:
 3. compare each stable-keyed declaration with journaled materialization;
 4. replay a matching completed effect or reconcile an active effect;
 5. persist and schedule a new matching-path effect when absent;
-6. retain invalidated downstream effects not observed on the new path as
-   abandoned history;
+6. retain declarations, barriers, and effects abandoned by an invalidation as
+   history that is never scheduled;
 7. reject duplicate, ambiguous, reordered-incompatible, or changed effects.
 
 Version 1 compares declarations by ordered materialization epoch. An epoch is
 the declarations between entry/result barriers. Re-execution must reproduce the
-same ordered `(namespace, key, identity)` prefix through every still-valid
+same ordered `(namespace, key, identity)` prefix through every on-path
 barrier. Insertion, removal, or reordering inside that prefix fails closed. A
-new suffix is allowed after the last previously reached barrier. When explicit
-invalidation re-executes an upstream task and replaces its concrete result, the
-runtime first invalidates every transitively dependent downstream epoch; the
-newly evaluated branch may then materialize a different suffix while the old
-suffix remains abandoned history. Duplicate keys and changed requests for an
-existing key always fail.
+new suffix is allowed after the last on-path barrier. Duplicate keys and
+changed requests for an existing on-path key always fail.
+
+Explicit invalidation (`task-invalidated`) names a cause task and carries the
+exact closure and the exact abandoned epochs; the reducer recomputes both with
+the exported `invalidationClosure` helper and rejects any other set. The
+closure is the cause plus every transitive dependent through `after` and
+`inputs`, abandoned tasks included, minus tasks already `invalidated`; the
+cause itself must not already be `invalidated`. The exposing barrier is the
+first on-path barrier whose `taskIds` intersect the closure. Every on-path
+barrier with a higher epoch is abandoned together with every task declared in
+those epochs and every effect sequenced after the exposing barrier; when no
+on-path barrier exposes the closure, nothing is abandoned. Abandoned records
+stay in the projection as history: they are never scheduled, never count as
+unsettled or required work, never satisfy or block dependencies of path tasks,
+and their settled usage still counts against the budget.
+
+After an invalidation the on-path prefix (non-abandoned tasks in
+materialization order, non-abandoned barriers in epoch order) must replay
+exactly; an invalidated path task is re-materialized (`task-status-changed`
+`invalidated → pending`, reason "Explicit invalidation re-executes the task.")
+when its epoch's barrier is matched. Beyond the prefix the new path may declare
+a divergent suffix. Abandoned epochs keep their numbers; new epochs are
+numbered from the run's current epoch upward, after every persisted barrier,
+and a new declaration takes materialization sequence `max + 1` over every
+persisted task. A new declaration whose `(namespace, key)` matches an
+abandoned task with an equal `identitySha256` readopts that task: the
+`task-declared` event re-declares the same task ID with fresh sequence, epoch,
+and position fields, keeps its status, commit, and current execution, and
+re-materializes it in the same commit when it was `invalidated`. A matching
+key with a different identity fails closed with "abandoned task key
+re-declared with a changed request". Keys of path tasks remain duplicates.
 
 JavaScript continuations are never serialized. The static runtime invokes the
 workflow function from entry on every drive, matches phase/log effects and
@@ -609,10 +636,15 @@ child launch. Future file or directory mounts require a new explicit subagent
 contract and cannot silently use this projection.
 
 Workflow derives deterministic task-execution and subagent operation IDs from
-workflow run ID, task ID, and task-execution generation. Generation 1 is the
-only executable generation in revision 14; generations 2 and later remain
-reserved for re-execution after invalidation and require the transactional
-invalidation contract. One agent task execution corresponds to one subagent run
+workflow run ID, task ID, and task-execution generation. Generations are
+contiguous: `task-execution-created` accepts `generation = 1 + (executions
+already recorded for the task)` up to `MAX_TASK_EXECUTION_GENERATIONS = 16`,
+requires the task `ready` and on-path, and requires the task to have no
+current execution: re-materialization detaches the terminal previous
+execution, and the new execution becomes `currentExecutionId` when it is
+created. Prior executions and their evidence are retained.
+Generation 2 and later exist only for a task re-materialized after explicit
+invalidation. One agent task execution corresponds to one subagent run
 and may contain multiple subagent attempts: the initial attempt plus the retry
 and resume attempts described under
 [Retry and resume attempts](#retry-and-resume-attempts). Before its initial
@@ -646,9 +678,10 @@ agent children or in-process support tasks.
 The journal stores bounded child-settlement evidence and a digest of the complete
 child result, not model output, structured values, session paths, or
 subagent-private store paths. Imported structured output is represented by a canonical JSON workflow-owned
-artifact. Its artifact identity binds the workflow run, producer task, output
-name, schema digest, and content digest, so equal JSON from different producers
-does not alias provenance. Child settlement alone does not complete a task:
+artifact. Its artifact identity binds the workflow run, producer task, producer
+execution, output name, schema digest, and content digest, so equal JSON from
+different producers or generations does not alias provenance. Child settlement
+alone does not complete a task:
 completed children still require artifact import, and every terminal child
 requires release before terminal execution and task events may be committed. Task lifecycle transitions remain separate events and may consume
 terminal execution evidence only after that evidence is durable.
@@ -691,8 +724,9 @@ changed policy is a changed request. The public schemas are
 A retry is a fresh pi-subagent attempt on the same child run obtained through
 the owner client's `retry(runId)`; a resume is the same through
 `resume(runId)` for an `interrupted` child. Both are recorded under the same
-task execution: the generation stays 1, and no new preflight, operation ID, or
-subagent run is created. A retry requires a durable `failed` settlement whose
+task execution: the generation is unchanged, and no new preflight, operation
+ID, or subagent run is created. A retry requires a durable `failed` settlement
+whose
 classified failure is `backoff` or `manual` and listed in `retry.on`; a resume
 requires a durable `interrupted` settlement whose classified failure is
 `resume`. Failures classified `never` or `reconcile` never enter the attempt
@@ -767,7 +801,7 @@ is adopted, otherwise the intent is declined with "Subagent refused the
 attempt." (or "Attempt call ended without a durable receipt." when the call
 returned nothing). A reconciliation error is thrown, never converted into a
 decline. Stop declines any open intent before finalization. There is no
-operator retry surface in revision 14.
+operator retry surface in revision 15.
 
 ## Nested workflow tasks
 
@@ -1024,12 +1058,20 @@ not references the child can dereference.
 
 Retry calls the owner client's `retry` on the same subagent run and records
 the fresh attempt under the same task execution; resume behaves likewise
-through subagent `resume`. Both attempts sit under the subagent run of a
-generation-1 agent execution and add no level to the hierarchy above.
-Operator-triggered retry remains later work. Re-execution after dependency
-invalidation is neither retry nor resume: it creates a new task-execution
-generation and a new preflight, idempotent operation ID, and subagent run.
-Every identity and relationship is persisted explicitly.
+through subagent `resume`. Both attempts sit under the subagent run of one
+agent execution and add no level to the hierarchy above. Operator-triggered
+retry remains later work. Re-execution after explicit invalidation is neither
+retry nor resume: it creates a new task-execution generation and a new
+preflight, idempotent operation ID, and subagent run, support computation, or
+child workflow run. A result artifact binds to the execution that produced it:
+`WorkflowArtifactRef.producerExecutionId` is required exactly when
+`producerTaskId` is present, participates in `deriveWorkflowArtifactId`, and
+must name an execution of the producer task. Every lookup of a task's result
+artifact (completion, `taskInputsSha256`, delegated-context projection, and
+nested input resolution) selects the artifact whose `producerExecutionId`
+equals the task's `currentExecutionId`; artifacts of prior generations remain
+history and valid provenance. Every identity and relationship is persisted
+explicitly.
 
 Subagent terminal outcomes map using both primary status and cleanup evidence:
 
@@ -1073,6 +1115,11 @@ interface WorkflowServiceV1 {
 	logs(runId: WorkflowRunId, options?: LogOptions): Promise<WorkflowLogs>;
 	wait(runId: WorkflowRunId, options?: WaitOptions): Promise<WorkflowResult>;
 	stop(runId: WorkflowRunId, reason: string): Promise<StopReceipt>;
+	invalidate(
+		runId: WorkflowRunId,
+		causeTaskId: WorkflowTaskId,
+		reason: string,
+	): Promise<WorkflowStatus>;
 	retry(
 		runId: WorkflowRunId,
 		taskKey: string,
@@ -1087,7 +1134,9 @@ The current extension exposes list, validate, run, status, wait, stop, and
 reconcile. `run` validates trust, definition, input, and the shared subagent
 provider before creating durable state, then returns a run ID immediately.
 `status` is a journal projection, `wait` reconstructs nonterminal work after
-restart, and `stop` persists run/task intent before delegated interruption,
+restart and drives a durably `failed` or `interrupted` run whose on-path tasks
+are `invalidated` (that run awaits explicit recovery), and `stop` persists
+run/task intent before delegated interruption,
 support abort, and child-run stop. Every run view carries `depth` and, for a
 linked child run, `parent: { runId, taskId, inputArtifacts }`, where
 `inputArtifacts` is the record's injected artifact identity map; a child run
@@ -1095,6 +1144,29 @@ is addressable by its own run ID for status, wait, stop, and reconcile. `createW
 accepts an optional `supportTasks` registration list that becomes the frozen
 constructor registry and supplies the nested run provider to every run it
 composes.
+
+`invalidate(runId, causeTaskId, reason)` is the only trigger for re-execution
+and is exposed by the service, not yet by a Pi tool. It validates the run ID,
+the task ID pattern, and a reason of 1 through 4096 characters, rejects with
+`conflict` ("Workflow run is still being driven.") while an owned run's drive
+has not settled and with `validation` ("Workflow run status does not admit
+invalidation.") unless the run is durably `failed` or `interrupted`, refuses
+nested child runs, runs that already hold on-path invalidated work awaiting
+recovery, and runs whose deadline has passed (each `validation`), then
+computes `invalidationClosure`, appends one `task-invalidated` event carrying
+the exact closure and abandoned epochs, appends the recovery transition
+`failed|interrupted → running` (reason "Explicit invalidation re-executes
+invalidated tasks."), restarts the drive without awaiting it (`wait` observes
+it), and returns the current view, whose status is already `running`; reducer
+rejections surface as `validation`. If the process crashes between the two
+appends, the restarted static runtime repairs the gap by appending the same
+transition when it finds a `failed` or `interrupted` run with at least one
+on-path `invalidated` task; otherwise the existing explicit-recovery refusal
+stands. Every
+run view carries `tasks` once events exist: one entry per declared task in
+materialization order with `id`, `namespace`, `key`, `kind`, `status`,
+`generation` (the highest generation recorded for the task, or 0), and
+`abandoned: true` for abandoned history.
 Declarative retry and resume attempts run under task policy without a service
 call. Operator-triggered `retry`, explicit interrupted-run `resume`, logs, and
 polished inspection remain later contract work.
@@ -1177,3 +1249,18 @@ proved terminal outcome. It is never degraded success. Support tasks use only
 `completed-degraded` requires every required task and required finalizer to
 succeed while one or more optional tasks or advisory finalizers failed; all
 degradations remain visible.
+
+`invalidated` leaves only to `pending`, through the re-materialization event
+appended when the task's epoch barrier is matched; that transition requires
+the task's current execution to be absent or `terminal` and detaches it, so
+the re-materialized task has no current execution until its next generation
+is created. A run
+leaves `failed` or `interrupted` for `running` only while at least one
+on-path task is `invalidated` ("recovery requires invalidated work"); the
+service's `invalidate` appends that transition, with reason "Explicit
+invalidation re-executes invalidated tasks.", immediately after
+`task-invalidated`, and the static runtime appends the same transition before
+materialization replay only when it finds the run still `failed` or
+`interrupted` with on-path invalidated work. Abandoned
+tasks carry `abandoned: true` in the projection, keep their last status, and
+may neither change status nor execute.
