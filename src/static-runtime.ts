@@ -233,10 +233,18 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				`Workflow task did not complete successfully: ${task.status}.`,
 			);
 		}
-		const artifact = Object.values(current.artifacts).find(
-			(candidate) =>
-				candidate.producerTaskId === taskId && candidate.output === "result",
-		);
+		// Result artifacts bind to the producing execution; only the current
+		// generation's artifact is the task's result.
+		const currentExecutionId = task.currentExecutionId;
+		const artifact =
+			currentExecutionId === undefined
+				? undefined
+				: Object.values(current.artifacts).find(
+						(candidate) =>
+							candidate.producerTaskId === taskId &&
+							candidate.output === "result" &&
+							candidate.producerExecutionId === currentExecutionId,
+					);
 		if (!artifact) {
 			throw new StaticWorkflowRuntimeError(
 				"result",
@@ -373,7 +381,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 	async function driveFinalGraph(): Promise<void> {
 		for (;;) {
 			const current = await state();
-			const tasks = Object.values(current.tasks);
+			const tasks = Object.values(current.tasks).filter(
+				(task) => task.abandoned !== true,
+			);
 			const failedRequired = tasks.find(
 				(task) =>
 					task.task.spec.disposition === "required" &&
@@ -452,6 +462,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			if (current.status === "finalizing") {
 				const degraded = Object.values(current.tasks).some(
 					(task) =>
+						task.abandoned !== true &&
 						task.task.spec.disposition === "optional" &&
 						task.status !== "completed",
 				);
@@ -516,6 +527,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		current = await state();
 		const degraded = Object.values(current.tasks).some(
 			(task) =>
+				task.abandoned !== true &&
 				task.task.spec.disposition === "optional" &&
 				task.status !== "completed",
 		);
@@ -535,7 +547,22 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			);
 		}
 		await initialize();
-		const previous = await state();
+		let previous = await state();
+		if (
+			(previous.status === "failed" || previous.status === "interrupted") &&
+			Object.values(previous.tasks).some(
+				(task) => task.abandoned !== true && task.status === "invalidated",
+			)
+		) {
+			// Explicit invalidation is the documented recovery: the run resumes
+			// so the invalidated tasks can be re-materialized and re-executed.
+			await journal.append("run-status-changed", {
+				from: previous.status,
+				to: "running",
+				reason: "Explicit invalidation re-executes invalidated tasks.",
+			});
+			previous = await state();
+		}
 		if (
 			previous.status === "failed" ||
 			previous.status === "cancelled" ||
@@ -554,8 +581,14 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			previousState: previous,
 		});
 		const handles = new Map<WorkflowTaskId, TaskHandle<unknown>>();
-		const expectedEffects = previous.effects;
+		// Only on-path effects replay; abandoned effects remain history but
+		// still occupy ordinals, so new ordinals continue after every effect.
+		const expectedEffects = previous.effects.filter(
+			(effect) => effect.abandoned !== true,
+		);
+		const persistedEffectCount = previous.effects.length;
 		let effectOrdinal = 0;
+		let appendedEffects = 0;
 		let effectTail = Promise.resolve();
 		let barrierTail = Promise.resolve();
 
@@ -567,7 +600,8 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			const effectCount = effectOrdinal;
 			const commit = materializer.closeEpoch(kind, tasks);
 			const expectedBarrier = previous.barriers.find(
-				(barrier) => barrier.epoch === commit.epoch,
+				(barrier) =>
+					barrier.abandoned !== true && barrier.epoch === commit.epoch,
 			);
 			if (expectedBarrier) {
 				const expectedEffectCount = expectedEffects.filter(
@@ -606,7 +640,8 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				}
 				return;
 			}
-			const ordinal = effectOrdinal;
+			appendedEffects += 1;
+			const ordinal = persistedEffectCount + appendedEffects;
 			effectTail = effectTail.then(async () => {
 				await journal.append("workflow-effect", {
 					ordinal,

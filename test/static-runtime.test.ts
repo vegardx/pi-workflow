@@ -230,6 +230,7 @@ function nestedSchedulerFor(
 			const artifact = await artifacts.putJson(outcome.output, {
 				runId: current.runId,
 				producerTaskId: taskId,
+				producerExecutionId: executionId,
 				output: "result",
 				schemaSha256: deriveJsonValueSha256(spec.request.outputSchema),
 			});
@@ -534,6 +535,7 @@ function schedulerFor(
 			const artifact = await artifacts.putJson(output, {
 				runId: current.runId,
 				producerTaskId: task.task.id,
+				producerExecutionId: executionId,
 				output: "result",
 				schemaSha256: deriveJsonValueSha256(
 					task.task.spec.request.outputSchema,
