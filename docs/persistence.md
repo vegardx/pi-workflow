@@ -71,9 +71,15 @@ Every workflow state write and workflow-owned effect carries its monotonic
 fencing generation. The OS releases ownership when the process dies; a live
 owner keeps the listener and prevents replacement. The persisted lease record
 is observational and supplies the next generation, not proof of liveness.
-Lease ports are deterministic from run identity; a collision or unrelated local
-listener fails safe as temporary unavailability rather than selecting another
-port without shared authority.
+The listener names its run: it answers every connection with
+`pi-workflow-lease/1 <identity>`, the digest of the canonical store root and
+run ID. Ports are a far smaller space than run identities, so acquisition
+walks 64 deterministic candidates, preferring the port named in the lease
+record. An occupied candidate is probed: only a banner proving a different
+run releases the acquirer to the next candidate, and the chosen port is then
+recorded so later acquirers meet the owner where it listens. The same
+identity, or any occupant that cannot identify itself, fails safe as
+temporary unavailability.
 Subagent calls
 use their owner binding and stable operation IDs because the current public
 service does not accept a caller fencing token. Every external side effect still

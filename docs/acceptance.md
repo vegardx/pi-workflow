@@ -21,6 +21,9 @@ The first executable release must prove:
 - process restart reconstructs state, reconciles the child, re-executes the
   workflow, and replays the matching effect;
 - lease fencing rejects stale scheduler writes;
+- a lease listener proves which run holds its port, so an unrelated run on the
+  same candidate port neither refuses nor displaces it, while the same
+  identity and unidentifiable occupants fail safe as unavailability;
 - required artifact import and child release settle before workflow success;
 - torn journal tail and interior corruption follow the documented fail-closed
   behavior;
