@@ -1,6 +1,14 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import type { WorkflowEventInput } from "../src/events.js";
+import {
+	currentSubagentAttemptId,
+	settledAgentUsage,
+} from "../src/attempts.js";
+import type {
+	TaskExecutionProjection,
+	WorkflowEventInput,
+} from "../src/events.js";
+import { deriveTaskExecutionId } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
 import {
@@ -38,7 +46,7 @@ function journalEvents(inputs: readonly WorkflowEventInput[]) {
 	return inputs.map(
 		(input, index): WorkflowJournalEvent => ({
 			schema: "pi-workflow-event",
-			contractRevision: 13,
+			contractRevision: 14,
 			sequence: index + 1,
 			eventId: `event-${index + 1}`,
 			timestamp: "2026-08-20T00:00:00.000Z",
@@ -415,6 +423,160 @@ describe("workflow event reducer", () => {
 			throw new Error("missing task declaration");
 		}
 		expect(Object.isFrozen(declaration.data.task)).toBe(false);
+	});
+
+	it("rejects attempt events on unknown executions", () => {
+		const { commit } = committedGraph();
+		const executionId = deriveTaskExecutionId(
+			"workflow_reducer",
+			`task_${"9".repeat(64)}`,
+			1,
+		);
+		const base: WorkflowEventInput[] = [
+			runCreated(),
+			...commit.events,
+			{
+				type: "run-status-changed",
+				data: { from: "created", to: "running" },
+			},
+		];
+		const attemptEvents: WorkflowEventInput[] = [
+			{
+				type: "task-execution-attempt-intended",
+				data: {
+					executionId,
+					subagentRunId: "run_child",
+					kind: "retry",
+					ordinal: 2,
+					previousAttemptId: "attempt_child",
+					failureCode: "provider-transient",
+					failureRetry: "backoff",
+				},
+			},
+			{
+				type: "task-execution-attempt-receipted",
+				data: {
+					executionId,
+					subagentRunId: "run_child",
+					ordinal: 2,
+					subagentAttemptId: "attempt_retry",
+					status: "active",
+				},
+			},
+			{
+				type: "task-execution-attempt-declined",
+				data: {
+					executionId,
+					subagentRunId: "run_child",
+					ordinal: 2,
+					reason: "stop requested",
+				},
+			},
+		];
+		for (const event of attemptEvents) {
+			expect(() =>
+				reduceWorkflowEvents(journalEvents([...base, event])),
+			).toThrow("task execution is unknown");
+		}
+	});
+
+	it("derives the current attempt and settled usage from a projection", () => {
+		const evidence = (attemptOrdinal: number, cost: number) => ({
+			kind: "subagent" as const,
+			attemptOrdinal,
+			resultSha256: "d".repeat(64),
+			status: "failed" as const,
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost,
+			},
+			usageComplete: attemptOrdinal === 1,
+			runtimeMs: 100 * attemptOrdinal,
+			failure: {
+				code: "provider-transient" as const,
+				origin: "provider" as const,
+				retry: "backoff" as const,
+				message: "Provider timed out.",
+				guidance: "Retry later.",
+			},
+			sandboxCleanup: "proved" as const,
+			workspaceCleanup: "not-needed" as const,
+			truncated: false,
+		});
+		const execution = {
+			kind: "agent" as const,
+			id: `execution_${"a".repeat(64)}`,
+			runId: "workflow_reducer",
+			taskId: `task_${"b".repeat(64)}`,
+			generation: 1,
+			taskIdentitySha256: "c".repeat(64),
+			operationId: `workflow-op_${"d".repeat(64)}`,
+		};
+		const created: TaskExecutionProjection = {
+			execution,
+			phase: "created",
+			createdSequence: 1,
+		};
+		expect(currentSubagentAttemptId(created)).toBeUndefined();
+		expect(settledAgentUsage(created)).toEqual({
+			cost: 0,
+			totalTokens: 0,
+			runtimeMs: 0,
+			usageComplete: true,
+		});
+		const launched: TaskExecutionProjection = {
+			...created,
+			phase: "settled",
+			launchReceipt: {
+				operationId: execution.operationId,
+				subagentRunId: "run_child",
+				subagentAttemptId: "attempt_child",
+				status: "active",
+				sequence: 2,
+			},
+			settlement: { evidence: evidence(1, 0.25), sequence: 3 },
+		};
+		expect(currentSubagentAttemptId(launched)).toBe("attempt_child");
+		expect(settledAgentUsage(launched)).toEqual({
+			cost: 0.25,
+			totalTokens: 15,
+			runtimeMs: 100,
+			usageComplete: true,
+		});
+		const retried: TaskExecutionProjection = {
+			...launched,
+			attempts: [
+				{
+					kind: "retry",
+					ordinal: 2,
+					previousAttemptId: "attempt_child",
+					subagentAttemptId: "attempt_retry",
+					status: "active",
+					intentSequence: 4,
+					receiptSequence: 5,
+				},
+				{
+					kind: "retry",
+					ordinal: 3,
+					previousAttemptId: "attempt_retry",
+					intentSequence: 7,
+				},
+			],
+			priorSettlements: [{ evidence: evidence(1, 0.25), sequence: 3 }],
+			settlement: { evidence: evidence(2, 0.5), sequence: 6 },
+			phase: "attempt-intended",
+		};
+		expect(currentSubagentAttemptId(retried)).toBe("attempt_retry");
+		expect(settledAgentUsage(retried)).toEqual({
+			cost: 0.75,
+			totalTokens: 30,
+			runtimeMs: 300,
+			usageComplete: false,
+		});
 	});
 
 	it("rejects missing creation and invalid lifecycle transitions", () => {

@@ -10,6 +10,7 @@ import * as addFormatsModule from "ajv-formats";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
+	type AgentRetryClass,
 	DEFAULT_WORKFLOW_CONCURRENCY,
 	JsonSchemaDocumentSchema,
 	MAX_WORKFLOW_CONCURRENCY,
@@ -114,6 +115,15 @@ export function createTaskHandle<T>(
 	});
 }
 
+export interface AgentRetryPolicyRequest {
+	readonly attempts: number;
+	readonly on?: readonly AgentRetryClass[];
+}
+
+export interface AgentResumePolicyRequest {
+	readonly attempts: number;
+}
+
 export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
 	readonly agent: string;
 	readonly task: DelegatedTask;
@@ -125,6 +135,8 @@ export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
 	readonly workspace: { readonly mode: "read-only"; readonly cwd: string };
 	readonly outputSchema: TOutputSchema;
 	readonly limits: RunLimits;
+	readonly retry?: AgentRetryPolicyRequest;
+	readonly resume?: AgentResumePolicyRequest;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
 	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;

@@ -345,6 +345,7 @@ async function readyJournalWithInput() {
 	const resultSha256 = deriveSubagentResultSha256(result);
 	const evidence = {
 		kind: "subagent" as const,
+		attemptOrdinal: 1,
 		resultSha256,
 		status: "completed" as const,
 		usage: structuredClone(result.usage),

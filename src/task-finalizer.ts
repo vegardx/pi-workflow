@@ -108,6 +108,7 @@ function resultEvidence(
 ): SubagentTerminalEvidence {
 	return {
 		kind: "subagent",
+		attemptOrdinal: 1,
 		resultSha256: deriveSubagentResultSha256(result),
 		status: result.status,
 		usage: structuredClone(result.usage),

@@ -19,6 +19,19 @@ export {
 	WorkflowArtifactStoreError,
 } from "./artifact-store.js";
 export {
+	type CurrentSubagentAttempt,
+	currentSubagentAttempt,
+	currentSubagentAttemptId,
+	type SettledAgentUsage,
+	settledAgentUsage,
+} from "./attempts.js";
+export {
+	type AgentResumePolicy,
+	AgentResumePolicySchema,
+	type AgentRetryClass,
+	AgentRetryClassSchema,
+	type AgentRetryPolicy,
+	AgentRetryPolicySchema,
 	type AgentTaskExecutionRecord,
 	AgentTaskExecutionRecordSchema,
 	type AgentTaskRequest,
@@ -31,6 +44,7 @@ export {
 	JsonSchemaDocumentSchema,
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_NESTED_WORKFLOW_TASKS,
+	MAX_TASK_ATTEMPTS,
 	MAX_WORKFLOW_CONCURRENCY,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
@@ -112,6 +126,8 @@ export {
 	WorkflowTaskStatusSchema,
 } from "./contracts.js";
 export {
+	type AgentResumePolicyRequest,
+	type AgentRetryPolicyRequest,
 	type AgentTaskAuthoringRequest,
 	type ArtifactHandle,
 	defineWorkflow,
@@ -133,6 +149,7 @@ export {
 	type WorkflowReturn,
 } from "./definition.js";
 export {
+	type TaskExecutionAttemptProjection,
 	type TaskExecutionProjection,
 	TaskExecutionProjectionSchema,
 	type WorkflowBarrierProjection,

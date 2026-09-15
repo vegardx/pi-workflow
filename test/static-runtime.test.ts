@@ -516,6 +516,7 @@ function schedulerFor(
 			const result = completedResult(childRunId, output);
 			const evidence = {
 				kind: "subagent" as const,
+				attemptOrdinal: 1,
 				resultSha256: deriveSubagentResultSha256(result),
 				status: "completed" as const,
 				usage: result.usage,

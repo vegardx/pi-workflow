@@ -325,9 +325,36 @@ export class WorkflowTaskMaterializer {
 			workspace: request.workspace,
 			outputSchema: outputSchema as AgentTaskRequest["outputSchema"],
 			limits: request.limits,
+			...(request.retry === undefined
+				? {}
+				: {
+						retry: {
+							attempts: request.retry.attempts,
+							on: [...(request.retry.on ?? ["backoff"])].sort(),
+						},
+					}),
+			...(request.resume === undefined
+				? {}
+				: { resume: { attempts: request.resume.attempts } }),
 		};
 		if (!Value.Check(AgentTaskRequestSchema, agentRequest)) {
 			throw new WorkflowMaterializationError("invalid agent task request");
+		}
+		if (
+			agentRequest.retry !== undefined &&
+			agentRequest.retry.attempts > agentRequest.limits.retries
+		) {
+			throw new WorkflowMaterializationError(
+				"agent retry policy exceeds the declared retry limit",
+			);
+		}
+		if (
+			agentRequest.resume !== undefined &&
+			agentRequest.resume.attempts > agentRequest.limits.resumes
+		) {
+			throw new WorkflowMaterializationError(
+				"agent resume policy exceeds the declared resume limit",
+			);
 		}
 		const orderedAfter = [...after.values()].sort((left, right) =>
 			left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0,

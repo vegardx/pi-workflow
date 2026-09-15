@@ -1,8 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
 import {
+	currentSubagentAttempt,
+	currentSubagentAttemptId,
+} from "./attempts.js";
+import {
 	type AgentTaskExecutionRecord,
+	type AgentTaskSpec,
 	MAX_NESTED_WORKFLOW_TASKS,
+	MAX_TASK_ATTEMPTS,
 	type NestedWorkflowTaskExecutionRecord,
 	type NestedWorkflowTaskSpec,
 	type SubagentTerminalEvidence,
@@ -195,6 +201,29 @@ function nestedTaskSpec(
 		fail("nested workflow execution target is not a workflow task", sequence);
 	}
 	return spec;
+}
+
+function agentTaskSpec(
+	state: WorkflowStateProjection,
+	projection: AgentExecutionProjection,
+	sequence: number,
+): AgentTaskSpec {
+	const spec = state.tasks[projection.execution.taskId]?.task.spec;
+	if (spec?.kind !== "agent") {
+		fail("subagent execution target is not an agent task", sequence);
+	}
+	return spec;
+}
+
+function receiptedAttempts(
+	projection: TaskExecutionProjection,
+	kind?: "retry" | "resume",
+): number {
+	return (projection.attempts ?? []).filter(
+		(attempt) =>
+			attempt.receiptSequence !== undefined &&
+			(kind === undefined || attempt.kind === kind),
+	).length;
 }
 
 function isTerminalRunStatus(status: string): boolean {
@@ -860,8 +889,9 @@ function applyEvent(
 				event.sequence,
 			);
 			const receipt = projection.launchReceipt;
+			const attempt = currentSubagentAttempt(projection);
 			const previousObservation = projection.observation;
-			const previousStatus = previousObservation?.status ?? receipt?.status;
+			const previousStatus = previousObservation?.status ?? attempt?.status;
 			const reconcilesCleanup =
 				projection.phase === "terminal" &&
 				projection.terminal?.outcome === "cleanup-blocked" &&
@@ -880,8 +910,9 @@ function applyEvent(
 					!reconcilesCleanup &&
 					!reconcilesRelease) ||
 				!receipt ||
+				!attempt ||
 				input.data.subagentRunId !== receipt.subagentRunId ||
-				input.data.subagentAttemptId !== receipt.subagentAttemptId ||
+				input.data.subagentAttemptId !== attempt.subagentAttemptId ||
 				!previousStatus ||
 				(!reconcilesCleanup &&
 					!reconcilesRelease &&
@@ -915,9 +946,233 @@ function applyEvent(
 			) {
 				fail("task execution child settlement is invalid", event.sequence);
 			}
+			if (evidence.attemptOrdinal !== 1 + receiptedAttempts(projection)) {
+				fail(
+					"task execution child settlement attempt ordinal does not match",
+					event.sequence,
+				);
+			}
 			projection.settlement = { evidence, sequence: event.sequence };
 			projection.phase =
 				projection.release?.status === evidence.status ? "released" : "settled";
+			break;
+		}
+		case "task-execution-attempt-intended": {
+			const projection = agentExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = agentTaskSpec(state, projection, event.sequence);
+			const receipt = projection.launchReceipt;
+			const settlement = projection.settlement;
+			const attempts = projection.attempts ?? [];
+			if (projection.attemptsClosed) {
+				fail("task execution attempt intents are closed", event.sequence);
+			}
+			if (
+				projection.phase !== "settled" ||
+				!receipt ||
+				!settlement ||
+				projection.releaseIntent !== undefined
+			) {
+				fail("task execution attempt intent is out of order", event.sequence);
+			}
+			if (state.status !== "running" && state.status !== "waiting") {
+				fail(
+					"task execution attempt intent requires a running workflow run",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.subagentRunId !== receipt.subagentRunId ||
+				input.data.previousAttemptId !== currentSubagentAttemptId(projection)
+			) {
+				fail(
+					"task execution attempt intent does not match the current attempt",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.ordinal !== 2 + attempts.length ||
+				input.data.ordinal > MAX_TASK_ATTEMPTS
+			) {
+				fail(
+					"task execution attempt ordinal is not contiguous",
+					event.sequence,
+				);
+			}
+			const failure = settlement.evidence.failure;
+			if (input.data.kind === "retry") {
+				const retryClass = failure?.retry;
+				if (
+					settlement.evidence.status !== "failed" ||
+					!failure ||
+					(retryClass !== "backoff" && retryClass !== "manual")
+				) {
+					fail(
+						"task execution retry intent requires a retryable failed settlement",
+						event.sequence,
+					);
+				}
+				if (
+					input.data.failureCode !== failure.code ||
+					input.data.failureRetry !== retryClass
+				) {
+					fail(
+						"task execution attempt intent does not match the settled failure",
+						event.sequence,
+					);
+				}
+				const policy = spec.request.retry;
+				if (!policy) {
+					fail(
+						"task execution retry intent lacks a retry policy",
+						event.sequence,
+					);
+				}
+				if (!policy.on.includes(retryClass)) {
+					fail(
+						"task execution retry intent failure class is not covered by the retry policy",
+						event.sequence,
+					);
+				}
+				if (receiptedAttempts(projection, "retry") >= policy.attempts) {
+					fail(
+						"task execution retry intent exceeds the retry policy",
+						event.sequence,
+					);
+				}
+			} else {
+				if (
+					settlement.evidence.status !== "interrupted" ||
+					!failure ||
+					failure.retry !== "resume"
+				) {
+					fail(
+						"task execution resume intent requires a resumable interrupted settlement",
+						event.sequence,
+					);
+				}
+				if (
+					input.data.failureCode !== failure.code ||
+					input.data.failureRetry !== "resume"
+				) {
+					fail(
+						"task execution attempt intent does not match the settled failure",
+						event.sequence,
+					);
+				}
+				const policy = spec.request.resume;
+				if (!policy) {
+					fail(
+						"task execution resume intent lacks a resume policy",
+						event.sequence,
+					);
+				}
+				if (receiptedAttempts(projection, "resume") >= policy.attempts) {
+					fail(
+						"task execution resume intent exceeds the resume policy",
+						event.sequence,
+					);
+				}
+			}
+			projection.attempts = [
+				...attempts,
+				{
+					kind: input.data.kind,
+					ordinal: input.data.ordinal,
+					previousAttemptId: input.data.previousAttemptId,
+					intentSequence: event.sequence,
+				},
+			];
+			projection.phase = "attempt-intended";
+			break;
+		}
+		case "task-execution-attempt-receipted": {
+			const projection = agentExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const receipt = projection.launchReceipt;
+			const settlement = projection.settlement;
+			const attempts = projection.attempts ?? [];
+			const open = attempts.at(-1);
+			if (
+				projection.phase !== "attempt-intended" ||
+				!receipt ||
+				!settlement ||
+				!open ||
+				open.receiptSequence !== undefined ||
+				open.declinedSequence !== undefined
+			) {
+				fail("task execution attempt receipt is out of order", event.sequence);
+			}
+			if (
+				input.data.ordinal !== open.ordinal ||
+				input.data.subagentRunId !== receipt.subagentRunId
+			) {
+				fail(
+					"task execution attempt receipt does not match its intent",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.subagentAttemptId === open.previousAttemptId ||
+				input.data.subagentAttemptId === receipt.subagentAttemptId ||
+				attempts.some(
+					(attempt) =>
+						attempt.subagentAttemptId === input.data.subagentAttemptId,
+				)
+			) {
+				fail(
+					"task execution attempt receipt reuses a subagent attempt identity",
+					event.sequence,
+				);
+			}
+			open.subagentAttemptId = input.data.subagentAttemptId;
+			open.status = input.data.status;
+			open.receiptSequence = event.sequence;
+			projection.priorSettlements = [
+				...(projection.priorSettlements ?? []),
+				settlement,
+			];
+			delete projection.observation;
+			delete projection.settlement;
+			projection.phase = "launched";
+			break;
+		}
+		case "task-execution-attempt-declined": {
+			const projection = agentExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const receipt = projection.launchReceipt;
+			const open = projection.attempts?.at(-1);
+			if (
+				projection.phase !== "attempt-intended" ||
+				!receipt ||
+				!projection.settlement ||
+				!open ||
+				open.receiptSequence !== undefined ||
+				open.declinedSequence !== undefined
+			) {
+				fail("task execution attempt decline is out of order", event.sequence);
+			}
+			if (
+				input.data.ordinal !== open.ordinal ||
+				input.data.subagentRunId !== receipt.subagentRunId
+			) {
+				fail(
+					"task execution attempt decline does not match its intent",
+					event.sequence,
+				);
+			}
+			open.declinedSequence = event.sequence;
+			projection.attemptsClosed = true;
+			projection.phase = "settled";
 			break;
 		}
 		case "task-execution-artifact-imported": {
@@ -1566,7 +1821,8 @@ function applyEvent(
 				}
 			} else if (input.data.to === "running") {
 				const childStatus =
-					execution?.observation?.status ?? execution?.launchReceipt?.status;
+					execution?.observation?.status ??
+					(execution ? currentSubagentAttempt(execution)?.status : undefined);
 				if (!execution || childStatus !== "active") {
 					fail(
 						"task became running without an active execution",

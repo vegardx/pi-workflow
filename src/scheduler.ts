@@ -228,6 +228,7 @@ function terminalOutcome(result: RunResult) {
 function settlementEvidence(result: RunResult): SubagentTerminalEvidence {
 	const evidence: SubagentTerminalEvidence = {
 		kind: "subagent",
+		attemptOrdinal: 1,
 		resultSha256: deriveSubagentResultSha256(result),
 		status: result.status,
 		usage: structuredClone(result.usage),

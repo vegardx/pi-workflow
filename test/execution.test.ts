@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import {
+	currentSubagentAttemptId,
+	settledAgentUsage,
+} from "../src/attempts.js";
 import type {
 	AgentTaskExecutionRecord,
 	MaterializedNestedWorkflowTask,
@@ -100,7 +104,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 13,
+		contractRevision: 14,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -252,6 +256,7 @@ function releaseEvents(
 function completedEvidence() {
 	return {
 		kind: "subagent" as const,
+		attemptOrdinal: 1,
 		resultSha256,
 		status: "completed" as const,
 		usage: {
@@ -597,6 +602,7 @@ describe("task execution persistence", () => {
 		const usage = completedEvidence().usage;
 		const cleanupEvidence: SubagentTerminalEvidence = {
 			kind: "subagent",
+			attemptOrdinal: 1,
 			resultSha256,
 			status: "cleanup-blocked",
 			usage,
@@ -609,6 +615,7 @@ describe("task execution persistence", () => {
 		};
 		const failedEvidence: SubagentTerminalEvidence = {
 			kind: "subagent",
+			attemptOrdinal: 1,
 			resultSha256: "3".repeat(64),
 			status: "failed",
 			usage,
@@ -3251,5 +3258,870 @@ describe("nested workflow task execution persistence", () => {
 		} finally {
 			await lease.release();
 		}
+	});
+});
+
+type AttemptPolicies = {
+	retry?: { attempts: number; on?: ("backoff" | "manual")[] };
+	resume?: { attempts: number };
+};
+
+function attemptRequest(policies: AttemptPolicies) {
+	const base = request();
+	return {
+		...base,
+		limits: { ...base.limits, retries: 3, resumes: 3 },
+		...policies,
+	};
+}
+
+function setupAttemptEvents(
+	agentRequest: ReturnType<typeof request> = attemptRequest({
+		retry: { attempts: 2, on: ["backoff", "manual"] },
+		resume: { attempts: 1 },
+	}),
+): ReturnType<typeof setupEvents> {
+	const materializer = new WorkflowTaskMaterializer({
+		runId: "workflow_execution",
+		definitionIdentitySha256,
+		inputSha256,
+	});
+	const task = materializer.agent("answer", agentRequest);
+	const commit = materializer.closeEpoch("final", [task]);
+	const declaration = commit.events.find(
+		(event) => event.type === "task-declared",
+	);
+	if (declaration?.type !== "task-declared") {
+		throw new Error("missing task declaration");
+	}
+	const record = execution(
+		task.ref.taskId,
+		declaration.data.task.spec.identitySha256,
+	);
+	return {
+		taskId: task.ref.taskId,
+		execution: record,
+		events: [
+			runCreated(),
+			...commit.events,
+			{
+				type: "run-status-changed",
+				data: { from: "created", to: "running" },
+			},
+			{
+				type: "task-status-changed",
+				data: { taskId: task.ref.taskId, from: "pending", to: "ready" },
+			},
+			{ type: "task-execution-created", data: { execution: record } },
+		],
+	};
+}
+
+function launchedEvents(
+	setup: ReturnType<typeof setupEvents>,
+): WorkflowEventInput[] {
+	return [
+		...preflightEvents(setup.execution),
+		{
+			type: "task-execution-launch-receipted",
+			data: {
+				executionId: setup.execution.id,
+				operationId: setup.execution.operationId,
+				subagentRunId: "run_child",
+				subagentAttemptId: "attempt_child",
+				status: "active",
+			},
+		},
+		{
+			type: "task-status-changed",
+			data: { taskId: setup.taskId, from: "ready", to: "running" },
+		},
+	];
+}
+
+function observed(
+	record: AgentTaskExecutionRecord,
+	subagentAttemptId: string,
+	status: "active" | "completed" | "failed" | "interrupted" | "cleanup-blocked",
+): WorkflowEventInput {
+	return {
+		type: "task-execution-child-observed",
+		data: {
+			executionId: record.id,
+			subagentRunId: "run_child",
+			subagentAttemptId,
+			status,
+		},
+	};
+}
+
+const attemptUsage = {
+	input: 20,
+	output: 4,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 24,
+	cost: 0.02,
+};
+
+function failedEvidence(
+	attemptOrdinal: number,
+	retry: "backoff" | "manual" | "never" = "backoff",
+): SubagentTerminalEvidence {
+	return {
+		kind: "subagent",
+		attemptOrdinal,
+		resultSha256: "6".repeat(64),
+		status: "failed",
+		usage: attemptUsage,
+		usageComplete: true,
+		runtimeMs: 500,
+		failure: {
+			code: "provider-transient",
+			origin: "provider",
+			retry,
+			message: "Provider timed out.",
+			guidance: "Retry later.",
+		},
+		sandboxCleanup: "proved",
+		workspaceCleanup: "not-needed",
+		truncated: false,
+	};
+}
+
+function interruptedEvidence(attemptOrdinal: number): SubagentTerminalEvidence {
+	return {
+		kind: "subagent",
+		attemptOrdinal,
+		resultSha256: "7".repeat(64),
+		status: "interrupted",
+		usage: attemptUsage,
+		usageComplete: false,
+		runtimeMs: 700,
+		failure: {
+			code: "seat-interruption",
+			origin: "service",
+			retry: "resume",
+			message: "Seat exited.",
+			guidance: "Resume the run.",
+		},
+		sandboxCleanup: "proved",
+		workspaceCleanup: "not-needed",
+		truncated: false,
+	};
+}
+
+function cleanupBlockedEvidence(
+	attemptOrdinal: number,
+): SubagentTerminalEvidence {
+	return {
+		kind: "subagent",
+		attemptOrdinal,
+		resultSha256: "8".repeat(64),
+		status: "cleanup-blocked",
+		usage: attemptUsage,
+		usageComplete: true,
+		runtimeMs: 900,
+		failure: {
+			code: "sandbox-cleanup",
+			origin: "sandbox",
+			retry: "reconcile",
+			message: "Cleanup is not yet proved.",
+			guidance: "Reconcile the child.",
+		},
+		sandboxCleanup: "blocked",
+		workspaceCleanup: "not-needed",
+		truncated: false,
+	};
+}
+
+function attemptIntended(
+	record: AgentTaskExecutionRecord,
+	overrides: Partial<{
+		kind: "retry" | "resume";
+		ordinal: number;
+		previousAttemptId: string;
+		failureCode: string;
+		failureRetry: "backoff" | "manual" | "resume";
+	}> = {},
+): WorkflowEventInput {
+	return {
+		type: "task-execution-attempt-intended",
+		data: {
+			executionId: record.id,
+			subagentRunId: "run_child",
+			kind: "retry",
+			ordinal: 2,
+			previousAttemptId: "attempt_child",
+			failureCode: "provider-transient",
+			failureRetry: "backoff",
+			...overrides,
+		},
+	};
+}
+
+function attemptReceipted(
+	record: AgentTaskExecutionRecord,
+	ordinal: number,
+	subagentAttemptId: string,
+	status: "active" | "queued" = "active",
+): WorkflowEventInput {
+	return {
+		type: "task-execution-attempt-receipted",
+		data: {
+			executionId: record.id,
+			subagentRunId: "run_child",
+			ordinal,
+			subagentAttemptId,
+			status,
+		},
+	};
+}
+
+function attemptDeclined(
+	record: AgentTaskExecutionRecord,
+	ordinal: number,
+): WorkflowEventInput {
+	return {
+		type: "task-execution-attempt-declined",
+		data: {
+			executionId: record.id,
+			subagentRunId: "run_child",
+			ordinal,
+			reason: "Workflow stop requested before the attempt.",
+		},
+	};
+}
+
+function failedPrefix(
+	setup: ReturnType<typeof setupEvents>,
+	evidence: SubagentTerminalEvidence = failedEvidence(1),
+): WorkflowEventInput[] {
+	return [
+		...setup.events,
+		...launchedEvents(setup),
+		observed(
+			setup.execution,
+			"attempt_child",
+			evidence.status as "failed" | "interrupted" | "cleanup-blocked",
+		),
+		settlement(setup.execution, evidence),
+	];
+}
+
+function completedAttemptEvents(
+	setup: ReturnType<typeof setupEvents>,
+	subagentAttemptId: string,
+	attemptOrdinal: number,
+): WorkflowEventInput[] {
+	const output = artifact(setup.taskId);
+	const evidence = { ...completedEvidence(), attemptOrdinal };
+	return [
+		observed(setup.execution, subagentAttemptId, "active"),
+		observed(setup.execution, subagentAttemptId, "completed"),
+		settlement(setup.execution, evidence),
+		{ type: "artifact-declared", data: { artifact: output } },
+		{
+			type: "task-execution-artifact-imported",
+			data: {
+				executionId: setup.execution.id,
+				subagentRunId: "run_child",
+				artifactId: output.id,
+				sourceResultSha256: resultSha256,
+			},
+		},
+		...releaseEvents(setup.execution, "completed"),
+		{
+			type: "task-execution-terminal",
+			data: {
+				executionId: setup.execution.id,
+				outcome: "completed",
+				evidence,
+			},
+		},
+		{
+			type: "task-status-changed",
+			data: { taskId: setup.taskId, from: "running", to: "completed" },
+		},
+	];
+}
+
+describe("task execution attempts", () => {
+	it("reduces a retry ladder under one execution", () => {
+		const setup = setupAttemptEvents();
+		const events: WorkflowEventInput[] = [
+			...failedPrefix(setup),
+			attemptIntended(setup.execution),
+			attemptReceipted(setup.execution, 2, "attempt_retry"),
+			...completedAttemptEvents(setup, "attempt_retry", 2),
+		];
+		for (let length = 1; length <= events.length; length += 1) {
+			expect(() =>
+				reduceWorkflowEvents(records(events.slice(0, length))),
+			).not.toThrow();
+		}
+		const intended = reduceWorkflowEvents(
+			records(events.slice(0, failedPrefix(setup).length + 1)),
+		).executions[setup.execution.id];
+		expect(intended).toMatchObject({
+			phase: "attempt-intended",
+			attempts: [
+				{ kind: "retry", ordinal: 2, previousAttemptId: "attempt_child" },
+			],
+			settlement: { evidence: { attemptOrdinal: 1 } },
+		});
+		expect(intended?.attempts?.[0]?.receiptSequence).toBeUndefined();
+		const receipted = reduceWorkflowEvents(
+			records(events.slice(0, failedPrefix(setup).length + 2)),
+		).executions[setup.execution.id];
+		expect(receipted).toMatchObject({
+			phase: "launched",
+			attempts: [{ subagentAttemptId: "attempt_retry", status: "active" }],
+			priorSettlements: [{ evidence: { attemptOrdinal: 1, status: "failed" } }],
+		});
+		expect(receipted?.observation).toBeUndefined();
+		expect(receipted?.settlement).toBeUndefined();
+		expect(receipted?.attempts?.[0]?.receiptSequence).toBe(
+			failedPrefix(setup).length + 2,
+		);
+		if (!receipted) throw new Error("missing receipted projection");
+		expect(currentSubagentAttemptId(receipted)).toBe("attempt_retry");
+		const state = reduceWorkflowEvents(records(events));
+		const projection = state.executions[setup.execution.id];
+		if (!projection) throw new Error("missing projection");
+		expect(projection).toMatchObject({
+			phase: "terminal",
+			attempts: [{ kind: "retry", ordinal: 2 }],
+			settlement: { evidence: { attemptOrdinal: 2, status: "completed" } },
+			terminal: {
+				outcome: "completed",
+				evidence: { kind: "subagent", attemptOrdinal: 2 },
+			},
+		});
+		expect(projection.priorSettlements).toHaveLength(1);
+		expect(projection.priorSettlements?.[0]?.evidence).toEqual(
+			failedEvidence(1),
+		);
+		expect(projection.attemptsClosed).toBeUndefined();
+		expect(currentSubagentAttemptId(projection)).toBe("attempt_retry");
+		expect(settledAgentUsage(projection)).toEqual({
+			cost: attemptUsage.cost + completedEvidence().usage.cost,
+			totalTokens:
+				attemptUsage.totalTokens + completedEvidence().usage.totalTokens,
+			runtimeMs: 500 + completedEvidence().runtimeMs,
+			usageComplete: true,
+		});
+		expect(state.tasks[setup.taskId]?.status).toBe("completed");
+	});
+
+	it("reduces a resume ladder from an interrupted settlement", () => {
+		const setup = setupAttemptEvents();
+		const events: WorkflowEventInput[] = [
+			...failedPrefix(setup, interruptedEvidence(1)),
+			attemptIntended(setup.execution, {
+				kind: "resume",
+				failureCode: "seat-interruption",
+				failureRetry: "resume",
+			}),
+			attemptReceipted(setup.execution, 2, "attempt_resume"),
+			...completedAttemptEvents(setup, "attempt_resume", 2),
+		];
+		const state = reduceWorkflowEvents(records(events));
+		const projection = state.executions[setup.execution.id];
+		if (!projection) throw new Error("missing projection");
+		expect(projection).toMatchObject({
+			phase: "terminal",
+			attempts: [
+				{
+					kind: "resume",
+					ordinal: 2,
+					previousAttemptId: "attempt_child",
+					subagentAttemptId: "attempt_resume",
+				},
+			],
+			priorSettlements: [{ evidence: interruptedEvidence(1) }],
+			terminal: { outcome: "completed" },
+		});
+		expect(currentSubagentAttemptId(projection)).toBe("attempt_resume");
+		expect(settledAgentUsage(projection).usageComplete).toBe(false);
+		expect(state.tasks[setup.taskId]?.status).toBe("completed");
+	});
+
+	it("uses the attempt receipt status for the running transition", () => {
+		const setup = setupAttemptEvents();
+		const waiting: WorkflowEventInput = {
+			type: "task-status-changed",
+			data: { taskId: setup.taskId, from: "running", to: "waiting" },
+		};
+		const running: WorkflowEventInput = {
+			type: "task-status-changed",
+			data: { taskId: setup.taskId, from: "waiting", to: "running" },
+		};
+		const prefix = [
+			...failedPrefix(setup),
+			waiting,
+			attemptIntended(setup.execution),
+		];
+		const active = reduceWorkflowEvents(
+			records([
+				...prefix,
+				attemptReceipted(setup.execution, 2, "attempt_retry", "active"),
+				running,
+			]),
+		);
+		expect(active.tasks[setup.taskId]?.status).toBe("running");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...prefix,
+					attemptReceipted(setup.execution, 2, "attempt_retry", "queued"),
+					running,
+				]),
+			),
+		).toThrow("without an active execution");
+		const queuedThenActive = reduceWorkflowEvents(
+			records([
+				...prefix,
+				attemptReceipted(setup.execution, 2, "attempt_retry", "queued"),
+				observed(setup.execution, "attempt_retry", "active"),
+				running,
+			]),
+		);
+		expect(queuedThenActive.tasks[setup.taskId]?.status).toBe("running");
+	});
+
+	it("rejects attempt intents that the task policy does not allow", () => {
+		const withoutPolicy = setupAttemptEvents(request());
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(withoutPolicy),
+					attemptIntended(withoutPolicy.execution),
+				]),
+			),
+		).toThrow("retry intent lacks a retry policy");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(withoutPolicy, interruptedEvidence(1)),
+					attemptIntended(withoutPolicy.execution, {
+						kind: "resume",
+						failureCode: "seat-interruption",
+						failureRetry: "resume",
+					}),
+				]),
+			),
+		).toThrow("resume intent lacks a resume policy");
+		const manualOnly = setupAttemptEvents(
+			attemptRequest({ retry: { attempts: 1, on: ["manual"] } }),
+		);
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(manualOnly),
+					attemptIntended(manualOnly.execution),
+				]),
+			),
+		).toThrow("failure class is not covered by the retry policy");
+		const single = setupAttemptEvents(
+			attemptRequest({ retry: { attempts: 1 }, resume: { attempts: 1 } }),
+		);
+		const exhausted: WorkflowEventInput[] = [
+			...failedPrefix(single),
+			attemptIntended(single.execution),
+			attemptReceipted(single.execution, 2, "attempt_retry"),
+			observed(single.execution, "attempt_retry", "failed"),
+			settlement(single.execution, failedEvidence(2)),
+		];
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...exhausted,
+					attemptIntended(single.execution, {
+						ordinal: 3,
+						previousAttemptId: "attempt_retry",
+					}),
+				]),
+			),
+		).toThrow("retry intent exceeds the retry policy");
+		const resumeExhausted: WorkflowEventInput[] = [
+			...failedPrefix(single, interruptedEvidence(1)),
+			attemptIntended(single.execution, {
+				kind: "resume",
+				failureCode: "seat-interruption",
+				failureRetry: "resume",
+			}),
+			attemptReceipted(single.execution, 2, "attempt_resume"),
+			observed(single.execution, "attempt_resume", "interrupted"),
+			settlement(single.execution, interruptedEvidence(2)),
+		];
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...resumeExhausted,
+					attemptIntended(single.execution, {
+						kind: "resume",
+						ordinal: 3,
+						previousAttemptId: "attempt_resume",
+						failureCode: "seat-interruption",
+						failureRetry: "resume",
+					}),
+				]),
+			),
+		).toThrow("resume intent exceeds the resume policy");
+		const state = reduceWorkflowEvents(
+			records([
+				...exhausted,
+				...releaseEvents(single.execution, "failed"),
+				{
+					type: "task-execution-terminal",
+					data: {
+						executionId: single.execution.id,
+						outcome: "failed",
+						evidence: failedEvidence(2),
+					},
+				},
+				{
+					type: "task-status-changed",
+					data: { taskId: single.taskId, from: "running", to: "failed" },
+				},
+			]),
+		);
+		expect(state.executions[single.execution.id]).toMatchObject({
+			phase: "terminal",
+			terminal: { outcome: "failed", evidence: { attemptOrdinal: 2 } },
+			priorSettlements: [{ evidence: { attemptOrdinal: 1 } }],
+		});
+		expect(state.tasks[single.taskId]?.status).toBe("failed");
+	});
+
+	it("rejects attempt intents with wrong identities, ordinals, or run state", () => {
+		const setup = setupAttemptEvents();
+		const prefix = failedPrefix(setup);
+		expect(() =>
+			reduceWorkflowEvents(
+				records([...prefix, attemptIntended(setup.execution, { ordinal: 3 })]),
+			),
+		).toThrow("attempt ordinal is not contiguous");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...prefix,
+					attemptIntended(setup.execution, {
+						previousAttemptId: "attempt_other",
+					}),
+				]),
+			),
+		).toThrow("does not match the current attempt");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...prefix,
+					{
+						...attemptIntended(setup.execution),
+						data: {
+							...attemptIntended(setup.execution).data,
+							subagentRunId: "run_other",
+						},
+					} as WorkflowEventInput,
+				]),
+			),
+		).toThrow("does not match the current attempt");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...prefix,
+					attemptIntended(setup.execution, { failureCode: "timeout" }),
+				]),
+			),
+		).toThrow("does not match the settled failure");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...prefix,
+					attemptIntended(setup.execution, { failureRetry: "manual" }),
+				]),
+			),
+		).toThrow("does not match the settled failure");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...prefix,
+					{
+						type: "run-status-changed",
+						data: { from: "running", to: "stopping" },
+					},
+					attemptIntended(setup.execution),
+				]),
+			),
+		).toThrow("requires a running workflow run");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...setup.events,
+					...launchedEvents(setup),
+					observed(setup.execution, "attempt_child", "failed"),
+					attemptIntended(setup.execution),
+				]),
+			),
+		).toThrow("attempt intent is out of order");
+	});
+
+	it("rejects attempt intents for never, reconcile, and mismatched kinds", () => {
+		const setup = setupAttemptEvents();
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(setup, failedEvidence(1, "never")),
+					attemptIntended(setup.execution),
+				]),
+			),
+		).toThrow("retry intent requires a retryable failed settlement");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(setup, cleanupBlockedEvidence(1)),
+					attemptIntended(setup.execution, { failureCode: "sandbox-cleanup" }),
+				]),
+			),
+		).toThrow("retry intent requires a retryable failed settlement");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(setup, cleanupBlockedEvidence(1)),
+					attemptIntended(setup.execution, {
+						kind: "resume",
+						failureCode: "sandbox-cleanup",
+						failureRetry: "resume",
+					}),
+				]),
+			),
+		).toThrow("resume intent requires a resumable interrupted settlement");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(setup),
+					attemptIntended(setup.execution, {
+						kind: "resume",
+						failureRetry: "resume",
+					}),
+				]),
+			),
+		).toThrow("resume intent requires a resumable interrupted settlement");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(setup, interruptedEvidence(1)),
+					attemptIntended(setup.execution, {
+						kind: "retry",
+						failureCode: "seat-interruption",
+						failureRetry: "resume",
+					}),
+				]),
+			),
+		).toThrow("retry intent requires a retryable failed settlement");
+	});
+
+	it("rejects receipts, observations, and settlements that reuse or skip attempts", () => {
+		const setup = setupAttemptEvents();
+		const intended = [...failedPrefix(setup), attemptIntended(setup.execution)];
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...intended,
+					attemptReceipted(setup.execution, 2, "attempt_child"),
+				]),
+			),
+		).toThrow("reuses a subagent attempt identity");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...intended,
+					attemptReceipted(setup.execution, 3, "attempt_retry"),
+				]),
+			),
+		).toThrow("attempt receipt does not match its intent");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...failedPrefix(setup),
+					attemptReceipted(setup.execution, 2, "attempt_retry"),
+				]),
+			),
+		).toThrow("attempt receipt is out of order");
+		const receipted = [
+			...intended,
+			attemptReceipted(setup.execution, 2, "attempt_retry"),
+		];
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...receipted,
+					attemptReceipted(setup.execution, 2, "attempt_retry"),
+				]),
+			),
+		).toThrow("attempt receipt is out of order");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...receipted,
+					observed(setup.execution, "attempt_child", "active"),
+				]),
+			),
+		).toThrow("child observation is invalid");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...receipted,
+					observed(setup.execution, "attempt_retry", "completed"),
+					settlement(setup.execution, completedEvidence()),
+				]),
+			),
+		).toThrow("settlement attempt ordinal does not match");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([...failedPrefix(setup, failedEvidence(2))]),
+			),
+		).toThrow("settlement attempt ordinal does not match");
+		const secondFailure: WorkflowEventInput[] = [
+			...receipted,
+			observed(setup.execution, "attempt_retry", "failed"),
+			settlement(setup.execution, failedEvidence(2)),
+			attemptIntended(setup.execution, {
+				ordinal: 3,
+				previousAttemptId: "attempt_retry",
+			}),
+		];
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...secondFailure,
+					attemptReceipted(setup.execution, 3, "attempt_retry"),
+				]),
+			),
+		).toThrow("reuses a subagent attempt identity");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...secondFailure,
+					attemptReceipted(setup.execution, 3, "attempt_child"),
+				]),
+			),
+		).toThrow("reuses a subagent attempt identity");
+		const third = reduceWorkflowEvents(
+			records([
+				...secondFailure,
+				attemptReceipted(setup.execution, 3, "attempt_third"),
+			]),
+		).executions[setup.execution.id];
+		expect(third?.priorSettlements).toHaveLength(2);
+		if (!third) throw new Error("missing projection");
+		expect(currentSubagentAttemptId(third)).toBe("attempt_third");
+	});
+
+	it("does not release or re-intend around an open or declined attempt", () => {
+		const setup = setupAttemptEvents();
+		const intended = [...failedPrefix(setup), attemptIntended(setup.execution)];
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...intended,
+					{
+						type: "task-execution-release-intended",
+						data: {
+							executionId: setup.execution.id,
+							subagentRunId: "run_child",
+						},
+					},
+				]),
+			),
+		).toThrow("release intent is invalid");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...intended,
+					attemptIntended(setup.execution, { ordinal: 3 }),
+				]),
+			),
+		).toThrow("attempt intent is out of order");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([...failedPrefix(setup), attemptDeclined(setup.execution, 2)]),
+			),
+		).toThrow("attempt decline is out of order");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([...intended, attemptDeclined(setup.execution, 3)]),
+			),
+		).toThrow("attempt decline does not match its intent");
+		const declined = [...intended, attemptDeclined(setup.execution, 2)];
+		const projection = reduceWorkflowEvents(records(declined)).executions[
+			setup.execution.id
+		];
+		expect(projection).toMatchObject({
+			phase: "settled",
+			attemptsClosed: true,
+			attempts: [{ ordinal: 2, declinedSequence: declined.length }],
+			settlement: { evidence: failedEvidence(1) },
+		});
+		expect(projection?.priorSettlements).toBeUndefined();
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...declined,
+					attemptIntended(setup.execution, { ordinal: 3 }),
+				]),
+			),
+		).toThrow("attempt intents are closed");
+		expect(() =>
+			reduceWorkflowEvents(
+				records([
+					...declined,
+					attemptReceipted(setup.execution, 2, "attempt_retry"),
+				]),
+			),
+		).toThrow("attempt receipt is out of order");
+		const state = reduceWorkflowEvents(
+			records([
+				...declined,
+				...releaseEvents(setup.execution, "failed"),
+				{
+					type: "task-execution-terminal",
+					data: {
+						executionId: setup.execution.id,
+						outcome: "failed",
+						evidence: failedEvidence(1),
+					},
+				},
+				{
+					type: "task-status-changed",
+					data: { taskId: setup.taskId, from: "running", to: "failed" },
+				},
+			]),
+		);
+		expect(state.executions[setup.execution.id]?.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { attemptOrdinal: 1 },
+		});
+		expect(state.tasks[setup.taskId]?.status).toBe("failed");
+	});
+
+	it("rebuilds the retry ladder into the same projection", () => {
+		const setup = setupAttemptEvents();
+		const events: WorkflowEventInput[] = [
+			...failedPrefix(setup),
+			attemptIntended(setup.execution),
+			attemptReceipted(setup.execution, 2, "attempt_retry"),
+			...completedAttemptEvents(setup, "attempt_retry", 2),
+		];
+		const first = reduceWorkflowEvents(records(events));
+		const second = reduceWorkflowEvents(records(structuredClone(events)));
+		expect(second).toEqual(first);
+		expect(
+			Object.isFrozen(first.executions[setup.execution.id]?.attempts),
+		).toBe(true);
+		expect(first.executions[setup.execution.id]?.priorSettlements).toHaveLength(
+			1,
+		);
 	});
 });
