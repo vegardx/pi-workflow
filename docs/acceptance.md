@@ -208,6 +208,43 @@ An in-memory-only successful drive does not satisfy the first slice.
   and abandoned marker in the run view; `wait` drives such a run after a crash
   between the two appends.
 
+## Service read surface
+
+- `listRuns` reads every run without taking a lease, reports per-directory
+  problems (`invalid-directory`, `missing-record`, `invalid-record`,
+  `corrupt-journal`, `invalid-projection`, `torn-tail`) as at most 16 sorted
+  issues plus a truncated count instead of failing, filters by status and
+  depth, orders newest first, and pages through an opaque position cursor
+  that rejects foreign values;
+- a run leased by another live service, or whose lease port occupant cannot
+  identify itself, is `leased-elsewhere` with no available actions; an owned
+  run is `owned`; every other run is `inactive`;
+- `availableActions` and `requiresAttention` come from the single predicate
+  module, and for every action absent from a summary the corresponding
+  lifecycle method refuses with its documented message;
+- `inspect` returns the requested sections only, never the output value or
+  child prose, bounds every list to 256 items with the omitted count in
+  `truncated`, returns all of one task's executions when `taskId` is given,
+  and refuses malformed selectors and task ids with the documented messages;
+- `logs` derives redacted entries in the fixed formats, excludes identities,
+  digests, prompts, and child prose, marks abandoned effects, and pages by
+  sequence with `nextAfterSequence` present only when more entries exist;
+- `subscribe` observes every append to an owned run in sequence order, a
+  throwing listener affects neither the append nor other listeners, unsubscribe
+  is idempotent, and subscription after shutdown is refused;
+- `wait` with `timeoutMs` validates the bound before touching the run, returns
+  the current view marked `timedOut` when the drive outlives the timeout, and
+  leaves the drive running for a later `wait`;
+- `reconcile` with `taskId` refuses unknown and non-cleanup-blocked tasks
+  before taking a lease, reconciles only that task, and reports `before`,
+  `after`, and the pi-subagent reconcile facts for agent tasks; without
+  `taskId` it reconciles every on-path cleanup-blocked task in order;
+- every projection output satisfies its `service-views.ts` schema for every
+  fixture journal and for a synthetic 256-task state;
+- the read tools validate output against those schemas, shrink run and log
+  pages to the 48 KiB bound while keeping later pages complete, and refuse an
+  oversized inspection with the exact guidance message.
+
 ## Structured output and support tasks
 
 - every initial agent task uses a terminating output schema;

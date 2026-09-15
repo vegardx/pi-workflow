@@ -1168,71 +1168,194 @@ primary status from a subagent `cleanup-blocked` result.
 ## Workflow service
 
 ```ts
-interface WorkflowServiceV1 {
-	readonly contract: WorkflowRuntimeContractV1;
+interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
-	list(options?: ListOptions): Promise<WorkflowSummary[]>;
-	validate(ref: string): Promise<ValidationResult>;
-	run(ref: string, input: unknown, options?: RunOptions): Promise<RunReceipt>;
-	status(runId: WorkflowRunId): Promise<WorkflowStatus>;
-	logs(runId: WorkflowRunId, options?: LogOptions): Promise<WorkflowLogs>;
-	wait(runId: WorkflowRunId, options?: WaitOptions): Promise<WorkflowResult>;
-	stop(runId: WorkflowRunId, reason: string): Promise<StopReceipt>;
-	invalidate(
-		runId: WorkflowRunId,
-		causeTaskId: WorkflowTaskId,
-		reason: string,
-	): Promise<WorkflowStatus>;
-	retry(
-		runId: WorkflowRunId,
-		taskKey: string,
-		options?: RetryOptions,
-	): Promise<RunReceipt>;
-	resume(runId: WorkflowRunId, options?: ResumeOptions): Promise<RunReceipt>;
-	reconcile(runId: WorkflowRunId): Promise<ReconcileResult>;
+	list(): Promise<readonly WorkflowDefinitionSummary[]>;
+	validate(ref: string, input?: unknown): Promise<WorkflowValidationResult>;
+	run(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;
+	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
+	wait(runId: WorkflowRunId, options?: { timeoutMs?: number }): Promise<WorkflowServiceWaitView>;
+	stop(runId: WorkflowRunId, reason: string): Promise<WorkflowServiceRunView>;
+	invalidate(runId: WorkflowRunId, causeTaskId: string, reason: string): Promise<WorkflowServiceRunView>;
+	reconcile(runId: WorkflowRunId, options?: { taskId?: WorkflowTaskId }): Promise<WorkflowServiceReconcileView>;
+	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
+	inspect(runId: WorkflowRunId, options?: WorkflowInspectOptions): Promise<WorkflowRunInspection>;
+	logs(runId: WorkflowRunId, options?: WorkflowLogOptions): Promise<WorkflowLogPage>;
+	subscribe(listener: (observation: WorkflowRunObservation) => void): () => void;
+	shutdown(): Promise<void>;
 }
 ```
 
-The current extension exposes list, validate, run, status, wait, stop, and
-reconcile. `run` validates trust, definition, input, and the shared subagent
-provider before creating durable state, then returns a run ID immediately.
-`status` is a journal projection, `wait` reconstructs nonterminal work after
-restart and drives a durably `failed` or `interrupted` run whose on-path tasks
-are `invalidated` (that run awaits explicit recovery), and `stop` persists
-run/task intent before delegated interruption,
-support abort, and child-run stop. Every run view carries `depth` and, for a
-linked child run, `parent: { runId, taskId, inputArtifacts }`, where
-`inputArtifacts` is the record's injected artifact identity map; a child run
-is addressable by its own run ID for status, wait, stop, and reconcile. `createWorkflowService`
-accepts an optional `supportTasks` registration list that becomes the frozen
-constructor registry and supplies the nested run provider to every run it
-composes.
+Every value a method returns is defined once as a TypeBox schema in
+`service-views.ts`; the TypeScript view types derive from those schemas, the
+Pi tools validate their output against them before serialization, and a
+failed check is a bug (`Error("workflow tool output violates its schema")`),
+never masked. Views are frozen and carry only fixed workflow strings,
+operator-authored reasons (1..4096 characters, already journaled), codes,
+digests, ids, statuses, ordinals, counts, and timestamps: no prompts,
+artifact values, child model prose (`failure.message`, `guidance`), session or
+store paths, or credential-shaped metadata.
+
+### Lifecycle methods
+
+`run` validates trust, definition, input, and the shared subagent provider
+before creating durable state, then returns a run ID immediately. `status` is
+a journal projection, `wait` reconstructs nonterminal work after restart and
+drives a durably `failed` or `interrupted` run whose on-path tasks are
+`invalidated` (that run awaits explicit recovery), and `stop` persists
+run/task intent before delegated interruption, support abort, and child-run
+stop. Every run view carries `depth` and, for a linked child run,
+`parent: { runId, taskId, inputArtifacts }`, where `inputArtifacts` is the
+record's injected artifact identity map; a child run is addressable by its own
+run ID for status, wait, stop, reconcile, inspect, and logs.
+`createWorkflowService` accepts an optional `supportTasks` registration list
+that becomes the frozen constructor registry and supplies the nested run
+provider to every run it composes.
+
+`wait(runId, { timeoutMs })` validates `timeoutMs` as an integer 1 through
+2 147 483 647 (`validation`, "Invalid workflow wait timeout.") before touching
+the run. When the drive outlives the timeout the method returns the current
+view with `timedOut: true` and leaves the drive running; a later `wait`
+observes it. Without a timeout the behaviour is unchanged. A `parked`
+field for checkpoint pauses is reserved and never emitted.
 
 `invalidate(runId, causeTaskId, reason)` is the only trigger for re-execution
-and is exposed by the service, not yet by a Pi tool. It validates the run ID,
-the task ID pattern, and a reason of 1 through 4096 characters, rejects with
-`conflict` ("Workflow run is still being driven.") while an owned run's drive
-has not settled and with `validation` ("Workflow run status does not admit
-invalidation.") unless the run is durably `failed` or `interrupted`, refuses
-nested child runs, runs that already hold on-path invalidated work awaiting
-recovery, and runs whose deadline has passed (each `validation`), then
-computes `invalidationClosure`, appends one `task-invalidated` event carrying
-the exact closure and abandoned epochs, appends the recovery transition
-`failed|interrupted → running` (reason "Explicit invalidation re-executes
-invalidated tasks."), restarts the drive without awaiting it (`wait` observes
-it), and returns the current view, whose status is already `running`; reducer
-rejections surface as `validation`. If the process crashes between the two
-appends, the restarted static runtime repairs the gap by appending the same
-transition when it finds a `failed` or `interrupted` run with at least one
-on-path `invalidated` task; otherwise the existing explicit-recovery refusal
-stands. Every
-run view carries `tasks` once events exist: one entry per declared task in
-materialization order with `id`, `namespace`, `key`, `kind`, `status`,
-`generation` (the highest generation recorded for the task, or 0), and
-`abandoned: true` for abandoned history.
+and is exposed by the `workflow_invalidate` tool as a pure pass-through. It
+validates the run ID, the task ID pattern, and a reason of 1 through 4096
+characters, rejects with `conflict` ("Workflow run is still being driven.")
+while an owned run's drive has not settled and with `validation` ("Workflow
+run status does not admit invalidation.") unless the run is durably `failed`
+or `interrupted`, refuses nested child runs, runs that already hold on-path
+invalidated work awaiting recovery, and runs whose deadline has passed (each
+`validation`), then computes `invalidationClosure`, appends one
+`task-invalidated` event carrying the exact closure and abandoned epochs,
+appends the recovery transition `failed|interrupted → running` (reason
+"Explicit invalidation re-executes invalidated tasks."), restarts the drive
+without awaiting it (`wait` observes it), and returns the current view, whose
+status is already `running`; reducer rejections surface as `validation`. If
+the process crashes between the two appends, the restarted static runtime
+repairs the gap by appending the same transition when it finds a `failed` or
+`interrupted` run with at least one on-path `invalidated` task; otherwise the
+existing explicit-recovery refusal stands.
+
+`reconcile(runId, { taskId })` returns a run view plus `reconciled`, one
+entry per reconciled execution with `taskId`, `executionId`, `before` and
+`after` (`phase`, `outcome`, `childStatus` captured from the reduced state
+around the call), and, for agent tasks, the pi-subagent facts
+`subagent: { sandboxProcess, workspace }` returned by the owner client's
+reconciliation. Without `taskId`, once the drive settles and while the run is
+`cleanup-blocked`, the service reconciles on-path `cleanup-blocked` tasks in
+materialization order one at a time (bounded by the task count) and restarts
+the drive when the run returns to `running` or `waiting`. With `taskId`, a
+malformed id is `validation` "Invalid workflow task ID.", an unknown or
+abandoned task is "Unknown workflow task.", a task that is not on-path
+`cleanup-blocked` is "Workflow task is not cleanup-blocked." (checked against
+the durable view before any lease is taken and again after the drive), and
+only that task is reconciled. `reconciled` is empty when the run was already
+completed or not cleanup-blocked. A settled run this service still owns is
+reused rather than re-leased.
+
+### Action legality
+
+`run-actions.ts` is the single predicate module for operator actions: the
+terminal, invalidation-admission, recovery, deadline, and nesting predicates,
+`runActionFacts`, `availableWorkflowRunActions`, and `requiresAttention`.
+Lifecycle methods refuse through the same predicates, and every summary
+carries `availableActions`: the subset of `stop`, `wait`, `reconcile`,
+`invalidate`, `retry`, `resume`, `decide` that is legal for the run's facts,
+filtered by the actions implemented in this build (`stop`, `wait`,
+`reconcile`, `invalidate`) and returned in that fixed order. A run leased by
+another live service has no available actions. `requiresAttention` is
+`cleanup-blocked`, or `failed`/`interrupted` without invalidated work awaiting
+recovery. Tools and widgets consume `availableActions`; nothing recomputes it.
+
+| Action | Legal iff |
+| --- | --- |
+| any | `ownership !== "leased-elsewhere"` |
+| `stop` | run status is not terminal |
+| `wait` | run status is not terminal, or the run awaits recovery |
+| `reconcile` | run is `cleanup-blocked`, or not terminal and not owned by any live service |
+| `invalidate` | `failed` or `interrupted`, not nested, not awaiting recovery, deadline not passed, not being driven |
+| `retry`, `resume`, `decide` | predicates ship; not emitted until their methods exist |
+
+### Read surface
+
+Reads never acquire a run lease. `listRuns`, `inspect`, and `logs` read runs
+this service owns through their own journals and every other run through the
+lease-free readers `WorkflowRunRecordStore.readFrom` and
+`readWorkflowJournalUnleased` (complete-record prefix; a torn tail is measured,
+never repaired). Ownership is `owned`, `leased-elsewhere` (the recorded lease
+port answers with this run's identity, or an occupant that cannot identify
+itself, matching acquisition's fail-safe), or `inactive`. `status()` keeps
+leasing as before.
+
+`listRuns(query)` accepts `statuses` (1..11 unique), `includeChildren`
+(default `false`: depth 0 only), `limit` (1..100, default 20), and an opaque
+`cursor`; a malformed query is `validation` "Invalid workflow run query." and
+a foreign cursor "Invalid workflow run cursor.". It scans `<store>/runs`,
+reports per-directory problems as `issues` (`invalid-directory`,
+`missing-record`, `invalid-record`, `corrupt-journal`, `invalid-projection`,
+`torn-tail`; basename only, fixed messages, at most 16 sorted by directory
+with the rest counted in `issuesTruncated`) instead of failing, and returns
+summaries newest first (`createdAt` descending, `runId` descending). The
+cursor encodes the last returned position, so runs created between pages
+appear only on a fresh first page. A summary carries `runId`,
+`definitionName`, `status` (`created` for an empty journal), `createdAt`,
+`updatedAt` (last complete event), `deadlineAt`, `depth`, `parent`,
+`lastSequence`, `taskCounts` (on-path tasks per status, zero-filled, plus
+`abandoned` and `total`), `ownership`, `leasedElsewhere`, `availableActions`,
+`requiresAttention`, and `outputArtifactId`; never the output value.
+
+`inspect(runId, { include, taskId })` returns `run` (the same summary) plus
+the requested sections, default `run`, `budget`, `tasks`: `budget` (declared
+and effective budgets, settled and reserved usage from `budget.ts`, and the
+scheduler's fixed `exceeded` string when settled usage exceeds the effective
+budget or evidence is incomplete), `tasks` (the enriched task view with
+`dependsOn` and `inputs`), `executions` (ordered by task then newest
+generation; identities, phases, attempts with fixed declined reasons,
+settlement, terminal outcome with failure code and stage, produced artifact
+ids), `effects`, `barriers`, and `artifacts` (metadata and digests only).
+Bounded sections keep 256 items (`executions` the first 256 in order, or all
+of one task's when `taskId` is given; the others the newest 256) and record
+the omitted count in `truncated`. Refusals: "Invalid workflow run ID.",
+"Invalid workflow inspection selector.", "Invalid workflow task ID."
+(`validation`); `not-found` for a missing run; `persistence` "Workflow run
+record is invalid." and "Workflow run journal is corrupt." (interior
+corruption, or a journal that violates run invariants).
+
+`logs(runId, { afterSequence, limit })` (`afterSequence` ≥ 0, `limit` 1..500
+default 100; otherwise "Invalid workflow log query.") derives one entry per
+`workflow-effect`, `run-status-changed`, `task-status-changed`, attempt
+intent/receipt/decline, `task-execution-terminal`, and `task-invalidated`
+event with fixed message formats, `status`, journaled `reason`, and
+`failureCode` (subagent code or workflow stage); abandoned effects are marked,
+not dropped. Declarations, barriers, artifact and identity events, digests,
+`output`, and child prose never appear. Entries ascend by sequence;
+`nextAfterSequence` is present only when later qualifying entries exist.
+
+`subscribe(listener)` observes every append this service makes to an owned
+run's journal as `{ runId, status, sequence }`, delivered from the journal's
+post-append microtask in sequence order per run without coalescing; a
+listener that throws affects nothing. It refuses after shutdown (`conflict`,
+"Workflow service is closed."), returns an idempotent unsubscribe, and never
+notifies for runs leased elsewhere, which the widget must poll through
+`listRuns`.
+
+### Task view
+
+Every run view carries `tasks` once events exist: one frozen entry per
+declared task in materialization order with `id`, `namespace`, `key`, `kind`,
+`disposition`, `status`, `generation` (the highest generation recorded for
+the task, or 0), the current execution's `executionId`, `attempts` (agent
+executions: the attempt count), `settlement` (`attemptOrdinal`, `status`,
+`failureCode`, `failureRetry`, `usageComplete` from the agent or nested
+settlement), `outcome` (the terminal outcome), and `abandoned: true` for
+abandoned history. `inspect` adds `dependsOn` and `inputs`.
+
 Declarative retry and resume attempts run under task policy without a service
-call. Operator-triggered `retry`, explicit interrupted-run `resume`, logs, and
-polished inspection remain later contract work.
+call. Operator-triggered `retry` and explicit interrupted-run `resume` remain
+later contract work; their predicates ship in `run-actions.ts` but their
+actions are not advertised.
 
 ## Checkpoints
 
