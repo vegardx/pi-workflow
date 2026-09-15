@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	RetryBackoffError,
 	type RunResult,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
@@ -15,6 +16,7 @@ import {
 	canonicalArtifactJson,
 	WorkflowArtifactStore,
 } from "../src/artifact-store.js";
+import { settledAgentUsage } from "../src/attempts.js";
 import type {
 	NestedWorkflowTaskRequest,
 	NestedWorkflowUsage,
@@ -3147,5 +3149,442 @@ describe("retry attempts", () => {
 		expect((await journal.readEvents()).map((event) => event.type)).toContain(
 			"task-execution-attempt-receipted",
 		);
+	});
+
+	function transient(retry: "backoff" | "manual" = "backoff"): RunResult {
+		const failed = result("failed");
+		if (!failed.failure) throw new Error("failed result lacks a failure");
+		return { ...failed, failure: { ...failed.failure, retry } };
+	}
+
+	function retryRequest(
+		attempts = 1,
+		overrides: Parameters<typeof request>[0] = {},
+	) {
+		const base = request(overrides);
+		return {
+			...base,
+			retry: { attempts },
+			limits: { ...base.limits, retries: attempts },
+		};
+	}
+
+	function budgeted<T extends { limits: { cost: number } }>(value: T): T {
+		return { ...value, limits: { ...value.limits, cost: 0.01 } };
+	}
+
+	function attemptReceipt<S extends string>(status: S) {
+		return { runId: "run_scheduler", attemptId: "attempt_scheduler2", status };
+	}
+
+	async function retryScheduler(
+		journal: WorkflowRunJournal,
+		ownerClient: SubagentClient,
+		options: { budget?: WorkflowBudget } = {},
+	) {
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const ownerBinding = binding(ownerClient);
+		return createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+			finalizer: createWorkflowTaskFinalizer({
+				journal,
+				artifacts,
+				binding: ownerBinding,
+			}),
+			...(options.budget ? { budget: options.budget } : {}),
+		});
+	}
+
+	async function executionOf(journal: WorkflowRunJournal, taskId: string) {
+		const state = await projection(journal);
+		const task = state.tasks[taskId];
+		const execution = state.executions[task?.currentExecutionId ?? ""];
+		if (!task || !execution) throw new Error("missing task execution");
+		return { state, task, execution };
+	}
+
+	async function attemptEventCounts(journal: WorkflowRunJournal) {
+		const types = (await journal.readEvents()).map((event) => event.type);
+		return {
+			intended: types.filter((t) => t === "task-execution-attempt-intended")
+				.length,
+			receipted: types.filter((t) => t === "task-execution-attempt-receipted")
+				.length,
+			declined: types.filter((t) => t === "task-execution-attempt-declined")
+				.length,
+		};
+	}
+
+	it("fails the task and run when the retried attempt exhausts the policy", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", retryRequest(1)),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const ownerClient = client({
+			wait: vi.fn(async () => executionResult(transient())),
+			retry: vi.fn(async () => attemptReceipt("active" as const)),
+			release: vi.fn(async () => attemptReceipt("failed" as const)),
+		});
+		const scheduler = await retryScheduler(journal, ownerClient);
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const { state, task, execution } = await executionOf(journal, taskId);
+		expect(task.status).toBe("failed");
+		expect(state.status).toBe("failed");
+		expect(execution.phase).toBe("terminal");
+		expect(execution.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { kind: "subagent", status: "failed", attemptOrdinal: 2 },
+		});
+		expect(execution.priorSettlements).toHaveLength(1);
+		expect(execution.priorSettlements?.[0]?.evidence.attemptOrdinal).toBe(1);
+		expect(execution.settlement?.evidence.attemptOrdinal).toBe(2);
+		expect(execution.attempts).toHaveLength(1);
+		expect(execution.attemptsClosed).toBeUndefined();
+		const usage = settledAgentUsage(execution);
+		expect(usage.cost).toBeCloseTo(0.02, 10);
+		expect(usage.totalTokens).toBe(30);
+		expect(usage.runtimeMs).toBe(2000);
+		expect(usage.usageComplete).toBe(true);
+		expect(ownerClient.wait).toHaveBeenCalledTimes(2);
+		expect(ownerClient.retry).toHaveBeenCalledTimes(1);
+		expect(ownerClient.launch).toHaveBeenCalledTimes(1);
+		expect(ownerClient.release).toHaveBeenCalledWith("run_scheduler");
+		await expect(attemptEventCounts(journal)).resolves.toEqual({
+			intended: 1,
+			receipted: 1,
+			declined: 0,
+		});
+	});
+
+	it("counts every attempt's settled usage when admitting the next task", async () => {
+		// Admission adds the candidate's declared maximum to all settled usage.
+		// Both attempts of the first task settled 0.01 each (0.02 <= 0.025, so
+		// the run itself is within budget), and the second task's 0.01 maximum
+		// pushes the sum to 0.03 > 0.025 with nothing reserved, which is the
+		// non-deferred "exhausted" branch: the task is blocked and, being
+		// required, the run fails.
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("first", budgeted(retryRequest(1))),
+			materializer.agent("second", budgeted(request())),
+		]);
+		const [firstId, secondId] = tasks.map((task) => task.ref.taskId);
+		let waits = 0;
+		const ownerClient = client({
+			wait: vi.fn(async () => {
+				waits += 1;
+				return executionResult(waits === 1 ? transient() : result("completed"));
+			}),
+			retry: vi.fn(async () => attemptReceipt("active" as const)),
+			release: vi.fn(async () => attemptReceipt("completed" as const)),
+		});
+		const scheduler = await retryScheduler(journal, ownerClient, {
+			budget: { cost: 0.025, childRuntimeMs: 600_000 },
+		});
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[firstId ?? ""]?.status).toBe("completed");
+		expect(state.tasks[secondId ?? ""]?.status).toBe("blocked");
+		expect(state.status).toBe("failed");
+		const changes = statusChanges(
+			await journal.readEvents(),
+			"task-status-changed",
+		);
+		expect(changes.at(-1)).toMatchObject({
+			to: "blocked",
+			reason: "Workflow cost budget is exhausted.",
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toMatchObject({
+			to: "failed",
+			reason: "Workflow cost budget is exhausted.",
+		});
+		expect(ownerClient.launch).toHaveBeenCalledTimes(1);
+		expect(ownerClient.retry).toHaveBeenCalledTimes(1);
+	});
+
+	it("fails the run when both attempts' settled usage overshoot the budget", async () => {
+		// With a 0.015 budget the second task is never admitted: settled usage
+		// across both attempts (0.02) already exceeds the budget once the first
+		// task finalizes, so the post-finalization budget check fails the run.
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("first", budgeted(retryRequest(1))),
+			materializer.agent("second", budgeted(request())),
+		]);
+		const [firstId, secondId] = tasks.map((task) => task.ref.taskId);
+		let waits = 0;
+		const ownerClient = client({
+			wait: vi.fn(async () => {
+				waits += 1;
+				return executionResult(waits === 1 ? transient() : result("completed"));
+			}),
+			retry: vi.fn(async () => attemptReceipt("active" as const)),
+			release: vi.fn(async () => attemptReceipt("completed" as const)),
+		});
+		const scheduler = await retryScheduler(journal, ownerClient, {
+			budget: { cost: 0.015, childRuntimeMs: 600_000 },
+		});
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[firstId ?? ""]?.status).toBe("completed");
+		expect(state.tasks[secondId ?? ""]?.status).toBe("pending");
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toMatchObject({
+			to: "failed",
+			reason: "Workflow cost budget was exceeded.",
+		});
+		expect(ownerClient.launch).toHaveBeenCalledTimes(1);
+	});
+
+	it("interrupts the retried attempt on stop and cancels the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", retryRequest(1)),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const waiting = deferred<ReturnType<typeof executionResult>>();
+		let waits = 0;
+		const ownerClient = client({
+			wait: vi.fn(() => {
+				waits += 1;
+				return waits === 1
+					? Promise.resolve(executionResult(transient()))
+					: waiting.promise;
+			}),
+			retry: vi.fn(async () => attemptReceipt("active" as const)),
+			interrupt: vi.fn(async () => attemptReceipt("stopping" as const)),
+			release: vi.fn(async () => attemptReceipt("cancelled" as const)),
+		});
+		const scheduler = await retryScheduler(journal, ownerClient);
+		const drive = scheduler.drive();
+		await vi.waitFor(
+			() => expect(ownerClient.wait).toHaveBeenCalledTimes(2),
+			WAIT_FOR,
+		);
+		expect((await executionOf(journal, taskId)).execution.phase).toBe(
+			"launched",
+		);
+		const stop = scheduler.stop("operator stop");
+		await vi.waitFor(
+			() => expect(ownerClient.interrupt).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		expect(ownerClient.interrupt).toHaveBeenCalledWith("run_scheduler");
+		const stopping = await executionOf(journal, taskId);
+		expect(stopping.state.status).toBe("stopping");
+		expect(stopping.task.status).toBe("cancelling");
+		await vi.waitFor(async () => {
+			const { execution } = await executionOf(journal, taskId);
+			expect(execution.observation).toMatchObject({
+				subagentAttemptId: "attempt_scheduler2",
+				status: "stopping",
+			});
+		}, WAIT_FOR);
+		waiting.resolve(executionResult(result("cancelled")));
+		await expect(stop).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		await expect(drive).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		const { state, task, execution } = await executionOf(journal, taskId);
+		expect(task.status).toBe("cancelled");
+		expect(state.status).toBe("cancelled");
+		expect(execution.terminal).toMatchObject({
+			outcome: "cancelled",
+			evidence: { status: "cancelled", attemptOrdinal: 2 },
+		});
+		expect(execution.priorSettlements).toHaveLength(1);
+		expect(ownerClient.release).toHaveBeenCalledTimes(1);
+		expect(ownerClient.retry).toHaveBeenCalledTimes(1);
+	});
+
+	it("declines the pending attempt on stop while the retrier waits out backoff", async () => {
+		// The stop signal aborts the retrier's backoff wait, so the open intent
+		// is declined and the settled failure proceeds to finalization. The
+		// task ends `failed` (its child really failed; nothing was interrupted)
+		// and the run drains to `cancelled` because it was stopping when the
+		// required task finalized.
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", retryRequest(1)),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const ownerClient = client({
+			wait: vi.fn(async () => executionResult(transient())),
+			retry: vi.fn(async () => {
+				throw new RetryBackoffError(
+					new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+				);
+			}),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "failed" as const,
+			})),
+		});
+		const scheduler = await retryScheduler(journal, ownerClient);
+		const drive = scheduler.drive();
+		await vi.waitFor(
+			() => expect(ownerClient.retry).toHaveBeenCalledOnce(),
+			WAIT_FOR,
+		);
+		expect((await executionOf(journal, taskId)).execution.phase).toBe(
+			"attempt-intended",
+		);
+		const started = Date.now();
+		const stop = await scheduler.stop("operator stop");
+		expect(Date.now() - started).toBeLessThan(30_000);
+		expect(stop).toEqual({ state: "terminal", runStatus: "cancelled" });
+		await expect(drive).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		const { state, task, execution } = await executionOf(journal, taskId);
+		expect(task.status).toBe("failed");
+		expect(state.status).toBe("cancelled");
+		expect(execution.attemptsClosed).toBe(true);
+		expect(execution.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { status: "failed", attemptOrdinal: 1 },
+		});
+		expect(execution.priorSettlements).toBeUndefined();
+		const declined = (await journal.readEvents()).find(
+			(event) => event.type === "task-execution-attempt-declined",
+		);
+		expect(declined?.data).toMatchObject({
+			ordinal: 2,
+			reason: "Workflow stop requested before the attempt.",
+		});
+		await expect(attemptEventCounts(journal)).resolves.toEqual({
+			intended: 1,
+			receipted: 0,
+			declined: 1,
+		});
+		expect(ownerClient.interrupt).not.toHaveBeenCalled();
+		expect(ownerClient.retry).toHaveBeenCalledTimes(1);
+		expect(ownerClient.release).toHaveBeenCalledTimes(1);
+	});
+
+	it("recovers an open attempt intent after restart with one intent and one receipt", async () => {
+		const fx = await fixture((materializer) => [
+			materializer.agent("answer", retryRequest(1)),
+		]);
+		const taskId = fx.tasks[0]?.ref.taskId ?? "";
+		const crashing = client({
+			wait: vi.fn(async () => executionResult(transient())),
+			retry: vi.fn(async () => {
+				throw new Error("connection reset");
+			}),
+			findByOperation: vi.fn(async () => {
+				throw new Error("lookup unavailable");
+			}),
+		});
+		const first = await retryScheduler(fx.journal, crashing);
+		await expect(first.drive()).rejects.toMatchObject({
+			name: "WorkflowAttemptError",
+			stage: "reconciliation",
+		});
+		expect((await executionOf(fx.journal, taskId)).execution.phase).toBe(
+			"attempt-intended",
+		);
+		await expect(attemptEventCounts(fx.journal)).resolves.toEqual({
+			intended: 1,
+			receipted: 0,
+			declined: 0,
+		});
+
+		const rotated = await rotateLease(fx);
+		const ownerClient = client({
+			wait: vi.fn(async () => executionResult(result("completed"))),
+			retry: vi.fn(async () => attemptReceipt("active" as const)),
+			release: vi.fn(async () => attemptReceipt("completed" as const)),
+		});
+		const second = await retryScheduler(rotated.journal, ownerClient);
+		// The scheduler never marks a run `completed` itself; a fully completed
+		// graph rests at `idle`/`waiting` for the run owner to close.
+		await expect(driveToRest(second)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const { state, task, execution } = await executionOf(
+			rotated.journal,
+			taskId,
+		);
+		expect(task.status).toBe("completed");
+		expect(state.status).toBe("waiting");
+		expect(execution.attempts).toMatchObject([
+			{ kind: "retry", ordinal: 2, subagentAttemptId: "attempt_scheduler2" },
+		]);
+		expect(execution.terminal?.evidence).toMatchObject({
+			status: "completed",
+			attemptOrdinal: 2,
+		});
+		await expect(attemptEventCounts(rotated.journal)).resolves.toEqual({
+			intended: 1,
+			receipted: 1,
+			declined: 0,
+		});
+		expect(ownerClient.preflight).not.toHaveBeenCalled();
+		expect(ownerClient.launch).not.toHaveBeenCalled();
+		expect(ownerClient.retry).toHaveBeenCalledTimes(1);
+		expect(ownerClient.findByOperation).not.toHaveBeenCalled();
+		// One wait for the recovered attempt plus the finalizer's exact-result
+		// re-read before artifact import.
+		expect(ownerClient.wait).toHaveBeenCalledTimes(2);
+	});
+
+	it("blocks cleanup when a release receipt names the superseded attempt", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", retryRequest(1)),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		let waits = 0;
+		const ownerClient = client({
+			wait: vi.fn(async () => {
+				waits += 1;
+				return executionResult(waits === 1 ? transient() : result("completed"));
+			}),
+			retry: vi.fn(async () => attemptReceipt("active" as const)),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "completed" as const,
+			})),
+		});
+		const scheduler = await retryScheduler(journal, ownerClient);
+		await expect(driveToRest(scheduler)).rejects.toMatchObject({
+			name: "WorkflowTaskFinalizationError",
+			stage: "release",
+			message: "Child release returned an invalid receipt.",
+		});
+		expect(ownerClient.release).toHaveBeenCalledWith("run_scheduler");
+		const { state, task, execution } = await executionOf(journal, taskId);
+		expect(task.status).toBe("cleanup-blocked");
+		expect(["running", "waiting", "cleanup-blocked"]).toContain(state.status);
+		expect(execution.phase).toBe("terminal");
+		expect(execution.terminal).toMatchObject({
+			outcome: "cleanup-blocked",
+			evidence: { kind: "workflow", stage: "release" },
+		});
+		expect(execution.release).toBeUndefined();
+		expect(execution.releaseIntent).toBeDefined();
+		expect(execution.settlement?.evidence.attemptOrdinal).toBe(2);
+		const types = (await journal.readEvents()).map((event) => event.type);
+		expect(types).toContain("task-execution-release-intended");
+		expect(types).not.toContain("task-execution-released");
+		expect(types).toContain("task-execution-terminal");
 	});
 });
