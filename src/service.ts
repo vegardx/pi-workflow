@@ -13,6 +13,7 @@ import { settledWorkflowUsage } from "./budget.js";
 import {
 	MAX_WORKFLOW_CONCURRENCY,
 	WORKFLOW_CONTRACT_REVISION,
+	type WorkflowHandoffDescriptor,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
 	type WorkflowRunStatus,
@@ -27,6 +28,11 @@ import type {
 	TaskExecutionProjection,
 	WorkflowStateProjection,
 } from "./events.js";
+import { deriveWorkflowHandoffDescriptor } from "./execution.js";
+import {
+	verifyWorkflowHandoffEvidence,
+	WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
+} from "./handoff.js";
 import {
 	WorkflowNestedRunError,
 	type WorkflowNestedRunLaunch,
@@ -66,6 +72,7 @@ import {
 	compareRunSummaries,
 	decodeWorkflowRunCursor,
 	encodeWorkflowRunCursor,
+	isCompletedWorktreeTask,
 	runInspection,
 	runLogs,
 	runSummary,
@@ -151,6 +158,14 @@ export type {
 
 export type WorkflowRunListener = (observation: WorkflowRunObservation) => void;
 
+export type WorkflowServiceHandoffExport = {
+	readonly descriptor: WorkflowHandoffDescriptor;
+	/** The verified `git format-patch` bytes the descriptor names. */
+	readonly content: Buffer;
+};
+
+const NO_HANDOFF_ARTIFACT_MESSAGE = "Workflow task has no handoff artifact.";
+
 export interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
 	list(): Promise<readonly WorkflowDefinitionSummary[]>;
@@ -185,6 +200,15 @@ export interface WorkflowService {
 		runId: WorkflowRunId,
 		options?: WorkflowReconcileOptions,
 	): Promise<WorkflowServiceReconcileView>;
+	/**
+	 * Exports the digest-verified handoff of a completed worktree agent task
+	 * together with its descriptor. The workflow never applies, pushes, or
+	 * merges the bytes; the caller owns what happens to them.
+	 */
+	exportHandoff(
+		runId: WorkflowRunId,
+		taskId: string,
+	): Promise<WorkflowServiceHandoffExport>;
 	shutdown(): Promise<void>;
 	/** Lease-free scan of every durable run in the store, newest first. */
 	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
@@ -799,6 +823,60 @@ export async function createWorkflowService(
 		});
 	}
 
+	/**
+	 * Selects the current execution's handoff artifact of a completed worktree
+	 * task and verifies it exactly as replay does (spec 5, D8) before any byte
+	 * leaves the store. A verification failure is durable-state corruption.
+	 */
+	async function exportHandoffFrom(
+		journal: WorkflowRunJournal,
+		artifacts: WorkflowArtifactStore,
+		taskId: string,
+	): Promise<WorkflowServiceHandoffExport> {
+		const events = await journal.readEvents();
+		const state =
+			events.length === 0 ? undefined : reduceWorkflowEvents(events);
+		const task = state?.tasks[taskId];
+		if (!state || !task) {
+			throw new WorkflowServiceError(
+				"not-found",
+				`Workflow task not found: ${taskId}`,
+			);
+		}
+		if (!isCompletedWorktreeTask(task)) {
+			throw new WorkflowServiceError("validation", NO_HANDOFF_ARTIFACT_MESSAGE);
+		}
+		try {
+			const verified = await verifyWorkflowHandoffEvidence(
+				state,
+				task,
+				artifacts,
+			);
+			if (verified.status === "absent") {
+				throw new WorkflowServiceError(
+					"validation",
+					NO_HANDOFF_ARTIFACT_MESSAGE,
+				);
+			}
+			return Object.freeze({
+				descriptor: Object.freeze(
+					deriveWorkflowHandoffDescriptor(
+						verified.artifact,
+						verified.execution,
+					),
+				),
+				content: verified.content,
+			});
+		} catch (error) {
+			if (error instanceof WorkflowServiceError) throw error;
+			throw new WorkflowServiceError(
+				"persistence",
+				WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
+				{ cause: error },
+			);
+		}
+	}
+
 	function lineageOf(record: WorkflowRunRecord): {
 		parent?: NonNullable<WorkflowServiceRunView["parent"]>;
 	} {
@@ -1402,6 +1480,36 @@ export async function createWorkflowService(
 				);
 			}
 			return reconcileCurrent(runIdValue, options.taskId);
+		},
+		async exportHandoff(runIdValue: WorkflowRunId, taskId: string) {
+			assertOpen();
+			if (!Value.Check(WorkflowRunIdSchema, runIdValue)) {
+				throw new WorkflowServiceError(
+					"validation",
+					"Invalid workflow run ID.",
+				);
+			}
+			if (!Value.Check(WorkflowTaskIdSchema, taskId)) {
+				throw new WorkflowServiceError(
+					"validation",
+					"Invalid workflow task ID.",
+				);
+			}
+			// An owned run keeps its lease and store; the journal is read as it
+			// stands, so a task completed on a still-driving run is exportable.
+			const current = owned.get(runIdValue);
+			if (current) {
+				return exportHandoffFrom(current.journal, current.artifacts, taskId);
+			}
+			const opened = await openInactive(runIdValue);
+			try {
+				const artifacts = await WorkflowArtifactStore.open({
+					journal: opened.journal,
+				});
+				return await exportHandoffFrom(opened.journal, artifacts, taskId);
+			} finally {
+				await opened.lease.release();
+			}
 		},
 		shutdown() {
 			return exclusive(async () => {
