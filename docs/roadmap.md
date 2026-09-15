@@ -103,11 +103,23 @@ Remaining:
 
 ## Phase 4 — product surface
 
+Delivered:
+
+- tool declaration table with output schemas: `WORKFLOW_TOOL_DECLARATIONS`
+  binds the seven existing tools to typed service results, the extension
+  registers from it, and every declared output schema is validated against a
+  real service result;
+- workflow authoring skill shipped under `skills/` and declared through
+  `pi.skills`, with loader-tested examples;
+- compatibility matrix (`compatibility.json`, `docs/compatibility.md`) checked
+  against the manifest, the contract constants, CI, and the packed
+  pi-subagent contract.
+
+Remaining:
+
 - persistent widget and inspector;
 - complete workflow command/tool surface, including operator-triggered retry
   and invalidate tools over the service;
-- workflow authoring skill;
-- packed integration matrix with pi-subagent;
 - first stable static-workflow API.
 
 ## Phase 5 — dynamic workflows
