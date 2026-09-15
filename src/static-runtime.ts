@@ -35,7 +35,10 @@ import {
 	type WorkspaceAuthoringRequest,
 	type WorktreeTaskHandle,
 } from "./definition.js";
-import type { WorkflowTaskProjection } from "./events.js";
+import type {
+	WorkflowStateProjection,
+	WorkflowTaskProjection,
+} from "./events.js";
 import {
 	deriveJsonValueSha256,
 	deriveWorkflowHandoffDescriptor,
@@ -52,12 +55,17 @@ import {
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
 import type { DiscoveredWorkflow } from "./registry.js";
+import {
+	hasOpenOperatorIntent,
+	isReopenedTask,
+	OPERATOR_RESUME_REASON,
+} from "./run-actions.js";
 import type { WorkflowSequentialScheduler } from "./scheduler.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
 const runtimeDrives = new Map<string, Promise<void>>();
-const FINALIZER_SETTLED = new Set([
+const SETTLED_TASK_STATUSES = new Set([
 	"completed",
 	"failed",
 	"cancelled",
@@ -66,6 +74,19 @@ const FINALIZER_SETTLED = new Set([
 	"cleanup-blocked",
 	"invalidated",
 ]);
+
+/**
+ * A task holds settled evidence unless an operator resume reopened it: such a
+ * task is `interrupted` by status while its execution is being re-attempted,
+ * and the barrier keeps driving it instead of reading the interruption.
+ */
+function isSettledTask(
+	state: WorkflowStateProjection,
+	task: WorkflowTaskProjection | undefined,
+): boolean {
+	if (!task) return false;
+	return SETTLED_TASK_STATUSES.has(task.status) && !isReopenedTask(state, task);
+}
 
 export type StaticWorkflowRunResult<T> = {
 	readonly runId: WorkflowRunId;
@@ -383,20 +404,21 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				(taskId) => current.tasks[taskId]?.status !== "completed",
 			);
 			if (pending.length === 0) return;
-			for (const taskId of pending) {
-				const status = current.tasks[taskId]?.status;
-				if (
-					status === "failed" ||
-					status === "cancelled" ||
-					status === "interrupted" ||
-					status === "blocked" ||
-					status === "cleanup-blocked" ||
-					status === "invalidated"
-				) {
-					throw new StaticWorkflowRuntimeError(
-						"execution",
-						`Workflow task cannot produce a result: ${status}.`,
-					);
+			// The barrier's verdict waits while an operator-reopened task is being
+			// re-attempted; once every target holds settled evidence it is final.
+			const reopened = pending.some((taskId) => {
+				const task = current.tasks[taskId];
+				return task !== undefined && isReopenedTask(current, task);
+			});
+			if (!reopened) {
+				for (const taskId of pending) {
+					const task = current.tasks[taskId];
+					if (isSettledTask(current, task)) {
+						throw new StaticWorkflowRuntimeError(
+							"execution",
+							`Workflow task cannot produce a result: ${task?.status}.`,
+						);
+					}
 				}
 			}
 			const { outcomes, errors } = await driveSchedulerBatch();
@@ -442,21 +464,10 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 	async function driveSettledTasks(
 		taskIds: readonly WorkflowTaskId[],
 	): Promise<void> {
-		const terminal = new Set([
-			"completed",
-			"failed",
-			"cancelled",
-			"interrupted",
-			"blocked",
-			"cleanup-blocked",
-			"invalidated",
-		]);
 		for (;;) {
 			const current = await state();
 			if (
-				taskIds.every((taskId) =>
-					terminal.has(current.tasks[taskId]?.status ?? ""),
-				)
+				taskIds.every((taskId) => isSettledTask(current, current.tasks[taskId]))
 			) {
 				return;
 			}
@@ -481,31 +492,30 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			const tasks = Object.values(current.tasks).filter(
 				(task) => task.abandoned !== true && task.task.spec.role === "task",
 			);
+			const reopened = tasks.some((task) => isReopenedTask(current, task));
 			const failedRequired = tasks.find(
 				(task) =>
 					task.task.spec.disposition === "required" &&
 					task.status !== "completed" &&
-					(task.status === "failed" ||
-						task.status === "cancelled" ||
-						task.status === "interrupted" ||
-						task.status === "blocked" ||
-						task.status === "cleanup-blocked" ||
-						task.status === "invalidated"),
+					isSettledTask(current, task),
 			);
-			if (failedRequired) {
+			// As at a result barrier, the verdict waits for a reopened task.
+			if (failedRequired && !reopened) {
 				throw new StaticWorkflowRuntimeError(
 					"execution",
 					`Required workflow task did not complete: ${failedRequired.status}.`,
 				);
 			}
-			const unsettled = tasks.some(
-				(task) =>
-					task.status === "pending" ||
-					task.status === "ready" ||
-					task.status === "running" ||
-					task.status === "waiting" ||
-					task.status === "cancelling",
-			);
+			const unsettled =
+				reopened ||
+				tasks.some(
+					(task) =>
+						task.status === "pending" ||
+						task.status === "ready" ||
+						task.status === "running" ||
+						task.status === "waiting" ||
+						task.status === "cancelling",
+				);
 			if (!unsettled) return;
 			const before = current.lastSequence;
 			const { outcomes, errors } = await driveSchedulerBatch();
@@ -546,7 +556,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				(task) =>
 					task.task.spec.disposition === "required" &&
 					task.status !== "completed" &&
-					FINALIZER_SETTLED.has(task.status),
+					isSettledTask(current, task),
 			);
 			if (failedRequired) {
 				throw new StaticWorkflowRuntimeError(
@@ -554,7 +564,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					`Required finalizer did not complete: ${failedRequired.status}.`,
 				);
 			}
-			if (finalizers.every((task) => FINALIZER_SETTLED.has(task.status))) {
+			if (finalizers.every((task) => isSettledTask(current, task))) {
 				return;
 			}
 			const before = current.lastSequence;
@@ -824,20 +834,32 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		}
 		await initialize();
 		let previous = await state();
-		if (
-			(previous.status === "failed" || previous.status === "interrupted") &&
-			Object.values(previous.tasks).some(
+		if (previous.status === "failed" || previous.status === "interrupted") {
+			const invalidated = Object.values(previous.tasks).some(
 				(task) => task.abandoned !== true && task.status === "invalidated",
-			)
-		) {
+			);
 			// Explicit invalidation is the documented recovery: the run resumes
-			// so the invalidated tasks can be re-materialized and re-executed.
-			await journal.append("run-status-changed", {
-				from: previous.status,
-				to: "running",
-				reason: "Explicit invalidation re-executes invalidated tasks.",
-			});
-			previous = await state();
+			// so the invalidated tasks can be re-materialized and re-executed. An
+			// open operator resume intent counts like invalidated work: the run
+			// resumes so the scheduler can perform the operator's attempt.
+			if (invalidated) {
+				await journal.append("run-status-changed", {
+					from: previous.status,
+					to: "running",
+					reason: "Explicit invalidation re-executes invalidated tasks.",
+				});
+				previous = await state();
+			} else if (
+				previous.status === "interrupted" &&
+				hasOpenOperatorIntent(previous)
+			) {
+				await journal.append("run-status-changed", {
+					from: "interrupted",
+					to: "running",
+					reason: OPERATOR_RESUME_REASON,
+				});
+				previous = await state();
+			}
 		}
 		if (
 			previous.status === "failed" ||

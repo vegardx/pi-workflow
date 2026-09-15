@@ -366,6 +366,8 @@ function attemptViews(
 			return Object.freeze({
 				kind: attempt.kind,
 				ordinal: attempt.ordinal,
+				origin: attempt.origin,
+				...(attempt.reason === undefined ? {} : { reason: attempt.reason }),
 				...(attempt.status === undefined ? {} : { status: attempt.status }),
 				...(attempt.subagentAttemptId === undefined
 					? {}
@@ -694,8 +696,11 @@ function logEntry(
 				...base,
 				kind: "attempt" as const,
 				...taskOfExecution(input.data.executionId),
+				...(input.data.reason === undefined
+					? {}
+					: { reason: input.data.reason }),
 				failureCode: input.data.failureCode,
-				message: `Attempt ${input.data.ordinal} (${input.data.kind}) intended after ${input.data.failureCode}.`,
+				message: `Attempt ${input.data.ordinal} (${input.data.kind}) intended after ${input.data.failureCode}${input.data.origin === "operator" ? " by operator" : ""}.`,
 			});
 		case "task-execution-attempt-receipted":
 			return Object.freeze({
