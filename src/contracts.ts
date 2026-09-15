@@ -1,7 +1,11 @@
 import {
 	ContextScopeSchema,
+	canonicalSha256,
 	DelegatedTaskSchema,
 	ExactModelRequestSchema,
+	HANDOFF_EXPORT_MEDIA_TYPE,
+	type HandoffRef,
+	HandoffRefSchema,
 	RunLimitsSchema,
 	ArtifactRefSchema as SubagentArtifactRefSchema,
 	AttemptIdSchema as SubagentAttemptIdSchema,
@@ -16,7 +20,19 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 16 as const;
+export const WORKFLOW_CONTRACT_REVISION = 17 as const;
+/** Upper bound of one imported handoff; equals the artifact byte bound. */
+export const MAX_WORKFLOW_HANDOFF_BYTES = 16 * 1024 * 1024;
+/** Fixed format document whose digest is the schemaSha256 of every handoff artifact. */
+export const WORKFLOW_HANDOFF_FORMAT = Object.freeze({
+	format: "git-format-patch",
+	mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+	/** pi-subagent contract revision that defines the rendering. */
+	revision: 6,
+});
+export const WORKFLOW_HANDOFF_FORMAT_SHA256 = canonicalSha256(
+	WORKFLOW_HANDOFF_FORMAT,
+);
 /** Generations per task: the initial execution plus re-executions after invalidation. */
 export const MAX_TASK_EXECUTION_GENERATIONS = 16;
 // Initial attempt plus up to 10 retries and up to 10 resumes (pi-subagent caps).
@@ -184,11 +200,19 @@ export const TaskRefSchema = Type.Object(
 );
 export type TaskRef = Static<typeof TaskRefSchema>;
 
+export const WorkflowArtifactOutputSchema = Type.Union([
+	Type.Literal("result"),
+	Type.Literal("handoff"),
+]);
+export type WorkflowArtifactOutput = Static<
+	typeof WorkflowArtifactOutputSchema
+>;
+
 export const WorkflowArtifactHandleRefSchema = Type.Object(
 	{
 		runId: WorkflowRunIdSchema,
 		producerTaskId: WorkflowTaskIdSchema,
-		output: Type.Literal("result"),
+		output: WorkflowArtifactOutputSchema,
 	},
 	{ additionalProperties: false },
 );
@@ -232,7 +256,7 @@ export const WorkflowArtifactRefSchema = Type.Object(
 		producerTaskId: Type.Optional(WorkflowTaskIdSchema),
 		/** The producing task execution; present iff producerTaskId is present. */
 		producerExecutionId: Type.Optional(TaskExecutionIdSchema),
-		output: Type.Optional(Type.Literal("result")),
+		output: Type.Optional(WorkflowArtifactOutputSchema),
 		sha256: Sha256Schema,
 		bytes: Type.Integer({ minimum: 0, maximum: 16 * 1024 * 1024 }),
 		mediaType: Type.String({
@@ -299,6 +323,34 @@ export const AgentResumePolicySchema = Type.Object(
 );
 export type AgentResumePolicy = Static<typeof AgentResumePolicySchema>;
 
+/** Same pattern as pi-subagent's HandoffRefSchema object ids. */
+export const GitObjectIdSchema = Type.String({ pattern: "^[a-f0-9]{40,64}$" });
+export type GitObjectId = Static<typeof GitObjectIdSchema>;
+
+export const HandoffPolicySchema = Type.Union([
+	Type.Literal("required"),
+	Type.Literal("optional"),
+]);
+export type HandoffPolicy = Static<typeof HandoffPolicySchema>;
+
+export const AgentWorkspaceRequestSchema = Type.Union([
+	Type.Object(
+		{
+			mode: Type.Literal("read-only"),
+			cwd: Type.String({ minLength: 1, maxLength: 4096 }),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			mode: Type.Literal("worktree"),
+			cwd: Type.String({ minLength: 1, maxLength: 4096 }),
+		},
+		{ additionalProperties: false },
+	),
+]);
+export type AgentWorkspaceRequest = Static<typeof AgentWorkspaceRequestSchema>;
+
 export const AgentTaskRequestSchema = Type.Object(
 	{
 		agent: ResourceNameSchema,
@@ -317,13 +369,9 @@ export const AgentTaskRequestSchema = Type.Object(
 			maxItems: 2,
 			uniqueItems: true,
 		}),
-		workspace: Type.Object(
-			{
-				mode: Type.Literal("read-only"),
-				cwd: Type.String({ minLength: 1, maxLength: 4096 }),
-			},
-			{ additionalProperties: false },
-		),
+		workspace: AgentWorkspaceRequestSchema,
+		/** Worktree tasks only; normalized to "required" by the materializer when omitted. */
+		handoff: Type.Optional(HandoffPolicySchema),
 		outputSchema: JsonSchemaDocumentSchema,
 		limits: RunLimitsSchema,
 		retry: Type.Optional(AgentRetryPolicySchema),
@@ -549,6 +597,19 @@ export const TaskExecutionRecordSchema = Type.Union([
 ]);
 export type TaskExecutionRecord = Static<typeof TaskExecutionRecordSchema>;
 
+/** Handoff identity projected from a settled worktree attempt; never paths, branches, or refs. */
+export const SubagentHandoffEvidenceSchema = Type.Object(
+	{
+		attemptId: SubagentAttemptIdSchema,
+		baselineHead: GitObjectIdSchema,
+		handoffCommit: GitObjectIdSchema,
+	},
+	{ additionalProperties: false },
+);
+export type SubagentHandoffEvidence = Static<
+	typeof SubagentHandoffEvidenceSchema
+>;
+
 export const SubagentTerminalEvidenceSchema = Type.Object(
 	{
 		kind: Type.Literal("subagent"),
@@ -567,6 +628,7 @@ export const SubagentTerminalEvidenceSchema = Type.Object(
 		truncated: Type.Boolean(),
 		output: Type.Optional(SubagentArtifactRefSchema),
 		structuredOutputSha256: Type.Optional(Sha256Schema),
+		handoff: Type.Optional(SubagentHandoffEvidenceSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -592,6 +654,7 @@ export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
 			Type.Literal("nested-launch"),
 			Type.Literal("nested-import"),
 			Type.Literal("nested-input"),
+			Type.Literal("handoff-import"),
 		]),
 		failureSha256: Sha256Schema,
 		message: Type.String({ minLength: 1, maxLength: 4096 }),
@@ -669,7 +732,35 @@ export const TaskExecutionOutcomeSchema = Type.Union([
 ]);
 export type TaskExecutionOutcome = Static<typeof TaskExecutionOutcomeSchema>;
 
+/**
+ * The only JSON face of an imported handoff: what ctx.handoff() resolves, what a
+ * returned handoff handle commits as workflow output, and what input projection
+ * places in delegated context. It carries identity, never paths or branch names.
+ */
+export const WorkflowHandoffDescriptorSchema = Type.Object(
+	{
+		artifactId: WorkflowArtifactIdSchema,
+		runId: WorkflowRunIdSchema,
+		producerTaskId: WorkflowTaskIdSchema,
+		producerExecutionId: TaskExecutionIdSchema,
+		subagentRunId: SubagentRunIdSchema,
+		subagentAttemptId: SubagentAttemptIdSchema,
+		baselineHead: GitObjectIdSchema,
+		handoffCommit: GitObjectIdSchema,
+		format: Type.Literal("git-format-patch"),
+		mediaType: Type.Literal(HANDOFF_EXPORT_MEDIA_TYPE),
+		sha256: Sha256Schema,
+		bytes: Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_HANDOFF_BYTES }),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowHandoffDescriptor = Static<
+	typeof WorkflowHandoffDescriptorSchema
+>;
+
 export {
+	type HandoffRef,
+	HandoffRefSchema,
 	SubagentAttemptIdSchema,
 	SubagentRunIdSchema,
 	SubagentRunStatusSchema,
@@ -714,7 +805,7 @@ export type WorkflowRuntimeContract = Static<
 
 const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 	schema: "pi-subagent-runtime",
-	contractRevision: 5,
+	contractRevision: 6,
 	features: Object.freeze({
 		nativeSessionBackend: true,
 		gondolinSandbox: true,
@@ -732,6 +823,7 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		retryBackoff: true,
 		deepReconciliation: true,
 		worktrees: true,
+		handoffExport: true,
 		publicNetworkEgress: true,
 		explicitResources: true,
 		ambientExtensionsControl: true,
@@ -755,7 +847,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			pipelines: true,
 			resume: false,
 			replay: true,
-			worktrees: false,
+			worktrees: true,
 			supportTaskExecution: true,
 			nestedWorkflows: true,
 			nestedArtifactInputs: true,

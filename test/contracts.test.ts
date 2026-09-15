@@ -1,4 +1,7 @@
-import { SUBAGENT_RUNTIME_CONTRACT } from "@vegardx/pi-subagent";
+import {
+	HANDOFF_EXPORT_MEDIA_TYPE,
+	SUBAGENT_RUNTIME_CONTRACT,
+} from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
@@ -6,25 +9,32 @@ import {
 	AgentRetryPolicySchema,
 	AgentTaskRequestSchema,
 	AgentTaskSpecSchema,
+	HandoffPolicySchema,
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_NESTED_WORKFLOW_TASKS,
 	MAX_TASK_ATTEMPTS,
+	MAX_WORKFLOW_HANDOFF_BYTES,
 	MaterializedAgentTaskSchema,
 	MaterializedWorkflowTaskSchema,
 	NestedWorkflowInputArtifactSchema,
 	NestedWorkflowInputArtifactsSchema,
 	NestedWorkflowTaskSpecSchema,
 	NestedWorkflowTerminalEvidenceSchema,
+	SubagentHandoffEvidenceSchema,
 	SubagentTerminalEvidenceSchema,
 	SupportTaskTerminalEvidenceSchema,
 	TaskExecutionRecordSchema,
 	TaskExecutionTerminalEvidenceSchema,
 	WORKFLOW_CONTRACT_REVISION,
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
 	WORKFLOW_RUNTIME_CONTRACT,
+	WorkflowArtifactOutputSchema,
+	WorkflowArtifactRefSchema,
 	WorkflowBudgetSchema,
 	WorkflowExecutionFailureEvidenceSchema,
+	WorkflowHandoffDescriptorSchema,
 } from "../src/contracts.js";
 import { WorkflowBudgetSchema as DefinitionBudgetSchema } from "../src/definition.js";
 import {
@@ -130,9 +140,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 16 and rejects revision 15 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(16);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(16);
+	it("publishes revision 17 and rejects revision 16 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(17);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(17);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -144,7 +154,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 16,
+			contractRevision: 17,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -159,12 +169,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 15,
+				contractRevision: 16,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 16,
+			contractRevision: 17,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -188,7 +198,7 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 15,
+				contractRevision: 16,
 			}),
 		).toBe(false);
 	});
@@ -662,15 +672,124 @@ describe("workflow contracts", () => {
 		).toBe(false);
 	});
 
-	it("rejects worktree requests while the capability is unavailable", () => {
+	it("admits worktree requests with a handoff policy", () => {
 		const spec = agentTaskSpec();
+		const worktree = {
+			...spec,
+			request: {
+				...spec.request,
+				workspace: { mode: "worktree", cwd: "/repo" },
+			},
+		};
+		expect(Value.Check(AgentTaskSpecSchema, worktree)).toBe(true);
+		for (const handoff of ["required", "optional"]) {
+			expect(
+				Value.Check(AgentTaskSpecSchema, {
+					...worktree,
+					request: { ...worktree.request, handoff },
+				}),
+			).toBe(true);
+		}
+		expect(
+			Value.Check(AgentTaskSpecSchema, {
+				...worktree,
+				request: { ...worktree.request, handoff: "never" },
+			}),
+		).toBe(false);
 		expect(
 			Value.Check(AgentTaskSpecSchema, {
 				...spec,
 				request: {
 					...spec.request,
-					workspace: { mode: "worktree", cwd: "/repo" },
+					workspace: { mode: "shared", cwd: "/repo" },
 				},
+			}),
+		).toBe(false);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
+	});
+
+	it("requires pi-subagent revision 6 with handoff export", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(6);
+		expect(
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.handoffExport,
+		).toBe(true);
+		expect(
+			isCompatibleSubagentContract({
+				...SUBAGENT_RUNTIME_CONTRACT,
+				contractRevision: 5,
+			}),
+		).toBe(false);
+		expect(
+			isCompatibleSubagentContract({
+				...SUBAGENT_RUNTIME_CONTRACT,
+				features: {
+					...SUBAGENT_RUNTIME_CONTRACT.features,
+					handoffExport: false,
+				},
+			}),
+		).toBe(false);
+	});
+
+	it("publishes the handoff artifact output, evidence, and descriptor", () => {
+		const gitObjectId = "b".repeat(40);
+		const handoff = {
+			attemptId: "attempt_abc123",
+			baselineHead: gitObjectId,
+			handoffCommit: "c".repeat(40),
+		};
+		expect(Value.Check(SubagentHandoffEvidenceSchema, handoff)).toBe(true);
+		expect(
+			Value.Check(SubagentHandoffEvidenceSchema, {
+				...handoff,
+				handoffCommit: "refs/heads/main",
+			}),
+		).toBe(false);
+		expect(Value.Check(WorkflowArtifactOutputSchema, "handoff")).toBe(true);
+		expect(
+			Value.Check(WorkflowArtifactRefSchema, {
+				...artifactRef(),
+				output: "handoff",
+				mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+				schemaSha256: WORKFLOW_HANDOFF_FORMAT_SHA256,
+			}),
+		).toBe(true);
+		expect(Value.Check(HandoffPolicySchema, "required")).toBe(true);
+		expect(Value.Check(HandoffPolicySchema, "never")).toBe(false);
+		expect(MAX_WORKFLOW_HANDOFF_BYTES).toBe(16 * 1024 * 1024);
+		expect(WORKFLOW_HANDOFF_FORMAT_SHA256).toMatch(/^[a-f0-9]{64}$/);
+		expect(
+			Value.Check(WorkflowExecutionFailureEvidenceSchema, {
+				kind: "workflow",
+				stage: "handoff-import",
+				failureSha256: sha,
+				message: "Completed worktree task captured no handoff.",
+			}),
+		).toBe(true);
+		const descriptor = {
+			artifactId: `artifact_${sha}`,
+			runId: "workflow_abc123",
+			producerTaskId: "task_abc123",
+			producerExecutionId: "execution_abc123",
+			subagentRunId: "run_abc123",
+			subagentAttemptId: "attempt_abc123",
+			baselineHead: gitObjectId,
+			handoffCommit: "c".repeat(40),
+			format: "git-format-patch",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			sha256: sha,
+			bytes: 1,
+		};
+		expect(Value.Check(WorkflowHandoffDescriptorSchema, descriptor)).toBe(true);
+		expect(
+			Value.Check(WorkflowHandoffDescriptorSchema, {
+				...descriptor,
+				bytes: MAX_WORKFLOW_HANDOFF_BYTES + 1,
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowHandoffDescriptorSchema, {
+				...descriptor,
+				worktreePath: "/private/worktree",
 			}),
 		).toBe(false);
 	});
