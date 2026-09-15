@@ -91,12 +91,24 @@ Delivered:
   history, exact on-path prefix replay with a divergent suffix and readoption,
   and the service `invalidate` trigger on settled failed or interrupted runs
   (runtime contract feature `transactionalInvalidation: true`, contract
-  revision 15).
+  revision 15);
+- required and advisory finalizers: `ctx.finalize` declarations lowered into
+  `role: "finalizer"` agent, support, or nested workflow tasks, driven only
+  while the run is `finalizing` after the output commit, never barrier
+  targets, with required failure blocking success and advisory failure
+  degrading it (runtime contract feature `finalizers: true`, contract
+  revision 16);
+- interrupted children retained without release: an `interrupted` settlement
+  with no admissible resume terminalizes the execution directly, and the
+  reducer admits operator `resume` intents (`origin: "operator"`) that reopen
+  such an execution (runtime contract feature `operatorAttempts: true`,
+  contract revision 16).
 
 Remaining:
 
-- operator-triggered retry;
-- required and advisory finalizers;
+- operator-triggered retry and resume surface over the service (the reducer
+  admits operator resume intents since revision 16; no service method or
+  tool appends them yet);
 - checkpoints and immutable decisions;
 - richer logs and reconciliation controls;
 - retention and pin coordination.
