@@ -106,11 +106,16 @@ Delivered:
   such an execution (runtime contract feature `operatorAttempts: true`,
   contract revision 16).
 
+- operator-triggered retry and resume over the service: `retry(runId,
+  taskId, reason)` as invalidation restricted to a failed or interrupted
+  cause task, and `resume(runId, reason, { taskId })` appending the operator
+  `resume` intent the reducer admits since revision 16 and re-attempting the
+  interrupted child on its existing subagent run, both exposed as
+  `workflow_retry` and `workflow_resume` and advertised through
+  `availableActions`.
+
 Remaining:
 
-- operator-triggered retry and resume surface over the service (the reducer
-  admits operator resume intents since revision 16; no service method or
-  tool appends them yet);
 - checkpoints and immutable decisions;
 - richer logs and reconciliation controls;
 - retention and pin coordination.
@@ -120,9 +125,15 @@ Remaining:
 Delivered:
 
 - tool declaration table with output schemas: `WORKFLOW_TOOL_DECLARATIONS`
-  binds the seven existing tools to typed service results, the extension
-  registers from it, and every declared output schema is validated against a
-  real service result;
+  binds all thirteen tools to typed service results, the extension registers
+  from it, every declared output schema is validated against a real service
+  result, and each entry carries its one-line call and result rendering;
+- complete workflow command surface: the unified `/workflow` command, the
+  `pi-workflow` widget below the editor, and the `alt+w` inspector as
+  projections of the service read surface (`availableActions`,
+  `requiresAttention`, ownership), with the read tools `workflow_runs`,
+  `workflow_inspect`, `workflow_logs` and the operator tools
+  `workflow_invalidate`, `workflow_retry`, `workflow_resume`;
 - workflow authoring skill shipped under `skills/` and declared through
   `pi.skills`, with loader-tested examples;
 - compatibility matrix (`compatibility.json`, `docs/compatibility.md`) checked
@@ -131,13 +142,11 @@ Delivered:
 
 Remaining:
 
-- persistent widget and inspector;
-- complete workflow command/tool surface, including operator-triggered retry
-  and invalidate tools over the service;
 - a handoff export tool over `WorkflowService.exportHandoff` that writes the
   handoff bytes to a caller path; deferred because a tool result of up to
   16 MiB returned to a model is wrong and writing caller paths needs its own
   authority text;
+- `decide` tool once checkpoints ship;
 - first stable static-workflow API.
 
 ## Phase 5 — dynamic workflows

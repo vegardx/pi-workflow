@@ -217,8 +217,9 @@ its input; the parent's intent carries the matching digest map.
 Revision 17 records subagent retry and resume attempts under the existing
 agent task execution. Every attempt intent carries `origin: "policy"` (written
 by the retrier, never with a `reason`) or `origin: "operator"` (a `resume`
-intent with an optional `reason`, admitted by the reducer but not yet appended
-by any service surface), and the attempt projection retains both fields. A new
+intent with an optional `reason`, appended only by the service `resume`
+method before the `interrupted -> running` transition), and the attempt
+projection retains both fields. A new
 execution generation, created only after explicit
 invalidation re-materialized the task, requires a new preflight, operation ID,
 launch intent, and subagent run.
