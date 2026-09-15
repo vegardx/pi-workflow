@@ -37,7 +37,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 14 as const,
+			contractRevision: 15 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -63,7 +63,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const root = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 14 as const,
+			contractRevision: 15 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -119,7 +119,7 @@ describe("workflow run record", () => {
 			}),
 		).rejects.toThrow("invalid workflow run record");
 		await expect(
-			store.create({ ...root, contractRevision: 13 as unknown as 14 }),
+			store.create({ ...root, contractRevision: 14 as unknown as 15 }),
 		).rejects.toThrow("invalid workflow run record");
 		const nested = { ...root, depth: 1, parent };
 		await store.create(nested);
@@ -137,7 +137,7 @@ describe("workflow run record", () => {
 		};
 		const nested = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 14 as const,
+			contractRevision: 15 as const,
 			runId: "workflow_record" as const,
 			depth: 1,
 			parent,
@@ -213,7 +213,7 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 14,
+				contractRevision: 15,
 				runId: "workflow_record",
 				depth: 0,
 				definitionName: "example",

@@ -45,6 +45,7 @@ export {
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_NESTED_WORKFLOW_TASKS,
 	MAX_TASK_ATTEMPTS,
+	MAX_TASK_EXECUTION_GENERATIONS,
 	MAX_WORKFLOW_CONCURRENCY,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
@@ -154,6 +155,7 @@ export {
 	TaskExecutionProjectionSchema,
 	type WorkflowBarrierProjection,
 	WorkflowBarrierProjectionSchema,
+	type WorkflowEffectProjection,
 	type WorkflowEventInput,
 	WorkflowEventInputSchema,
 	type WorkflowEventType,
@@ -219,9 +221,11 @@ export {
 	WorkflowRunLeaseUnavailableError,
 } from "./persistence/run-lease.js";
 export {
+	invalidationClosure,
 	rebuildWorkflowSnapshot,
 	reduceWorkflowEvents,
 	WorkflowEventReductionError,
+	type WorkflowInvalidationClosure,
 } from "./reducer.js";
 export {
 	type DiscoveredWorkflow,
