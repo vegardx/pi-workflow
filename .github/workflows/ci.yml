@@ -39,6 +39,14 @@ jobs:
         working-directory: pi-subagent
       - run: npm ci
         working-directory: pi-workflow
+      # Every suite writes its journals, artifact stores, and leases under
+      # .pi/ in the checkout and fsyncs each append. On the runner's disk the
+      # fsync-bound suites ran 10-50x slower than locally (nested-execution
+      # 304 s, scheduler 256 s, service 221 s in run 34970590645) and the job
+      # exceeded its 15 minute budget. A tmpfs keeps the durability code path
+      # intact while removing the disk cost.
+      - run: mkdir -p .pi && sudo mount -t tmpfs -o size=2g tmpfs .pi
+        working-directory: pi-workflow
       - run: npm run check
         working-directory: pi-workflow
       - run: npm audit --audit-level=low
