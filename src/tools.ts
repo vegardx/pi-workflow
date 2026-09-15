@@ -5,6 +5,7 @@ import {
 	MAX_WORKFLOW_CONCURRENCY,
 	NestedWorkflowInputArtifactsSchema,
 	TaskKeySchema,
+	TaskRoleSchema,
 	WorkflowArtifactIdSchema,
 	WorkflowBudgetSchema,
 	WorkflowDefinitionNameSchema,
@@ -116,6 +117,7 @@ export const WorkflowServiceTaskViewSchema = Type.Object(
 			Type.Literal("support"),
 			Type.Literal("workflow"),
 		]),
+		role: TaskRoleSchema,
 		status: WorkflowTaskStatusSchema,
 		/** Generation of the task's current execution; 0 when it has none. */
 		generation: Type.Integer({

@@ -12,7 +12,7 @@ checks fail when this document, the manifest, or the constants disagree.
 | Component | Value | Source |
 | --- | --- | --- |
 | `@vegardx/pi-workflow` | 0.1.0 | `package.json` `version` |
-| `WORKFLOW_CONTRACT_REVISION` | 15 | `src/contracts.ts` |
+| `WORKFLOW_CONTRACT_REVISION` | 16 | `src/contracts.ts` |
 | Required `@vegardx/pi-subagent` | `0.9.0` (exact) | `package.json` `peerDependencies` |
 | Required pi-subagent contract revision | 5 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
 | pi-subagent commit built in CI | `aec79ff8f75dad7dc4125def1ad83b50bbba7391` | `.github/workflows/ci.yml` |
@@ -57,6 +57,6 @@ it is revision 5 and every feature below has exactly this value.
 | Linux x64 | Build-only | GitHub Actions `ubuntu-latest` on Node.js 24.16.0 builds the pinned pi-subagent commit, then runs `npm run check` (Biome, `tsc`, build, Vitest with fake subagent clients, pack check) and `npm audit --audit-level=low`. No real Pi session, model, or Gondolin VM is exercised. |
 | Other platforms | Not built | Nothing else is built, tested, or qualified. |
 
-Support tasks, nested workflows, retry and resume attempts, and invalidation
-are covered by unit and packed-contract tests only; no host qualification
-report exists for them yet.
+Support tasks, nested workflows, retry and resume attempts, invalidation,
+finalizers, and interrupted-child retention are covered by unit and
+packed-contract tests only; no host qualification report exists for them yet.

@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a static pi-
 
 # Authoring static pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` contract revision 15. Every rule
+This skill covers `@vegardx/pi-workflow` contract revision 16. Every rule
 below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, and the pi-subagent launch contracts).
@@ -13,10 +13,11 @@ Quoted strings are the exact messages the runtime throws. Worked examples that
 load through the real definition loader are in
 [references/examples.md](references/examples.md).
 
-Not available in revision 15: `ctx.checkpoint`, `ctx.artifact`,
-`ctx.finalize`, dynamic workflows, writer (non-read-only) agent tasks, fork
-context, operator-triggered retry, and a Pi tool for invalidation. Do not
-author against them; a definition that calls them fails when its source runs.
+Not available in revision 16: `ctx.checkpoint`, `ctx.artifact`, dynamic
+workflows, writer (non-read-only) agent tasks, fork context, operator-triggered
+retry or resume tools, and a Pi tool for invalidation. Do not author against
+them; a definition that calls them fails when its source runs. `ctx.finalize`
+is available since revision 16; see [Finalizers](#finalizers).
 
 ## Validate, run, inspect
 
@@ -38,8 +39,8 @@ author against them; a definition that calls them fails when its source runs.
    any time. The view carries `status`, `definitionName`, `createdAt`,
    `deadlineAt`, `depth`, `output` and `outputArtifactId` once committed, and
    `tasks[]` (one entry per declared task in materialization order with `id`,
-   `namespace`, `key`, `kind`, `status`, `generation`, and `abandoned: true`
-   for abandoned history).
+   `namespace`, `key`, `kind`, `role` (`"task"` or `"finalizer"`), `status`,
+   `generation`, and `abandoned: true` for abandoned history).
 6. `workflow_stop { runId, reason }` persists stop intent and drains;
    `workflow_reconcile { runId }` re-opens a run after restart, interruption,
    or `cleanup-blocked`.
@@ -78,12 +79,12 @@ unique across all roots ("duplicate workflow name <name>: <path> and <path>").
 Static imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
 module specifiers of support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 15". Relative imports of helper files are therefore
+contract revision 16". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 15",
+"dynamic workflow imports are not supported by contract revision 16",
 "dynamic imports and CommonJS require are not supported by contract revision
-15", and "TypeScript import assignment is not supported by contract revision
-15". Import-like text inside strings and comments is fine. The loader
+16", and "TypeScript import assignment is not supported by contract revision
+16". Import-like text inside strings and comments is fine. The loader
 resolves imports from the definition file's location, so `@vegardx/pi-workflow`
 and `typebox` must be resolvable there.
 
@@ -154,6 +155,7 @@ export default defineWorkflow({
 | `ctx.fanOut(namespace, items, { key, task })` | Declares at most 64 agent tasks in namespace `[namespace]`; returns handles in item order. "Workflow fan-out namespace is invalid.", "Workflow fan-out exceeds 64 items.", "Workflow fan-out options are invalid." |
 | `ctx.fanIn(key, sources, { inputKey, task })` | Declares one agent task whose `inputs` are the 1..64 source outputs under the names `inputKey(source, index)` returns. `task` may not carry its own `inputs`. "Workflow fan-in requires 1 to 64 sources.", "Workflow fan-in options are invalid.", "Workflow fan-in input keys must be unique." |
 | `ctx.pipeline(namespace, build)` | Runs a synchronous builder whose `stage.agent(key, request)` declares at most 64 agent tasks in namespace `[namespace]`; the builder must return one of them. "Workflow pipeline definition is invalid.", "Workflow pipeline exceeds 64 stages.", "Workflow pipeline must return one of its stage handles." |
+| `ctx.finalize(key, { kind, support \| agent \| workflow })` | Declares a `role: "finalizer"` task that the runtime drives itself after the output commit; `kind` is `"required"` or `"advisory"`. Returns a handle other finalizers may depend on; never a barrier target. See [Finalizers](#finalizers). |
 | `await ctx.result(handle)` | Barrier: persists all declarations so far, drives until the task completes, returns its frozen validated value. |
 | `await ctx.results([a, b])` | Fail-fast barrier over several handles; returns a tuple in declaration order. |
 | `await ctx.settled([a, b])` | Barrier that never throws for task failure; returns `{ status: "fulfilled", value }` or `{ status: "rejected", taskId, outcome, failure? }` per handle. |
@@ -358,6 +360,46 @@ replay? })` runs another discovered definition as a linked child run.
   addressable by its own run ID with `workflow_status`; its view carries
   `depth` and `parent: { runId, taskId, inputArtifacts }`.
 
+## Finalizers
+
+`ctx.finalize(key, { kind, support | agent | workflow })` declares a finalizer:
+a task with `role: "finalizer"` that the runtime drives itself after the
+ordinary graph has settled and the output has been committed, while the run is
+`finalizing`. Use it for cleanup, recording, or notification work that must
+not influence the output.
+
+- `kind` is `"required"` or `"advisory"` ("invalid finalizer kind").
+  `required` lowers to `disposition: "required"`; `advisory` lowers to
+  `disposition: "optional"`.
+- Exactly one of `support` (a `defineSupportTask` descriptor), `agent` (an
+  agent request), or `workflow` (a nested workflow request) names the work
+  ("finalizer requires exactly one of support, agent, or workflow"). A request
+  that is not an object fails with "Workflow finalizer request is invalid.".
+- The inner request may not carry its own `disposition`, even `undefined`
+  ("finalizer disposition is its kind"). `after`, `inputs`, and `replay` are
+  allowed and follow the ordinary rules.
+- A finalizer may depend on ordinary tasks and on other finalizers. An
+  ordinary task may not depend on a finalizer through `after` or `inputs`
+  ("ordinary task may not depend on a finalizer").
+- Finalizers are never barrier targets: do not pass the handle to
+  `ctx.result`, `ctx.results`, or `ctx.settled`, and do not return it
+  ("a finalizer cannot be a barrier target"). Declare them, then return the
+  ordinary output handle or value.
+- Finalizers run only while the run is `finalizing`, after `run-output-committed`;
+  the output can never be changed by them. They share the run's concurrency
+  lanes and budget, are validated, persisted, and replayed exactly like other
+  declarations, and appear in the run view with `role: "finalizer"`.
+- A required finalizer that ends `failed` or `interrupted` fails the run
+  (`finalizing -> failed` or `finalizing -> interrupted`); one left `blocked`
+  by a failed dependency fails it with
+  "Required finalizer did not complete: blocked.". An advisory finalizer that
+  fails or is blocked ends the run `completed-degraded`. Interrupted optional
+  work, whether an optional task or an advisory finalizer, degrades completion
+  instead of preventing it.
+- After the output commit, `service.invalidate` may target only finalizers
+  ("invalidation after output commit may only cover finalizers"); the
+  finalizer re-executes as its next generation against the existing output.
+
 ## Failure semantics for authors
 
 - Required task (the default) that ends `failed`, `cancelled`, `interrupted`,
@@ -366,8 +408,8 @@ replay? })` runs another discovered definition as a linked child run.
   it throws first.
 - Optional task (`disposition: "optional"`) failure never fails the run. Read
   it through `ctx.settled`. When every required task completed and at least one
-  optional task did not, the run ends `completed-degraded` instead of
-  `completed`.
+  optional task or advisory finalizer did not, the run ends
+  `completed-degraded` instead of `completed`.
 - Dependents of a failed task become `blocked`.
 - An exception thrown by `run` (including a rejected barrier) ends the run
   `failed` with reason "Static workflow source execution failed."; an output
@@ -376,8 +418,14 @@ replay? })` runs another discovered definition as a linked child run.
 - `cleanup-blocked` means a child's cleanup, release, or output import could
   not be proved; the run waits for `workflow_reconcile`, which retries the
   import or reconciles the child.
-- `interrupted` means the run lost its lease or a child was interrupted without
-  an admissible resume attempt; reconcile or invalidate it.
+- `interrupted` means the run lost its lease or an agent child was interrupted
+  without an admissible resume attempt. Such a child is retained in
+  pi-subagent without release; the task ends `interrupted` with the reason
+  "Interrupted child retained for recovery; no release performed." and the run
+  never resumes it on its own. Recover a lost lease with `workflow_reconcile`;
+  recover an interrupted task with `service.invalidate(runId, taskId,
+  reason)`, which re-executes it as a new generation with a fresh child run.
+  There is no operator resume tool in revision 16.
 - `cancelled` is the result of `workflow_stop`, session shutdown, or the
   deadline. Trusted source awaiting `ctx.signal` should unwind when it aborts.
 - Run statuses: `created`, `running`, `waiting`, `finalizing`, `stopping`,
