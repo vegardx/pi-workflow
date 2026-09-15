@@ -9,6 +9,7 @@ import {
 	type AgentTaskSpec,
 	MAX_NESTED_WORKFLOW_TASKS,
 	MAX_TASK_ATTEMPTS,
+	MAX_TASK_EXECUTION_GENERATIONS,
 	type NestedWorkflowTaskExecutionRecord,
 	type NestedWorkflowTaskSpec,
 	type SubagentTerminalEvidence,
@@ -16,6 +17,7 @@ import {
 	type SupportTaskSpec,
 	type TaskExecutionId,
 	type TaskExecutionOutcome,
+	type WorkflowArtifactRef,
 	type WorkflowTaskId,
 } from "./contracts.js";
 import {
@@ -25,6 +27,7 @@ import {
 	WorkflowEventInputSchema,
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
+	type WorkflowTaskProjection,
 } from "./events.js";
 import {
 	deriveJsonValueSha256,
@@ -100,6 +103,102 @@ function transitiveDependents(
 		}
 	}
 	return selected;
+}
+
+function isOnPath(task: WorkflowTaskProjection): boolean {
+	return task.abandoned !== true;
+}
+
+function pathTasks(state: WorkflowStateProjection): WorkflowTaskProjection[] {
+	return Object.values(state.tasks).filter(isOnPath);
+}
+
+function pathBarriers(
+	state: WorkflowStateProjection,
+): WorkflowStateProjection["barriers"][number][] {
+	return state.barriers.filter((barrier) => barrier.abandoned !== true);
+}
+
+function hasPathFinalBarrier(state: WorkflowStateProjection): boolean {
+	return pathBarriers(state).some((barrier) => barrier.kind === "final");
+}
+
+function maxMaterializationSequence(state: WorkflowStateProjection): number {
+	return Object.values(state.tasks).reduce(
+		(max, task) => Math.max(max, task.task.materializationSequence),
+		0,
+	);
+}
+
+function currentExecutionIsActive(
+	state: WorkflowStateProjection,
+	task: WorkflowTaskProjection,
+): boolean {
+	const execution = task.currentExecutionId
+		? state.executions[task.currentExecutionId]
+		: undefined;
+	return execution !== undefined && execution.phase !== "terminal";
+}
+
+/** The result artifact produced by the task's current execution, if any. */
+function currentResultArtifact(
+	state: WorkflowStateProjection,
+	taskId: WorkflowTaskId,
+): WorkflowArtifactRef | undefined {
+	const task = state.tasks[taskId];
+	if (!task?.currentExecutionId) return undefined;
+	return Object.values(state.artifacts).find(
+		(artifact) =>
+			artifact.producerTaskId === taskId &&
+			artifact.output === "result" &&
+			artifact.producerExecutionId === task.currentExecutionId,
+	);
+}
+
+export interface WorkflowInvalidationClosure {
+	readonly taskIds: WorkflowTaskId[];
+	readonly abandonedEpochs: number[];
+}
+
+/**
+ * The exact invalidation closure for a cause task: the cause plus every
+ * transitive dependent that is not already invalidated, and the on-path
+ * epochs after the first on-path barrier exposing any closure task.
+ */
+export function invalidationClosure(
+	state: WorkflowStateProjection,
+	causeTaskId: WorkflowTaskId,
+): WorkflowInvalidationClosure {
+	const cause = state.tasks[causeTaskId];
+	if (!cause) throw new Error("invalidation cause task is unknown");
+	if (cause.status === "invalidated") {
+		throw new Error("invalidation cause is already invalidated");
+	}
+	const closure = new Set(
+		[...transitiveDependents(state, causeTaskId)].filter(
+			(taskId) => state.tasks[taskId]?.status !== "invalidated",
+		),
+	);
+	for (const taskId of closure) {
+		const generations = Object.values(state.executions).filter(
+			(execution) => execution.execution.taskId === taskId,
+		).length;
+		if (generations >= MAX_TASK_EXECUTION_GENERATIONS) {
+			throw new Error("task execution generation bound exceeded");
+		}
+	}
+	const exposing = pathBarriers(state).find((barrier) =>
+		barrier.taskIds.some((taskId) => closure.has(taskId)),
+	);
+	const abandonedEpochs = exposing
+		? pathBarriers(state)
+				.filter((barrier) => barrier.epoch > exposing.epoch)
+				.map((barrier) => barrier.epoch)
+		: [];
+	return {
+		taskIds: [...closure].sort(),
+		abandonedEpochs: abandonedEpochs.sort((left, right) => left - right),
+	};
 }
 
 function executionProjection(
@@ -285,13 +384,8 @@ function taskInputsSha256(
 ): string {
 	const inputs: Record<string, string> = {};
 	for (const [name, input] of Object.entries(spec.inputs)) {
-		const candidates = Object.values(state.artifacts).filter(
-			(artifact) =>
-				artifact.producerTaskId === input.producerTaskId &&
-				artifact.output === "result",
-		);
-		const artifact = candidates[0];
-		if (!artifact || candidates.length !== 1) {
+		const artifact = currentResultArtifact(state, input.producerTaskId);
+		if (!artifact) {
 			fail(
 				`${spec.kind === "support" ? "support" : "workflow"} task input artifact is missing or ambiguous`,
 				sequence,
@@ -431,7 +525,7 @@ function applyEvent(
 			) {
 				fail("terminal workflow run may not declare tasks", event.sequence);
 			}
-			if (state.barriers.some((barrier) => barrier.kind === "final")) {
+			if (hasPathFinalBarrier(state)) {
 				fail("task declaration follows the final barrier", event.sequence);
 			}
 			if (task.runId !== state.runId) {
@@ -479,7 +573,9 @@ function applyEvent(
 					spec,
 				});
 				const workflowTaskCount = Object.values(state.tasks).filter(
-					(existing) => existing.task.spec.kind === "workflow",
+					(existing) =>
+						existing.task.spec.kind === "workflow" &&
+						existing.task.id !== task.id,
 				).length;
 				if (workflowTaskCount + 1 > MAX_NESTED_WORKFLOW_TASKS) {
 					fail(
@@ -499,12 +595,33 @@ function applyEvent(
 			if (identitySha256 !== derivedIdentity) {
 				fail("declared task identity digest does not match", event.sequence);
 			}
-			if (state.tasks[task.id]) {
-				fail("duplicate workflow task ID", event.sequence);
+			// A declaration for an existing id readopts an abandoned task onto the
+			// current path when everything but its position fields is unchanged.
+			const readopted = state.tasks[task.id];
+			if (readopted) {
+				const {
+					materializationSequence: _previousSequence,
+					materializationEpoch: _previousEpoch,
+					epochPosition: _previousPosition,
+					...previousRecord
+				} = readopted.task;
+				const {
+					materializationSequence: _sequence,
+					materializationEpoch: _epoch,
+					epochPosition: _position,
+					...nextRecord
+				} = task;
+				if (
+					readopted.abandoned !== true ||
+					!isDeepStrictEqual(previousRecord, nextRecord)
+				) {
+					fail("duplicate workflow task ID", event.sequence);
+				}
 			}
 			if (
 				Object.values(state.tasks).some(
 					(existing) =>
+						existing.task.id !== task.id &&
 						taskNamespaceKey(existing.task) === taskNamespaceKey(task),
 				)
 			) {
@@ -512,7 +629,7 @@ function applyEvent(
 			}
 			if (
 				task.materializationSequence !==
-				Object.keys(state.tasks).length + 1
+				maxMaterializationSequence(state) + 1
 			) {
 				fail("task materialization sequence is not contiguous", event.sequence);
 			}
@@ -533,21 +650,23 @@ function applyEvent(
 			}
 			const explicitDependencies = new Set(
 				task.spec.after.map((dependency) => {
-					if (
-						dependency.runId !== state.runId ||
-						!state.tasks[dependency.taskId]
-					) {
+					const target = state.tasks[dependency.taskId];
+					if (dependency.runId !== state.runId || !target) {
 						fail("task order dependency is unknown", event.sequence);
+					}
+					if (!isOnPath(target)) {
+						fail("task dependency is abandoned", event.sequence);
 					}
 					return dependency.taskId;
 				}),
 			);
 			for (const inputRef of Object.values(task.spec.inputs)) {
-				if (
-					inputRef.runId !== state.runId ||
-					!state.tasks[inputRef.producerTaskId]
-				) {
+				const producer = state.tasks[inputRef.producerTaskId];
+				if (inputRef.runId !== state.runId || !producer) {
 					fail("task data dependency is unknown", event.sequence);
+				}
+				if (!isOnPath(producer)) {
+					fail("task dependency is abandoned", event.sequence);
 				}
 				if (!explicitDependencies.has(inputRef.producerTaskId)) {
 					fail(
@@ -556,7 +675,12 @@ function applyEvent(
 					);
 				}
 			}
-			state.tasks[task.id] = { task, status: "pending", committed: false };
+			if (readopted) {
+				readopted.task = task;
+				delete readopted.abandoned;
+			} else {
+				state.tasks[task.id] = { task, status: "pending", committed: false };
+			}
 			break;
 		}
 		case "artifact-declared": {
@@ -576,14 +700,19 @@ function applyEvent(
 			}
 			if (
 				(artifact.producerTaskId === undefined) !==
-				(artifact.output === undefined)
+					(artifact.output === undefined) ||
+				(artifact.producerTaskId === undefined) !==
+					(artifact.producerExecutionId === undefined)
 			) {
 				fail(
-					"artifact producer and output identity must appear together",
+					"artifact producer, execution, and output identity must appear together",
 					event.sequence,
 				);
 			}
-			if (artifact.producerTaskId !== undefined) {
+			if (
+				artifact.producerTaskId !== undefined &&
+				artifact.producerExecutionId !== undefined
+			) {
 				const producer = state.tasks[artifact.producerTaskId];
 				if (!producer) {
 					fail("artifact producer is unknown", event.sequence);
@@ -592,11 +721,18 @@ function applyEvent(
 					fail("artifact producer is not committed", event.sequence);
 				}
 				if (
+					state.executions[artifact.producerExecutionId]?.execution.taskId !==
+					artifact.producerTaskId
+				) {
+					fail("artifact producer execution does not match", event.sequence);
+				}
+				if (
 					artifact.output !== undefined &&
 					artifact.id !==
 						deriveWorkflowArtifactId({
 							runId: artifact.runId,
 							producerTaskId: artifact.producerTaskId,
+							producerExecutionId: artifact.producerExecutionId,
 							output: artifact.output,
 							schemaSha256: artifact.schemaSha256,
 							sha256: artifact.sha256,
@@ -619,6 +755,7 @@ function applyEvent(
 				Object.values(state.artifacts).some(
 					(existing) =>
 						existing.producerTaskId === artifact.producerTaskId &&
+						existing.producerExecutionId === artifact.producerExecutionId &&
 						existing.output === artifact.output,
 				)
 			) {
@@ -638,15 +775,19 @@ function applyEvent(
 			if (input.data.epoch !== state.currentEpoch) {
 				fail("barrier does not close the current epoch", event.sequence);
 			}
-			if (state.barriers.some((barrier) => barrier.kind === "final")) {
+			if (hasPathFinalBarrier(state)) {
 				fail(
 					"an event follows the final materialization barrier",
 					event.sequence,
 				);
 			}
 			for (const taskId of input.data.taskIds) {
-				if (!state.tasks[taskId]) {
+				const target = state.tasks[taskId];
+				if (!target) {
 					fail("barrier references an unknown task", event.sequence);
+				}
+				if (!isOnPath(target)) {
+					fail("barrier references an abandoned task", event.sequence);
 				}
 			}
 			for (const task of Object.values(state.tasks)) {
@@ -671,6 +812,9 @@ function applyEvent(
 			if (task.status !== "ready") {
 				fail("task execution requires a ready task", event.sequence);
 			}
+			if (!isOnPath(task)) {
+				fail("abandoned task may not execute", event.sequence);
+			}
 			if (
 				execution.runId !== state.runId ||
 				execution.taskIdentitySha256 !== task.task.spec.identitySha256
@@ -680,15 +824,19 @@ function applyEvent(
 			const previousGenerations = Object.values(state.executions).filter(
 				(candidate) => candidate.execution.taskId === execution.taskId,
 			);
-			const expectedGeneration = previousGenerations.length + 1;
-			if (
-				execution.generation !== expectedGeneration ||
-				execution.generation !== 1
-			) {
-				fail(
-					"task execution generation is unavailable or not contiguous",
-					event.sequence,
-				);
+			if (execution.generation !== previousGenerations.length + 1) {
+				fail("task execution generation is not contiguous", event.sequence);
+			}
+			if (execution.generation > MAX_TASK_EXECUTION_GENERATIONS) {
+				fail("task execution generation bound exceeded", event.sequence);
+			}
+			if (currentExecutionIsActive(state, task)) {
+				fail("task execution supersedes an active execution", event.sequence);
+			}
+			// Re-materialization clears the current execution pointer; a terminal
+			// execution still current here is a crash window awaiting repair.
+			if (task.currentExecutionId) {
+				fail("task execution is duplicate or already current", event.sequence);
 			}
 			if (
 				execution.id !==
@@ -753,7 +901,7 @@ function applyEvent(
 					);
 				}
 			}
-			if (state.executions[execution.id] || task.currentExecutionId) {
+			if (state.executions[execution.id]) {
 				fail("task execution is duplicate or already current", event.sequence);
 			}
 			state.executions[execution.id] = {
@@ -1195,6 +1343,7 @@ function applyEvent(
 				input.data.subagentRunId !== observation.subagentRunId ||
 				!artifact ||
 				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.producerExecutionId !== projection.execution.id ||
 				artifact.output !== "result"
 			) {
 				fail("task execution artifact import is invalid", event.sequence);
@@ -1310,6 +1459,7 @@ function applyEvent(
 				!artifact ||
 				artifact.runId !== state.runId ||
 				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.producerExecutionId !== projection.execution.id ||
 				artifact.output !== "result" ||
 				artifact.sha256 !== input.data.outputSha256 ||
 				artifact.mediaType !== "application/json" ||
@@ -1515,6 +1665,7 @@ function applyEvent(
 				!artifact ||
 				artifact.runId !== state.runId ||
 				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.producerExecutionId !== projection.execution.id ||
 				artifact.output !== "result" ||
 				artifact.mediaType !== "application/json" ||
 				artifact.sha256 !== input.data.sourceSha256 ||
@@ -1800,9 +1951,22 @@ function applyEvent(
 			if (task.status !== input.data.from) {
 				fail("task status source does not match projection", event.sequence);
 			}
+			if (!isOnPath(task)) {
+				fail("abandoned task may not change status", event.sequence);
+			}
 			const execution = task.currentExecutionId
 				? state.executions[task.currentExecutionId]
 				: undefined;
+			if (
+				input.data.to === "pending" &&
+				(input.data.from !== "invalidated" ||
+					(execution !== undefined && execution.phase !== "terminal"))
+			) {
+				fail(
+					"re-materialization requires a terminal execution",
+					event.sequence,
+				);
+			}
 			const supportTask = task.task.spec.kind === "support";
 			const workflowTask = task.task.spec.kind === "workflow";
 			if (input.data.to === "running" && supportTask) {
@@ -1898,11 +2062,7 @@ function applyEvent(
 			}
 			if (
 				input.data.to === "completed" &&
-				!Object.values(state.artifacts).some(
-					(artifact) =>
-						artifact.producerTaskId === input.data.taskId &&
-						artifact.output === "result",
-				)
+				!currentResultArtifact(state, input.data.taskId)
 			) {
 				fail(
 					"task completed without its declared result artifact",
@@ -1920,26 +2080,49 @@ function applyEvent(
 					event.sequence,
 				);
 			}
+			// Re-materialization detaches the superseded execution: it stays in
+			// the projection as history, and the next generation becomes current
+			// when it is created.
+			if (input.data.to === "pending") delete task.currentExecutionId;
 			break;
 		}
 		case "task-invalidated": {
 			if (
-				state.status === "completed" ||
-				state.status === "completed-degraded" ||
-				state.status === "cancelled"
+				state.status !== "running" &&
+				state.status !== "waiting" &&
+				state.status !== "failed" &&
+				state.status !== "interrupted"
 			) {
-				fail("terminal workflow run may not invalidate tasks", event.sequence);
+				fail("workflow run status does not admit invalidation", event.sequence);
 			}
-			if (!state.tasks[input.data.causeTaskId]) {
-				fail("invalidation cause task is unknown", event.sequence);
+			if (
+				Object.values(state.tasks).some((task) =>
+					currentExecutionIsActive(state, task),
+				)
+			) {
+				fail("workflow run has active task executions", event.sequence);
 			}
-			const expected = [
-				...transitiveDependents(state, input.data.causeTaskId),
-			].sort();
+			let closure: WorkflowInvalidationClosure;
+			try {
+				closure = invalidationClosure(state, input.data.causeTaskId);
+			} catch (error) {
+				fail((error as Error).message, event.sequence);
+			}
 			const actual = [...input.data.taskIds].sort();
-			if (!isDeepStrictEqual(actual, expected)) {
+			if (!isDeepStrictEqual(actual, closure.taskIds)) {
 				fail(
 					"invalidation does not cover the exact dependent closure",
+					event.sequence,
+				);
+			}
+			if (
+				!isDeepStrictEqual(
+					[...input.data.abandonedEpochs],
+					closure.abandonedEpochs,
+				)
+			) {
+				fail(
+					"invalidation does not cover the exact abandoned epochs",
 					event.sequence,
 				);
 			}
@@ -1959,6 +2142,27 @@ function applyEvent(
 						(error as Error).message,
 						event.sequence,
 					);
+				}
+			}
+			// Everything after the first on-path barrier exposing the closure is
+			// abandoned history: later on-path epochs (barriers and their tasks)
+			// and every effect recorded after that barrier, even when no later
+			// epoch exists.
+			const abandonedEpochs = new Set(closure.abandonedEpochs);
+			const exposing = pathBarriers(state).find((barrier) =>
+				barrier.taskIds.some((taskId) => actual.includes(taskId)),
+			);
+			for (const barrier of state.barriers) {
+				if (abandonedEpochs.has(barrier.epoch)) barrier.abandoned = true;
+			}
+			for (const task of Object.values(state.tasks)) {
+				if (abandonedEpochs.has(task.task.materializationEpoch)) {
+					task.abandoned = true;
+				}
+			}
+			if (exposing) {
+				for (const effect of state.effects) {
+					if (effect.sequence > exposing.sequence) effect.abandoned = true;
 				}
 			}
 			break;
@@ -1994,9 +2198,17 @@ function applyEvent(
 				);
 			}
 			if (
+				input.data.to === "running" &&
+				(input.data.from === "failed" || input.data.from === "interrupted") &&
+				!pathTasks(state).some((task) => task.status === "invalidated")
+			) {
+				fail("recovery requires invalidated work", event.sequence);
+			}
+			const liveTasks = pathTasks(state);
+			if (
 				input.data.to === "finalizing" &&
-				(!state.barriers.some((barrier) => barrier.kind === "final") ||
-					Object.values(state.tasks).some(
+				(!hasPathFinalBarrier(state) ||
+					liveTasks.some(
 						(task) =>
 							task.task.spec.disposition === "required" &&
 							task.status !== "completed",
@@ -2010,8 +2222,7 @@ function applyEvent(
 			if (
 				(input.data.to === "completed" ||
 					input.data.to === "completed-degraded") &&
-				(!state.barriers.some((barrier) => barrier.kind === "final") ||
-					state.outputArtifactId === undefined)
+				(!hasPathFinalBarrier(state) || state.outputArtifactId === undefined)
 			) {
 				fail(
 					"run completed without a final barrier and output",
@@ -2021,7 +2232,7 @@ function applyEvent(
 			if (
 				(input.data.to === "completed" ||
 					input.data.to === "completed-degraded") &&
-				Object.values(state.tasks).some(
+				liveTasks.some(
 					(task) =>
 						task.task.spec.disposition === "required" &&
 						task.status !== "completed",
@@ -2029,13 +2240,13 @@ function applyEvent(
 			) {
 				fail("run completed before required tasks completed", event.sequence);
 			}
-			const unsettledTasks = Object.values(state.tasks).some(
+			const unsettledTasks = liveTasks.some(
 				(task) =>
 					task.status !== "completed" &&
 					task.status !== "failed" &&
 					task.status !== "cancelled",
 			);
-			const uncancelledTasks = Object.values(state.tasks).some(
+			const uncancelledTasks = liveTasks.some(
 				(task) =>
 					task.status !== "completed" &&
 					task.status !== "failed" &&
@@ -2052,7 +2263,7 @@ function applyEvent(
 			) {
 				fail("run completed while tasks remain unsettled", event.sequence);
 			}
-			const degradedOptionalTask = Object.values(state.tasks).some(
+			const degradedOptionalTask = liveTasks.some(
 				(task) =>
 					task.task.spec.disposition === "optional" &&
 					task.status !== "completed",

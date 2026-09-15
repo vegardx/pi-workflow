@@ -104,7 +104,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 14,
+		contractRevision: 15,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -218,6 +218,7 @@ function artifact(taskId: WorkflowTaskId): WorkflowArtifactRef {
 	const input = {
 		runId: "workflow_execution" as const,
 		producerTaskId: taskId,
+		producerExecutionId: deriveTaskExecutionId("workflow_execution", taskId, 1),
 		output: "result" as const,
 		sha256: structuredOutputSha256,
 		schemaSha256: deriveJsonValueSha256(request().outputSchema),
@@ -317,6 +318,7 @@ describe("task execution persistence", () => {
 			deriveWorkflowArtifactId({
 				runId: "workflow_execution",
 				producerTaskId: "task_one",
+				producerExecutionId: "execution_one",
 				output: "result",
 				schemaSha256: planIdentitySha256,
 				sha256: planIdentitySha256,
@@ -325,6 +327,7 @@ describe("task execution persistence", () => {
 			deriveWorkflowArtifactId({
 				runId: "workflow_execution",
 				producerTaskId: "task_two",
+				producerExecutionId: "execution_two",
 				output: "result",
 				schemaSha256: planIdentitySha256,
 				sha256: planIdentitySha256,
@@ -878,7 +881,10 @@ describe("task execution persistence", () => {
 		};
 		expect(() =>
 			reduceWorkflowEvents(records([...setup.events.slice(0, -1), changed])),
-		).toThrow("generation is unavailable");
+		).toThrow("generation is not contiguous");
+		expect(() =>
+			reduceWorkflowEvents(records([...setup.events, changed])),
+		).toThrow("supersedes an active execution");
 		expect(() =>
 			reduceWorkflowEvents(
 				records([
@@ -1055,6 +1061,11 @@ function supportArtifact(
 	const input = {
 		runId: "workflow_execution" as const,
 		producerTaskId: task.id,
+		producerExecutionId: deriveTaskExecutionId(
+			"workflow_execution",
+			task.id,
+			1,
+		),
 		output: "result" as const,
 		sha256: supportOutputSha256,
 		schemaSha256: deriveJsonValueSha256(
@@ -1748,6 +1759,11 @@ function nestedArtifact(
 	const input = {
 		runId: "workflow_execution" as const,
 		producerTaskId: task.id,
+		producerExecutionId: deriveTaskExecutionId(
+			"workflow_execution",
+			task.id,
+			1,
+		),
 		output: "result" as const,
 		sha256: nestedOutputSha256,
 		schemaSha256: deriveJsonValueSha256(task.spec.request.outputSchema),
@@ -2604,6 +2620,7 @@ describe("nested workflow task execution persistence", () => {
 		const wrongSchemaInput = {
 			runId: "workflow_execution" as const,
 			producerTaskId: setup.task.id,
+			producerExecutionId: setup.execution.id,
 			output: "result" as const,
 			sha256: nestedOutputSha256,
 			schemaSha256: "7".repeat(64),
