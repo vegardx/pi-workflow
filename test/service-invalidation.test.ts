@@ -902,8 +902,17 @@ describe("invalidation and re-execution", () => {
 					key: "answer",
 					kind: "agent",
 					role: "task",
+					disposition: "required",
 					status: "completed",
 					generation: 2,
+					executionId: generation2,
+					attempts: 0,
+					settlement: {
+						attemptOrdinal: 1,
+						status: "completed",
+						usageComplete: true,
+					},
+					outcome: "completed",
 				},
 			]);
 			expect(view.tasks?.some((entry) => entry.abandoned)).toBe(false);
@@ -1657,8 +1666,19 @@ describe("invalidation and re-execution", () => {
 					key: "answer",
 					kind: "agent",
 					role: "task",
+					disposition: "required",
 					status: "failed",
 					generation: 1,
+					executionId: deriveTaskExecutionId(runId, taskId, 1),
+					attempts: 0,
+					settlement: {
+						attemptOrdinal: 1,
+						status: "failed",
+						failureCode: "provider-transient",
+						failureRetry: "manual",
+						usageComplete: true,
+					},
+					outcome: "failed",
 				},
 			]);
 			expect(Object.isFrozen(failedView)).toBe(true);
@@ -1666,12 +1686,17 @@ describe("invalidation and re-execution", () => {
 			expect(Object.isFrozen(failedView.tasks?.[0])).toBe(true);
 			expect(Object.isFrozen(failedView.tasks?.[0]?.namespace)).toBe(true);
 			expect(Object.keys(failedView.tasks?.[0] ?? {}).sort()).toEqual([
+				"attempts",
+				"disposition",
+				"executionId",
 				"generation",
 				"id",
 				"key",
 				"kind",
 				"namespace",
+				"outcome",
 				"role",
+				"settlement",
 				"status",
 			]);
 
@@ -1691,8 +1716,17 @@ describe("invalidation and re-execution", () => {
 					key: "answer",
 					kind: "agent",
 					role: "task",
+					disposition: "required",
 					status: "completed",
 					generation: 2,
+					executionId: deriveTaskExecutionId(runId, taskId, 2),
+					attempts: 0,
+					settlement: {
+						attemptOrdinal: 1,
+						status: "completed",
+						usageComplete: true,
+					},
+					outcome: "completed",
 				},
 			]);
 			expect(Object.keys(finished.tasks?.[0] ?? {})).not.toContain("abandoned");

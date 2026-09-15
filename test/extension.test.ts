@@ -39,6 +39,10 @@ describe("workflow Pi extension", () => {
 			"workflow_wait",
 			"workflow_stop",
 			"workflow_reconcile",
+			"workflow_runs",
+			"workflow_inspect",
+			"workflow_logs",
+			"workflow_invalidate",
 		]);
 		for (const tool of tools) {
 			const declaration = WORKFLOW_TOOL_DECLARATIONS.find(
@@ -54,7 +58,7 @@ describe("workflow Pi extension", () => {
 		expect(
 			tools.find((tool) => tool.name === "workflow_run")?.promptSnippet,
 		).toBeUndefined();
-		expect(commands).toEqual(["workflows", "workflow-status"]);
+		expect(commands).toEqual(["workflows", "workflow-status", "workflow-runs"]);
 		expect([...handlers.keys()]).toEqual(["session_shutdown"]);
 		expect(
 			tools.find((tool) => tool.name === "workflow_run")?.description,
