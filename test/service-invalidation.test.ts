@@ -409,7 +409,7 @@ function attemptProvider(outcomes: readonly ChildOutcome[]) {
 	vi.mocked(delegated.ownerClient.release).mockImplementation(async () => ({
 		runId: child.runId,
 		attemptId: child.attemptId,
-		status: lastStatus === "interrupted" ? "completed" : lastStatus,
+		status: lastStatus,
 	}));
 	// `client()` shares one rejecting mock across every method, so the
 	// attempt calls need their own mocks to be counted separately.
@@ -625,7 +625,9 @@ type ReplayInput = { type: WorkflowJournalEvent["type"]; data: unknown };
  * Rewrites one durable event of a failed agent-task run into the event the
  * same run would have persisted had the child ended `interrupted` instead,
  * or `undefined` to drop it. The child evidence keeps its retry class
- * "never", so no resume policy could ever apply to it.
+ * "never", so no resume policy could ever apply to it. An interrupted
+ * settlement is terminalized without release, so the failed run's release
+ * intent and receipt are dropped from the replay.
  */
 function interruptedVariant(
 	event: WorkflowJournalEvent,
@@ -640,8 +642,10 @@ function interruptedVariant(
 		failure: { ...childFailure("never"), retry: "never" },
 	});
 	switch (event.type) {
-		case "task-execution-child-observed":
+		case "task-execution-release-intended":
 		case "task-execution-released":
+			return undefined;
+		case "task-execution-child-observed":
 			return { type: event.type, data: { ...data, status: "interrupted" } };
 		case "task-execution-child-settled":
 			return {
@@ -685,11 +689,9 @@ function interruptedVariant(
 }
 
 /**
- * Builds a durably `interrupted` run. The fake owner client cannot produce
- * one directly (the finalizer refuses an `interrupted` release receipt while
- * the reducer requires the release to echo the observed status), so a real
- * failed run is replayed through the validating journal into a fresh store
- * root with its child evidence rewritten to `interrupted`. Every replayed
+ * Builds a durably `interrupted` run by replaying a real failed run through
+ * the validating journal into a fresh store root with its child evidence
+ * rewritten to `interrupted` and its release events dropped. Every replayed
  * event still passes the reducer, so the result is a legitimate projection.
  */
 async function replayedInterruptedRun(
@@ -899,6 +901,7 @@ describe("invalidation and re-execution", () => {
 					namespace: expect.any(Array),
 					key: "answer",
 					kind: "agent",
+					role: "task",
 					status: "completed",
 					generation: 2,
 				},
@@ -1653,6 +1656,7 @@ describe("invalidation and re-execution", () => {
 					namespace: [...namespace],
 					key: "answer",
 					kind: "agent",
+					role: "task",
 					status: "failed",
 					generation: 1,
 				},
@@ -1667,6 +1671,7 @@ describe("invalidation and re-execution", () => {
 				"key",
 				"kind",
 				"namespace",
+				"role",
 				"status",
 			]);
 
@@ -1685,6 +1690,7 @@ describe("invalidation and re-execution", () => {
 					namespace: [...namespace],
 					key: "answer",
 					kind: "agent",
+					role: "task",
 					status: "completed",
 					generation: 2,
 				},

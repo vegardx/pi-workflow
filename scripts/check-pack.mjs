@@ -127,7 +127,7 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 15 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 16 ||
 	workflow.MAX_NESTED_WORKFLOW_DEPTH !== 4 ||
 	workflow.MAX_TASK_EXECUTION_GENERATIONS !== 16 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution !== true ||
@@ -136,7 +136,7 @@ if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.retryAttempts !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.resumeAttempts !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.executionGenerations !== true ||
-	workflow.WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.finalizers !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts !== true || !workflow.TaskRoleSchema ||
 	typeof workflow.invalidationClosure !== "function" ||
 	typeof workflow.createWorkflowTaskRetrier !== "function" ||
 	!workflow.AgentRetryPolicySchema ||

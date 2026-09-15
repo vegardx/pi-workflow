@@ -352,7 +352,11 @@ export function createWorkflowTaskRetrier(
 			return performAttempt(selection);
 		}
 		if (execution.phase !== "settled") return { kind: "none" };
-		if (current.status !== "running" && current.status !== "waiting") {
+		if (
+			current.status !== "running" &&
+			current.status !== "waiting" &&
+			current.status !== "finalizing"
+		) {
 			return { kind: "none" };
 		}
 		const decision = policyDecision(selection.task.task.spec, execution);
@@ -372,6 +376,7 @@ export function createWorkflowTaskRetrier(
 				previousAttemptId,
 				failureCode: decision.failureCode,
 				failureRetry: decision.failureRetry as "backoff" | "manual" | "resume",
+				origin: "policy",
 			},
 		});
 		current = await state();

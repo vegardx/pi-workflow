@@ -472,7 +472,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 15,
+			contractRevision: 16,
 			runId,
 			depth: 0,
 			definitionName: "pending",
@@ -762,7 +762,7 @@ function attemptProvider(outcomes: readonly ChildOutcome[]) {
 	vi.mocked(delegated.ownerClient.release).mockImplementation(async () => ({
 		runId: "run_servicechild",
 		attemptId,
-		status: lastStatus === "interrupted" ? "completed" : lastStatus,
+		status: lastStatus,
 	}));
 	// `client()` shares one rejecting mock across every method, so the
 	// attempt calls need their own mocks to be counted separately.

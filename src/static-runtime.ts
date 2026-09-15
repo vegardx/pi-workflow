@@ -30,7 +30,10 @@ import {
 	type WorkflowDefinition,
 } from "./definition.js";
 import { deriveJsonValueSha256 } from "./execution.js";
-import { WorkflowTaskMaterializer } from "./materializer.js";
+import {
+	type NestedWorkflowDeclaration,
+	WorkflowTaskMaterializer,
+} from "./materializer.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
 import type { DiscoveredWorkflow } from "./registry.js";
@@ -39,6 +42,15 @@ import type { WorkflowSequentialScheduler } from "./scheduler.js";
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
 const runtimeDrives = new Map<string, Promise<void>>();
+const FINALIZER_SETTLED = new Set([
+	"completed",
+	"failed",
+	"cancelled",
+	"interrupted",
+	"blocked",
+	"cleanup-blocked",
+	"invalidated",
+]);
 
 export type StaticWorkflowRunResult<T> = {
 	readonly runId: WorkflowRunId;
@@ -382,7 +394,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		for (;;) {
 			const current = await state();
 			const tasks = Object.values(current.tasks).filter(
-				(task) => task.abandoned !== true,
+				(task) => task.abandoned !== true && task.task.spec.role === "task",
 			);
 			const failedRequired = tasks.find(
 				(task) =>
@@ -432,6 +444,115 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		}
 	}
 
+	async function driveFinalizers(): Promise<void> {
+		for (;;) {
+			const current = await state();
+			if (current.status !== "finalizing") {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					`Workflow run left finalizing while driving finalizers: ${current.status}.`,
+				);
+			}
+			const finalizers = Object.values(current.tasks).filter(
+				(task) =>
+					task.abandoned !== true && task.task.spec.role === "finalizer",
+			);
+			const failedRequired = finalizers.find(
+				(task) =>
+					task.task.spec.disposition === "required" &&
+					task.status !== "completed" &&
+					FINALIZER_SETTLED.has(task.status),
+			);
+			if (failedRequired) {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					`Required finalizer did not complete: ${failedRequired.status}.`,
+				);
+			}
+			if (finalizers.every((task) => FINALIZER_SETTLED.has(task.status))) {
+				return;
+			}
+			const before = current.lastSequence;
+			const { outcomes, errors } = await driveSchedulerBatch();
+			const after = await state();
+			const terminal = outcomes.find((outcome) => outcome.state === "terminal");
+			if (terminal?.state === "terminal") {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					`Workflow run terminated while driving finalizers: ${terminal.runStatus}.`,
+				);
+			}
+			if (after.lastSequence === before && errors.length > 0) {
+				throw errors[0];
+			}
+			if (after.lastSequence === before) {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					"Workflow scheduler made no durable progress on the finalizers.",
+				);
+			}
+		}
+	}
+
+	async function completeFinalizing(
+		artifact: WorkflowArtifactRef,
+		output: TOutput,
+	): Promise<StaticWorkflowRunResult<TOutput>> {
+		let current = await state();
+		// Re-entry after invalidation recovery resumes the run before the
+		// finalizers are driven again.
+		if (current.status === "waiting") {
+			await journal.append("run-status-changed", {
+				from: "waiting",
+				to: "running",
+			});
+			current = await state();
+		}
+		if (current.status === "running") {
+			await journal.append("run-status-changed", {
+				from: "running",
+				to: "finalizing",
+			});
+			current = await state();
+		}
+		if (current.status === "finalizing") {
+			await driveFinalizers();
+			current = await state();
+			if (current.status !== "finalizing") {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					`Workflow run left finalizing while driving finalizers: ${current.status}.`,
+				);
+			}
+			const degraded = Object.values(current.tasks).some(
+				(task) =>
+					task.abandoned !== true &&
+					task.task.spec.disposition === "optional" &&
+					task.status !== "completed",
+			);
+			await journal.append("run-status-changed", {
+				from: "finalizing",
+				to: degraded ? "completed-degraded" : "completed",
+			});
+			current = await state();
+		}
+		if (
+			current.status !== "completed" &&
+			current.status !== "completed-degraded"
+		) {
+			throw new StaticWorkflowRuntimeError(
+				"finalization",
+				"Workflow output exists outside final completion state.",
+			);
+		}
+		return {
+			runId: journal.runId,
+			status: current.status,
+			value: output,
+			artifact,
+		};
+	}
+
 	async function finish(
 		value: unknown,
 	): Promise<StaticWorkflowRunResult<TOutput>> {
@@ -459,34 +580,10 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					"Workflow output changed after durable completion.",
 				);
 			}
-			if (current.status === "finalizing") {
-				const degraded = Object.values(current.tasks).some(
-					(task) =>
-						task.abandoned !== true &&
-						task.task.spec.disposition === "optional" &&
-						task.status !== "completed",
-				);
-				await journal.append("run-status-changed", {
-					from: "finalizing",
-					to: degraded ? "completed-degraded" : "completed",
-				});
-				current = await state();
-			}
-			if (
-				current.status !== "completed" &&
-				current.status !== "completed-degraded"
-			) {
-				throw new StaticWorkflowRuntimeError(
-					"finalization",
-					"Workflow output exists outside final completion state.",
-				);
-			}
-			return {
-				runId: journal.runId,
-				status: current.status,
-				value: jsonCloneFrozen(replayed, "Replayed workflow output") as TOutput,
-				artifact: existing,
-			};
+			return completeFinalizing(
+				existing,
+				jsonCloneFrozen(replayed, "Replayed workflow output") as TOutput,
+			);
 		}
 		const ref = await artifacts.putJson(output, {
 			runId: journal.runId,
@@ -524,19 +621,113 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			);
 		}
 		await journal.append("run-output-committed", { artifactId: ref.id });
-		current = await state();
-		const degraded = Object.values(current.tasks).some(
-			(task) =>
-				task.abandoned !== true &&
-				task.task.spec.disposition === "optional" &&
-				task.status !== "completed",
+		return completeFinalizing(ref, output);
+	}
+
+	function nestedDeclaration(
+		request: NestedWorkflowRequest,
+	): NestedWorkflowDeclaration {
+		if (!nesting) {
+			throw new StaticWorkflowRuntimeError(
+				"validation",
+				"Nested workflows are not available in this runtime.",
+			);
+		}
+		if (
+			typeof request !== "object" ||
+			request === null ||
+			!Value.Check(WorkflowDefinitionNameSchema, request.workflow)
+		) {
+			throw new StaticWorkflowRuntimeError(
+				"validation",
+				"Nested workflow name is invalid.",
+			);
+		}
+		const child = nesting.resolveWorkflow(request.workflow);
+		if (!child || !isWorkflowDefinition(child.definition)) {
+			throw new StaticWorkflowRuntimeError(
+				"validation",
+				"Nested workflow definition is not discovered.",
+			);
+		}
+		if (nesting.depth + 1 >= MAX_NESTED_WORKFLOW_DEPTH) {
+			throw new StaticWorkflowRuntimeError(
+				"validation",
+				"Nested workflow depth bound exceeded.",
+			);
+		}
+		const childIdentity = child.identity.identitySha256;
+		if (
+			childIdentity === definitionIdentitySha256 ||
+			nesting.ancestorDefinitionIdentities.includes(childIdentity)
+		) {
+			throw new StaticWorkflowRuntimeError(
+				"validation",
+				"Nested workflow recursion is not allowed.",
+			);
+		}
+		const childInputSchema = validateJsonSchemaDocument(
+			child.definition.inputSchema,
+			"nested workflow input schema",
 		);
-		const status = degraded ? "completed-degraded" : "completed";
-		await journal.append("run-status-changed", {
-			from: "finalizing",
-			to: status,
-		});
-		return { runId: journal.runId, status, value: output, artifact: ref };
+		const childOutputSchema = validateJsonSchemaDocument(
+			child.definition.outputSchema,
+			"nested workflow output schema",
+		);
+		const childInput = jsonCloneFrozen(request.input, "Nested workflow input");
+		const inputNames = Object.keys(request.inputs ?? {});
+		if (inputNames.length === 0) {
+			if (!validator(childInputSchema)(childInput)) {
+				throw new StaticWorkflowRuntimeError(
+					"validation",
+					"Nested workflow input does not match its schema.",
+				);
+			}
+		} else {
+			// Artifact inputs are merged into the authored input at launch,
+			// so the merged value is validated against the child schema
+			// there; declaration only checks the merge is well-formed.
+			if (
+				typeof childInput !== "object" ||
+				childInput === null ||
+				Array.isArray(childInput)
+			) {
+				throw new StaticWorkflowRuntimeError(
+					"validation",
+					"Nested workflow artifact inputs require an object input.",
+				);
+			}
+			if (inputNames.some((name) => Object.hasOwn(childInput, name))) {
+				throw new StaticWorkflowRuntimeError(
+					"validation",
+					"Nested workflow input name collides with the authored input.",
+				);
+			}
+		}
+		const meta = child.definition.meta;
+		const nestedRequest: NestedWorkflowTaskRequest = {
+			definitionName: meta.name,
+			definitionIdentitySha256: childIdentity,
+			definitionSourceSha256: child.identity.sourceSha256,
+			definitionVersion: meta.version,
+			input: childInput,
+			inputSha256: deriveJsonValueSha256(childInput),
+			inputSchema: childInputSchema as NestedWorkflowTaskRequest["inputSchema"],
+			outputSchema:
+				childOutputSchema as NestedWorkflowTaskRequest["outputSchema"],
+			budget: structuredClone(meta.budget),
+			timeoutMs: meta.timeoutMs,
+			concurrency: meta.concurrency,
+		};
+		return {
+			request: nestedRequest,
+			...(request.disposition === undefined
+				? {}
+				: { disposition: request.disposition }),
+			...(request.after === undefined ? {} : { after: request.after }),
+			...(request.inputs === undefined ? {} : { inputs: request.inputs }),
+			...(request.replay === undefined ? {} : { replay: request.replay }),
+		};
 	}
 
 	async function driveCurrent(): Promise<StaticWorkflowRunResult<TOutput>> {
@@ -688,111 +879,10 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				key: Parameters<typeof materializer.workflow>[0],
 				request: NestedWorkflowRequest,
 			): TaskHandle<TOutput> {
-				if (!nesting) {
-					throw new StaticWorkflowRuntimeError(
-						"validation",
-						"Nested workflows are not available in this runtime.",
-					);
-				}
-				if (
-					typeof request !== "object" ||
-					request === null ||
-					!Value.Check(WorkflowDefinitionNameSchema, request.workflow)
-				) {
-					throw new StaticWorkflowRuntimeError(
-						"validation",
-						"Nested workflow name is invalid.",
-					);
-				}
-				const child = nesting.resolveWorkflow(request.workflow);
-				if (!child || !isWorkflowDefinition(child.definition)) {
-					throw new StaticWorkflowRuntimeError(
-						"validation",
-						"Nested workflow definition is not discovered.",
-					);
-				}
-				if (nesting.depth + 1 >= MAX_NESTED_WORKFLOW_DEPTH) {
-					throw new StaticWorkflowRuntimeError(
-						"validation",
-						"Nested workflow depth bound exceeded.",
-					);
-				}
-				const childIdentity = child.identity.identitySha256;
-				if (
-					childIdentity === definitionIdentitySha256 ||
-					nesting.ancestorDefinitionIdentities.includes(childIdentity)
-				) {
-					throw new StaticWorkflowRuntimeError(
-						"validation",
-						"Nested workflow recursion is not allowed.",
-					);
-				}
-				const childInputSchema = validateJsonSchemaDocument(
-					child.definition.inputSchema,
-					"nested workflow input schema",
+				const handle = materializer.workflow<TOutput>(
+					key,
+					nestedDeclaration(request),
 				);
-				const childOutputSchema = validateJsonSchemaDocument(
-					child.definition.outputSchema,
-					"nested workflow output schema",
-				);
-				const childInput = jsonCloneFrozen(
-					request.input,
-					"Nested workflow input",
-				);
-				const inputNames = Object.keys(request.inputs ?? {});
-				if (inputNames.length === 0) {
-					if (!validator(childInputSchema)(childInput)) {
-						throw new StaticWorkflowRuntimeError(
-							"validation",
-							"Nested workflow input does not match its schema.",
-						);
-					}
-				} else {
-					// Artifact inputs are merged into the authored input at launch,
-					// so the merged value is validated against the child schema
-					// there; declaration only checks the merge is well-formed.
-					if (
-						typeof childInput !== "object" ||
-						childInput === null ||
-						Array.isArray(childInput)
-					) {
-						throw new StaticWorkflowRuntimeError(
-							"validation",
-							"Nested workflow artifact inputs require an object input.",
-						);
-					}
-					if (inputNames.some((name) => Object.hasOwn(childInput, name))) {
-						throw new StaticWorkflowRuntimeError(
-							"validation",
-							"Nested workflow input name collides with the authored input.",
-						);
-					}
-				}
-				const meta = child.definition.meta;
-				const nestedRequest: NestedWorkflowTaskRequest = {
-					definitionName: meta.name,
-					definitionIdentitySha256: childIdentity,
-					definitionSourceSha256: child.identity.sourceSha256,
-					definitionVersion: meta.version,
-					input: childInput,
-					inputSha256: deriveJsonValueSha256(childInput),
-					inputSchema:
-						childInputSchema as NestedWorkflowTaskRequest["inputSchema"],
-					outputSchema:
-						childOutputSchema as NestedWorkflowTaskRequest["outputSchema"],
-					budget: structuredClone(meta.budget),
-					timeoutMs: meta.timeoutMs,
-					concurrency: meta.concurrency,
-				};
-				const handle = materializer.workflow<TOutput>(key, {
-					request: nestedRequest,
-					...(request.disposition === undefined
-						? {}
-						: { disposition: request.disposition }),
-					...(request.after === undefined ? {} : { after: request.after }),
-					...(request.inputs === undefined ? {} : { inputs: request.inputs }),
-					...(request.replay === undefined ? {} : { replay: request.replay }),
-				});
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
 				return handle;
 			},
@@ -905,6 +995,36 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					);
 				}
 				return final;
+			},
+			finalize(key, request) {
+				if (request === null || typeof request !== "object") {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow finalizer request is invalid.",
+					);
+				}
+				// An explicit disposition on the nested request, even undefined,
+				// must reach the materializer's "finalizer disposition is its kind"
+				// rule rather than being dropped while lowering the request.
+				const workflow =
+					request.workflow !== undefined
+						? {
+								...nestedDeclaration(request.workflow),
+								...(Object.hasOwn(request.workflow, "disposition")
+									? { disposition: request.workflow.disposition }
+									: {}),
+							}
+						: undefined;
+				const handle = materializer.finalizer(key, {
+					kind: request.kind,
+					...(request.support === undefined
+						? {}
+						: { support: request.support }),
+					...(request.agent === undefined ? {} : { agent: request.agent }),
+					...(workflow === undefined ? {} : { workflow }),
+				});
+				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+				return handle;
 			},
 			result<T>(task: TaskHandle<T>): Promise<T> {
 				const commit = prepareBarrier("result", [task]);

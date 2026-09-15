@@ -445,6 +445,7 @@ describe("workflow task retrier", () => {
 				previousAttemptId: LAUNCH_ATTEMPT,
 				failureCode: "tool",
 				failureRetry: "backoff",
+				origin: "policy",
 			});
 			expect(events.at(-1)?.data).toEqual({
 				executionId,

@@ -10,6 +10,7 @@ import { WorkflowArtifactStore } from "./artifact-store.js";
 import {
 	MAX_WORKFLOW_CONCURRENCY,
 	type NestedWorkflowInputArtifacts,
+	type TaskRole,
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
@@ -99,6 +100,7 @@ export type WorkflowServiceTaskView = {
 	readonly namespace: readonly string[];
 	readonly key: string;
 	readonly kind: "agent" | "support" | "workflow";
+	readonly role: TaskRole;
 	readonly status: WorkflowTaskStatus;
 	/** Generation of the task's current execution; 0 when it has none. */
 	readonly generation: number;
@@ -297,6 +299,7 @@ function taskViews(
 					namespace: Object.freeze([...task.task.namespace]),
 					key: task.task.spec.key,
 					kind: task.task.spec.kind,
+					role: task.task.spec.role,
 					status: task.status,
 					generation,
 					...(task.abandoned === true ? { abandoned: true as const } : {}),
