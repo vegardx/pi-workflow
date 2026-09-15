@@ -1349,8 +1349,8 @@ notifies for runs leased elsewhere, which the widget must poll through
 
 Every run view carries `tasks` once events exist: one frozen entry per
 declared task in materialization order with `id`, `namespace`, `key`, `kind`,
-`disposition`, `status`, `generation` (the highest generation recorded for
-the task, or 0), the current execution's `executionId`, `attempts` (agent
+`role` (`task` or `finalizer`), `disposition`, `status`, `generation` (the
+highest generation recorded for the task, or 0), the current execution's `executionId`, `attempts` (agent
 executions: the attempt count), `settlement` (`attemptOrdinal`, `status`,
 `failureCode`, `failureRetry`, `usageComplete` from the agent or nested
 settlement), `outcome` (the terminal outcome), and `abandoned: true` for

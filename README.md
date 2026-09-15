@@ -96,19 +96,31 @@ schema, output schema, and service binding:
 | `workflow_validate` | `ref`, optional `input` | `WorkflowValidationResultSchema` |
 | `workflow_run` | `ref`, `input` | `WorkflowServiceRunReceiptSchema` |
 | `workflow_status` | `runId` | `WorkflowServiceRunViewSchema` |
-| `workflow_wait` | `runId` | `WorkflowServiceRunViewSchema` |
+| `workflow_wait` | `runId`, optional `timeoutMs` | `WorkflowServiceWaitViewSchema` |
 | `workflow_stop` | `runId`, `reason` | `WorkflowServiceRunViewSchema` |
-| `workflow_reconcile` | `runId` | `WorkflowServiceRunViewSchema` |
+| `workflow_reconcile` | `runId`, optional `taskId` | `WorkflowServiceReconcileViewSchema` |
+| `workflow_runs` | optional `statuses`, `includeChildren`, `limit`, `cursor` | `WorkflowRunPageSchema` |
+| `workflow_inspect` | `runId`, optional `include`, `taskId` | `WorkflowRunInspectionSchema` |
+| `workflow_logs` | `runId`, optional `afterSequence`, `limit` | `WorkflowLogPageSchema` |
+| `workflow_invalidate` | `runId`, `taskId`, `reason` | `WorkflowServiceRunViewSchema` |
 
 Each tool result carries the typed service value as `details` and the same
-value as JSON text bounded to 48 KiB (long lists are truncated with a marker,
-and an oversized run `output` is omitted in favor of the durable output
-artifact). `workflow_run` returns a durable run ID immediately. Use
-`workflow_wait` for the bounded result or `workflow_stop` to persist stop
-intent, abort in-process support work, and drain active child work.
+value, checked against its output schema, as JSON text bounded to 48 KiB
+(`workflowToolText`): run and log pages shrink to the bound and re-cursor so
+later pages stay complete, an oversized inspection is refused with guidance to
+narrow `include` or pass `taskId`, an oversized run `output` is omitted in
+favor of the durable output artifact, and the `workflow_list` array is
+truncated with a marker. `workflow_run` returns a durable run ID immediately.
+Use `workflow_wait` for the bounded result (with `timeoutMs`, the current view
+marked `timedOut` while the run keeps driving) or `workflow_stop` to persist
+stop intent, abort in-process support work, and drain active child work.
 `workflow_reconcile` takes `runId` and an optional `taskId` (forwarded
 unchanged to `reconcile(runId, { taskId })`) to reconcile one cleanup-blocked
-task instead of every blocked task in order.
+task instead of every blocked task in order. `workflow_runs`,
+`workflow_inspect`, and `workflow_logs` read without taking a run lease;
+`workflow_invalidate` re-executes a settled task and its dependents on a
+failed or interrupted run. The `/workflows`, `/workflow-status <run-id>`, and
+`/workflow-runs` commands are notification shortcuts.
 
 ## Authoring skill
 

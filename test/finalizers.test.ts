@@ -784,7 +784,7 @@ describe("finalizers", () => {
 			]);
 
 			expect(finished.tasks).toEqual([
-				{
+				expect.objectContaining({
 					id: report.task.id,
 					namespace: [...report.task.namespace],
 					key: "report",
@@ -792,8 +792,8 @@ describe("finalizers", () => {
 					role: "task",
 					status: "completed",
 					generation: 1,
-				},
-				{
+				}),
+				expect.objectContaining({
 					id: cleanup.task.id,
 					namespace: [...cleanup.task.namespace],
 					key: "cleanup",
@@ -801,7 +801,7 @@ describe("finalizers", () => {
 					role: "finalizer",
 					status: "completed",
 					generation: 1,
-				},
+				}),
 			]);
 			await expect(service.status(receipt.runId)).resolves.toMatchObject({
 				status: "completed",

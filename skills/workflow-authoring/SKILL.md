@@ -14,8 +14,8 @@ load through the real definition loader are in
 [references/examples.md](references/examples.md).
 
 Not available in revision 16: `ctx.checkpoint`, `ctx.artifact`, dynamic
-workflows, writer (non-read-only) agent tasks, fork context, operator-triggered
-retry or resume tools, and a Pi tool for invalidation. Do not author against
+workflows, writer (non-read-only) agent tasks, fork context, and operator-triggered
+retry or resume tools. Do not author against
 them; a definition that calls them fails when its source runs. `ctx.finalize`
 is available since revision 16; see [Finalizers](#finalizers).
 
@@ -34,23 +34,40 @@ is available since revision 16; see [Finalizers](#finalizers).
    creating a run.
 4. `workflow_run { ref, input }` validates the same way, then returns
    `{ runId, status: "created" }` immediately.
-5. `workflow_wait { runId }` drives the run to a terminal status and returns
-   the run view; `workflow_status { runId }` reads the durable projection at
-   any time. The view carries `status`, `definitionName`, `createdAt`,
-   `deadlineAt`, `depth`, `output` and `outputArtifactId` once committed, and
-   `tasks[]` (one entry per declared task in materialization order with `id`,
-   `namespace`, `key`, `kind`, `role` (`"task"` or `"finalizer"`), `status`,
-   `generation`, and `abandoned: true` for abandoned history).
-6. `workflow_stop { runId, reason }` persists stop intent and drains;
-   `workflow_reconcile { runId }` re-opens a run after restart, interruption,
-   or `cleanup-blocked`.
-7. Fix the definition and repeat. Definition identity covers the file's
+5. `workflow_wait { runId, timeoutMs? }` drives the run to a terminal status
+   and returns the run view; with `timeoutMs` (1_000..3_600_000) it returns
+   the current view marked `timedOut: true` when the run outlives the timeout
+   and the run keeps driving. `workflow_status { runId }` reads the durable
+   projection at any time. The view carries `status`, `definitionName`,
+   `createdAt`, `deadlineAt`, `depth`, `output` and `outputArtifactId` once
+   committed, and `tasks[]` (one entry per declared task in materialization
+   order with `id`, `namespace`, `key`, `kind`, `role` (`"task"` or
+   `"finalizer"`), `disposition`, `status`, `generation`, the current
+   `executionId`, `attempts` (agent tasks), `settlement`, `outcome`, and
+   `abandoned: true` for abandoned history).
+6. `workflow_runs { statuses?, includeChildren?, limit?, cursor? }` lists
+   durable runs newest first with `taskCounts`, `ownership`,
+   `availableActions`, and `requiresAttention`; `workflow_inspect { runId,
+   include?, taskId? }` returns the run summary plus `budget`, `tasks` (with
+   `dependsOn` and `inputs`), `executions`, `effects`, `barriers`, and
+   `artifacts` sections; `workflow_logs { runId, afterSequence?, limit? }`
+   pages redacted lifecycle entries (effects, status changes, attempts,
+   terminal outcomes, invalidations) with `nextAfterSequence`. Reads never
+   take a run lease.
+7. `workflow_stop { runId, reason }` persists stop intent and drains;
+   `workflow_reconcile { runId, taskId? }` re-opens a run after restart,
+   interruption, or `cleanup-blocked`, reconciling every blocked task in order
+   or only `taskId`; `workflow_invalidate { runId, taskId, reason }`
+   re-executes a settled task and its dependents on a `failed` or
+   `interrupted` run (see [Invalidation and
+   re-execution](#invalidation-and-re-execution)).
+8. Fix the definition and repeat. Definition identity covers the file's
    source, path, meta, and schemas; an existing run refuses a changed
    definition ("Workflow definition or input identity changed during
    replay."). Start a new run after editing.
 
-The `/workflows` and `/workflow-status <run-id>` commands are notification
-shortcuts for steps 2 and 5.
+The `/workflows`, `/workflow-status <run-id>`, and `/workflow-runs` commands
+are notification shortcuts for steps 2, 5, and 6.
 
 ## Where definitions live and trust
 
@@ -396,7 +413,8 @@ not influence the output.
   fails or is blocked ends the run `completed-degraded`. Interrupted optional
   work, whether an optional task or an advisory finalizer, degrades completion
   instead of preventing it.
-- After the output commit, `service.invalidate` may target only finalizers
+- After the output commit, `workflow_invalidate` (`service.invalidate`) may
+  target only finalizers
   ("invalidation after output commit may only cover finalizers"); the
   finalizer re-executes as its next generation against the existing output.
 
@@ -423,8 +441,8 @@ not influence the output.
   pi-subagent without release; the task ends `interrupted` with the reason
   "Interrupted child retained for recovery; no release performed." and the run
   never resumes it on its own. Recover a lost lease with `workflow_reconcile`;
-  recover an interrupted task with `service.invalidate(runId, taskId,
-  reason)`, which re-executes it as a new generation with a fresh child run.
+  recover an interrupted task with `workflow_invalidate { runId, taskId,
+  reason }`, which re-executes it as a new generation with a fresh child run.
   There is no operator resume tool in revision 16.
 - `cancelled` is the result of `workflow_stop`, session shutdown, or the
   deadline. Trusted source awaiting `ctx.signal` should unwind when it aborts.
@@ -436,8 +454,10 @@ not influence the output.
 
 ## Invalidation and re-execution
 
-An embedder can call `service.invalidate(runId, causeTaskId, reason)` on a run
-that is durably `failed` or `interrupted` (there is no Pi tool for it yet). The
+`workflow_invalidate { runId, taskId, reason }` (the pass-through for
+`service.invalidate(runId, causeTaskId, reason)`) applies to a run that is
+durably `failed` or `interrupted`; `availableActions` in `workflow_runs` and
+`workflow_inspect` lists `invalidate` when it is admissible. The
 cause task and its transitive dependents become `invalidated`, the epochs after
 the barrier that exposed them are abandoned, and the run is driven again:
 

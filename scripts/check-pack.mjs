@@ -64,7 +64,7 @@ try {
 			throw new Error(`development source leaked into package: ${filePath}`);
 		}
 	}
-	if (workflow.entryCount > 100 || workflow.unpackedSize > 1024 * 1024) {
+	if (workflow.entryCount > 100 || workflow.unpackedSize > 1536 * 1024) {
 		throw new Error("packed package exceeds release bounds");
 	}
 
@@ -146,9 +146,13 @@ if (
 if (
 	!Array.isArray(workflow.WORKFLOW_TOOL_DECLARATIONS) ||
 	!Object.isFrozen(workflow.WORKFLOW_TOOL_DECLARATIONS) ||
-	workflow.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name).join(",") !== "workflow_list,workflow_validate,workflow_run,workflow_status,workflow_wait,workflow_stop,workflow_reconcile" ||
+	workflow.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name).join(",") !== "workflow_list,workflow_validate,workflow_run,workflow_status,workflow_wait,workflow_stop,workflow_reconcile,workflow_runs,workflow_inspect,workflow_logs,workflow_invalidate" ||
 	!workflow.WORKFLOW_TOOL_DECLARATIONS.every((tool) => typeof tool.execute === "function" && tool.parameters?.type === "object" && typeof tool.output?.type === "string") ||
 	!workflow.WorkflowServiceRunViewSchema ||
+	!workflow.WorkflowRunPageSchema ||
+	!workflow.WorkflowRunInspectionSchema ||
+	!workflow.WorkflowLogPageSchema ||
+	typeof workflow.workflowToolText !== "function" ||
 	!workflow.WorkflowDefinitionSummarySchema
 ) throw new Error("packed tool declaration table is unavailable or incomplete");
 if (

@@ -1201,6 +1201,7 @@ describe("inspect and logs", () => {
 					namespace: [],
 					key: "answer",
 					kind: "agent",
+					role: "task",
 					disposition: "required",
 					status: "completed",
 					generation: 1,
