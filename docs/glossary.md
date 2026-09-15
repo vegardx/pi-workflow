@@ -36,7 +36,11 @@ This document owns workflow terminology.
 | Fan-in | Reducing multiple task results into a later task. |
 | Pipeline | Typed authoring helper that materializes sequential task dependencies. |
 | Artifact | Durable bounded output owned by a workflow run or task. |
-| Handoff | Bounded verified data or repository evidence supplied from one task to another. |
+| Handoff | Workflow-owned, digest-verified `git format-patch` artifact (`output: "handoff"`, media type `application/x-git-format-patch`, at most `MAX_WORKFLOW_HANDOFF_BYTES` = 16 MiB) imported through pi-subagent's `exportHandoff` from a completed worktree attempt before the child is released; identified by `{ attemptId, baselineHead, handoffCommit }`, never by a path, branch, or ref name. |
+| Handoff descriptor | The only JSON face of a handoff (`WorkflowHandoffDescriptor`): artifact ID, run, producer task and execution, subagent run and attempt, `baselineHead`, `handoffCommit`, format, media type, digest, and size. `ctx.handoff` resolves it, a returned handoff handle commits it as the workflow output, and a downstream task named with `handle.handoff` in `inputs` receives it in place of the bytes. |
+| Handoff policy | Workflow-only `handoff` field of a worktree agent request, `required` (default) or `optional`; normalized by the materializer, part of task identity, and never sent to pi-subagent. Under `required` a completed child that captured no handoff is released and then fails at stage `handoff-import`; under `optional` it completes and the descriptor is `undefined`. |
+| Worktree agent task | Agent task with `workspace: { mode: "worktree", cwd }` and `limits.workspaceWriteBytes >= 1`; the only producer of handoff artifacts. Its handle carries `handoff`, and its execution ladder inserts `handoff-resolved` between `artifact-imported` and `release-intended`. |
+| Baseline | The clean checkout a worktree attempt started from, journaled as the launch plan's `workspaceBaselineSha256` on the preflight (pi-subagent's digest, opaque to the workflow) together with the settlement's and the imported handoff's `baselineHead`; a replayed handoff must match this exact triple, and a new execution generation may take a new baseline. |
 | Structured output | Schema-validated result produced through the subagent terminating tool. |
 | Checkpoint | Durable human decision that gates later work. |
 | Journal | Append-only lifecycle event record and source of truth. |

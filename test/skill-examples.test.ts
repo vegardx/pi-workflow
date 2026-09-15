@@ -25,6 +25,7 @@ const EXPECTED_EXAMPLE_NAMES = [
 	"nested-parent",
 	"nested-child",
 	"resilient-draft",
+	"worktree-implement",
 	"finalized-report",
 ];
 
@@ -54,7 +55,12 @@ async function projectWithExamples(examples: readonly string[]) {
 	await Promise.all(
 		examples.map((source, index) =>
 			writeFile(
-				path.join(cwd, "workflows", `example-${index}.workflow.ts`),
+				// Zero-padded so discovery's name sort keeps the authoring order.
+				path.join(
+					cwd,
+					"workflows",
+					`example-${String(index).padStart(2, "0")}.workflow.ts`,
+				),
 				source,
 			),
 		),
@@ -71,24 +77,39 @@ describe("workflow authoring skill", () => {
 			"description: Use when creating, modifying, validating, or debugging a static pi-workflow *.workflow.ts definition; not for operating runs.",
 		);
 		expect(skill).toContain("references/examples.md");
-		const unavailable = skill.match(
-			/Not available in revision 16:([\s\S]*?)\. Do not author against/,
-		)?.[1];
+		const unavailable = skill
+			.match(
+				/Not available in revision 17:([\s\S]*?)\. Do not author against/,
+			)?.[1]
+			?.replace(/\s+/g, " ");
 		if (!unavailable) throw new Error("no unavailable-API statement");
 		for (const api of [
 			"`ctx.checkpoint`",
 			"`ctx.artifact`",
-			"dynamic\nworkflows",
-			"writer (non-read-only) agent tasks",
-			"operator-triggered\nretry or resume tools",
+			"dynamic workflows",
+			"operator-triggered retry or resume tools",
+			"a Pi tool for handoff export",
 		]) {
 			expect(unavailable).toContain(api);
 		}
+		// Invalidation has a Pi tool and writer (worktree) agent tasks are
+		// available since revision 17.
 		expect(unavailable).not.toContain("invalidation");
+		expect(unavailable).not.toContain("writer");
+		expect(unavailable).not.toContain("worktree");
 		expect(skill).toContain("`workflow_invalidate { runId, taskId, reason }`");
 		expect(skill).toContain("`workflow_wait { runId, timeoutMs? }`");
 		expect(skill).toContain("`workflow_reconcile { runId, taskId? }`");
 		expect(unavailable).not.toContain("ctx.finalize");
+		expect(skill).toContain("## Worktree tasks and handoffs");
+		for (const message of [
+			"handoff policy requires a worktree workspace",
+			"worktree workspace requires a positive workspaceWriteBytes limit",
+			"handoff input producer is not a worktree agent task",
+			"Completed worktree task captured no handoff.",
+		]) {
+			expect(skill).toContain(message);
+		}
 		expect(skill).toContain("## Finalizers");
 		expect(skill).toContain(
 			"`ctx.finalize(key, { kind, support | agent | workflow })`",
@@ -129,6 +150,11 @@ describe("workflow authoring skill", () => {
 			expect(example).toContain('from "@vegardx/pi-workflow"');
 			expect(example).toContain("export default defineWorkflow({");
 		}
+		const worktree = examples.at(-2);
+		expect(worktree).toContain('workspace: { mode: "worktree", cwd: ctx.cwd }');
+		expect(worktree).toContain('handoff: "required"');
+		expect(worktree).toContain("await ctx.handoff(implement)");
+		expect(worktree).toContain("handoff: implement.handoff");
 		expect(examples.at(-1)).toContain('ctx.finalize("record", {');
 		expect(examples.at(-1)).toContain('ctx.finalize("announce", {');
 		const project = await projectWithExamples(examples);
@@ -163,7 +189,7 @@ describe("workflow authoring skill", () => {
 		await expect(
 			discoverWorkflows({ ...project, projectTrusted: true }),
 		).rejects.toThrow(
-			"workflow import node:fs is not identity-bound by contract revision 16",
+			"workflow import node:fs is not identity-bound by contract revision 17",
 		);
 	});
 });

@@ -662,6 +662,102 @@ export default defineWorkflow({
 });
 ```
 
+## Worktree task with a handoff consumed by a read-only reviewer
+
+The `implement` task runs in an isolated pi-subagent worktree
+(`workspace.mode: "worktree"`, `workspaceWriteBytes >= 1`). Its handoff is
+imported as a workflow-owned `git format-patch` artifact before the child is
+released; `ctx.handoff` resolves the descriptor (identity, digest, size; never
+paths or bytes), and `implement.handoff` feeds the reviewer the same
+descriptor as an input. Under the default `handoff: "required"` policy a child
+that changed nothing fails the task, so the descriptor is defined once the
+barrier resolves.
+
+```ts
+import { defineWorkflow } from "@vegardx/pi-workflow";
+import { Type } from "typebox";
+
+const InputSchema = Type.Object(
+	{ change: Type.String({ minLength: 1 }) },
+	{ additionalProperties: false },
+);
+const SummarySchema = Type.Object(
+	{ summary: Type.String(), files: Type.Array(Type.String()) },
+	{ additionalProperties: false },
+);
+const ReviewSchema = Type.Object(
+	{ approved: Type.Boolean(), notes: Type.Array(Type.String()) },
+	{ additionalProperties: false },
+);
+const readOnly = {
+	cumulativeRuntimeMs: 600_000,
+	attemptTimeoutMs: 300_000,
+	cost: 2,
+	outputBytes: 65_536,
+	workspaceWriteBytes: 0,
+	retries: 0,
+	resumes: 0,
+};
+const writer = {
+	...readOnly,
+	cumulativeRuntimeMs: 1_800_000,
+	attemptTimeoutMs: 900_000,
+	cost: 6,
+	workspaceWriteBytes: 64 * 1024 * 1024,
+};
+
+export default defineWorkflow({
+	meta: {
+		name: "worktree-implement",
+		description: "Implement a change in a worktree, then review its handoff",
+		version: 1,
+		budget: { cost: 10, childRuntimeMs: 3_600_000 },
+		timeoutMs: 7_200_000,
+	},
+	inputSchema: InputSchema,
+	outputSchema: ReviewSchema,
+	async run(ctx) {
+		const implement = ctx.agent("implement", {
+			agent: "implementer",
+			task: {
+				goal: `Implement this change: ${ctx.input.change}`,
+				context: [],
+				instructions: ["Change only the files the task requires."],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep", "find", "ls", "edit", "write"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "worktree", cwd: ctx.cwd },
+			handoff: "required",
+			outputSchema: SummarySchema,
+			limits: writer,
+		});
+		const handoff = await ctx.handoff(implement);
+		ctx.phase(handoff ? "review-handoff" : "review-summary");
+		return ctx.agent("review", {
+			agent: "reviewer",
+			task: {
+				goal: "Review the change described by the `summary` and `handoff` inputs",
+				context: [],
+				instructions: [
+					"The handoff input is identity (baseline, commit, digest), not patch bytes.",
+					"Approve only when the summary matches the declared files.",
+				],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: ctx.cwd },
+			outputSchema: ReviewSchema,
+			limits: readOnly,
+			inputs: { summary: implement.output, handoff: implement.handoff },
+		});
+	},
+});
+```
+
 ## Finalizers: required record and advisory announcement
 
 Both finalizers are declared and never awaited or returned; the run returns

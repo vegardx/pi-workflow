@@ -64,12 +64,14 @@ Delivered:
 - cross-run artifact references as provenance: the child run record and view
   carry `parent.inputArtifacts` identifying the exact parent artifacts merged
   into its input, re-verified on resume; these are provenance records, not a
-  read path, and no live cross-run artifact read exists.
-
-Remaining:
-
-- pi-subagent handoff-export contract and workflow-owned worktree artifacts
-  before enabling writer tasks.
+  read path, and no live cross-run artifact read exists;
+- worktree agent tasks with workflow-owned handoff artifacts: `workspace:
+  { mode: "worktree", cwd }` requests with a workflow-only `handoff` policy,
+  pi-subagent contract revision 6 `exportHandoff` imported as a
+  digest-verified `git format-patch` artifact before release, `ctx.handoff`,
+  handoff descriptors as downstream inputs, and
+  `WorkflowService.exportHandoff` (runtime contract feature `worktrees: true`,
+  contract revision 17).
 
 ## Phase 3 — durable control
 
@@ -132,6 +134,10 @@ Remaining:
 - persistent widget and inspector;
 - complete workflow command/tool surface, including operator-triggered retry
   and invalidate tools over the service;
+- a handoff export tool over `WorkflowService.exportHandoff` that writes the
+  handoff bytes to a caller path; deferred because a tool result of up to
+  16 MiB returned to a model is wrong and writing caller paths needs its own
+  authority text;
 - first stable static-workflow API.
 
 ## Phase 5 — dynamic workflows

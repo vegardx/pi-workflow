@@ -3,13 +3,14 @@
 Custom workflow runtime for [Pi](https://pi.dev).
 
 This repository contains the durable static execution core and Pi extension for
-trusted read-only agent workflows, durable deterministic support-task
-execution, bounded nested static workflows executed as linked child runs, and
-declarative required and advisory finalizers (`ctx.finalize`). The runtime
-contract is revision 16 with the feature flags `finalizers: true` and
-`operatorAttempts: true` alongside the earlier flags. Dynamic workflows, writer
-tasks, the operator-triggered retry and resume surface, and polished UI remain
-unavailable.
+trusted agent workflows with read-only and worktree agent tasks, durable
+deterministic support-task execution, bounded nested static workflows executed
+as linked child runs, and declarative required and advisory finalizers
+(`ctx.finalize`). The runtime contract is revision 17 with the feature flag
+`worktrees: true` alongside the earlier flags, and it requires pi-subagent
+contract revision 6 (`handoffExport: true`). Dynamic workflows, the
+operator-triggered retry and resume surface, a Pi tool for handoff export, and
+polished UI remain unavailable.
 
 ## Goal
 
@@ -241,6 +242,50 @@ are `createWorkflowTaskRetrier`, `AgentRetryPolicySchema`,
 `AgentResumePolicySchema`, `settledAgentUsage`, and
 `currentSubagentAttemptId`; see
 [Contracts](docs/contracts.md#retry-and-resume-attempts).
+
+## Worktree tasks and handoffs
+
+An agent request with `workspace: { mode: "worktree", cwd }` runs the child in
+a pi-subagent worktree and must declare `limits.workspaceWriteBytes >= 1`. The
+workflow-only `handoff` policy (`"required"` by default, or `"optional"`) is
+part of task identity and is never sent to pi-subagent:
+
+```ts
+const implement = ctx.agent("implement", {
+	agent: "implementer",
+	task: { goal: "Implement the change", context: [], instructions: [] },
+	contextMode: "fresh",
+	tools: ["read", "grep", "edit", "write"],
+	preloadSkills: [],
+	contextScopes: ["project"],
+	workspace: { mode: "worktree", cwd: ctx.cwd },
+	handoff: "required",
+	limits: { ...limits.readOnly, workspaceWriteBytes: 64 * 1024 * 1024 },
+	outputSchema: SummarySchema,
+});
+const handoff = await ctx.handoff(implement); // WorkflowHandoffDescriptor
+```
+
+When the child completes, the task finalizer imports its structured output,
+then calls pi-subagent's `exportHandoff`, verifies the returned reference
+against the settled `{ attemptId, baselineHead, handoffCommit }` identity, its
+format, digest, size (at most `MAX_WORKFLOW_HANDOFF_BYTES` = 16 MiB), and the
+single-commit `git format-patch` shape, stores the bytes as a
+content-addressed `.patch` artifact (`output: "handoff"`), and records
+`task-execution-handoff-imported` before it persists release intent. Import
+failure leaves the task `cleanup-blocked` at stage `handoff-import` until
+reconciliation; a completed child that captured no handoff completes under
+`"optional"` and fails after release under `"required"`. The handle's
+`handoff` may be named in a later task's `inputs` (the child receives the
+descriptor, not patch bytes) or returned as the workflow output;
+`WorkflowService.exportHandoff(runId, taskId)` returns the descriptor and the
+verified bytes. The workflow never applies, pushes, merges, or checks out a
+handoff. The public entry points are `WorkflowHandoffDescriptorSchema`,
+`HandoffPolicySchema`, `AgentWorkspaceRequestSchema`,
+`SubagentHandoffEvidenceSchema`, `MAX_WORKFLOW_HANDOFF_BYTES`,
+`WORKFLOW_HANDOFF_FORMAT_SHA256`, `deriveSubagentSettlementEvidence`,
+`deriveWorkflowHandoffDescriptor`, and `isHandoffHandle`; see
+[Contracts](docs/contracts.md#worktree-tasks-and-handoffs).
 
 ## Invalidation and re-execution
 

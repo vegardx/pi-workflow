@@ -77,8 +77,10 @@ An in-memory-only successful drive does not satisfy the first slice.
 - crash after child launch is recovered by operation ID without duplication;
 - every subagent terminal and cleanup outcome maps to a workflow task outcome;
 - imported artifacts are digest-verified and retention-safe;
-- worktree requests fail before launch until a compatible public handoff-export
-  capability exists; private paths or branch names are never used as imports.
+- worktree requests are admitted, and a completed worktree child's handoff is
+  imported through pi-subagent's public digest-verified `exportHandoff`
+  before release; private paths, branches, or ref names are never used as
+  imports.
 
 ## Scheduling and control
 
@@ -247,6 +249,60 @@ An in-memory-only successful drive does not satisfy the first slice.
   pages to the 48 KiB bound while keeping later pages complete, and refuse an
   oversized inspection with the exact guidance message.
 
+## Worktree tasks and handoffs
+
+- a worktree agent task (`workspace: { mode: "worktree", cwd }`,
+  `limits.workspaceWriteBytes >= 1`) completes with a workflow-owned,
+  digest-verified `git format-patch` handoff artifact imported from
+  pi-subagent's `exportHandoff` before the child is released;
+- `task-execution-handoff-imported` precedes `task-execution-release-intended`
+  in the journal, and the handoff artifact is declared with
+  `output: "handoff"`, `mediaType: "application/x-git-format-patch"`, and
+  `schemaSha256 = WORKFLOW_HANDOFF_FORMAT_SHA256` under the same producer
+  execution as the result artifact;
+- the preflight event carries `workspaceMode` and `workspaceBaselineSha256`,
+  the settlement carries `handoff { attemptId, baselineHead, handoffCommit }`
+  and nothing else about the worktree, and the import's identity equals the
+  settlement's;
+- export failure, identity mismatch, unsupported format, digest or size
+  mismatch, oversize, or a malformed patch leaves the task and run
+  `cleanup-blocked` at stage `handoff-import`, and explicit reconciliation
+  reconciles the child and retries the import;
+- a completed child that captured no handoff under `handoff: "required"` is
+  released and then fails with "Completed worktree task captured no
+  handoff."; under `"optional"` it completes and `ctx.handoff` resolves
+  `undefined`;
+- a retry or resume attempt imports the final attempt's handoff, whose
+  `attemptId` equals the current attempt, while prior attempts' handoff
+  identities stay in `priorSettlements`;
+- generation 2 receives a fresh preflight, baseline, subagent run, and
+  worktree; the prior generation's handoff artifact is retained and every
+  lookup selects the current execution's artifact;
+- every crash prefix of the handoff ladder (no handoff evidence, orphan
+  `.patch` blob, declared but not imported, imported or absent, blocked at
+  `handoff-import`, released with a required handoff absent) replays to the
+  same outcome without a duplicate artifact or event;
+- `ctx.handoff` resolves the descriptor, a returned `HandoffHandle` commits the
+  descriptor as the workflow output, and a downstream task that names
+  `handle.handoff` in `inputs` receives the descriptor envelope, never patch
+  bytes; a handoff input whose producer is not a worktree agent task is
+  rejected at declaration;
+- `WorkflowService.exportHandoff(runId, taskId)` returns the verified bytes and
+  descriptor for a completed worktree task and refuses read-only or
+  incomplete tasks; the run view lists `handoff` on completed worktree tasks;
+- a completed worktree task replays only with a verified handoff artifact (or
+  a recorded absence under an optional policy) whose identity equals the
+  settlement and import; otherwise "Completed worktree task has no verified
+  handoff artifact.";
+- private paths, branches, and ref names never appear in the journal or store;
+- the workflow never applies, pushes, merges, or checks out a handoff;
+- the materializer rejects `handoff` on a read-only request, a worktree
+  request without a positive `workspaceWriteBytes`, and a handoff input whose
+  producer is not a worktree agent task, with the fixed messages, and the
+  launcher never lowers `handoff` into the pi-subagent request;
+- the runtime contract publishes `worktrees: true` and requires pi-subagent
+  contract revision 6 with `handoffExport: true`.
+
 ## Structured output and support tasks
 
 - every initial agent task uses a terminating output schema;
@@ -394,7 +450,7 @@ An in-memory-only successful drive does not satisfy the first slice.
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-16 stores reject revision 1 through 15 records;
+  and revision-17 stores reject revision 1 through 16 records;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - finalizers are `role: "finalizer"` tasks declared through `ctx.finalize`
   with exactly one of `support`, `agent`, or `workflow`, `kind` lowers to the

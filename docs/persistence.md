@@ -41,16 +41,20 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-16 rejects revision-1 through revision-15 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 16 accepts
+17 rejects revision-1 through revision-16 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 17 accepts
 only the declared run, workflow phase/log effect, task, artifact, barrier,
 output-commit, and task-execution events. Agent task-execution evidence records
-generation creation, the latest preflight before launch intent, uncertain launch
+generation creation, the latest preflight before launch intent (carrying the
+launch plan's `workspaceMode` and `workspaceBaselineSha256`), uncertain launch
 and reconciled absence or a launch receipt, child observation, bounded terminal
-child settlement, zero or more retry or resume attempts (each an intent followed
-by a receipt with the next observation and settlement, or by a decline),
-artifact import, release intent and receipt, and terminal outcome in that
-order; an `interrupted` settlement that admits no further attempt records the
+child settlement (with `handoff { attemptId, baselineHead, handoffCommit }`
+when a worktree attempt captured one), zero or more retry or resume attempts
+(each an intent followed by a receipt with the next observation and
+settlement, or by a decline), artifact import, for a completed worktree child
+either handoff import (`task-execution-handoff-imported`) or recorded absence
+(`task-execution-handoff-absent`), release intent and receipt, and terminal
+outcome in that order; an `interrupted` settlement that admits no further attempt records the
 `interrupted` terminal outcome directly after the settlement, with no release
 intent or receipt, and the task moves to `interrupted` with reason
 "Interrupted child retained for recovery; no release performed.". Support
@@ -138,7 +142,7 @@ valid prefix fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 16 admits generations 1 through
+invalidation. Revision 17 admits generations 1 through
 `MAX_TASK_EXECUTION_GENERATIONS = 16`. `task-execution-created` requires the
 generation to equal one more than the executions already recorded for the
 task, the task to be `ready` and on-path, and no current execution:
@@ -159,6 +163,8 @@ An agent execution (`kind: "agent"`) owns one subagent run and contains:
 - the initial child attempt and every retry or resume attempt: its intent,
   its receipt or decline, and the superseded attempt's settlement evidence;
 - imported artifacts;
+- for a worktree task, the imported handoff artifact identity (`handoffImport`)
+  or the recorded absence of a handoff (`handoffAbsent`);
 - terminal classification.
 
 A support execution (`kind: "support"`) carries `implementationIdentitySha256`
@@ -208,7 +214,7 @@ identity only. The child record additionally carries `parent.inputArtifacts`,
 the identities of the parent artifacts whose verified values were merged into
 its input; the parent's intent carries the matching digest map.
 
-Revision 16 records subagent retry and resume attempts under the existing
+Revision 17 records subagent retry and resume attempts under the existing
 agent task execution. Every attempt intent carries `origin: "policy"` (written
 by the retrier, never with a `reason`) or `origin: "operator"` (a `resume`
 intent with an optional `reason`, admitted by the reducer but not yet appended
@@ -249,7 +255,7 @@ task-execution-child-settled (status interrupted, attemptOrdinal n)
 The last ladder is the operator reopen: the intent deletes the retained
 terminal outcome and returns the execution to `attempt-intended`; a decline
 leaves it settled and the finalizer re-terminalizes it `interrupted`. Only the
-reducer side exists in revision 16.
+reducer side exists in revision 17.
 
 Restart repairs an agent execution with attempt evidence from its durable
 prefix:
@@ -296,6 +302,26 @@ Journal, lease, and artifact-store errors during support execution are thrown
 rather than converted into task failure. A `running` support task found after
 restart with no in-process execution is cancelled directly during stop and is
 otherwise repaired or recomputed by the ladder above.
+
+### Worktree handoff recovery
+
+A completed worktree child inserts the handoff step between artifact import
+and release intent. A retry or resume attempt gets a fresh pi-subagent
+worktree per attempt, and only the final settled attempt's handoff is
+imported; prior attempts' handoff identities stay in `priorSettlements`. A new
+generation gets a new preflight, baseline, subagent run, and worktree, and the
+previous generation's handoff artifact remains declared under its own
+`producerExecutionId`. Restart repairs the step from the durable prefix:
+
+| Durable prefix | Recovery |
+| --- | --- |
+| `artifact-imported`, no handoff evidence | export again when the settlement carries a handoff (the content-addressed blob deduplicates), declare and import once; record absence when it does not |
+| `.patch` blob present, no `artifact-declared` | safe orphan; re-export yields identical bytes for the same commit pair, then declare and import |
+| `artifact-declared`, no `task-execution-handoff-imported` | append the import event only, without another export call |
+| `task-execution-handoff-imported` or `task-execution-handoff-absent` | proceed to release intent |
+| terminal `cleanup-blocked` at stage `handoff-import` | explicit reconciliation reconciles the child, persists any replacement observation and settlement, and retries the import; the import event's recovery branch deletes the terminal |
+| `released`, handoff absent, policy `required`, no terminal | append the fixed `failed` terminal ("Completed worktree task captured no handoff.") and the task and run transitions |
+| terminal `completed` whose handoff artifact is missing or unreadable | `WorkflowTaskFinalizationError` at `handoff-import` ("Completed worktree task has no durable handoff artifact."); the task status is not repaired |
 
 ### Nested execution recovery
 
@@ -359,8 +385,15 @@ subagent and workflow runtime revisions
 ```
 
 Ambiguous duplicate matches miss. Replayed structured values are revalidated.
-Replayed repository patches or handoffs must validate against their exact
-immutable baseline.
+A replayed handoff must validate against its exact immutable baseline, which
+is the journaled triple of the launch plan's `workspaceBaselineSha256` on the
+preflight (pi-subagent's digest over the clean checkout HEAD, opaque to the
+workflow), the settlement's `handoff.baselineHead`, and the imported
+artifact's `baselineHead`: the last two must be equal and the first must be
+present. The workflow never recomputes the digest from git and does not depend
+on pi-subagent's internal derivation. Between generations the baseline may
+legitimately differ because a new preflight was taken; the difference is
+visible evidence, not an error. Cross-run replay remains unsupported.
 
 Default policy:
 
@@ -372,8 +405,15 @@ Default policy:
   imported artifact; child source drift changes the declaration identity and
   fails replay of the parent as declaration drift, while an already-launched
   child whose definition no longer resolves exactly fails at `nested-launch`;
-- isolated worktree tasks: replay allowed only with verified retained handoff
-  evidence and exact baseline;
+- worktree tasks: a completed result replays (`loadTaskResult` reuses it)
+  only when the current execution's preflight recorded
+  `workspaceMode: "worktree"` and either its handoff artifact
+  (`output: "handoff"`, `producerExecutionId` equal to the current execution)
+  reads through `readBytes` with digest and format verification, embeds the
+  imported `handoffCommit` in its first line, and carries
+  `{ attemptId, baselineHead, handoffCommit }` equal to the settlement, or the
+  handoff is recorded absent under an `optional` policy; otherwise the load
+  fails with "Completed worktree task has no verified handoff artifact.";
 - live-branch mutation: not supported by the workflow task contract;
 - external web/service tasks: replay disabled unless evidence is captured as an
   immutable declared artifact.
@@ -455,6 +495,30 @@ same store without a task producer and is bound to the definition output schema.
 Run completion requires a durable output-artifact commit; a crash after that
 commit resumes only the final status transition.
 
+Handoff artifacts share the same store. `putBytes` writes an exported
+pi-subagent handoff as a content-addressed `<sha256>.patch` blob next to the
+`<sha256>.json` result blobs, under the same process-wide mutation queue,
+lease fencing, temp-file/fsync/rename path, per-run total bound (`.patch`
+entries count, and any other extension is an invalid entry), and
+existing-blob digest check, with `output: "handoff"`, `mediaType:
+"application/x-git-format-patch"`, and `schemaSha256 =
+WORKFLOW_HANDOFF_FORMAT_SHA256`, the canonical digest of the fixed format
+document `{ format: "git-format-patch", mediaType, revision: 6 }`. All three
+producer fields are required, and the per-blob bound is the smaller of the
+store bound and `MAX_WORKFLOW_HANDOFF_BYTES` (16 MiB): "workflow handoff
+artifact is empty", "workflow handoff artifact exceeds byte limit", and
+"invalid workflow handoff artifact metadata" are the fixed errors. `readBytes`
+revalidates the reference, run, deterministic id, media type, output, format
+digest, and byte bound, requires a regular non-symlink file of the recorded
+size, verifies the SHA-256, and requires the first line
+`From <object id> Mon Sep 17 00:00:00 2001` ("workflow handoff artifact is not
+a git-format-patch"); the embedded object id is compared to the imported
+`handoffCommit` by the finalizer and the replay verifier, not by the store.
+`readJson` continues to refuse any non-`application/json` reference, so a
+patch can never be read as a value. One result and one handoff artifact may
+coexist per producer execution, and identical handoff bytes across generations
+share one blob under distinct references.
+
 Subagent artifacts are attempt evidence. Workflow imports every artifact needed
 for downstream execution, result delivery, resume, or replay using owner and
 digest verification. Workflow retention never depends on an unpinned subagent
@@ -483,11 +547,13 @@ read path exists: a child cannot dereference them, the artifact store never
 resolves an id from another run, and a value crosses the run boundary only as
 a verified copy bound by digest into the receiving run's record or store.
 
-The initial read-only slice imports structured/output artifacts only. Worktree
-execution is rejected until pi-subagent exposes bounded handoff content through
-a public digest-verified export. A persisted `WorktreeRecord`, host path, branch,
-or commit name alone is not a workflow-owned artifact and cannot satisfy this
-requirement.
+Worktree execution imports the child's handoff through pi-subagent's public
+digest-verified `exportHandoff` into this store before the child is released;
+the imported `.patch` blob and its declared reference are the only
+workflow-owned handoff evidence, and the workflow never reads a subagent
+worktree, branch, or ref. A pi-subagent `WorktreeRecord`, host path, branch,
+or ref name alone is not a workflow-owned artifact and is never persisted;
+only the `{ attemptId, baselineHead, handoffCommit }` identity is journaled.
 
 ## Finalizers
 

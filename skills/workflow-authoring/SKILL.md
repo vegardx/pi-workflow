@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a static pi-
 
 # Authoring static pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` contract revision 16. Every rule
+This skill covers `@vegardx/pi-workflow` contract revision 17. Every rule
 below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, and the pi-subagent launch contracts).
@@ -13,11 +13,13 @@ Quoted strings are the exact messages the runtime throws. Worked examples that
 load through the real definition loader are in
 [references/examples.md](references/examples.md).
 
-Not available in revision 16: `ctx.checkpoint`, `ctx.artifact`, dynamic
-workflows, writer (non-read-only) agent tasks, fork context, and operator-triggered
-retry or resume tools. Do not author against
+Not available in revision 17: `ctx.checkpoint`, `ctx.artifact`, dynamic
+workflows, fork context, operator-triggered retry or resume tools, and a Pi
+tool for handoff export. Do not author against
 them; a definition that calls them fails when its source runs. `ctx.finalize`
-is available since revision 16; see [Finalizers](#finalizers).
+is available since revision 16 (see [Finalizers](#finalizers)); worktree agent
+tasks with `ctx.handoff` are available since revision 17 (see
+[Worktree tasks and handoffs](#worktree-tasks-and-handoffs)).
 
 ## Validate, run, inspect
 
@@ -43,8 +45,9 @@ is available since revision 16; see [Finalizers](#finalizers).
    committed, and `tasks[]` (one entry per declared task in materialization
    order with `id`, `namespace`, `key`, `kind`, `role` (`"task"` or
    `"finalizer"`), `disposition`, `status`, `generation`, the current
-   `executionId`, `attempts` (agent tasks), `settlement`, `outcome`, and
-   `abandoned: true` for abandoned history).
+   `executionId`, `attempts` (agent tasks), `settlement`, `outcome`,
+   `abandoned: true` for abandoned history, and `handoff` (the handoff
+   descriptor) on completed worktree tasks).
 6. `workflow_runs { statuses?, includeChildren?, limit?, cursor? }` lists
    durable runs newest first with `taskCounts`, `ownership`,
    `availableActions`, and `requiresAttention`; `workflow_inspect { runId,
@@ -96,12 +99,12 @@ unique across all roots ("duplicate workflow name <name>: <path> and <path>").
 Static imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
 module specifiers of support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 16". Relative imports of helper files are therefore
+contract revision 17". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 16",
+"dynamic workflow imports are not supported by contract revision 17",
 "dynamic imports and CommonJS require are not supported by contract revision
-16", and "TypeScript import assignment is not supported by contract revision
-16". Import-like text inside strings and comments is fine. The loader
+17", and "TypeScript import assignment is not supported by contract revision
+17". Import-like text inside strings and comments is fine. The loader
 resolves imports from the definition file's location, so `@vegardx/pi-workflow`
 and `typebox` must be resolvable there.
 
@@ -145,8 +148,9 @@ export default defineWorkflow({
   type their static types. Use `additionalProperties: false` on objects.
 - `run` must be a function ("workflow run must be a function"). It may return
   a plain value, a `TaskHandle`, an `ArtifactHandle` from a task declared in
-  this run ("Workflow returned an unknown artifact handle."), or a promise of
-  one. The final value is validated against `outputSchema` ("Workflow return
+  this run ("Workflow returned an unknown artifact handle."), a worktree
+  task's `handle.handoff` (the output schema must then accept a
+  `WorkflowHandoffDescriptor`), or a promise of one. The final value is validated against `outputSchema` ("Workflow return
   value does not match its output schema.") and must be lossless JSON
   ("Workflow output is not losslessly JSON-serializable.").
 - Effective limits: the service lowers `budget.cost` to its cap (default
@@ -166,7 +170,7 @@ export default defineWorkflow({
 | `ctx.signal` | Aborted on stop, shutdown, or deadline. |
 | `ctx.phase(name)` | Durable progress effect; 1..128 characters ("Workflow phase must contain 1 to 128 characters."). |
 | `ctx.log(message)` | Durable log effect; 1..4096 characters ("Workflow log must contain 1 to 4096 characters."). |
-| `ctx.agent(key, request)` | Declares a read-only agent task; returns `TaskHandle<Static<outputSchema>>`. |
+| `ctx.agent(key, request)` | Declares an agent task; returns `TaskHandle<Static<outputSchema>>`, or `WorktreeTaskHandle` (same plus `handle.handoff`) when the request's `workspace.mode` is `"worktree"`. |
 | `ctx.support(key, descriptor)` | Declares a deterministic in-process support task from a `defineSupportTask` helper call. |
 | `ctx.workflow<TOutput>(key, request)` | Declares a nested workflow task that runs another discovered definition as a linked child run. |
 | `ctx.fanOut(namespace, items, { key, task })` | Declares at most 64 agent tasks in namespace `[namespace]`; returns handles in item order. "Workflow fan-out namespace is invalid.", "Workflow fan-out exceeds 64 items.", "Workflow fan-out options are invalid." |
@@ -176,6 +180,7 @@ export default defineWorkflow({
 | `await ctx.result(handle)` | Barrier: persists all declarations so far, drives until the task completes, returns its frozen validated value. |
 | `await ctx.results([a, b])` | Fail-fast barrier over several handles; returns a tuple in declaration order. |
 | `await ctx.settled([a, b])` | Barrier that never throws for task failure; returns `{ status: "fulfilled", value }` or `{ status: "rejected", taskId, outcome, failure? }` per handle. |
+| `await ctx.handoff(worktreeHandle)` | Barrier on a worktree task (same persisted barrier kind as `result`); resolves its `WorkflowHandoffDescriptor`, or `undefined` only when the task's `handoff` policy is `"optional"` and the completed child captured no changes. Rejects a finalizer handle ("a finalizer cannot be a barrier target"). |
 
 Declaring a task never starts work. Only barriers and the final return
 execute anything. Barriers run one at a time in call order. A `result` or
@@ -208,6 +213,9 @@ producer's output schema before they are returned.
   the artifact handle `{ runId, producerTaskId, output: "result" }` (use it in
   `inputs`). Handles are frozen, non-thenable, and typed by the producer's
   output schema.
+- `handle.handoff` exists only on worktree agent tasks and is the handoff
+  handle `{ runId, producerTaskId, output: "handoff" }`; it may be used in
+  `inputs`, passed to `ctx.handoff`, or returned as the workflow value.
 
 ## `after` versus `inputs`
 
@@ -216,6 +224,10 @@ producer's output schema before they are returned.
 - `inputs: { name: handle.output, … }` is a data dependency. Each producer
   becomes an order dependency as well; order alone never grants data. At most
   64 inputs per task.
+- `inputs: { name: worktreeHandle.handoff }` names a worktree task's handoff.
+  The consumer receives the handoff descriptor (identity, digest, and size),
+  never patch bytes. The producer must be a worktree agent task, otherwise
+  "handoff input producer is not a worktree agent task".
 - Both must name tasks that are already declared in this run: "task order
   dependency is unknown or belongs to another run", "task data dependency is
   invalid, unknown, or belongs to another run".
@@ -274,14 +286,15 @@ request fails with "invalid agent task request".
 | `tools` | 0..64 unique resource names, brokered by pi-subagent. |
 | `preloadSkills` | 0..64 unique skill names. |
 | `contextScopes` | Unique subset of `"global"`, `"project"`. |
-| `workspace` | `{ mode: "read-only", cwd }` only, `cwd` 1..4096 characters; use `ctx.cwd`. |
+| `workspace` | `{ mode: "read-only", cwd }` or `{ mode: "worktree", cwd }`, `cwd` 1..4096 characters; use `ctx.cwd`. A worktree runs the child in an isolated pi-subagent worktree and produces a handoff. |
+| `handoff` | Worktree tasks only: `"required"` (default when omitted) or `"optional"`. On a read-only request: "handoff policy requires a worktree workspace". Part of task identity; never sent to pi-subagent. |
 | `outputSchema` | JSON Schema for the structured result; the child must satisfy it. |
 | `limits.cumulativeRuntimeMs` | 1_000..3_600_000 across all attempts. |
 | `limits.attemptTimeoutMs` | 1_000..3_600_000 per attempt. |
 | `limits.totalTokens` | Optional 1..10_000_000; required for every task when the run has a token budget. |
 | `limits.cost` | Dollars, >= 0. |
 | `limits.outputBytes` | 1..16 MiB. |
-| `limits.workspaceWriteBytes` | 0..16 GiB (read-only tasks use 0). |
+| `limits.workspaceWriteBytes` | 0..16 GiB. Read-only tasks use 0; worktree tasks must declare at least 1 ("worktree workspace requires a positive workspaceWriteBytes limit"). |
 | `limits.retries`, `limits.resumes` | 0..10 each. |
 | `retry` | Optional `{ attempts: 1..10, on?: ["backoff" | "manual"] }`, `on` defaults to `["backoff"]`; `attempts` may not exceed `limits.retries` ("agent retry policy exceeds the declared retry limit"). |
 | `resume` | Optional `{ attempts: 1..10 }`; may not exceed `limits.resumes` ("agent resume policy exceeds the declared resume limit"). |
@@ -292,6 +305,44 @@ classified `resume`. Failures classified `never` or `reconcile` are not
 retried. Every attempt runs on the same child run under the same task
 execution, backoff is waited out under the run deadline and stop signal, and
 settled usage across attempts counts against the budget.
+
+## Worktree tasks and handoffs
+
+A worktree agent task (`workspace: { mode: "worktree", cwd: ctx.cwd }`,
+`limits.workspaceWriteBytes >= 1`) runs its child in an isolated pi-subagent
+worktree. When the child completes, the runtime imports its structured output
+and then its handoff: it calls pi-subagent's `exportHandoff`, verifies the
+returned reference against the settled `{ attemptId, baselineHead,
+handoffCommit }`, its `git-format-patch` format, digest, size (at most 16 MiB),
+and single-commit shape, stores the bytes as a workflow-owned
+`application/x-git-format-patch` artifact, and records the import before it
+releases the child. The workflow never applies, pushes, merges, or checks out
+a handoff, and it never reads a worktree path or branch; downstream tasks
+cannot run on top of a handoff.
+
+- `handoff: "required"` (the default): a completed child that captured no
+  changes is released and then fails at stage `handoff-import` with
+  "Completed worktree task captured no handoff."; `ctx.handoff` and
+  `ctx.result` on it throw. `handoff: "optional"`: such a child completes and
+  `ctx.handoff` resolves `undefined`.
+- `await ctx.handoff(handle)` resolves the descriptor:
+  `{ artifactId, runId, producerTaskId, producerExecutionId, subagentRunId,
+  subagentAttemptId, baselineHead, handoffCommit, format: "git-format-patch",
+  mediaType: "application/x-git-format-patch", sha256, bytes }`. It contains
+  no paths or branch names. `handle.handoff` in a later task's `inputs`
+  delivers the same descriptor in the child's context (the envelope marks
+  `content: "descriptor"`), and returning `handle.handoff` commits the
+  descriptor as the workflow output.
+- Retries and resumes create a fresh worktree per attempt; only the final
+  attempt's handoff is imported. Invalidation re-executes the task in a new
+  worktree from a new baseline; the previous generation's handoff artifact
+  stays in the run as history.
+- Failure at stage `handoff-import` before release (export refused, identity,
+  format, digest, or size mismatch, or a handoff above 16 MiB) leaves the task
+  and run `cleanup-blocked` until `workflow_reconcile` retries the import; an
+  oversize handoff stays exportable from pi-subagent by the operator.
+- The embedder can read the bytes with
+  `service.exportHandoff(runId, taskId)`; there is no Pi tool for it.
 
 ## Budgets and admission
 
@@ -333,8 +384,11 @@ const hashed = ctx.support("hash", digest({ parameters: { algorithm: "sha256" },
 
 - The helper validates `parameters` when it is called ("support task
   parameters do not match their schema") and returns a frozen descriptor that
-  also accepts `after`, `inputs`, `disposition`, and `replay`. Invalid
-  identity fields fail with "invalid support task implementation identity".
+  also accepts `after`, `inputs`, `disposition`, and `replay`. `inputs` may
+  name result handles (`handle.output`) and worktree handoff handles
+  (`handle.handoff`); a handoff input gives `execute` the handoff descriptor,
+  not patch bytes. Invalid identity fields fail with "invalid support task
+  implementation identity".
 - The workflow only declares the task. The embedder must register the
   matching implementation with `createWorkflowService({ supportTasks:
   [digest.registration(execute)] })`; the runtime resolves the persisted
@@ -433,9 +487,14 @@ not influence the output.
   `failed` with reason "Static workflow source execution failed."; an output
   that fails validation ends it `failed` with "Workflow output finalization
   failed.".
-- `cleanup-blocked` means a child's cleanup, release, or output import could
-  not be proved; the run waits for `workflow_reconcile`, which retries the
-  import or reconciles the child.
+- `cleanup-blocked` means a child's cleanup, release, output import, or
+  handoff import could not be proved; the run waits for `workflow_reconcile`,
+  which retries the import or reconciles the child.
+- A worktree task can also end `failed` at stage `handoff-import` after a
+  successful child: under `handoff: "required"` a child that captured no
+  changes is released and then fails with "Completed worktree task captured no
+  handoff." (`settled` reports `code: "handoff-import"`). Use
+  `handoff: "optional"` when an unchanged worktree is an acceptable outcome.
 - `interrupted` means the run lost its lease or an agent child was interrupted
   without an admissible resume attempt. Such a child is retained in
   pi-subagent without release; the task ends `interrupted` with the reason
@@ -443,7 +502,7 @@ not influence the output.
   never resumes it on its own. Recover a lost lease with `workflow_reconcile`;
   recover an interrupted task with `workflow_invalidate { runId, taskId,
   reason }`, which re-executes it as a new generation with a fresh child run.
-  There is no operator resume tool in revision 16.
+  There is no operator resume tool in revision 17.
 - `cancelled` is the result of `workflow_stop`, session shutdown, or the
   deadline. Trusted source awaiting `ctx.signal` should unwind when it aborts.
 - Run statuses: `created`, `running`, `waiting`, `finalizing`, `stopping`,
