@@ -3062,3 +3062,90 @@ describe("nested workflow scheduling", () => {
 		});
 	});
 });
+
+describe("retry attempts", () => {
+	it("retries a backoff-classified failure under the same execution and completes", async () => {
+		const base = request();
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", {
+				...base,
+				retry: { attempts: 1 },
+				limits: { ...base.limits, retries: 1 },
+			}),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const failedResult = result("failed");
+		const transient: RunResult = {
+			...failedResult,
+			failure: {
+				...(failedResult.failure ?? {
+					code: "tool",
+					origin: "tool",
+					message: "tool failed",
+					guidance: "Inspect the result.",
+				}),
+				retry: "backoff",
+			},
+		};
+		let waits = 0;
+		const ownerClient = client({
+			wait: vi.fn(async () => {
+				waits += 1;
+				return executionResult(waits === 1 ? transient : result("completed"));
+			}),
+			retry: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler2",
+				status: "active" as const,
+			})),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler2",
+				status: "completed" as const,
+			})),
+		});
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const ownerBinding = binding(ownerClient);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+			finalizer: createWorkflowTaskFinalizer({
+				journal,
+				artifacts,
+				binding: ownerBinding,
+			}),
+		});
+		await driveToRest(scheduler);
+		const state = await projection(journal);
+		const task = state.tasks[taskId];
+		expect(task?.status).toBe("completed");
+		const execution = state.executions[task?.currentExecutionId ?? ""];
+		expect(execution?.attempts).toMatchObject([
+			{
+				kind: "retry",
+				ordinal: 2,
+				previousAttemptId: "attempt_scheduler",
+				subagentAttemptId: "attempt_scheduler2",
+			},
+		]);
+		expect(execution?.priorSettlements).toHaveLength(1);
+		expect(execution?.priorSettlements?.[0]?.evidence).toMatchObject({
+			status: "failed",
+			attemptOrdinal: 1,
+		});
+		expect(execution?.settlement?.evidence).toMatchObject({
+			status: "completed",
+			attemptOrdinal: 2,
+		});
+		expect(execution?.terminal?.evidence).toMatchObject({
+			kind: "subagent",
+			attemptOrdinal: 2,
+		});
+		expect(ownerClient.retry).toHaveBeenCalledWith("run_scheduler");
+		expect(ownerClient.launch).toHaveBeenCalledTimes(1);
+		expect((await journal.readEvents()).map((event) => event.type)).toContain(
+			"task-execution-attempt-receipted",
+		);
+	});
+});

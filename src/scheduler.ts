@@ -7,6 +7,7 @@ import {
 } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
+import { currentSubagentAttemptId, settledAgentUsage } from "./attempts.js";
 import type {
 	SubagentTerminalEvidence,
 	TaskExecutionId,
@@ -44,6 +45,10 @@ import {
 	createWorkflowTaskLauncher,
 	type WorkflowTaskLauncher,
 } from "./task-launcher.js";
+import {
+	createWorkflowTaskRetrier,
+	type WorkflowTaskRetrier,
+} from "./task-retrier.js";
 
 const TERMINAL_CHILD_STATUSES = new Set([
 	"completed",
@@ -117,6 +122,8 @@ export interface WorkflowSequentialSchedulerOptions {
 	 * the nested run provider, and this run's nesting context used to build
 	 * one. Without either, nested workflow tasks fail closed.
 	 */
+	/** Retry and resume attempts for agent tasks; built from the binding when omitted. */
+	readonly retrier?: WorkflowTaskRetrier;
 	readonly nestedExecutor?: WorkflowNestedRunExecutor;
 	readonly nestedRuns?: WorkflowNestedRunProvider;
 	readonly nesting?: {
@@ -129,6 +136,7 @@ export interface WorkflowSequentialSchedulerOptions {
 
 type PreparedWork =
 	| { state: "wait"; taskId: WorkflowTaskId; receipt: RunReceipt }
+	| { state: "attempt"; taskId: WorkflowTaskId }
 	| { state: "support"; taskId: WorkflowTaskId }
 	| { state: "nested"; taskId: WorkflowTaskId }
 	| WorkflowSchedulerOutcome;
@@ -162,11 +170,21 @@ function receiptFor(
 ): RunReceipt | undefined {
 	const receipt = execution.launchReceipt;
 	if (!receipt) return undefined;
+	const attempt = (execution.attempts ?? []).at(-1);
 	return {
 		runId: receipt.subagentRunId,
-		attemptId: receipt.subagentAttemptId,
-		status: receipt.status,
+		attemptId: currentSubagentAttemptId(execution) ?? receipt.subagentAttemptId,
+		status:
+			attempt?.subagentAttemptId !== undefined && attempt.status !== undefined
+				? attempt.status
+				: receipt.status,
 	};
+}
+
+function receiptedAttemptCount(execution: TaskExecutionProjection): number {
+	return (execution.attempts ?? []).filter(
+		(attempt) => attempt.subagentAttemptId !== undefined,
+	).length;
 }
 
 function dependencies(
@@ -225,10 +243,13 @@ function terminalOutcome(result: RunResult) {
 	return outcomeFromStatus(result.status);
 }
 
-function settlementEvidence(result: RunResult): SubagentTerminalEvidence {
+function settlementEvidence(
+	result: RunResult,
+	attemptOrdinal: number,
+): SubagentTerminalEvidence {
 	const evidence: SubagentTerminalEvidence = {
 		kind: "subagent",
-		attemptOrdinal: 1,
+		attemptOrdinal,
 		resultSha256: deriveSubagentResultSha256(result),
 		status: result.status,
 		usage: structuredClone(result.usage),
@@ -301,6 +322,14 @@ export function createWorkflowSequentialScheduler(
 					signal: () => stopController.signal,
 				})
 			: undefined);
+	const retrier =
+		options.retrier ??
+		createWorkflowTaskRetrier({
+			journal,
+			binding,
+			signal: () => stopController.signal,
+			...(options.nesting ? { deadlineAt: options.nesting.deadlineAt } : {}),
+		});
 	const nestedExecutor =
 		options.nestedExecutor ??
 		(options.artifacts && options.nestedRuns && options.nesting
@@ -489,12 +518,13 @@ export function createWorkflowSequentialScheduler(
 				continue;
 			}
 			if (!execution.settlement) continue;
-			if (!execution.settlement.evidence.usageComplete) {
+			const usage = settledAgentUsage(execution);
+			if (!usage.usageComplete) {
 				return "Workflow child usage evidence is incomplete.";
 			}
-			cost += execution.settlement.evidence.usage.cost;
-			totalTokens += execution.settlement.evidence.usage.totalTokens;
-			childRuntimeMs += execution.settlement.evidence.runtimeMs;
+			cost += usage.cost;
+			totalTokens += usage.totalTokens;
+			childRuntimeMs += usage.runtimeMs;
 		}
 		if (cost > budget.cost) return "Workflow cost budget was exceeded.";
 		if (budget.totalTokens !== undefined && totalTokens > budget.totalTokens) {
@@ -530,16 +560,17 @@ export function createWorkflowSequentialScheduler(
 				continue;
 			}
 			if (execution.settlement) {
-				if (!execution.settlement.evidence.usageComplete) {
+				const usage = settledAgentUsage(execution);
+				if (!usage.usageComplete) {
 					return {
 						allowed: false,
 						deferred: false,
 						reason: "Workflow child usage evidence is incomplete.",
 					};
 				}
-				settledCost += execution.settlement.evidence.usage.cost;
-				settledTotalTokens += execution.settlement.evidence.usage.totalTokens;
-				settledChildRuntimeMs += execution.settlement.evidence.runtimeMs;
+				settledCost += usage.cost;
+				settledTotalTokens += usage.totalTokens;
+				settledChildRuntimeMs += usage.runtimeMs;
 				continue;
 			}
 			if (execution.nestedSettlement) {
@@ -920,6 +951,14 @@ export function createWorkflowSequentialScheduler(
 		}
 
 		const selectedExecution = executionFor(current, selected);
+		if (
+			selectedExecution?.settlement &&
+			(selectedExecution.phase === "settled" ||
+				selectedExecution.phase === "attempt-intended")
+		) {
+			busy.add(selected.task.id);
+			return { state: "attempt", taskId: selected.task.id };
+		}
 		if (selectedExecution?.settlement) {
 			const receipt = receiptFor(selectedExecution);
 			if (!receipt) {
@@ -1085,18 +1124,24 @@ export function createWorkflowSequentialScheduler(
 			status: executionResult.result.status,
 		};
 		validateReceipt(terminalReceipt, expected, "observation");
-		let evidence: SubagentTerminalEvidence;
-		try {
-			evidence = settlementEvidence(executionResult.result);
-		} catch (error) {
-			throw new WorkflowSchedulerError(
-				"observation",
-				"Subagent terminal result cannot be represented as durable evidence.",
-				{ cause: error },
-			);
-		}
+		const evidenceFor = (
+			execution: TaskExecutionProjection,
+		): SubagentTerminalEvidence => {
+			try {
+				return settlementEvidence(
+					executionResult.result,
+					1 + receiptedAttemptCount(execution),
+				);
+			} catch (error) {
+				throw new WorkflowSchedulerError(
+					"observation",
+					"Subagent terminal result cannot be represented as durable evidence.",
+					{ cause: error },
+				);
+			}
+		};
 
-		return mutate(async () => {
+		const settled = await mutate(async () => {
 			let current = await state();
 			const task = current.tasks[taskId];
 			let execution = task ? executionFor(current, task) : undefined;
@@ -1114,6 +1159,7 @@ export function createWorkflowSequentialScheduler(
 				);
 			}
 			validateReceipt(terminalReceipt, persisted, "observation");
+			const evidence = evidenceFor(execution);
 			const reconcilesCleanup =
 				execution.phase === "terminal" &&
 				execution.terminal?.outcome === "cleanup-blocked";
@@ -1154,8 +1200,43 @@ export function createWorkflowSequentialScheduler(
 				executionId: execution.execution.id,
 				child: terminalReceipt,
 				outcome: terminalOutcome(executionResult.result),
-			};
+			} as const;
 		});
+		return settleAfterAttempts(taskId, settled);
+	}
+
+	/**
+	 * After a durable settlement, lets the retrier start a policy attempt.
+	 * A new attempt receipt is waited on like the initial launch; otherwise
+	 * the settled outcome proceeds to finalization.
+	 */
+	async function settleAfterAttempts(
+		taskId: WorkflowTaskId,
+		settled?: WorkflowSchedulerOutcome,
+	): Promise<WorkflowSchedulerOutcome> {
+		const decision = await retrier.consider(taskId);
+		if (decision.kind === "attempt") {
+			return settle(taskId, decision.receipt);
+		}
+		if (settled) return settled;
+		const current = await state();
+		const task = current.tasks[taskId];
+		const execution = task ? executionFor(current, task) : undefined;
+		const receipt = execution ? receiptFor(execution) : undefined;
+		if (!execution?.settlement || !receipt) {
+			throw new WorkflowSchedulerError(
+				"selection",
+				"Settled workflow task has no persisted child receipt.",
+			);
+		}
+		return {
+			state: "awaiting-finalization",
+			runStatus: current.status,
+			taskId,
+			executionId: execution.execution.id,
+			child: { ...receipt, status: execution.settlement.evidence.status },
+			outcome: outcomeFromStatus(execution.settlement.evidence.status),
+		};
 	}
 
 	async function continueAfterFinalization(
@@ -1226,6 +1307,7 @@ export function createWorkflowSequentialScheduler(
 		}
 		if (
 			prepared.state !== "wait" &&
+			prepared.state !== "attempt" &&
 			prepared.state !== "support" &&
 			prepared.state !== "nested" &&
 			prepared.state !== "awaiting-finalization"
@@ -1233,6 +1315,11 @@ export function createWorkflowSequentialScheduler(
 			return prepared;
 		}
 		try {
+			if (prepared.state === "attempt") {
+				return await continueAfterFinalization(
+					await settleAfterAttempts(prepared.taskId),
+				);
+			}
 			if (prepared.state === "support" || prepared.state === "nested") {
 				const outcome =
 					prepared.state === "support"
@@ -1414,6 +1501,13 @@ export function createWorkflowSequentialScheduler(
 			if (!selected && active.length > 0) {
 				return { state: "stopping", runStatus: "stopping" } as const;
 			}
+			for (const task of orderedTasks(current)) {
+				const execution = executionFor(current, task);
+				if (execution?.phase === "attempt-intended") {
+					await retrier.decline(task.task.id, reason);
+				}
+			}
+			current = await state();
 			const pendingFinalization = orderedTasks(current).find(
 				(task) => executionFor(current, task)?.settlement,
 			);

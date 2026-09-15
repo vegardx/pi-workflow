@@ -17,6 +17,7 @@ import {
 	validateWorkflowTaskContext,
 } from "./artifact-input.js";
 import { WorkflowArtifactStore } from "./artifact-store.js";
+import { currentSubagentAttempt } from "./attempts.js";
 import {
 	type MaterializedAgentTask,
 	type SubagentOperationId,
@@ -75,10 +76,13 @@ function launchReceipt(
 ): RunReceipt | undefined {
 	const receipt = projection.launchReceipt;
 	if (!receipt) return undefined;
+	// A retry or resume attempt supersedes the launch attempt; the receipt
+	// handed back after restart must name the current attempt.
+	const attempt = currentSubagentAttempt(projection);
 	return {
 		runId: receipt.subagentRunId,
-		attemptId: receipt.subagentAttemptId,
-		status: receipt.status,
+		attemptId: attempt?.subagentAttemptId ?? receipt.subagentAttemptId,
+		status: attempt?.status ?? receipt.status,
 	};
 }
 
