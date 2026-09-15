@@ -11,7 +11,6 @@
   tasks/<task-id>/
   artifacts/
   checkpoints/
-  finalizers/
 ```
 
 A bounded global pointer index may live under:
@@ -42,8 +41,8 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-15 rejects revision-1 through revision-14 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 15 accepts
+16 rejects revision-1 through revision-15 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 16 accepts
 only the declared run, workflow phase/log effect, task, artifact, barrier,
 output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent, uncertain launch
@@ -51,7 +50,11 @@ and reconciled absence or a launch receipt, child observation, bounded terminal
 child settlement, zero or more retry or resume attempts (each an intent followed
 by a receipt with the next observation and settlement, or by a decline),
 artifact import, release intent and receipt, and terminal outcome in that
-order. Support task-execution evidence records generation
+order; an `interrupted` settlement that admits no further attempt records the
+`interrupted` terminal outcome directly after the settlement, with no release
+intent or receipt, and the task moves to `interrupted` with reason
+"Interrupted child retained for recovery; no release performed.". Support
+task-execution evidence records generation
 creation, support intent, output commit, and terminal outcome in that order.
 Nested workflow task-execution evidence records generation creation, nested
 intent, nested launch, nested settlement, nested output import, and terminal
@@ -135,7 +138,7 @@ valid prefix fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 15 admits generations 1 through
+invalidation. Revision 16 admits generations 1 through
 `MAX_TASK_EXECUTION_GENERATIONS = 16`. `task-execution-created` requires the
 generation to equal one more than the executions already recorded for the
 task, the task to be `ready` and on-path, and no current execution:
@@ -205,8 +208,12 @@ identity only. The child record additionally carries `parent.inputArtifacts`,
 the identities of the parent artifacts whose verified values were merged into
 its input; the parent's intent carries the matching digest map.
 
-Revision 15 records subagent retry and resume attempts under the existing
-agent task execution. A new execution generation, created only after explicit
+Revision 16 records subagent retry and resume attempts under the existing
+agent task execution. Every attempt intent carries `origin: "policy"` (written
+by the retrier, never with a `reason`) or `origin: "operator"` (a `resume`
+intent with an optional `reason`, admitted by the reducer but not yet appended
+by any service surface), and the attempt projection retains both fields. A new
+execution generation, created only after explicit
 invalidation re-materialized the task, requires a new preflight, operation ID,
 launch intent, and subagent run.
 
@@ -227,7 +234,22 @@ task-execution-child-settled (attemptOrdinal n)
 → task-execution-attempt-intended (ordinal n + 1)
 → task-execution-attempt-declined (ordinal n + 1)
 → release intent, receipt, and terminal outcome
+      (or, for an interrupted settlement, the interrupted terminal outcome
+       with no release)
+
+task-execution-child-settled (status interrupted, attemptOrdinal n)
+→ [no admissible policy attempt, or a declined one]
+→ task-execution-terminal (outcome interrupted)
+→ task-status-changed (… → interrupted)
+→ task-execution-attempt-intended (kind resume, origin operator, ordinal n + 1)
+→ run-status-changed (interrupted → running) admitted without invalidated work
+→ receipt or decline as above
 ```
+
+The last ladder is the operator reopen: the intent deletes the retained
+terminal outcome and returns the execution to `attempt-intended`; a decline
+leaves it settled and the finalizer re-terminalizes it `interrupted`. Only the
+reducer side exists in revision 16.
 
 Restart repairs an agent execution with attempt evidence from its durable
 prefix:
@@ -469,11 +491,26 @@ requirement.
 
 ## Finalizers
 
-Required finalizers, including artifact import and subagent release, settle
-before workflow success. Advisory UI, metrics, or retention finalizers may fail
-without failing an otherwise valid run, but produce `completed-degraded` and
-remain visible. Retained, blocked, or unknown required cleanup maps to
-`cleanup-blocked` until reconciliation or release proves the required
+Finalizers are task records with `role: "finalizer"` in the same journal,
+declared and committed with the ordinary graph and executed through the same
+agent, support, or nested execution ladders. They persist no separate store.
+The run ladder is `run-status-changed (running → finalizing)` →
+`run-output-committed` → finalizer readiness, executions, and settlement →
+`run-status-changed (finalizing → completed | completed-degraded)`; a required
+finalizer that fails or is interrupted appends `finalizing → failed` or
+`finalizing → interrupted`, and a required finalizer left `blocked` appends
+`finalizing → failed` with reason "Workflow output finalization failed.".
+Restart inside `finalizing` before the output commit selects nothing until the
+static runtime recommits from its replayed value; restart after the commit
+re-drives the remaining finalizers. Recovery of a failed or interrupted
+finalizer is an ordinary invalidation whose closure may hold only finalizers
+after the output commit; replay re-materializes it at the final barrier,
+matches the committed output artifact, re-enters `finalizing`, and creates its
+next execution generation.
+
+Artifact import and subagent release are runtime steps of every agent
+execution, not finalizer tasks. Retained, blocked, or unknown required cleanup
+maps to `cleanup-blocked` until reconciliation or release proves the required
 postcondition and returns a new mappable terminal result. Workflow retains the
 original observed status and failure as evidence but does not infer a hidden
 primary outcome from a subagent `cleanup-blocked` result.

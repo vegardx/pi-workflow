@@ -10,7 +10,7 @@
 | Service provider | Missing, duplicate, or incompatible pi-subagent provider | Fail before run |
 | Subagent preflight | Missing feature, tool, model, trust, workspace | Fail task before launch |
 | Subagent launch/runtime | Child startup, provider, tool, timeout | Terminal settlement with a classified failure; the task's attempt policy decides whether a fresh attempt follows |
-| Retry and resume attempts | `failed` child classified `backoff` or `manual` under a `retry` policy that lists that class; `interrupted` child classified `resume` under a `resume` policy; `never` and `reconcile` classifications, an unlisted class, an exhausted policy, or a declined earlier attempt | Fresh pi-subagent attempt on the same child run under the same task execution; pi-subagent enforces backoff through `RetryBackoffError.retryAt`, which the runtime waits out under the stop signal and workflow deadline; stop or deadline declines with a fixed message; a refusal is reconciled by operation ID and declined when no new attempt exists; an execution without an admissible attempt proceeds to release and its settled outcome |
+| Retry and resume attempts | `failed` child classified `backoff` or `manual` under a `retry` policy that lists that class; `interrupted` child classified `resume` under a `resume` policy; `never` and `reconcile` classifications, an unlisted class, an exhausted policy, or a declined earlier attempt | Fresh pi-subagent attempt on the same child run under the same task execution; pi-subagent enforces backoff through `RetryBackoffError.retryAt`, which the runtime waits out under the stop signal and workflow deadline; stop or deadline declines with a fixed message; a refusal is reconciled by operation ID and declined when no new attempt exists; an execution without an admissible attempt proceeds to release and its settled outcome, or, when interrupted, to `interrupted` without release |
 | Lease port occupied | A deterministic candidate port is held by another process | A banner proving a different run advances to the next candidate; the same identity or an occupant that cannot identify itself fails safe as `WorkflowRunLeaseUnavailableError`; a recorded port outside the candidate walk is lease-record corruption |
 | Invalidation | Service `invalidate` on a run still being driven, whose status is not `failed` or `interrupted`, that is a nested child run ("Nested workflow runs are invalidated through their parent run."), that already holds on-path invalidated work ("Workflow run already awaits recovery of invalidated work."), or whose deadline has passed ("Workflow run deadline has passed."); a `task-invalidated` event while a current execution is non-terminal ("workflow run has active task executions"), under a run status outside `running`, `waiting`, `failed`, and `interrupted` ("workflow run status does not admit invalidation"), for an unknown or already-invalidated cause, for a closure task that already holds 16 generations ("task execution generation bound exceeded"), or with a closure or abandoned-epoch set other than the computed one; a declaration beyond the on-path prefix reusing an abandoned key with a different identity ("abandoned task key re-declared with a changed request"); an execution created for an abandoned task, out of contiguous order, beyond generation 16, or while the task still has a current execution (active, or terminal and not yet detached by re-materialization); a closure task whose status admits no `invalidated` transition (for example `cleanup-blocked`) | Service rejection (`conflict` or `validation`) without a journal change; reducer rejection fails the append closed; the materialization error fails the run closed; abandoned work is never scheduled |
 | Structured output | Terminating schema repair exhausted | Task failure |
@@ -22,7 +22,7 @@
 | Lease loss | Scheduler ownership lost | Interrupt and reconcile |
 | Persistence | Journal, snapshot, intent, receipt, or artifact durability failure; a nested input that cannot be recomputed to the intended digests after intent | Fail closed |
 | Resource/source drift | Workflow, helper, tool, skill, model, or service changed | Invalidate or refuse resume; registry drift fails non-terminal support executions at `support-resolution`; child source drift fails replay of the parent as declaration drift |
-| Finalizer | Required artifact import, cleanup, or release failed | Cleanup-blocked or failed |
+| Finalizer | Required finalizer task failed, interrupted, or blocked by a failed dependency; advisory finalizer failed or blocked; a finalizer named as a barrier target or as an ordinary task's dependency | Required: run `failed` or `interrupted` from `finalizing`; advisory: `completed-degraded`; declaration errors fail the run closed |
 | Unknown | Unclassified or unprovable state | Interrupt and reconcile |
 
 Retryability is a stable code-level property combined with explicit workflow
@@ -53,7 +53,25 @@ attempt:  task-execution-child-settled (status failed, failure.retry
 decline:  task-execution-attempt-intended
           → task-execution-attempt-declined (fixed reason)
           → release and the retained settlement's terminal outcome
+          (an interrupted settlement: terminal outcome interrupted, no release)
+
+no attempt (interrupted):
+          task-execution-child-settled (status interrupted)
+          → task-execution-terminal (outcome interrupted, evidence = settlement)
+          → task-status-changed (running | waiting | cancelling → interrupted,
+            "Interrupted child retained for recovery; no release performed.")
+          → run-status-changed (→ interrupted) for a required task
+
+operator: task-execution-terminal (outcome interrupted)
+          → task-execution-attempt-intended (kind resume, origin operator,
+            optional reason; reopens the execution)
+          → receipt or decline as above
 ```
+
+Policy intents carry `origin: "policy"` and never a `reason`. Operator intents
+are admitted by the reducer only as `resume` against the task's current
+unreleased interrupted execution while the run is `running`, `waiting`, or
+`interrupted`; no service surface appends them in revision 16.
 
 Decline reasons are fixed strings: "Workflow stop requested before the
 attempt." when the scheduler stop signal is aborted before the call or while

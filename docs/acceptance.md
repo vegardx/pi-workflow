@@ -131,6 +131,13 @@ An in-memory-only successful drive does not satisfy the first slice.
   default policy retries `backoff` alone, `never` and `reconcile` are never
   attempted, and an `interrupted` child is resumed only under a `resume`
   policy when its failure is classified `resume`;
+- an `interrupted` child without an admissible resume attempt is terminalized
+  `interrupted` from its settlement without a release intent or a release
+  call, the task carries the fixed retention reason, a required task moves the
+  run to `interrupted` (also from `finalizing`), an optional task leaves the
+  run status alone, a release intent on that settlement is rejected, and a
+  stop drain counts `interrupted` tasks as settled so `stopping → cancelled`
+  may retain them;
 - the materializer normalizes and sorts `retry.on`, binds the policies into
   task identity, and rejects `retry.attempts` above `limits.retries` and
   `resume.attempts` above `limits.resumes` with the fixed messages;
@@ -153,8 +160,14 @@ An in-memory-only successful drive does not satisfy the first slice.
   incomplete settlement in any attempt fails closed;
 - the finalizer and scheduler verify, release, and reconcile the current
   attempt (`currentSubagentAttemptId`), not the launch receipt's attempt;
-- the runtime contract publishes `retryAttempts: true` and
-  `resumeAttempts: true`, and no operator retry surface exists.
+- the runtime contract publishes `retryAttempts: true`,
+  `resumeAttempts: true`, and `operatorAttempts: true`; every attempt intent
+  carries `origin`, policy intents reject a `reason`, and the reducer admits
+  operator `resume` intents only against the current unreleased interrupted
+  execution while the run is `running`, `waiting`, or `interrupted`, reopening
+  a terminalized `interrupted` execution and admitting `interrupted → running`
+  without invalidated work; no service method or tool appends operator intents
+  yet.
 
 ## Invalidation and re-execution
 
@@ -342,9 +355,22 @@ An in-memory-only successful drive does not satisfy the first slice.
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-15 stores reject revision 1 through 14 records;
+  and revision-16 stores reject revision 1 through 15 records;
 - source or runtime drift cannot reinterpret prior human or model decisions;
-- required finalizer failure prevents success;
+- finalizers are `role: "finalizer"` tasks declared through `ctx.finalize`
+  with exactly one of `support`, `agent`, or `workflow`, `kind` lowers to the
+  disposition, an inner disposition or an invalid kind is rejected, ordinary
+  tasks may not depend on finalizers, and no barrier may target one;
+- finalizers run only while the run is `finalizing` after the output commit,
+  ordinary tasks only while it is `running` or `waiting`, and the scheduler
+  idles in `finalizing` without flipping the run status;
+- required finalizer failure prevents success (`finalizing → failed`,
+  `finalizing → interrupted`, or the runtime's "Required finalizer did not
+  complete: blocked."), an advisory finalizer that fails or is blocked yields
+  `completed-degraded`, and invalidation after the output commit may cover
+  only finalizers, re-executing them as the next generation against the
+  committed output;
+- the runtime contract publishes `finalizers: true`;
 - bounded private stores redact sensitive metadata.
 
 ## Dynamic workflows

@@ -4,10 +4,11 @@ This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
 nested run executor, artifact store, and static source runtime implement the
 current subset; later interfaces remain design contracts. The runtime contract
-is revision 15 and declares the feature flags `supportTaskExecution: true`,
+is revision 16 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
-`resumeAttempts: true`, `executionGenerations: true`, and
-`transactionalInvalidation: true`.
+`resumeAttempts: true`, `executionGenerations: true`,
+`transactionalInvalidation: true`, `finalizers: true`, and
+`operatorAttempts: true`.
 
 ## Static definition
 
@@ -403,9 +404,32 @@ interface WorkflowContext<TInput> {
 	settled<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,
 	): Promise<SettledResultTuple<T>>;
-	finalize(key: string, finalizer: Finalizer): void;
+	finalize<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		request: FinalizeRequest<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>>;
+}
+
+type FinalizerKind = "required" | "advisory";
+
+interface FinalizeRequest<TOutputSchema extends TSchema> {
+	readonly kind: FinalizerKind;
+	readonly support?: SupportTaskDescriptor<TOutputSchema>;
+	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema>;
+	readonly workflow?: NestedWorkflowRequest;
 }
 ```
+
+`ctx.finalize(key, request)` declares a finalizer task: exactly one of
+`support`, `agent`, or `workflow` names the work, and `kind` lowers into the
+task disposition (`required` → `required`, `advisory` → `optional`). The inner
+request may not carry its own `disposition` ("finalizer disposition is its
+kind"); a `kind` outside the two values is rejected ("invalid finalizer
+kind"); naming zero or several of `support`, `agent`, and `workflow` is
+rejected ("finalizer requires exactly one of support, agent, or workflow").
+The returned handle exists so other finalizers may depend on it through
+`after` or `inputs`; it is never a barrier target and never awaited by the
+author. See [Finalizers](#finalizers).
 
 `ctx.fanOut(namespace, items, options)` synchronously materializes at most 64
 ordinary agent tasks in the named child namespace. The caller supplies a stable
@@ -464,6 +488,7 @@ scheduler consumes only validated records, never workflow closures.
 interface TaskSpecBase {
 	key: string;
 	kind: "agent" | "support" | "workflow";
+	role: "task" | "finalizer";
 	disposition: "required" | "optional";
 	after: TaskRef[];
 	inputs: Record<string, ArtifactRef>;
@@ -482,8 +507,14 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow"` in revision 15; a checkpoint task
-kind remains a design contract. Keys are unique within a workflow namespace.
+`kind` is `"agent" | "support" | "workflow"` in revision 16; a checkpoint task
+kind remains a design contract. `role` is `"task"` for every ordinary
+declaration (`ctx.agent`, `ctx.support`, `ctx.workflow`, fan-out, fan-in, and
+pipelines) and `"finalizer"` for `ctx.finalize`; it participates in task
+identity. An ordinary task may not depend on a finalizer through `after` or
+`inputs` ("ordinary task may not depend on a finalizer"); a finalizer may
+depend on any declared task of either role. Keys are unique within a workflow
+namespace.
 Pipelines and fan-out create explicit child namespaces; a nested workflow task
 is one node in its parent's namespace whose child run owns a separate graph.
 Order dependencies use `after`; data dependencies use named artifact `inputs`.
@@ -619,6 +650,8 @@ Disposition defaults to `required` and participates in task identity. Failure
 of an optional task is observable but does not block unrelated required tasks.
 A run may become `completed-degraded` only after every required task and
 required finalizer succeeds while an optional task or advisory finalizer failed.
+An optional task or advisory finalizer left `blocked` by a failed dependency
+counts as settled for completion and degrades the run the same way.
 
 `pi-subagent` accepts delegated context strings, not workflow artifact handles.
 Before agent preflight, workflow resolves each named input from its own store,
@@ -800,8 +833,25 @@ deadline is declined the same way. Any other rejection is reconciled through
 is adopted, otherwise the intent is declined with "Subagent refused the
 attempt." (or "Attempt call ended without a durable receipt." when the call
 returned nothing). A reconciliation error is thrown, never converted into a
-decline. Stop declines any open intent before finalization. There is no
-operator retry surface in revision 15.
+decline. Stop declines any open intent before finalization.
+
+Every attempt intent carries `origin`. The retrier writes `origin: "policy"`
+and no `reason`; a policy intent that carries a `reason` is rejected ("policy
+attempt intent may not carry a reason"). Revision 16 additionally admits
+`origin: "operator"` intents in the reducer: they must be `resume` intents
+("operator attempt intent requires a resume") against the task's current,
+on-path, non-invalidated execution ("operator attempt intent targets a
+superseded execution") whose settlement is `interrupted` with `retry:
+"resume"` and which has no release intent or receipt ("operator attempt intent
+requires an unreleased interrupted execution"), while the run is `running`,
+`waiting`, or `interrupted` ("operator attempt intent requires a running or
+interrupted workflow run"). An operator intent may reopen an execution already
+terminalized `interrupted`, may carry a `reason`, and is not bound by the
+task's `resume` policy or by a prior decline; ordinal contiguity and the
+previous attempt ID still apply. The attempt projection records `origin` and
+`reason`, and `interrupted -> running` is admitted while such an intent is
+open without invalidated work. No service method or tool appends operator
+intents in revision 16; that operator resume surface arrives later.
 
 ## Nested workflow tasks
 
@@ -1095,7 +1145,20 @@ owner client's subagent reconciliation, persists any replacement child
 observation and settlement, and repeats release against that exact result.
 A cleanup reconciliation that yields `interrupted` remains action-required
 because Phase 1 does not authorize automatic child resume or abandonment; it
-cannot be reported as success or ordinary failure. Release itself is an idempotent external effect with durable intent and receipt.
+cannot be reported as success or ordinary failure. An agent execution whose
+settlement is `interrupted` and that admits no further attempt is never
+released: the finalizer appends the `interrupted` terminal outcome directly
+from the settled phase, moves the task to `interrupted` with reason
+"Interrupted child retained for recovery; no release performed.", and moves
+the run from `running`, `waiting`, or `finalizing` to `interrupted` when the
+task is required (an optional task leaves the run alone). The child remains
+recoverable in pi-subagent. A release intent on an `interrupted` settlement is
+rejected ("interrupted child is not releasable"), and `interrupted` terminal
+evidence requires the settled, unreleased execution ("interrupted terminal
+evidence requires an unreleased settled execution"). Under stop, a
+`cancelling` task whose child settles `interrupted` moves to `interrupted` and
+counts as drained, so `stopping -> cancelled` may leave `interrupted` tasks
+behind. Release itself is an idempotent external effect with durable intent and receipt.
 A crash after release intent retries release; a crash after its receipt resumes
 from the receipt. If release proves cleanup and changes `cleanup-blocked` to a
 terminal primary status, workflow persists the release receipt before replacing
@@ -1190,14 +1253,49 @@ the first vertical slice.
 
 ## Finalizers
 
-```ts
-interface Finalizer {
-	kind: "required" | "advisory";
-	run(ctx: FinalizerContext): Promise<void>;
-}
-```
+Finalizers are ordinary declarative tasks with `role: "finalizer"`, declared
+through `ctx.finalize(key, { kind, support | agent | workflow })` and lowered
+into the same `AgentTaskSpec`, `SupportTaskSpec`, or `NestedWorkflowTaskSpec`
+records as ordinary tasks, so they share the materializer's key, namespace,
+limit, schema, and authority validation, identity derivation, exact-prefix
+replay, budgets, concurrency lanes, and execution ladders. `kind: "required"`
+lowers to `disposition: "required"` and `kind: "advisory"` to
+`disposition: "optional"`; the request may not set its own disposition.
 
-Finalizers are stable-keyed effects. Required finalizers settle before success.
+Finalizers are never barrier targets: `ctx.result`, `ctx.results`,
+`ctx.settled`, and the final barrier reject a finalizer handle ("a finalizer
+cannot be a barrier target"), and the reducer rejects a `barrier-reached`
+naming one. Ordinary tasks may not depend on finalizers; finalizers may depend
+on ordinary tasks and on other finalizers.
+
+The runtime drives finalizers itself, after the ordinary graph. Once the final
+barrier's ordinary work has settled, the run moves `running -> finalizing`
+(rejected while an ordinary required task is incomplete or any ordinary task
+is still `pending`, `ready`, `running`, `waiting`, or `cancelling`: "run
+finalized while ordinary tasks remain active") and commits the workflow
+output (`run-output-committed`). Only then may a finalizer become `ready` and
+receive an execution ("finalizer became ready outside finalizing", "finalizer
+execution requires a finalizing workflow run"); ordinary tasks may become
+`ready` or receive an execution only while the run is `running` or `waiting`
+("task became ready outside a running workflow run", "task execution requires
+a running workflow run"). The scheduler selects only finalizers while the run
+is `finalizing`, never flips `finalizing` to `waiting`, and reports
+`{ state: "idle", runStatus: "finalizing" }` when none is selectable; a
+finalizer whose dependency failed becomes `blocked`.
+
+When every finalizer is settled the run moves `finalizing -> completed`, or
+`finalizing -> completed-degraded` when any optional task or advisory
+finalizer did not complete (a `blocked` advisory finalizer included). A
+required finalizer that fails moves the run `finalizing -> failed`; one that
+is interrupted moves it `finalizing -> interrupted`; one left `blocked` fails
+the run through the static runtime ("Required finalizer did not complete:
+blocked."). After the output commit, `task-invalidated` may cover only
+finalizers ("invalidation after output commit may only cover finalizers"),
+because the output is never recommitted; recovery of a failed or interrupted
+finalizer invalidates it, re-materializes it at the final barrier, matches the
+existing output artifact, re-enters `finalizing`, and re-executes the
+finalizer as its next generation.
+
 Physical process and worktree cleanup remain subagent-owned. Workflow verifies
 or imports required handoff evidence and invokes the subagent service's
 idempotent release operation rather than manipulating a child worktree.
@@ -1248,7 +1346,14 @@ proved terminal outcome. It is never degraded success. Support tasks use only
 `interrupted`, and `cleanup-blocked` but never `waiting`.
 `completed-degraded` requires every required task and required finalizer to
 succeed while one or more optional tasks or advisory finalizers failed; all
-degradations remain visible.
+degradations remain visible. Completion (`finalizing -> completed` or
+`completed-degraded`) treats `completed`, `failed`, `cancelled`, `blocked`, and
+`interrupted` tasks as settled, so an interrupted optional task or advisory
+finalizer degrades completion rather than preventing it; `stopping ->
+cancelled` likewise treats `interrupted` tasks as drained. Revision 16 adds the transitions `finalizing -> interrupted`
+(a required finalizer's child was interrupted) and `cancelling -> interrupted`
+(a task being stopped whose child settled `interrupted` and is retained
+without release).
 
 `invalidated` leaves only to `pending`, through the re-materialization event
 appended when the task's epoch barrier is matched; that transition requires

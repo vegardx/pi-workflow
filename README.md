@@ -4,9 +4,12 @@ Custom workflow runtime for [Pi](https://pi.dev).
 
 This repository contains the durable static execution core and Pi extension for
 trusted read-only agent workflows, durable deterministic support-task
-execution, and bounded nested static workflows executed as linked child runs.
-Dynamic workflows, writer tasks, operator-triggered retry, and polished UI
-remain unavailable.
+execution, bounded nested static workflows executed as linked child runs, and
+declarative required and advisory finalizers (`ctx.finalize`). The runtime
+contract is revision 16 with the feature flags `finalizers: true` and
+`operatorAttempts: true` alongside the earlier flags. Dynamic workflows, writer
+tasks, the operator-triggered retry and resume surface, and polished UI remain
+unavailable.
 
 ## Goal
 
@@ -21,7 +24,8 @@ Provide one reusable workflow engine with:
   wall-clock deadlines;
 - append-only lifecycle state, leases, fencing, resume, retry, replay, and
   reconciliation;
-- fail-closed persistence, required finalizers, and bounded UI;
+- fail-closed persistence, required and advisory finalizers declared with
+  `ctx.finalize`, and bounded UI;
 - physical child execution delegated to the exact extension-owned
   `SubagentService`.
 

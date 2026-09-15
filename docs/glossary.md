@@ -52,5 +52,9 @@ This document owns workflow terminology.
 | Abandoned | Declaration or barrier recorded in an epoch after the exposing barrier of an invalidation, or an effect sequenced after that barrier; retained with `abandoned: true` as history, never scheduled, never counted as unsettled or required work, never a dependency of path tasks, and still charged for its settled usage. |
 | Readoption | Re-declaration of an abandoned task by a declaration beyond the on-path prefix with the same `(namespace, key)` and identity digest; the same task ID returns to the path with fresh sequence, epoch, and position fields and keeps its status, commit, and current execution. |
 | Reconcile | Compare persisted workflow state with subagent and workspace reality. |
-| Finalizer | Required or advisory settlement effect after ordinary workflow execution. |
+| Finalizer | Task with role `finalizer`, declared through `ctx.finalize(key, { kind, support \| agent \| workflow })`, that the runtime drives only while the run is `finalizing` after the workflow output is committed; it is never a barrier target, ordinary tasks may not depend on it, and its `kind` lowers into the task disposition. |
+| Required finalizer | Finalizer declared with `kind: "required"` (disposition `required`); its failure, interruption, or blocking prevents workflow success. |
+| Advisory finalizer | Finalizer declared with `kind: "advisory"` (disposition `optional`); its failure or blocking yields `completed-degraded` instead of failing the run. |
+| Task role | The `role` field of every task spec, `task` for ordinary declarations and `finalizer` for `ctx.finalize`; it participates in task identity and selects which run statuses admit readiness and execution. |
+| Attempt origin | The `origin` of an attempt intent: `policy` when the retrier applied the task's `retry` or `resume` policy, `operator` for an explicit resume intent with an optional `reason` that the reducer admits against an unreleased interrupted execution. |
 | Maestro plan | Delivery-domain intent that may later be lowered into workflow effects; it is not a workflow runtime concept. |
