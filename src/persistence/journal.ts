@@ -9,6 +9,7 @@ import {
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
+	type WorkflowRunStatus,
 } from "../contracts.js";
 import {
 	MAX_WORKFLOW_EVENT_INPUT_BYTES,
@@ -68,6 +69,29 @@ export const WorkflowRunSnapshotSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type WorkflowRunSnapshot = Static<typeof WorkflowRunSnapshotSchema>;
+
+export interface WorkflowJournalAppendNotice {
+	readonly event: WorkflowJournalEvent;
+	/** Run status after the appended event, from the pre-append validation reduction. */
+	readonly status: WorkflowRunStatus;
+}
+
+export interface WorkflowRunJournalOpenOptions {
+	/**
+	 * Invoked on a microtask after a durable append. It never runs inside the
+	 * append and its errors are swallowed, so a listener cannot block or fail
+	 * the coordinator tail.
+	 */
+	readonly onAppended?: (notice: WorkflowJournalAppendNotice) => void;
+}
+
+export interface UnleasedJournalRead {
+	readonly events: readonly WorkflowJournalEvent[];
+	/** Bytes after the last newline; 0 when the file ends cleanly. Never repaired by a reader. */
+	readonly tornTailBytes: number;
+	/** Journal file byte length actually read (0 when absent). */
+	readonly bytes: number;
+}
 
 type JournalCoordinator = {
 	leaseId: string;
@@ -294,6 +318,99 @@ function parseJournal(
 	return events;
 }
 
+/**
+ * The complete-record prefix of a journal file: every record up to the last
+ * newline, parsed and checked. The torn tail, if any, is measured but left
+ * in place; `open` repairs it, readers never do.
+ */
+async function readCompletePrefix(
+	journalPath: string,
+	runId: WorkflowRunId,
+): Promise<{
+	events: WorkflowJournalEvent[];
+	completeBytes: number;
+	totalBytes: number;
+}> {
+	const buffer = await readBounded(
+		journalPath,
+		MAX_JOURNAL_BYTES,
+		"workflow journal",
+	);
+	if (!buffer) return { events: [], completeBytes: 0, totalBytes: 0 };
+	const completeBytes =
+		buffer.at(-1) === 0x0a ? buffer.byteLength : buffer.lastIndexOf(0x0a) + 1;
+	if (buffer.byteLength - completeBytes > MAX_EVENT_BYTES) {
+		throw new WorkflowPersistenceCorruptionError(
+			"torn workflow journal record exceeds size limit",
+		);
+	}
+	const content = decodeUtf8(
+		buffer.subarray(0, completeBytes),
+		"workflow journal",
+	);
+	return {
+		events: parseJournal(content, runId),
+		completeBytes,
+		totalBytes: buffer.byteLength,
+	};
+}
+
+/**
+ * Reads and parses the complete-record prefix of
+ * `<storeRoot>/runs/<runId>/events.jsonl` without a lease: O_NOFOLLOW, the
+ * journal size bound, canonical-record, sequence, and fencing-monotonicity
+ * checks. Never truncates, fsyncs, or reduces. Throws
+ * `WorkflowPersistenceCorruptionError` on interior corruption, a symlink, an
+ * oversize file, a torn tail larger than one record, or a run directory that
+ * is not a real directory under the canonical runs root. A missing run
+ * directory or journal file reads as no events.
+ */
+export async function readWorkflowJournalUnleased(
+	storeRootInput: string,
+	runId: WorkflowRunId,
+): Promise<UnleasedJournalRead> {
+	if (!Value.Check(WorkflowRunIdSchema, runId)) {
+		throw new Error("invalid workflow run ID");
+	}
+	let directory: string;
+	let runsRoot: string;
+	try {
+		const storeRoot = await realpath(storeRootInput);
+		runsRoot = await realpath(path.join(storeRoot, "runs"));
+		if (
+			path.dirname(runsRoot) !== storeRoot ||
+			path.basename(runsRoot) !== "runs"
+		) {
+			throw new WorkflowPersistenceCorruptionError(
+				"workflow runs directory escapes its store root",
+			);
+		}
+		directory = await realpath(path.join(runsRoot, runId));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return Object.freeze({ events: [], tornTailBytes: 0, bytes: 0 });
+		}
+		throw error;
+	}
+	if (
+		path.dirname(directory) !== runsRoot ||
+		path.basename(directory) !== runId
+	) {
+		throw new WorkflowPersistenceCorruptionError(
+			"workflow run directory escapes its runs root",
+		);
+	}
+	const read = await readCompletePrefix(
+		path.join(directory, "events.jsonl"),
+		runId,
+	);
+	return Object.freeze({
+		events: Object.freeze(read.events),
+		tornTailBytes: read.totalBytes - read.completeBytes,
+		bytes: read.totalBytes,
+	});
+}
+
 export class WorkflowRunJournal {
 	readonly runId: WorkflowRunId;
 	readonly directory: string;
@@ -301,12 +418,16 @@ export class WorkflowRunJournal {
 	readonly snapshotPath: string;
 	private readonly coordinator: JournalCoordinator;
 	private readonly lease: WorkflowRunLease;
+	private readonly onAppended:
+		| ((notice: WorkflowJournalAppendNotice) => void)
+		| undefined;
 
 	private constructor(
 		directory: string,
 		runId: WorkflowRunId,
 		coordinator: JournalCoordinator,
 		lease: WorkflowRunLease,
+		options: WorkflowRunJournalOpenOptions,
 	) {
 		this.directory = directory;
 		this.runId = runId;
@@ -314,12 +435,14 @@ export class WorkflowRunJournal {
 		this.snapshotPath = path.join(directory, "run.json");
 		this.coordinator = coordinator;
 		this.lease = lease;
+		this.onAppended = options.onAppended;
 	}
 
 	static async open(
 		storeRootInput: string,
 		runId: WorkflowRunId,
 		lease: WorkflowRunLease,
+		options: WorkflowRunJournalOpenOptions = {},
 	): Promise<WorkflowRunJournal> {
 		return lease.withCurrent(() =>
 			serializedOpen(async () => {
@@ -369,27 +492,9 @@ export class WorkflowRunJournal {
 					}
 				}
 				const journalPath = path.join(directory, "events.jsonl");
-				let events: WorkflowJournalEvent[] = [];
-				const buffer = await readBounded(
-					journalPath,
-					MAX_JOURNAL_BYTES,
-					"workflow journal",
-				);
-				if (buffer) {
-					const completeBytes =
-						buffer.at(-1) === 0x0a
-							? buffer.byteLength
-							: buffer.lastIndexOf(0x0a) + 1;
-					if (buffer.byteLength - completeBytes > MAX_EVENT_BYTES) {
-						throw new WorkflowPersistenceCorruptionError(
-							"torn workflow journal record exceeds size limit",
-						);
-					}
-					const content = decodeUtf8(
-						buffer.subarray(0, completeBytes),
-						"workflow journal",
-					);
-					events = parseJournal(content, runId);
+				const read = await readCompletePrefix(journalPath, runId);
+				const events = read.events;
+				if (read.totalBytes > 0) {
 					const latest = events.at(-1);
 					if (
 						latest &&
@@ -402,7 +507,11 @@ export class WorkflowRunJournal {
 							"workflow run lease is older than journal fencing evidence",
 						);
 					}
-					await repairTornTail(journalPath, completeBytes, buffer.byteLength);
+					await repairTornTail(
+						journalPath,
+						read.completeBytes,
+						read.totalBytes,
+					);
 					await chmod(journalPath, 0o600);
 					const handle = await open(journalPath, "r");
 					try {
@@ -447,6 +556,7 @@ export class WorkflowRunJournal {
 					runId,
 					coordinator,
 					lease,
+					options,
 				);
 				await journal.readSnapshot();
 				return journal;
@@ -516,8 +626,12 @@ export class WorkflowRunJournal {
 				}
 				const existingEvents = await this.readEventsUncoordinated();
 				const { reduceWorkflowEvents } = await import("../reducer.js");
+				let projected: WorkflowStateProjection;
 				try {
-					reduceWorkflowEvents([...existingEvents, roundTrip.value]);
+					projected = reduceWorkflowEvents([
+						...existingEvents,
+						roundTrip.value,
+					]);
 				} catch (error) {
 					throw new Error("workflow journal event violates run invariants", {
 						cause: error,
@@ -563,6 +677,20 @@ export class WorkflowRunJournal {
 					throw error;
 				}
 				this.coordinator.sequence = event.sequence;
+				const onAppended = this.onAppended;
+				if (onAppended) {
+					const notice: WorkflowJournalAppendNotice = Object.freeze({
+						event: roundTrip.value,
+						status: projected.status,
+					});
+					queueMicrotask(() => {
+						try {
+							onAppended(notice);
+						} catch {
+							// A listener failure is never an append failure.
+						}
+					});
+				}
 				return roundTrip.value;
 			}),
 		);

@@ -105,37 +105,96 @@ function leasePortCandidates(
 	);
 }
 
+type LeasePortOccupant =
+	| { readonly kind: "refused" }
+	| { readonly kind: "identity"; readonly identity: string }
+	| { readonly kind: "unidentified" };
+
 /**
- * Reads the banner of whatever holds a port. Returns undefined when the
- * occupant cannot be proved to be another run's lease; callers then fail
- * closed rather than binding a second listener for the same run.
+ * Reads the banner of whatever holds a port. `refused` means nothing accepted
+ * the connection; `unidentified` means an occupant answered without proving
+ * which run it serves. Acquisition fails closed on both rather than binding a
+ * second listener for the same run.
  */
-async function probeIdentity(port: number): Promise<string | undefined> {
-	return new Promise<string | undefined>((resolve) => {
+async function probeIdentity(port: number): Promise<LeasePortOccupant> {
+	return new Promise<LeasePortOccupant>((resolve) => {
 		const socket = net.connect({ host: "127.0.0.1", port });
 		let banner = "";
-		const finish = (value: string | undefined) => {
+		let connected = false;
+		const finish = (value: LeasePortOccupant) => {
 			socket.destroy();
 			resolve(value);
 		};
-		socket.setTimeout(LEASE_PROBE_TIMEOUT_MS, () => finish(undefined));
-		socket.once("error", () => finish(undefined));
+		const unidentified = () =>
+			finish(connected ? { kind: "unidentified" } : { kind: "refused" });
+		socket.once("connect", () => {
+			connected = true;
+		});
+		socket.setTimeout(LEASE_PROBE_TIMEOUT_MS, unidentified);
+		socket.once("error", unidentified);
 		socket.on("data", (chunk) => {
 			banner += chunk.toString("utf8");
 			const end = banner.indexOf("\n");
 			if (end < 0) {
-				if (banner.length > LEASE_BANNER_PREFIX.length + 64) finish(undefined);
+				if (banner.length > LEASE_BANNER_PREFIX.length + 64) unidentified();
 				return;
 			}
 			const line = banner.slice(0, end);
-			finish(
-				line.startsWith(LEASE_BANNER_PREFIX)
-					? line.slice(LEASE_BANNER_PREFIX.length)
-					: undefined,
-			);
+			if (line.startsWith(LEASE_BANNER_PREFIX)) {
+				finish({
+					kind: "identity",
+					identity: line.slice(LEASE_BANNER_PREFIX.length),
+				});
+			} else {
+				unidentified();
+			}
 		});
-		socket.once("end", () => finish(undefined));
+		socket.once("end", unidentified);
 	});
+}
+
+export type WorkflowRunLeaseProbe =
+	/** No record, or the recorded port refused or is held by a different identity. */
+	| { readonly state: "free"; readonly record?: WorkflowRunLeaseRecord }
+	/** The recorded port answers with this run's identity banner. */
+	| { readonly state: "held"; readonly record: WorkflowRunLeaseRecord }
+	/** The occupant did not identify itself within the probe timeout. */
+	| { readonly state: "unknown"; readonly record: WorkflowRunLeaseRecord };
+
+/**
+ * Read-only lease probe: never binds a port, never writes the record. Only
+ * the recorded port is probed, because acquisition rewrites the record with
+ * the port it actually bound, so a live owner listens there.
+ */
+export async function probeWorkflowRunLease(options: {
+	storeRoot: string;
+	runId: WorkflowRunId;
+}): Promise<WorkflowRunLeaseProbe> {
+	if (!Value.Check(WorkflowRunIdSchema, options.runId)) {
+		throw new Error("invalid workflow run ID");
+	}
+	let storeRoot: string;
+	try {
+		storeRoot = await realpath(options.storeRoot);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return { state: "free" };
+		}
+		throw error;
+	}
+	const record = await readRecord(
+		path.join(storeRoot, "leases", `${options.runId}.lease.json`),
+	);
+	if (!record) return { state: "free" };
+	const occupant = await probeIdentity(record.port);
+	if (occupant.kind === "unidentified") return { state: "unknown", record };
+	if (
+		occupant.kind === "identity" &&
+		occupant.identity === leaseIdentity(storeRoot, options.runId)
+	) {
+		return { state: "held", record };
+	}
+	return { state: "free", record };
 }
 
 async function bind(
@@ -366,9 +425,10 @@ export async function acquireWorkflowRunLease(options: {
 			break;
 		}
 		const occupant = await probeIdentity(candidate);
-		// Held by this very run, or by something that cannot identify itself:
-		// either way this process must not become a second writer.
-		if (occupant === identity || occupant === undefined) {
+		// Held by this very run, or by something that cannot identify itself
+		// (including a port that was busy a moment ago and now refuses): either
+		// way this process must not become a second writer.
+		if (occupant.kind !== "identity" || occupant.identity === identity) {
 			throw new WorkflowRunLeaseUnavailableError(options.runId);
 		}
 	}
