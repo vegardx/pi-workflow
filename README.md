@@ -5,8 +5,8 @@ Custom workflow runtime for [Pi](https://pi.dev).
 This repository contains the durable static execution core and Pi extension for
 trusted read-only agent workflows, durable deterministic support-task
 execution, and bounded nested static workflows executed as linked child runs.
-Dynamic workflows, writer tasks, retry/resume, and polished UI remain
-unavailable.
+Dynamic workflows, writer tasks, operator-triggered retry, and polished UI
+remain unavailable.
 
 ## Goal
 
@@ -159,6 +159,43 @@ entry points are `createWorkflowNestedRunExecutor`,
 `NestedWorkflowInputArtifactsSchema`, `NestedWorkflowTerminalEvidenceSchema`,
 and `MAX_NESTED_WORKFLOW_DEPTH`; see
 [Contracts](docs/contracts.md#nested-workflow-tasks).
+
+## Retry and resume
+
+An agent request may declare how many fresh pi-subagent attempts the runtime
+may make on the same child run after a classified failure:
+
+```ts
+const draft = ctx.agent("draft", {
+	agent: "researcher",
+	task: { goal: "Draft the document", context: [], instructions: [] },
+	contextMode: "fresh",
+	tools: ["read"],
+	preloadSkills: [],
+	contextScopes: ["project"],
+	workspace: { mode: "read-only", cwd: ctx.cwd },
+	limits: { ...limits.readOnly, retries: 3, resumes: 1 },
+	outputSchema: DocSchema,
+	retry: { attempts: 2, on: ["backoff", "manual"] },
+	resume: { attempts: 1 },
+});
+```
+
+`retry` applies to a `failed` child whose failure is classified `backoff` or
+`manual` (`on` defaults to `["backoff"]`); `resume` applies to an `interrupted`
+child whose failure is classified `resume`. Each `attempts` value is 1 through
+10 and may not exceed the request's own `limits.retries` or `limits.resumes`.
+Every attempt is recorded under the same task execution: intent is persisted
+before the owner client's `retry` or `resume` call, the receipt after it, and
+each attempt's settlement evidence is retained so budget usage sums across
+attempts. pi-subagent enforces backoff; the runtime waits until `retryAt`,
+bounded by the workflow deadline and stop signal, and declines the attempt when
+either arrives first. Failures classified `never` or `reconcile` are never
+retried, and there is no operator-triggered retry yet. The public entry points
+are `createWorkflowTaskRetrier`, `AgentRetryPolicySchema`,
+`AgentResumePolicySchema`, `settledAgentUsage`, and
+`currentSubagentAttemptId`; see
+[Contracts](docs/contracts.md#retry-and-resume-attempts).
 
 ## Development
 
