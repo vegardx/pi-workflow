@@ -1,17 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	RetryBackoffError,
+	type RunReceipt,
+	type RunResult,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
 import { describe, expect, it, vi } from "vitest";
+import type { WorkflowStateProjection } from "../src/events.js";
 import { deriveJsonValueSha256 } from "../src/execution.js";
-import { WorkflowRunJournal } from "../src/persistence/journal.js";
+import {
+	type WorkflowJournalEvent,
+	WorkflowRunJournal,
+} from "../src/persistence/journal.js";
 import { acquireWorkflowRunLease } from "../src/persistence/run-lease.js";
+import { reduceWorkflowEvents } from "../src/reducer.js";
 import { discoverWorkflows } from "../src/registry.js";
 import { WorkflowRunRecordStore } from "../src/run-record.js";
 import { createWorkflowService, WorkflowServiceError } from "../src/service.js";
@@ -537,5 +545,799 @@ describe("workflow service", () => {
 			access(path.join(fixture.storeRoot, "runs", "workflow_missing")),
 		).rejects.toMatchObject({ code: "ENOENT" });
 		await service.shutdown();
+	});
+});
+
+async function until(predicate: () => boolean | Promise<boolean>) {
+	while (!(await predicate())) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}
+
+/** Fails fast with a named label instead of hanging the whole suite. */
+function bounded<T>(
+	promise: Promise<T>,
+	label: string,
+	ms = 30_000,
+): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(
+			() => reject(new Error(`${label} did not settle within ${ms}ms`)),
+			ms,
+		);
+	});
+	return Promise.race([promise, timeout]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
+}
+
+async function journalEvents(
+	storeRoot: string,
+	runId: string,
+): Promise<WorkflowJournalEvent[]> {
+	let journal: string;
+	try {
+		journal = await readFile(
+			path.join(storeRoot, "runs", runId, "events.jsonl"),
+			"utf8",
+		);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+	// Only newline-terminated records are complete while the service appends.
+	const complete = journal.endsWith("\n")
+		? journal
+		: journal.slice(0, journal.lastIndexOf("\n") + 1);
+	return complete
+		.split("\n")
+		.filter((line) => line.length > 0)
+		.map((line) => JSON.parse(line) as WorkflowJournalEvent);
+}
+
+async function eventTypes(storeRoot: string, runId: string) {
+	return (await journalEvents(storeRoot, runId)).map((event) => event.type);
+}
+
+async function stateOf(
+	storeRoot: string,
+	runId: string,
+): Promise<WorkflowStateProjection> {
+	return reduceWorkflowEvents(await journalEvents(storeRoot, runId));
+}
+
+function agentExecutionOf(state: WorkflowStateProjection) {
+	const task = Object.values(state.tasks).find(
+		(candidate) => candidate.task.spec.kind === "agent",
+	);
+	if (!task) throw new Error("missing agent task");
+	const execution = task.currentExecutionId
+		? state.executions[task.currentExecutionId]
+		: undefined;
+	if (!execution) throw new Error("missing agent execution");
+	return { task, execution };
+}
+
+/**
+ * Simulates a process crash: the run directory is copied into a fresh store
+ * root while the first service is still blocked inside a child call.
+ */
+async function crashSnapshot(
+	fx: { cwd: string; storeRoot: string },
+	runId: string,
+): Promise<string> {
+	const storeRoot = path.join(fx.cwd, ".pi", `workflow-${randomUUID()}`);
+	const setup = await acquireWorkflowRunLease({
+		storeRoot,
+		runId,
+		ownerId: "setup",
+	});
+	await setup.release();
+	await mkdir(path.join(storeRoot, "runs"), { recursive: true, mode: 0o700 });
+	await cp(
+		path.join(fx.storeRoot, "runs", runId),
+		path.join(storeRoot, "runs", runId),
+		{ recursive: true },
+	);
+	return storeRoot;
+}
+
+interface AttemptWorkflowOptions {
+	readonly retry?: { attempts: number; on?: readonly ("backoff" | "manual")[] };
+	readonly resume?: { attempts: number };
+	readonly budgetCost?: number;
+	readonly timeoutMs?: number;
+	readonly limitCost?: number;
+}
+
+async function attemptWorkflowFixture(options: AttemptWorkflowOptions = {}) {
+	const fixture = await workflowFixture("attempts");
+	const policies = [
+		options.retry ? `retry: ${JSON.stringify(options.retry)},` : "",
+		options.resume ? `resume: ${JSON.stringify(options.resume)},` : "",
+	].join("\n      ");
+	await writeFile(
+		fixture.definitionPath,
+		`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "attempts", description: "Attempt policy workflow", version: 1, budget: { cost: ${options.budgetCost ?? 1000}, childRuntimeMs: 3600000 }, timeoutMs: ${options.timeoutMs ?? 3600000}, concurrency: 4 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run(ctx) {
+    return ctx.agent("answer", {
+      agent: "researcher",
+      task: { goal: "Answer", context: [], instructions: ["Return structured output."] },
+      contextMode: "fresh",
+      tools: ["read"],
+      preloadSkills: [],
+      contextScopes: ["project"],
+      workspace: { mode: "read-only", cwd: ctx.cwd },
+      outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+      ${policies}
+      limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: ${options.limitCost ?? 10}, outputBytes: 1024, workspaceWriteBytes: 0, retries: ${options.retry?.attempts ?? 0}, resumes: ${options.resume?.attempts ?? 0} }
+    });
+  }
+};\n`,
+	);
+	return fixture;
+}
+
+type ChildFailure = NonNullable<RunResult["failure"]>;
+
+function childFailure(
+	retry: ChildFailure["retry"],
+	retryAfterMs?: number,
+): ChildFailure {
+	return {
+		code: "provider-transient",
+		origin: "provider",
+		retry,
+		message: "provider hiccup",
+		guidance: "Try again later.",
+		...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+	};
+}
+
+interface ChildOutcome {
+	readonly status: RunResult["status"];
+	readonly failure?: ChildFailure;
+	readonly cost?: number;
+}
+
+function childResult(outcome: ChildOutcome) {
+	const completed = outcome.status === "completed";
+	const result: RunResult = {
+		runId: "run_servicechild",
+		status: outcome.status,
+		...(completed ? { structuredOutput: { answer: "from child" } } : {}),
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: outcome.cost ?? 0,
+		},
+		usageComplete: true,
+		runtimeMs: 10,
+		...(outcome.failure ? { failure: outcome.failure } : {}),
+		sandboxCleanup: "proved",
+		workspaceCleanup: "not-needed",
+		truncated: false,
+	};
+	return {
+		result,
+		output: completed ? "from child" : "",
+		sessionFile: undefined,
+		handoff: undefined,
+		structuredOutput: result.structuredOutput,
+		error: outcome.failure?.message,
+	};
+}
+
+/**
+ * Owner client whose successive `wait` calls return `outcomes` in order (the
+ * last one repeats) and whose `retry`/`resume` hand out fresh attempt ids
+ * that `release` then echoes back for the current attempt.
+ */
+function attemptProvider(outcomes: readonly ChildOutcome[]) {
+	const delegated = taskProvider();
+	let attemptId = "attempt_servicechild";
+	let attempts = 1;
+	let waits = 0;
+	let lastStatus: RunResult["status"] = "completed";
+	const nextAttempt = async (): Promise<RunReceipt> => {
+		attempts += 1;
+		attemptId = `attempt_servicechild${attempts}`;
+		return { runId: "run_servicechild", attemptId, status: "active" };
+	};
+	vi.mocked(delegated.ownerClient.wait).mockImplementation(async () => {
+		const outcome = outcomes[Math.min(waits, outcomes.length - 1)];
+		if (!outcome) throw new Error("no child outcome scripted");
+		waits += 1;
+		lastStatus = outcome.status;
+		return childResult(outcome);
+	});
+	vi.mocked(delegated.ownerClient.release).mockImplementation(async () => ({
+		runId: "run_servicechild",
+		attemptId,
+		status: lastStatus === "interrupted" ? "completed" : lastStatus,
+	}));
+	// `client()` shares one rejecting mock across every method, so the
+	// attempt calls need their own mocks to be counted separately.
+	const ownerClient = delegated.ownerClient as unknown as Record<
+		string,
+		unknown
+	>;
+	ownerClient.retry = vi.fn(nextAttempt);
+	ownerClient.resume = vi.fn(nextAttempt);
+	ownerClient.interrupt = vi.fn(async () => {
+		throw new Error("unexpected interrupt");
+	});
+	return { ...delegated, nextAttempt };
+}
+
+const ATTEMPT_ID = /^attempt_[a-z0-9]+$/;
+
+function countOf(types: readonly string[], type: string): number {
+	return types.filter((candidate) => candidate === type).length;
+}
+
+describe("retry and resume attempts", () => {
+	it("retries a backoff failure under the same execution and completes", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "from child" },
+			});
+			expect(delegated.ownerClient.launch).toHaveBeenCalledOnce();
+			expect(delegated.ownerClient.retry).toHaveBeenCalledOnce();
+			expect(delegated.ownerClient.retry).toHaveBeenCalledWith(
+				"run_servicechild",
+			);
+			expect(delegated.ownerClient.resume).not.toHaveBeenCalled();
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-child-settled")).toBe(2);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-declined")).toBe(0);
+			const { task, execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			expect(task.status).toBe("completed");
+			expect(execution.attempts).toHaveLength(1);
+			expect(execution.attempts?.[0]).toMatchObject({
+				kind: "retry",
+				ordinal: 2,
+				previousAttemptId: expect.stringMatching(ATTEMPT_ID),
+				subagentAttemptId: expect.stringMatching(ATTEMPT_ID),
+			});
+			expect(execution.attempts?.[0]?.subagentAttemptId).not.toBe(
+				execution.attempts?.[0]?.previousAttemptId,
+			);
+			expect(execution.priorSettlements?.[0]?.evidence).toMatchObject({
+				status: "failed",
+				attemptOrdinal: 1,
+			});
+			expect(execution.terminal?.evidence).toMatchObject({
+				kind: "subagent",
+				attemptOrdinal: 2,
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("fails the run once the retry policy is exhausted", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "failed", failure: childFailure("backoff") },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "failed" });
+			expect(delegated.ownerClient.retry).toHaveBeenCalledOnce();
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-child-settled")).toBe(2);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(1);
+			const { task, execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			expect(task.status).toBe("failed");
+			expect(execution.terminal?.evidence).toMatchObject({
+				kind: "subagent",
+				attemptOrdinal: 2,
+				status: "failed",
+			});
+			expect(execution.priorSettlements).toHaveLength(1);
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("does not retry a manual classification under the default policy", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("manual") },
+			{ status: "completed" },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "failed" });
+			expect(delegated.ownerClient.retry).not.toHaveBeenCalled();
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-child-settled")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(0);
+			const { execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			expect(execution.terminal?.evidence).toMatchObject({
+				kind: "subagent",
+				attemptOrdinal: 1,
+				status: "failed",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("retries a manual classification when the policy opts in", async () => {
+		const fixture = await attemptWorkflowFixture({
+			retry: { attempts: 1, on: ["manual"] },
+		});
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("manual") },
+			{ status: "completed" },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "from child" },
+			});
+			expect(delegated.ownerClient.retry).toHaveBeenCalledOnce();
+			const { execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			expect(execution.attempts?.[0]).toMatchObject({
+				kind: "retry",
+				ordinal: 2,
+			});
+			expect(execution.terminal?.evidence).toMatchObject({
+				attemptOrdinal: 2,
+				status: "completed",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("resumes an interrupted child under the resume policy", async () => {
+		const fixture = await attemptWorkflowFixture({ resume: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "interrupted", failure: childFailure("resume") },
+			{ status: "completed" },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "from child" },
+			});
+			expect(delegated.ownerClient.resume).toHaveBeenCalledOnce();
+			expect(delegated.ownerClient.resume).toHaveBeenCalledWith(
+				"run_servicechild",
+			);
+			expect(delegated.ownerClient.retry).not.toHaveBeenCalled();
+			expect(delegated.ownerClient.launch).toHaveBeenCalledOnce();
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(1);
+			const { task, execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			expect(task.status).toBe("completed");
+			expect(execution.attempts?.[0]).toMatchObject({
+				kind: "resume",
+				ordinal: 2,
+				subagentAttemptId: expect.stringMatching(ATTEMPT_ID),
+			});
+			expect(execution.priorSettlements?.[0]?.evidence).toMatchObject({
+				status: "interrupted",
+				attemptOrdinal: 1,
+			});
+			expect(execution.terminal?.evidence).toMatchObject({
+				attemptOrdinal: 2,
+				status: "completed",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("declines a backoff that would outlast the workflow deadline", async () => {
+		const fixture = await attemptWorkflowFixture({
+			retry: { attempts: 1 },
+			timeoutMs: 3_000,
+		});
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		vi.mocked(delegated.ownerClient.retry).mockImplementation(async () => {
+			throw new RetryBackoffError(new Date(Date.now() + 60_000).toISOString());
+		});
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			// The attempt is declined immediately because `retryAt` lies past the
+			// deadline, so the settled failure finalizes and the run fails well
+			// before the 3 s deadline itself would have cancelled it.
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "failed" });
+			expect(delegated.ownerClient.retry).toHaveBeenCalledOnce();
+			const events = await journalEvents(fixture.storeRoot, receipt.runId);
+			const types = events.map((event) => event.type);
+			expect(countOf(types, "task-execution-child-settled")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(0);
+			expect(countOf(types, "task-execution-attempt-declined")).toBe(1);
+			const { task, execution } = agentExecutionOf(
+				reduceWorkflowEvents(events),
+			);
+			expect(task.status).toBe("failed");
+			expect(execution.attemptsClosed).toBe(true);
+			expect(execution.attempts?.[0]).toMatchObject({
+				kind: "retry",
+				ordinal: 2,
+				declinedSequence: expect.any(Number),
+			});
+			expect(execution.attempts?.[0]?.subagentAttemptId).toBeUndefined();
+			expect(execution.terminal?.evidence).toMatchObject({
+				attemptOrdinal: 1,
+				status: "failed",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("waits out a backoff that ends before the workflow deadline", async () => {
+		const fixture = await attemptWorkflowFixture({
+			retry: { attempts: 1 },
+			timeoutMs: 30_000,
+		});
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		let backoffs = 0;
+		let retryAt = 0;
+		vi.mocked(delegated.ownerClient.retry).mockImplementation(async () => {
+			if (backoffs === 0) {
+				backoffs += 1;
+				retryAt = Date.now() + 200;
+				throw new RetryBackoffError(new Date(retryAt).toISOString());
+			}
+			return delegated.nextAttempt();
+		});
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "from child" },
+			});
+			expect(Date.now()).toBeGreaterThanOrEqual(retryAt);
+			expect(delegated.ownerClient.retry).toHaveBeenCalledTimes(2);
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-child-settled")).toBe(2);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-declined")).toBe(0);
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("declines the open attempt and cancels the run on an explicit stop during backoff", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		vi.mocked(delegated.ownerClient.retry).mockImplementation(async () => {
+			throw new RetryBackoffError(
+				new Date(Date.now() + 10 * 60_000).toISOString(),
+			);
+		});
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await until(
+				() => vi.mocked(delegated.ownerClient.retry).mock.calls.length > 0,
+			);
+			await expect(
+				bounded(service.stop(receipt.runId, "operator stop"), "stop"),
+			).resolves.toMatchObject({ status: "cancelled" });
+			expect(delegated.ownerClient.retry).toHaveBeenCalledOnce();
+			expect(delegated.ownerClient.interrupt).not.toHaveBeenCalled();
+			const events = await journalEvents(fixture.storeRoot, receipt.runId);
+			const types = events.map((event) => event.type);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(0);
+			expect(countOf(types, "task-execution-attempt-declined")).toBe(1);
+			const { execution } = agentExecutionOf(reduceWorkflowEvents(events));
+			expect(execution.attemptsClosed).toBe(true);
+			expect(execution.attempts?.[0]?.subagentAttemptId).toBeUndefined();
+			await expect(service.status(receipt.runId)).resolves.toMatchObject({
+				status: "cancelled",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("recovers an open attempt intent after a crash and records one receipt", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const first = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		const stuck = deferred<void>();
+		vi.mocked(first.ownerClient.retry).mockImplementation(async () => {
+			await stuck.promise;
+			return first.nextAttempt();
+		});
+		const firstService = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: first.provider,
+		});
+		const receipt = await firstService.run("attempts", {});
+		await until(() => vi.mocked(first.ownerClient.retry).mock.calls.length > 0);
+		await until(async () =>
+			(await eventTypes(fixture.storeRoot, receipt.runId)).includes(
+				"task-execution-attempt-intended",
+			),
+		);
+		const storeRoot = await crashSnapshot(fixture, receipt.runId);
+		const snapshot = await eventTypes(storeRoot, receipt.runId);
+		expect(countOf(snapshot, "task-execution-attempt-intended")).toBe(1);
+		expect(countOf(snapshot, "task-execution-attempt-receipted")).toBe(0);
+
+		const second = attemptProvider([{ status: "completed" }]);
+		const service = await createWorkflowService({
+			...fixture,
+			storeRoot,
+			projectTrusted: () => true,
+			subagents: second.provider,
+		});
+		try {
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "from child" },
+			});
+			expect(second.ownerClient.launch).not.toHaveBeenCalled();
+			expect(second.ownerClient.retry).toHaveBeenCalledOnce();
+			const types = await eventTypes(storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-child-settled")).toBe(2);
+			expect(countOf(types, "task-execution-attempt-intended")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-receipted")).toBe(1);
+			expect(countOf(types, "task-execution-attempt-declined")).toBe(0);
+			const { task, execution } = agentExecutionOf(
+				await stateOf(storeRoot, receipt.runId),
+			);
+			expect(task.status).toBe("completed");
+			expect(execution.attempts?.[0]).toMatchObject({
+				kind: "retry",
+				ordinal: 2,
+				subagentAttemptId: expect.stringMatching(ATTEMPT_ID),
+			});
+			expect(execution.terminal?.evidence).toMatchObject({
+				attemptOrdinal: 2,
+				status: "completed",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown").catch(() => undefined);
+			stuck.resolve();
+			await bounded(firstService.shutdown(), "first shutdown").catch(
+				() => undefined,
+			);
+		}
+	});
+
+	it("charges every attempt against the workflow budget", async () => {
+		const fixture = await attemptWorkflowFixture({
+			retry: { attempts: 1 },
+			budgetCost: 0.015,
+			limitCost: 0.01,
+		});
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff"), cost: 0.01 },
+			{ status: "completed", cost: 0.01 },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			// Reservations are per task (declared limits are cumulative), so the
+			// retry is admitted; the summed settlement of both attempts then
+			// exceeds the budget after finalization.
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "failed" });
+			expect(delegated.ownerClient.retry).toHaveBeenCalledOnce();
+			const events = await journalEvents(fixture.storeRoot, receipt.runId);
+			expect(
+				countOf(
+					events.map((event) => event.type),
+					"task-execution-child-settled",
+				),
+			).toBe(2);
+			const reasons = events
+				.filter((event) => event.type === "run-status-changed")
+				.map((event) => (event.data as { reason?: string }).reason);
+			expect(reasons).toContain("Workflow cost budget was exceeded.");
+			const { task, execution } = agentExecutionOf(
+				reduceWorkflowEvents(events),
+			);
+			expect(task.status).toBe("completed");
+			expect(execution.settlement?.evidence.usage.cost).toBe(0.01);
+			expect(execution.priorSettlements?.[0]?.evidence.usage.cost).toBe(0.01);
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("fails closed when release reports the superseded attempt", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		vi.mocked(delegated.ownerClient.release).mockResolvedValue({
+			runId: "run_servicechild",
+			attemptId: "attempt_servicechild",
+			status: "completed",
+		});
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			const settled = await bounded(
+				service.wait(receipt.runId).then(
+					(view) => ({ outcome: "resolved" as const, status: view.status }),
+					(error: unknown) => ({ outcome: "rejected" as const, error }),
+				),
+				"wait",
+				10_000,
+			);
+			expect(
+				settled.outcome === "rejected" || settled.status === "failed",
+			).toBe(true);
+			expect(
+				vi.mocked(delegated.ownerClient.release).mock.calls.length,
+			).toBeLessThanOrEqual(2);
+		} finally {
+			await bounded(service.shutdown(), "shutdown").catch(() => undefined);
+		}
+	});
+
+	it("keeps the task non-failed while an attempt is pending", async () => {
+		const fixture = await attemptWorkflowFixture({ retry: { attempts: 1 } });
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("backoff") },
+			{ status: "completed" },
+		]);
+		const gate = deferred<void>();
+		vi.mocked(delegated.ownerClient.retry).mockImplementation(async () => {
+			await gate.promise;
+			return delegated.nextAttempt();
+		});
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await until(
+				() => vi.mocked(delegated.ownerClient.retry).mock.calls.length > 0,
+			);
+			const view = await service.status(receipt.runId);
+			expect(["running", "waiting"]).toContain(view.status);
+			const events = await journalEvents(fixture.storeRoot, receipt.runId);
+			const { task, execution } = agentExecutionOf(
+				reduceWorkflowEvents(events),
+			);
+			expect(["running", "waiting"]).toContain(task.status);
+			expect(execution.phase).toBe("attempt-intended");
+			expect(execution.settlement?.evidence.status).toBe("failed");
+			const taskStatuses = events
+				.filter((event) => event.type === "task-status-changed")
+				.map((event) => (event.data as { to: string }).to);
+			expect(taskStatuses).not.toContain("failed");
+			gate.resolve();
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "completed" });
+			const finalStatuses = (
+				await journalEvents(fixture.storeRoot, receipt.runId)
+			)
+				.filter((event) => event.type === "task-status-changed")
+				.map((event) => (event.data as { to: string }).to);
+			expect(finalStatuses).not.toContain("failed");
+			expect(finalStatuses.at(-1)).toBe("completed");
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
 	});
 });
