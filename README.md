@@ -57,6 +57,8 @@ own publication, push, pull-request, merge, release, or deployment policy.
 - [Implementation research](docs/research.md)
 - [Research source ledger](docs/research-sources.md)
 - [Roadmap](docs/roadmap.md)
+- [Compatibility matrix](docs/compatibility.md)
+- [Workflow authoring skill](skills/workflow-authoring/SKILL.md)
 - [macOS arm64 Phase 1 qualification](docs/qualification/macos-arm64-phase1.md)
 - [macOS arm64 artifact pipeline qualification](docs/qualification/macos-arm64-artifact-pipeline.md)
 - [macOS arm64 bounded parallel qualification](docs/qualification/macos-arm64-parallel.md)
@@ -71,21 +73,45 @@ own publication, push, pull-request, merge, release, or deployment policy.
 agent run and attempt. Its extension registers a lazy provider on Pi's event bus.
 Workflow acquires that exact service through the public typed provider export,
 checks the exact runtime contract, and never constructs or shuts down a second
-execution service.
+execution service. The required pi-subagent version, contract revision, and
+feature values, together with the Pi, Node.js, and typebox ranges and the host
+qualification status, are recorded in
+[`compatibility.json`](compatibility.json) and explained in the
+[compatibility matrix](docs/compatibility.md); tests and the pack check keep
+them in step with `package.json`, `src/contracts.ts`, and CI.
 
 ## Pi tools
 
-The packaged extension registers:
+The packaged extension registers every entry of the exported
+`WORKFLOW_TOOL_DECLARATIONS` table, which carries each tool's parameter
+schema, output schema, and service binding:
 
-```text
-workflow_list      workflow_validate  workflow_run
-workflow_status    workflow_wait      workflow_stop
-workflow_reconcile
-```
+| Tool | Parameters | Output schema |
+| --- | --- | --- |
+| `workflow_list` | none | `WorkflowDefinitionSummaryListSchema` |
+| `workflow_validate` | `ref`, optional `input` | `WorkflowValidationResultSchema` |
+| `workflow_run` | `ref`, `input` | `WorkflowServiceRunReceiptSchema` |
+| `workflow_status` | `runId` | `WorkflowServiceRunViewSchema` |
+| `workflow_wait` | `runId` | `WorkflowServiceRunViewSchema` |
+| `workflow_stop` | `runId`, `reason` | `WorkflowServiceRunViewSchema` |
+| `workflow_reconcile` | `runId` | `WorkflowServiceRunViewSchema` |
 
-`workflow_run` returns a durable run ID immediately. Use `workflow_wait` for the
-bounded result or `workflow_stop` to persist stop intent, abort in-process
-support work, and drain active child work.
+Each tool result carries the typed service value as `details` and the same
+value as JSON text bounded to 48 KiB (long lists are truncated with a marker,
+and an oversized run `output` is omitted in favor of the durable output
+artifact). `workflow_run` returns a durable run ID immediately. Use
+`workflow_wait` for the bounded result or `workflow_stop` to persist stop
+intent, abort in-process support work, and drain active child work.
+
+## Authoring skill
+
+The package ships the model-invoked `workflow-authoring` skill under
+`skills/` (declared through `pi.skills`). It documents definition roots and
+trust, the import allow-list, `defineWorkflow`, the `ctx` API with the bounds
+and error messages the runtime throws, agent request limits, budgets, support
+tasks, nested workflows, failure semantics, invalidation, and the
+validate-run-inspect loop, with examples that a test loads through the real
+definition loader.
 
 ## Support tasks
 
