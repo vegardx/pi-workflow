@@ -11,6 +11,7 @@ import { currentSubagentAttemptId, settledAgentUsage } from "./attempts.js";
 import type {
 	SubagentTerminalEvidence,
 	TaskExecutionId,
+	TaskRole,
 	WorkflowRunStatus,
 	WorkflowTaskId,
 	WorkflowTaskStatus,
@@ -418,6 +419,11 @@ export function createWorkflowSequentialScheduler(
 		});
 	}
 
+	async function failRunFromObservedStatus(reason: string): Promise<void> {
+		const now = await state();
+		await changeRun(now.status, "failed", reason);
+	}
+
 	async function observeReceipt(
 		execution: TaskExecutionProjection,
 		receipt: RunReceipt,
@@ -731,7 +737,9 @@ export function createWorkflowSequentialScheduler(
 		if (
 			task?.task.spec.disposition === "required" &&
 			(task.status === "failed" || task.status === "cancelled") &&
-			(after.status === "running" || after.status === "waiting")
+			(after.status === "running" ||
+				after.status === "waiting" ||
+				after.status === "finalizing")
 		) {
 			await changeRun(
 				after.status,
@@ -809,7 +817,7 @@ export function createWorkflowSequentialScheduler(
 				"Nested workflow execution is not configured for this workflow run.";
 			await changeTask(taskId, selected.status, "blocked", message);
 			if (selected.task.spec.disposition === "required") {
-				await changeRun("running", "failed", message);
+				await failRunFromObservedStatus(message);
 				return { state: "terminal", runStatus: "failed" };
 			}
 			return prepare();
@@ -860,7 +868,7 @@ export function createWorkflowSequentialScheduler(
 				"Support task execution is not configured for this workflow run.";
 			await changeTask(taskId, selected.status, "blocked", message);
 			if (selected.task.spec.disposition === "required") {
-				await changeRun("running", "failed", message);
+				await failRunFromObservedStatus(message);
 				return { state: "terminal", runStatus: "failed" };
 			}
 			return prepare();
@@ -888,12 +896,22 @@ export function createWorkflowSequentialScheduler(
 		if (current.status === "stopping") {
 			return { state: "stopping", runStatus: current.status };
 		}
-		if (current.status === "created" || current.status === "waiting") {
+		const finalizing = current.status === "finalizing";
+		if (
+			!finalizing &&
+			(current.status === "created" || current.status === "waiting")
+		) {
 			await changeRun(current.status, "running");
 			current = await state();
 		}
+		if (finalizing && current.outputArtifactId === undefined) {
+			return { state: "idle", runStatus: "finalizing" };
+		}
+		const role: TaskRole = finalizing ? "finalizer" : "task";
+		const candidates = () =>
+			orderedTasks(current).filter((task) => task.task.spec.role === role);
 
-		for (const task of orderedTasks(current)) {
+		for (const task of candidates()) {
 			if (task.status !== "pending") continue;
 			const blockers = dependencies(current, task).filter((dependency) =>
 				DEPENDENCY_FAILURE_STATUSES.has(dependency.status),
@@ -913,7 +931,7 @@ export function createWorkflowSequentialScheduler(
 		);
 		let selected = active.find((task) => !busy.has(task.task.id));
 		if (!selected && active.length < concurrency) {
-			selected = orderedTasks(current).find((task) => {
+			selected = candidates().find((task) => {
 				if (task.status === "ready") return true;
 				return (
 					task.status === "pending" &&
@@ -931,7 +949,10 @@ export function createWorkflowSequentialScheduler(
 					"No committed workflow task is currently ready.",
 				);
 			}
-			return { state: "idle", runStatus: "waiting" };
+			return {
+				state: "idle",
+				runStatus: finalizing ? "finalizing" : "waiting",
+			};
 		}
 		if (selected.status === "pending") {
 			await changeTask(
@@ -1003,7 +1024,7 @@ export function createWorkflowSequentialScheduler(
 				admission.reason.includes("incomplete") ||
 				admission.reason.includes("no task declaration")
 			) {
-				await changeRun("running", "failed", admission.reason);
+				await failRunFromObservedStatus(admission.reason);
 				return { state: "terminal", runStatus: "failed" };
 			}
 			return prepare();
@@ -1022,11 +1043,11 @@ export function createWorkflowSequentialScheduler(
 			if (
 				failedTask?.task.spec.disposition === "required" &&
 				failedTask.status === "failed" &&
-				failed.status === "running"
+				(failed.status === "running" ||
+					failed.status === "waiting" ||
+					failed.status === "finalizing")
 			) {
-				await changeRun(
-					"running",
-					"failed",
+				await failRunFromObservedStatus(
 					"A required workflow task failed before launch.",
 				);
 			}
@@ -1038,11 +1059,11 @@ export function createWorkflowSequentialScheduler(
 			if (
 				projected?.task.spec.disposition === "required" &&
 				projected.status === "failed" &&
-				after.status === "running"
+				(after.status === "running" ||
+					after.status === "waiting" ||
+					after.status === "finalizing")
 			) {
-				await changeRun(
-					"running",
-					"failed",
+				await failRunFromObservedStatus(
 					"A required workflow task failed before launch.",
 				);
 				return { state: "terminal", runStatus: "failed" };

@@ -39,6 +39,8 @@ import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
 const finalizerMutations = new Map<string, Promise<void>>();
+const INTERRUPTED_REASON =
+	"Interrupted child retained for recovery; no release performed.";
 type SettledExecution = TaskExecutionProjection & {
 	settlement: NonNullable<TaskExecutionProjection["settlement"]>;
 };
@@ -489,7 +491,8 @@ export function createWorkflowTaskFinalizer(
 					candidate.status !== "completed" &&
 					candidate.status !== "failed" &&
 					candidate.status !== "cancelled" &&
-					candidate.status !== "invalidated",
+					candidate.status !== "invalidated" &&
+					candidate.status !== "interrupted",
 			);
 			if (!unsettled) {
 				await append({
@@ -573,6 +576,40 @@ export function createWorkflowTaskFinalizer(
 			}
 			current = await state();
 			({ task, execution } = selected(current, taskId));
+		}
+
+		if (execution.settlement.evidence.status === "interrupted") {
+			if (execution.phase !== "terminal") {
+				await append({
+					type: "task-execution-terminal",
+					data: {
+						executionId: execution.execution.id,
+						outcome: "interrupted",
+						evidence: execution.settlement.evidence,
+					},
+				});
+				current = await state();
+				({ task, execution } = selected(current, taskId));
+			}
+			if (task.status !== "interrupted") {
+				await append({
+					type: "task-status-changed",
+					data: {
+						taskId,
+						from: task.status,
+						to: "interrupted",
+						reason: INTERRUPTED_REASON,
+					},
+				});
+			}
+			await updateRunAfterTask(task, "interrupted");
+			const finalized = await state();
+			return {
+				taskId,
+				executionId: execution.execution.id,
+				outcome: "interrupted",
+				runStatus: finalized.status,
+			};
 		}
 
 		let child = receipt(execution);
