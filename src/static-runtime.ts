@@ -9,6 +9,7 @@ import type { WorkflowArtifactStore } from "./artifact-store.js";
 import type {
 	NestedWorkflowTaskRequest,
 	WorkflowArtifactRef,
+	WorkflowHandoffDescriptor,
 	WorkflowRunId,
 	WorkflowTaskId,
 } from "./contracts.js";
@@ -18,7 +19,10 @@ import {
 	WorkflowDefinitionNameSchema,
 } from "./contracts.js";
 import {
+	type AgentTaskAuthoringRequest,
+	type AgentTaskHandle,
 	isArtifactHandle,
+	isHandoffHandle,
 	isTaskHandle,
 	isWorkflowDefinition,
 	type NestedWorkflowRequest,
@@ -28,8 +32,19 @@ import {
 	validateJsonSchemaDocument,
 	type WorkflowContext,
 	type WorkflowDefinition,
+	type WorkspaceAuthoringRequest,
+	type WorktreeTaskHandle,
 } from "./definition.js";
-import { deriveJsonValueSha256 } from "./execution.js";
+import type { WorkflowTaskProjection } from "./events.js";
+import {
+	deriveJsonValueSha256,
+	deriveWorkflowHandoffDescriptor,
+} from "./execution.js";
+import {
+	type VerifiedWorkflowHandoff,
+	verifyWorkflowHandoffEvidence,
+	WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
+} from "./handoff.js";
 import {
 	type NestedWorkflowDeclaration,
 	WorkflowTaskMaterializer,
@@ -93,6 +108,12 @@ export class StaticWorkflowRuntimeError extends Error {
 		super(message, options);
 		this.name = "StaticWorkflowRuntimeError";
 	}
+}
+
+/** The runtime decides worktree handling from the materialized spec only. */
+function isWorktreeTask(task: WorkflowTaskProjection): boolean {
+	const spec = task.task.spec;
+	return spec.kind === "agent" && spec.request.workspace.mode === "worktree";
 }
 
 function validator(schema: TSchema): (value: unknown) => boolean {
@@ -274,7 +295,71 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				"Workflow task artifact no longer matches its output schema.",
 			);
 		}
+		// A completed worktree task replays only with verified handoff
+		// evidence for its current execution (spec D8).
+		if (isWorktreeTask(task)) await verifyHandoff(current, task);
 		return jsonCloneFrozen(value, "Workflow task result");
+	}
+
+	async function verifyHandoff(
+		current: Awaited<ReturnType<typeof state>>,
+		task: WorkflowTaskProjection,
+	): Promise<VerifiedWorkflowHandoff> {
+		try {
+			return await verifyWorkflowHandoffEvidence(current, task, artifacts);
+		} catch (error) {
+			throw new StaticWorkflowRuntimeError(
+				"result",
+				WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
+				{ cause: error },
+			);
+		}
+	}
+
+	/**
+	 * Resolves the handoff descriptor of a completed worktree task from its
+	 * current execution's verified handoff artifact; `undefined` only under
+	 * the optional policy when the child captured no handoff.
+	 */
+	async function loadTaskHandoff(
+		taskId: WorkflowTaskId,
+	): Promise<WorkflowHandoffDescriptor | undefined> {
+		const current = await state();
+		const task = current.tasks[taskId];
+		if (!task) {
+			throw new StaticWorkflowRuntimeError(
+				"result",
+				"Workflow result references an unknown task.",
+			);
+		}
+		if (task.status !== "completed") {
+			throw new StaticWorkflowRuntimeError(
+				"result",
+				`Workflow task did not complete successfully: ${task.status}.`,
+			);
+		}
+		if (!isWorktreeTask(task)) {
+			throw new StaticWorkflowRuntimeError(
+				"result",
+				"Workflow handoff references a non-worktree task.",
+			);
+		}
+		const verified = await verifyHandoff(current, task);
+		if (verified.status === "absent") return undefined;
+		let descriptor: WorkflowHandoffDescriptor;
+		try {
+			descriptor = deriveWorkflowHandoffDescriptor(
+				verified.artifact,
+				verified.execution,
+			);
+		} catch (error) {
+			throw new StaticWorkflowRuntimeError(
+				"result",
+				WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
+				{ cause: error },
+			);
+		}
+		return jsonCloneFrozen(descriptor, "Workflow handoff descriptor");
 	}
 
 	async function driveSchedulerBatch() {
@@ -967,10 +1052,14 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				}
 				const created = new Set<WorkflowTaskId>();
 				const stage: PipelineStage = Object.freeze({
-					agent<TOutputSchema extends TSchema>(
+					agent<
+						TOutputSchema extends TSchema,
+						TWorkspace extends
+							WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+					>(
 						key: Parameters<typeof materializer.agent>[0],
-						request: Parameters<typeof materializer.agent<TOutputSchema>>[1],
-					) {
+						request: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
+					): AgentTaskHandle<TOutputSchema, TWorkspace> {
 						if (created.size >= 64) {
 							throw new StaticWorkflowRuntimeError(
 								"validation",
@@ -1032,6 +1121,28 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					await commit();
 					await driveTasks([task.ref.taskId]);
 					return (await loadTaskResult(task.ref.taskId)) as T;
+				});
+			},
+			handoff<T>(
+				task: WorktreeTaskHandle<T>,
+			): Promise<WorkflowHandoffDescriptor | undefined> {
+				if (
+					!isTaskHandle(task) ||
+					!isHandoffHandle(task.handoff) ||
+					task.handoff.ref.producerTaskId !== task.ref.taskId
+				) {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow handoff barrier requires a worktree task handle.",
+					);
+				}
+				// A persisted "result"-kind barrier: no new barrier kind, and the
+				// finalizer rule applies exactly as for ctx.result.
+				const commit = prepareBarrier("result", [task]);
+				return barrier(async () => {
+					await commit();
+					await driveTasks([task.ref.taskId]);
+					return loadTaskHandoff(task.ref.taskId);
 				});
 			},
 			results<const T extends readonly TaskHandle<unknown>[]>(
@@ -1157,6 +1268,25 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			await prepareBarrier("final", [handle])();
 			await driveFinalGraph();
 			value = await loadTaskResult(handle.ref.taskId);
+		} else if (isHandoffHandle(returned)) {
+			// The descriptor is the run output; the patch bytes never are.
+			const handle = handles.get(returned.ref.producerTaskId);
+			if (!handle || !isHandoffHandle(handle.handoff)) {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					"Workflow returned an unknown handoff handle.",
+				);
+			}
+			await prepareBarrier("final", [handle])();
+			await driveFinalGraph();
+			const descriptor = await loadTaskHandoff(handle.ref.taskId);
+			if (descriptor === undefined) {
+				throw new StaticWorkflowRuntimeError(
+					"finalization",
+					"Workflow returned the handoff of a task that captured none.",
+				);
+			}
+			value = descriptor;
 		} else {
 			await prepareBarrier("final", [])();
 			await driveFinalGraph();

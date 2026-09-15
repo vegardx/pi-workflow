@@ -225,6 +225,8 @@ async function fixture(result: RunResult, policies: Policies = {}) {
 		executionId,
 		operationId,
 		preflightId: "preflight-retrier",
+		workspaceMode: "read-only" as const,
+		workspaceBaselineSha256: "c".repeat(64),
 		planIdentitySha256: hash,
 		plannedSubagentRunId: CHILD_RUN,
 		plannedSubagentAttemptId: LAUNCH_ATTEMPT,

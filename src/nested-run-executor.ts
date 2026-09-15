@@ -15,6 +15,7 @@ import {
 	type TaskExecutionGeneration,
 	type TaskExecutionOutcome,
 	type WorkflowArtifactId,
+	type WorkflowArtifactOutput,
 	type WorkflowArtifactRef,
 	type WorkflowBudget,
 	type WorkflowRunId,
@@ -189,12 +190,14 @@ function nextGeneration(
 }
 
 /**
- * The result artifact bound to the producer's current execution. Artifacts of
- * superseded generations remain durable history and never resolve an input.
+ * The artifact of the referenced output bound to the producer's current
+ * execution. Artifacts of superseded generations remain durable history and
+ * never resolve an input.
  */
-function resultArtifact(
+function outputArtifact(
 	state: WorkflowStateProjection,
 	producerTaskId: WorkflowTaskId,
+	output: WorkflowArtifactOutput,
 ): WorkflowArtifactRef | undefined {
 	const executionId = state.tasks[producerTaskId]?.currentExecutionId;
 	if (executionId === undefined) return undefined;
@@ -202,7 +205,7 @@ function resultArtifact(
 		(artifact) =>
 			artifact.producerTaskId === producerTaskId &&
 			artifact.producerExecutionId === executionId &&
-			artifact.output === "result",
+			artifact.output === output,
 	);
 	return matches.length === 1 ? matches[0] : undefined;
 }
@@ -311,8 +314,9 @@ export function createWorkflowNestedRunExecutor(
 
 	/**
 	 * Resolves the child input from the authored input plus verified artifact
-	 * values. Throws a WorkflowNestedRunError with stage "input" for any
-	 * declaration, evidence, verification, schema, or bound problem.
+	 * values; a handoff input contributes its descriptor, never patch bytes.
+	 * Throws a WorkflowNestedRunError with stage "input" for any declaration,
+	 * evidence, verification, schema, or bound problem.
 	 */
 	async function resolveChildInput(
 		current: WorkflowStateProjection,
@@ -329,7 +333,11 @@ export function createWorkflowNestedRunExecutor(
 		for (const name of names) {
 			const input = spec.inputs[name];
 			if (!input) continue;
-			const artifact = resultArtifact(current, input.producerTaskId);
+			const artifact = outputArtifact(
+				current,
+				input.producerTaskId,
+				input.output,
+			);
 			if (!artifact) {
 				throw new WorkflowNestedRunError("input", MESSAGES.inputArtifact);
 			}

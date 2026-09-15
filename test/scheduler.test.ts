@@ -3,12 +3,15 @@ import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	HANDOFF_EXPORT_MEDIA_TYPE,
+	type HandoffRef,
 	RetryBackoffError,
 	type RunResult,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentPreflight,
 	type SubagentRequest,
+	type WorktreeRecord,
 } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
@@ -238,12 +241,12 @@ function result(
 	};
 }
 
-function executionResult(runResult: RunResult) {
+function executionResult(runResult: RunResult, handoff?: WorktreeRecord) {
 	return {
 		result: runResult,
 		output: "not persisted by workflow scheduler",
 		sessionFile: "/private/session.jsonl",
-		handoff: undefined,
+		handoff,
 		structuredOutput: runResult.structuredOutput,
 		error: undefined,
 	};
@@ -280,6 +283,7 @@ function client(overrides: Partial<SubagentClient> = {}): SubagentClient {
 		pin: unavailable,
 		unpin: unavailable,
 		exportArtifact: unavailable,
+		exportHandoff: unavailable,
 		...overrides,
 	} as unknown as SubagentClient;
 }
@@ -1337,6 +1341,7 @@ function supportOnlyClient(): SubagentClient {
 		pin: unexpected(),
 		unpin: unexpected(),
 		exportArtifact: unexpected(),
+		exportHandoff: unexpected(),
 	} as unknown as SubagentClient;
 }
 
@@ -3586,5 +3591,400 @@ describe("retry attempts", () => {
 		expect(types).toContain("task-execution-release-intended");
 		expect(types).not.toContain("task-execution-released");
 		expect(types).toContain("task-execution-terminal");
+	});
+});
+
+describe("worktree handoff settlement", () => {
+	const baselineHead = "b".repeat(40);
+	const handoffCommit = "d".repeat(40);
+
+	function worktreeRequest(
+		policy: "required" | "optional" = "required",
+		overrides: Parameters<typeof request>[0] = {},
+	) {
+		const base = request(overrides);
+		return {
+			...base,
+			workspace: { mode: "worktree" as const, cwd: "/repo" },
+			handoff: policy,
+			limits: { ...base.limits, workspaceWriteBytes: 1024 },
+		};
+	}
+
+	function worktreeRecord(
+		attemptId = "attempt_scheduler",
+		overrides: Partial<WorktreeRecord> = {},
+	): WorktreeRecord {
+		return {
+			schema: "pi-subagent-worktree",
+			contractRevision: 6,
+			runId: "run_scheduler",
+			attemptId,
+			repositoryRoot: "/private/repo",
+			worktreePath: `/private/repo/.pi/worktrees/${attemptId}`,
+			recordPath: `/private/repo/.pi/worktrees/${attemptId}.json`,
+			branch: `pi-subagent/reservations/run_scheduler/${attemptId}`,
+			baselineHead,
+			createdAt: "2026-01-01T00:00:00.000Z",
+			handoffCommit,
+			handoffRef: `refs/pi-subagent/handoffs/run_scheduler/${attemptId}`,
+			...overrides,
+		};
+	}
+
+	function privateFields(record: WorktreeRecord): string[] {
+		return [
+			record.repositoryRoot,
+			record.worktreePath,
+			record.recordPath,
+			record.branch,
+			record.handoffRef ?? "",
+			record.createdAt,
+		];
+	}
+
+	function patch(): Buffer {
+		return Buffer.from(
+			`From ${handoffCommit} Mon Sep 17 00:00:00 2001\nFrom: Agent <agent@example.com>\nSubject: [PATCH] change\n\n---\n a.txt | 1 +\n`,
+		);
+	}
+
+	function handoffExport(
+		attemptId: string,
+		content = patch(),
+	): { ref: HandoffRef; content: Buffer } {
+		return {
+			ref: {
+				runId: "run_scheduler",
+				attemptId,
+				baselineHead,
+				handoffCommit,
+				format: "git-format-patch",
+				sha256: createHash("sha256").update(content).digest("hex"),
+				bytes: content.byteLength,
+				mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			},
+			content,
+		};
+	}
+
+	function transientFailure(): RunResult {
+		const failed = result("failed");
+		if (!failed.failure) throw new Error("failed result lacks a failure");
+		return { ...failed, failure: { ...failed.failure, retry: "backoff" } };
+	}
+
+	function causeMessages(error: unknown): string[] {
+		const messages: string[] = [];
+		let current: unknown = error;
+		while (current instanceof Error) {
+			messages.push(current.message);
+			current = current.cause;
+		}
+		return messages;
+	}
+
+	async function worktreeScheduler(
+		journal: WorkflowRunJournal,
+		ownerClient: SubagentClient,
+	) {
+		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const ownerBinding = binding(ownerClient);
+		return createWorkflowSequentialScheduler({
+			journal,
+			binding: ownerBinding,
+			artifacts,
+			finalizer: createWorkflowTaskFinalizer({
+				journal,
+				artifacts,
+				binding: ownerBinding,
+			}),
+		});
+	}
+
+	it("persists only the handoff identity in worktree settlement evidence", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", worktreeRequest()),
+		]);
+		const record = worktreeRecord();
+		const ownerClient = client({
+			wait: vi.fn(async () => executionResult(result("completed"), record)),
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+		});
+
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-finalization",
+			outcome: "completed",
+		});
+		const state = await projection(journal);
+		const task = state.tasks[tasks[0]?.ref.taskId ?? ""];
+		const execution = state.executions[task?.currentExecutionId ?? ""];
+		expect(execution).toMatchObject({
+			phase: "settled",
+			preflight: { workspaceMode: "worktree" },
+			settlement: {
+				evidence: {
+					kind: "subagent",
+					status: "completed",
+					handoff: {
+						attemptId: "attempt_scheduler",
+						baselineHead,
+						handoffCommit,
+					},
+				},
+			},
+		});
+		expect(Object.keys(execution?.settlement?.evidence.handoff ?? {})).toEqual([
+			"attemptId",
+			"baselineHead",
+			"handoffCommit",
+		]);
+		const journalText = JSON.stringify(await journal.readEvents());
+		for (const secret of privateFields(record)) {
+			expect(journalText).not.toContain(secret);
+		}
+		expect(journalText).not.toContain("not persisted");
+		expect(journalText).not.toContain("session.jsonl");
+	});
+
+	it("settles a worktree child that captured no changes without a handoff", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", worktreeRequest("optional")),
+		]);
+		const {
+			handoffCommit: _commit,
+			handoffRef: _ref,
+			...noChanges
+		} = worktreeRecord();
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(
+				client({
+					wait: vi.fn(async () =>
+						executionResult(result("completed"), noChanges),
+					),
+				}),
+			),
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-finalization",
+		});
+		const state = await projection(journal);
+		const task = state.tasks[tasks[0]?.ref.taskId ?? ""];
+		const execution = state.executions[task?.currentExecutionId ?? ""];
+		expect(execution?.settlement?.evidence.handoff).toBeUndefined();
+		expect(JSON.stringify(execution)).not.toContain(baselineHead);
+	});
+
+	it("rejects a read-only child whose result carries a handoff", async () => {
+		const { journal, tasks } = await fixture();
+		const ownerClient = client({
+			wait: vi.fn(async () =>
+				executionResult(result("completed"), worktreeRecord()),
+			),
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(ownerClient),
+		});
+		const failure = await scheduler.drive().then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(Error);
+		expect(causeMessages(failure)).toContainEqual(
+			expect.stringContaining("read-only task settlement carries a handoff"),
+		);
+		const state = await projection(journal);
+		const task = state.tasks[tasks[0]?.ref.taskId ?? ""];
+		const execution = state.executions[task?.currentExecutionId ?? ""];
+		expect(execution?.settlement).toBeUndefined();
+		expect(execution?.observation?.status).toBe("completed");
+	});
+
+	it("rejects a malformed handoff record as unrepresentable evidence", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", worktreeRequest()),
+		]);
+		const malformed = worktreeRecord("attempt_scheduler", {
+			handoffCommit: baselineHead,
+		});
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(
+				client({
+					wait: vi.fn(async () =>
+						executionResult(result("completed"), malformed),
+					),
+				}),
+			),
+		});
+		await expect(scheduler.drive()).rejects.toMatchObject({
+			name: "WorkflowSchedulerError",
+			stage: "observation",
+			message:
+				"Subagent terminal result cannot be represented as durable evidence.",
+		});
+		const state = await projection(journal);
+		const task = state.tasks[tasks[0]?.ref.taskId ?? ""];
+		expect(
+			state.executions[task?.currentExecutionId ?? ""]?.settlement,
+		).toBeUndefined();
+	});
+
+	it("imports the final attempt's handoff after a retry names a new attempt", async () => {
+		const base = worktreeRequest();
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", {
+				...base,
+				retry: { attempts: 1 },
+				limits: { ...base.limits, retries: 1 },
+			}),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const first = worktreeRecord("attempt_scheduler");
+		const second = worktreeRecord("attempt_scheduler2");
+		let waits = 0;
+		const ownerClient = client({
+			wait: vi.fn(async () => {
+				waits += 1;
+				return waits === 1
+					? executionResult(transientFailure(), first)
+					: executionResult(result("completed"), second);
+			}),
+			retry: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler2",
+				status: "active" as const,
+			})),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler2",
+				status: "completed" as const,
+			})),
+			exportHandoff: vi.fn(async () => handoffExport("attempt_scheduler2")),
+		});
+		const scheduler = await worktreeScheduler(journal, ownerClient);
+
+		// A completed graph leaves the run waiting for its output commit.
+		await expect(driveToRest(scheduler)).resolves.toMatchObject({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		const task = state.tasks[taskId];
+		const execution = state.executions[task?.currentExecutionId ?? ""];
+		expect(task?.status).toBe("completed");
+		expect(execution?.priorSettlements?.[0]?.evidence).toMatchObject({
+			status: "failed",
+			attemptOrdinal: 1,
+			handoff: { attemptId: "attempt_scheduler" },
+		});
+		expect(execution?.settlement?.evidence).toMatchObject({
+			status: "completed",
+			attemptOrdinal: 2,
+			handoff: { attemptId: "attempt_scheduler2", baselineHead, handoffCommit },
+		});
+		expect(execution?.handoffImport).toMatchObject({
+			subagentRunId: "run_scheduler",
+			subagentAttemptId: "attempt_scheduler2",
+			handoffCommit,
+			baselineHead,
+		});
+		expect(execution?.terminal).toMatchObject({
+			outcome: "completed",
+			evidence: {
+				kind: "subagent",
+				attemptOrdinal: 2,
+				handoff: { attemptId: "attempt_scheduler2" },
+			},
+		});
+		expect(ownerClient.exportHandoff).toHaveBeenCalledExactlyOnceWith(
+			"run_scheduler",
+			{ maxBytes: 16 * 1024 * 1024 },
+		);
+		const journalText = JSON.stringify(await journal.readEvents());
+		for (const secret of [...privateFields(first), ...privateFields(second)]) {
+			expect(journalText).not.toContain(secret);
+		}
+	});
+
+	it("reconciles a handoff-import block and completes the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.agent("answer", worktreeRequest()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const exportHandoff = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("export unavailable"))
+			.mockResolvedValueOnce(handoffExport("attempt_scheduler"));
+		const ownerClient = client({
+			wait: vi.fn(async () =>
+				executionResult(result("completed"), worktreeRecord()),
+			),
+			release: vi.fn(async () => ({
+				runId: "run_scheduler",
+				attemptId: "attempt_scheduler",
+				status: "completed" as const,
+			})),
+			reconcile: vi.fn(async () => ({
+				run: {
+					runId: "run_scheduler",
+					attemptId: "attempt_scheduler",
+					status: "completed" as const,
+				},
+				sandboxProcess: "absent" as const,
+				workspace: "not-needed" as const,
+			})),
+			exportHandoff,
+		});
+		const scheduler = await worktreeScheduler(journal, ownerClient);
+
+		await expect(scheduler.drive()).rejects.toMatchObject({
+			name: "WorkflowTaskFinalizationError",
+			stage: "handoff-import",
+			message: "Subagent handoff export failed.",
+		});
+		let state = await projection(journal);
+		expect(state.status).toBe("cleanup-blocked");
+		expect(state.tasks[taskId]?.status).toBe("cleanup-blocked");
+		expect(
+			state.executions[state.tasks[taskId]?.currentExecutionId ?? ""]?.terminal,
+		).toMatchObject({
+			outcome: "cleanup-blocked",
+			evidence: { kind: "workflow", stage: "handoff-import" },
+		});
+		expect(ownerClient.release).not.toHaveBeenCalled();
+
+		// Reconciliation retries the import, releases, and drives on; the
+		// completed graph leaves the run waiting for its output commit.
+		await expect(scheduler.reconcile(taskId)).resolves.toMatchObject({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[taskId]?.status).toBe("completed");
+		const execution =
+			state.executions[state.tasks[taskId]?.currentExecutionId ?? ""];
+		expect(execution).toMatchObject({
+			phase: "terminal",
+			handoffImport: { subagentAttemptId: "attempt_scheduler", handoffCommit },
+			terminal: { outcome: "completed", evidence: { kind: "subagent" } },
+		});
+		expect(execution?.priorSettlements).toBeUndefined();
+		expect(ownerClient.reconcile).toHaveBeenCalledOnce();
+		expect(exportHandoff).toHaveBeenCalledTimes(2);
+		// Scheduler settlement and the finalizer's exact-result check each wait,
+		// before the block and again on reconciliation.
+		expect(ownerClient.wait).toHaveBeenCalledTimes(4);
+		expect(ownerClient.release).toHaveBeenCalledOnce();
+		const types = (await journal.readEvents()).map((event) => event.type);
+		expect(
+			types.filter((type) => type === "task-execution-child-settled"),
+		).toHaveLength(1);
 	});
 });

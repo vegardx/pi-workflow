@@ -100,6 +100,8 @@ function isRunReceipt(value: unknown): value is RunReceipt {
 	);
 }
 
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+
 function sameStringSet(
 	left: readonly string[],
 	right: readonly string[],
@@ -118,7 +120,7 @@ function validatePreflight(
 		typeof preflight.preflightId !== "string" ||
 		preflight.preflightId.length < 1 ||
 		preflight.preflightId.length > 128 ||
-		!preflight.identitySha256.match(/^[a-f0-9]{64}$/) ||
+		!SHA256_PATTERN.test(preflight.identitySha256) ||
 		!Number.isFinite(Date.parse(preflight.expiresAt)) ||
 		Date.parse(preflight.expiresAt) <= Date.now() ||
 		!Value.Check(AgentLaunchPlanSchema, preflight.launchPlan) ||
@@ -133,6 +135,9 @@ function validatePreflight(
 		!sameStringSet(preflight.launchPlan.preloadSkills, request.preloadSkills) ||
 		!sameStringSet(preflight.launchPlan.contextScopes, request.contextScopes) ||
 		preflight.launchPlan.workspace.mode !== request.workspace.mode ||
+		// The baseline digest is persisted as replay identity on the preflight
+		// event; a plan without a well-formed digest cannot be journaled.
+		!SHA256_PATTERN.test(preflight.launchPlan.workspace.baselineSha256) ||
 		!isDeepStrictEqual(
 			preflight.launchPlan.outputSchema,
 			request.outputSchema,
@@ -167,6 +172,8 @@ async function lowerRequest(
 			: [];
 	const context = [...task.spec.request.task.context, ...projected];
 	validateWorkflowTaskContext(context);
+	// Fields are lowered explicitly: the workflow-only handoff policy
+	// (task.spec.request.handoff) is never sent to pi-subagent.
 	const request = {
 		operationId,
 		agent: task.spec.request.agent,
@@ -576,6 +583,9 @@ export function createWorkflowTaskLauncher(
 					plannedSubagentRunId: freshPreflight.launchPlan.runId,
 					plannedSubagentAttemptId: freshPreflight.launchPlan.attemptId,
 					expiresAt: freshPreflight.expiresAt,
+					workspaceMode: freshPreflight.launchPlan.workspace.mode,
+					workspaceBaselineSha256:
+						freshPreflight.launchPlan.workspace.baselineSha256,
 					...(execution.preflight
 						? { supersedesPreflightId: execution.preflight.preflightId }
 						: {}),

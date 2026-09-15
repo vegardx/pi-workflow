@@ -16,6 +16,7 @@ import {
 	type MaterializedSupportTask,
 	type TaskExecutionGeneration,
 	type TaskExecutionOutcome,
+	type WorkflowArtifactOutput,
 	type WorkflowArtifactRef,
 	type WorkflowRunStatus,
 	type WorkflowTaskId,
@@ -156,12 +157,14 @@ function nextGeneration(
 }
 
 /**
- * Result artifacts bound to the producer's current execution. Artifacts of
- * superseded generations remain durable history and never satisfy a lookup.
+ * Artifacts of one output bound to the producer's current execution.
+ * Artifacts of superseded generations remain durable history and never
+ * satisfy a lookup.
  */
-function resultArtifacts(
+function outputArtifacts(
 	state: WorkflowStateProjection,
 	producerTaskId: WorkflowTaskId,
+	output: WorkflowArtifactOutput,
 ): readonly WorkflowArtifactRef[] {
 	const executionId = state.tasks[producerTaskId]?.currentExecutionId;
 	if (executionId === undefined) return [];
@@ -169,8 +172,15 @@ function resultArtifacts(
 		(artifact) =>
 			artifact.producerTaskId === producerTaskId &&
 			artifact.producerExecutionId === executionId &&
-			artifact.output === "result",
+			artifact.output === output,
 	);
+}
+
+function resultArtifacts(
+	state: WorkflowStateProjection,
+	producerTaskId: WorkflowTaskId,
+): readonly WorkflowArtifactRef[] {
+	return outputArtifacts(state, producerTaskId, "result");
 }
 
 function compileSchema(schema: unknown): (value: unknown) => boolean {
@@ -308,7 +318,13 @@ export function createWorkflowSupportTaskExecutor(
 		for (const [name, input] of Object.entries(task.spec.inputs).sort(
 			([left], [right]) => compareNames(left, right),
 		)) {
-			const matches = resultArtifacts(current, input.producerTaskId);
+			// Selection follows the reference's output: a handoff input digests
+			// the producer's handoff artifact, a result input its result.
+			const matches = outputArtifacts(
+				current,
+				input.producerTaskId,
+				input.output,
+			);
 			if (matches.length !== 1 || !matches[0]) {
 				throw new WorkflowSupportExecutionError(
 					"input",

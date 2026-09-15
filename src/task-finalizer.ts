@@ -1,8 +1,12 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
+	HANDOFF_EXPORT_MEDIA_TYPE,
+	type HandoffRef,
 	isRunResult,
 	type RunReceipt,
+	type RunResult,
 	RunStatusSchema,
 } from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
@@ -14,12 +18,16 @@ import {
 	WorkflowArtifactStoreError,
 } from "./artifact-store.js";
 import { currentSubagentAttemptId } from "./attempts.js";
-import type {
-	SubagentTerminalEvidence,
-	TaskExecutionOutcome,
-	WorkflowArtifactRef,
-	WorkflowRunStatus,
-	WorkflowTaskId,
+import {
+	HandoffRefSchema,
+	MAX_WORKFLOW_HANDOFF_BYTES,
+	type SubagentHandoffEvidence,
+	type SubagentTerminalEvidence,
+	type TaskExecutionOutcome,
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
+	type WorkflowArtifactRef,
+	type WorkflowRunStatus,
+	type WorkflowTaskId,
 } from "./contracts.js";
 import type {
 	TaskExecutionProjection,
@@ -29,7 +37,7 @@ import type {
 } from "./events.js";
 import {
 	deriveJsonValueSha256,
-	deriveSubagentResultSha256,
+	deriveSubagentSettlementEvidence,
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
@@ -41,6 +49,12 @@ const addFormats = (addFormatsModule.default ??
 const finalizerMutations = new Map<string, Promise<void>>();
 const INTERRUPTED_REASON =
 	"Interrupted child retained for recovery; no release performed.";
+const HANDOFF_IMPORT_BLOCKED_REASON =
+	"Workflow handoff artifact import requires reconciliation.";
+const HANDOFF_ABSENT_REQUIRED_MESSAGE =
+	"Completed worktree task captured no handoff.";
+const HANDOFF_ARTIFACT_MISSING_MESSAGE =
+	"Completed worktree task has no durable handoff artifact.";
 type SettledExecution = TaskExecutionProjection & {
 	settlement: NonNullable<TaskExecutionProjection["settlement"]>;
 };
@@ -65,7 +79,11 @@ export interface WorkflowTaskFinalizerOptions {
 
 export class WorkflowTaskFinalizationError extends Error {
 	constructor(
-		readonly stage: "validation" | "artifact-import" | "release",
+		readonly stage:
+			| "validation"
+			| "artifact-import"
+			| "handoff-import"
+			| "release",
 		message: string,
 		options?: ErrorOptions,
 	) {
@@ -115,31 +133,31 @@ function attemptOrdinalOf(execution: TaskExecutionProjection): number {
 	);
 }
 
-function resultEvidence(
-	result: Parameters<typeof deriveSubagentResultSha256>[0],
-	attemptOrdinal: number,
-): SubagentTerminalEvidence {
-	return {
-		kind: "subagent",
-		attemptOrdinal,
-		resultSha256: deriveSubagentResultSha256(result),
-		status: result.status,
-		usage: structuredClone(result.usage),
-		usageComplete: result.usageComplete,
-		runtimeMs: result.runtimeMs,
-		...(result.failure ? { failure: structuredClone(result.failure) } : {}),
-		sandboxCleanup: result.sandboxCleanup,
-		workspaceCleanup: result.workspaceCleanup,
-		truncated: result.truncated,
-		...(result.output ? { output: structuredClone(result.output) } : {}),
-		...(result.structuredOutput === undefined
-			? {}
-			: {
-					structuredOutputSha256: deriveJsonValueSha256(
-						result.structuredOutput,
-					),
-				}),
-	};
+function isWorktreeTask(task: WorkflowTaskProjection): boolean {
+	return (
+		task.task.spec.kind === "agent" &&
+		task.task.spec.request.workspace.mode === "worktree"
+	);
+}
+
+function sha256(content: Buffer): string {
+	return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * git's fixed mbox separator: a single-commit `git format-patch` opens with
+ * the rendered commit's object id and the magic date.
+ */
+function handoffFirstLineMatches(
+	content: Buffer,
+	handoffCommit: string,
+): boolean {
+	const newline = content.indexOf(0x0a);
+	if (newline === -1) return false;
+	return (
+		content.subarray(0, newline).toString("utf8") ===
+		`From ${handoffCommit} Mon Sep 17 00:00:00 2001`
+	);
 }
 
 function validateReleaseReceipt(value: RunReceipt, expected: RunReceipt): void {
@@ -218,6 +236,26 @@ export function createWorkflowTaskFinalizer(
 		return { task, execution: execution as SettledExecution };
 	}
 
+	/**
+	 * The shared derivation keeps finalizer evidence byte-identical to the
+	 * scheduler's settlement; a malformed handoff record cannot match it.
+	 */
+	function evidenceOf(
+		waited: { result: RunResult; handoff?: unknown },
+		execution: TaskExecutionProjection,
+		stage: "validation" | "release",
+		message: string,
+	): SubagentTerminalEvidence {
+		try {
+			return deriveSubagentSettlementEvidence(
+				waited,
+				attemptOrdinalOf(execution),
+			);
+		} catch (error) {
+			throw new WorkflowTaskFinalizationError(stage, message, { cause: error });
+		}
+	}
+
 	async function waitForExactResult(execution: TaskExecutionProjection) {
 		const child = receipt(execution);
 		const waited = await binding.client.wait(child.runId);
@@ -227,7 +265,12 @@ export function createWorkflowTaskFinalizer(
 				"Child result is unavailable or invalid during finalization.",
 			);
 		}
-		const evidence = resultEvidence(waited.result, attemptOrdinalOf(execution));
+		const evidence = evidenceOf(
+			waited,
+			execution,
+			"validation",
+			"Child result does not match durable settlement evidence.",
+		);
 		if (!isDeepStrictEqual(evidence, execution.settlement?.evidence)) {
 			throw new WorkflowTaskFinalizationError(
 				"validation",
@@ -256,7 +299,7 @@ export function createWorkflowTaskFinalizer(
 	async function blockExecution(
 		task: WorkflowTaskProjection,
 		execution: TaskExecutionProjection,
-		stage: "artifact-import" | "release",
+		stage: "artifact-import" | "handoff-import" | "release",
 		message: string,
 	): Promise<void> {
 		const current = await state();
@@ -364,6 +407,236 @@ export function createWorkflowTaskFinalizer(
 		return ref;
 	}
 
+	function handoffImportError(message: string, cause?: unknown) {
+		return new WorkflowTaskFinalizationError(
+			"handoff-import",
+			message,
+			cause === undefined ? undefined : { cause },
+		);
+	}
+
+	/**
+	 * Exports the current attempt's handoff from pi-subagent and proves it is
+	 * the settled handoff before any byte reaches the workflow store.
+	 */
+	async function exportVerifiedHandoff(
+		execution: SettledExecution,
+		settled: SubagentHandoffEvidence,
+		child: RunReceipt,
+	): Promise<{ ref: HandoffRef; content: Buffer }> {
+		let exported: unknown;
+		try {
+			exported = await binding.client.exportHandoff(child.runId, {
+				maxBytes: MAX_WORKFLOW_HANDOFF_BYTES,
+			});
+		} catch (error) {
+			throw handoffImportError("Subagent handoff export failed.", error);
+		}
+		const candidate = exported as { ref?: unknown; content?: unknown } | null;
+		if (
+			typeof candidate !== "object" ||
+			candidate === null ||
+			!Value.Check(HandoffRefSchema, candidate.ref) ||
+			!Buffer.isBuffer(candidate.content)
+		) {
+			throw handoffImportError(
+				"Subagent handoff export returned an invalid reference.",
+			);
+		}
+		const ref = candidate.ref;
+		const content = candidate.content;
+		const attemptId = currentSubagentAttemptId(execution);
+		if (
+			ref.runId !== child.runId ||
+			ref.attemptId !== attemptId ||
+			ref.attemptId !== settled.attemptId ||
+			ref.baselineHead !== settled.baselineHead ||
+			ref.handoffCommit !== settled.handoffCommit ||
+			ref.handoffCommit === ref.baselineHead
+		) {
+			throw handoffImportError(
+				"Exported handoff does not match the settled handoff identity.",
+			);
+		}
+		if (
+			ref.format !== "git-format-patch" ||
+			ref.mediaType !== HANDOFF_EXPORT_MEDIA_TYPE
+		) {
+			throw handoffImportError("Exported handoff has an unsupported format.");
+		}
+		if (content.byteLength !== ref.bytes || sha256(content) !== ref.sha256) {
+			throw handoffImportError(
+				"Exported handoff digest or size does not match its reference.",
+			);
+		}
+		if (ref.bytes < 1 || ref.bytes > MAX_WORKFLOW_HANDOFF_BYTES) {
+			throw handoffImportError(
+				"Exported handoff exceeds the workflow handoff bound.",
+			);
+		}
+		if (!handoffFirstLineMatches(content, ref.handoffCommit)) {
+			throw handoffImportError(
+				"Exported handoff is not a single-commit git-format-patch.",
+			);
+		}
+		return { ref, content };
+	}
+
+	/**
+	 * Imports the settled handoff as a workflow-owned artifact. A handoff
+	 * artifact already declared for this execution is verified and imported
+	 * without another export; otherwise the export is verified, stored, and
+	 * declared. Every step is idempotent on the durable prefix.
+	 */
+	async function importHandoff(
+		task: WorkflowTaskProjection,
+		execution: SettledExecution,
+	): Promise<WorkflowArtifactRef> {
+		const settled = execution.settlement.evidence.handoff;
+		if (!settled) {
+			throw handoffImportError("Settled child captured no handoff to import.");
+		}
+		const child = receipt(execution);
+		let current = await state();
+		let ref = Object.values(current.artifacts).find(
+			(candidate) =>
+				candidate.producerTaskId === task.task.id &&
+				candidate.producerExecutionId === execution.execution.id &&
+				candidate.output === "handoff",
+		);
+		if (ref) {
+			let content: Buffer;
+			try {
+				content = await artifacts.readBytes(ref);
+			} catch (error) {
+				throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE, error);
+			}
+			if (!handoffFirstLineMatches(content, settled.handoffCommit)) {
+				throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE);
+			}
+		} else {
+			const exported = await exportVerifiedHandoff(execution, settled, child);
+			ref = await artifacts.putBytes(exported.content, {
+				runId: journal.runId,
+				producerTaskId: task.task.id,
+				producerExecutionId: execution.execution.id,
+				output: "handoff",
+				mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+				schemaSha256: WORKFLOW_HANDOFF_FORMAT_SHA256,
+			});
+			current = await state();
+			const existing = current.artifacts[ref.id];
+			if (existing && !isDeepStrictEqual(existing, ref)) {
+				throw handoffImportError(
+					"Workflow artifact identity conflicts with durable metadata.",
+				);
+			}
+			if (!existing) {
+				await append({ type: "artifact-declared", data: { artifact: ref } });
+			}
+		}
+		const afterDeclaration = await state();
+		const projected = afterDeclaration.executions[execution.execution.id];
+		if (!projected?.handoffImport) {
+			await append({
+				type: "task-execution-handoff-imported",
+				data: {
+					executionId: execution.execution.id,
+					subagentRunId: child.runId,
+					subagentAttemptId: child.attemptId,
+					artifactId: ref.id,
+					handoffCommit: settled.handoffCommit,
+					baselineHead: settled.baselineHead,
+					sha256: ref.sha256,
+					bytes: ref.bytes,
+				},
+			});
+		}
+		return ref;
+	}
+
+	/** Terminal already persisted: the durable handoff blob must still verify. */
+	async function verifyRepairedHandoff(
+		task: WorkflowTaskProjection,
+		execution: SettledExecution,
+		repaired: WorkflowStateProjection,
+	): Promise<void> {
+		const handoffImport = execution.handoffImport;
+		if (!handoffImport) {
+			if (
+				execution.handoffAbsent &&
+				task.task.spec.kind === "agent" &&
+				task.task.spec.request.handoff === "optional"
+			) {
+				return;
+			}
+			throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE);
+		}
+		const handoffArtifact = repaired.artifacts[handoffImport.artifactId];
+		if (!handoffArtifact) {
+			throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE);
+		}
+		let content: Buffer;
+		try {
+			content = await artifacts.readBytes(handoffArtifact);
+		} catch (error) {
+			throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE, error);
+		}
+		if (!handoffFirstLineMatches(content, handoffImport.handoffCommit)) {
+			throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE);
+		}
+	}
+
+	/**
+	 * A completed worktree child under a required handoff policy that captured
+	 * nothing is released first, then fails on workflow evidence.
+	 */
+	async function failAbsentRequiredHandoff(
+		taskId: WorkflowTaskId,
+		task: WorkflowTaskProjection,
+		execution: SettledExecution,
+	): Promise<WorkflowTaskFinalizationOutcome> {
+		if (execution.phase !== "terminal") {
+			await append({
+				type: "task-execution-terminal",
+				data: {
+					executionId: execution.execution.id,
+					outcome: "failed",
+					evidence: {
+						kind: "workflow",
+						stage: "handoff-import",
+						failureSha256: deriveWorkflowFailureSha256(
+							"handoff-import",
+							HANDOFF_ABSENT_REQUIRED_MESSAGE,
+						),
+						message: HANDOFF_ABSENT_REQUIRED_MESSAGE,
+					},
+				},
+			});
+		}
+		const current = await state();
+		const projectedTask = current.tasks[taskId];
+		if (projectedTask && projectedTask.status !== "failed") {
+			await append({
+				type: "task-status-changed",
+				data: {
+					taskId,
+					from: projectedTask.status,
+					to: "failed",
+					reason: HANDOFF_ABSENT_REQUIRED_MESSAGE,
+				},
+			});
+		}
+		await updateRunAfterTask(task, "failed");
+		const finalized = await state();
+		return {
+			taskId,
+			executionId: execution.execution.id,
+			outcome: "failed",
+			runStatus: finalized.status,
+		};
+	}
+
 	async function reconcileReleasedStatus(
 		taskId: WorkflowTaskId,
 		execution: SettledExecution,
@@ -384,9 +657,11 @@ export function createWorkflowTaskFinalizer(
 				"Released child result is unavailable or invalid.",
 			);
 		}
-		const evidence = resultEvidence(
-			updated.result,
-			attemptOrdinalOf(execution),
+		const evidence = evidenceOf(
+			updated,
+			execution,
+			"release",
+			"Released child result is unavailable or invalid.",
 		);
 		if (evidence.status !== releasedStatus) {
 			throw new WorkflowTaskFinalizationError(
@@ -512,9 +787,15 @@ export function createWorkflowTaskFinalizer(
 	): Promise<WorkflowTaskFinalizationOutcome> {
 		let current = await state();
 		let { task, execution } = selected(current, taskId);
+		const absentRequiredTerminal =
+			execution.terminal?.outcome === "failed" &&
+			execution.terminal.evidence.kind === "workflow" &&
+			execution.terminal.evidence.stage === "handoff-import";
 		if (
 			execution.phase === "terminal" &&
-			execution.terminal?.evidence.kind === "subagent"
+			execution.terminal &&
+			(execution.terminal.evidence.kind === "subagent" ||
+				absentRequiredTerminal)
 		) {
 			if (task.status !== execution.terminal.outcome) {
 				await append({
@@ -539,6 +820,9 @@ export function createWorkflowTaskFinalizer(
 					);
 				}
 				await artifacts.readJson(repairedArtifact);
+				if (isWorktreeTask(task)) {
+					await verifyRepairedHandoff(task, execution, repaired);
+				}
 			}
 			await updateRunAfterTask(task, execution.terminal.outcome);
 			const finalState = await state();
@@ -573,6 +857,49 @@ export function createWorkflowTaskFinalizer(
 					"Workflow result artifact import failed.",
 					{ cause: error },
 				);
+			}
+			current = await state();
+			({ task, execution } = selected(current, taskId));
+		}
+
+		if (
+			isWorktreeTask(task) &&
+			execution.settlement.evidence.status === "completed" &&
+			!execution.handoffImport &&
+			!execution.handoffAbsent
+		) {
+			const child = receipt(execution);
+			if (execution.settlement.evidence.handoff === undefined) {
+				await append({
+					type: "task-execution-handoff-absent",
+					data: {
+						executionId: execution.execution.id,
+						subagentRunId: child.runId,
+						subagentAttemptId: child.attemptId,
+					},
+				});
+			} else {
+				try {
+					await importHandoff(task, execution);
+				} catch (error) {
+					await blockExecution(
+						task,
+						execution,
+						"handoff-import",
+						HANDOFF_IMPORT_BLOCKED_REASON,
+					);
+					await updateRunAfterTask(task, "cleanup-blocked");
+					if (
+						error instanceof WorkflowTaskFinalizationError &&
+						error.stage === "handoff-import"
+					) {
+						throw error;
+					}
+					throw handoffImportError(
+						"Workflow handoff artifact import failed.",
+						error,
+					);
+				}
 			}
 			current = await state();
 			({ task, execution } = selected(current, taskId));
@@ -681,6 +1008,15 @@ export function createWorkflowTaskFinalizer(
 				execution,
 				child,
 			));
+		}
+
+		if (
+			isWorktreeTask(task) &&
+			execution.handoffAbsent &&
+			task.task.spec.kind === "agent" &&
+			task.task.spec.request.handoff === "required"
+		) {
+			return failAbsentRequiredHandoff(taskId, task, execution);
 		}
 
 		const terminalOutcome = outcome(execution.settlement.evidence.status);
