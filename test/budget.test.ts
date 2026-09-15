@@ -61,6 +61,7 @@ function agentTask(
 		spec: {
 			key,
 			kind: "agent",
+			role: "task",
 			disposition: "required",
 			after: [],
 			inputs: {},
@@ -108,6 +109,7 @@ function nestedTask(
 		spec: {
 			key,
 			kind: "workflow",
+			role: "task",
 			disposition: "required",
 			after: [],
 			inputs: {},

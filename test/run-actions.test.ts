@@ -77,6 +77,7 @@ function agentTask(
 		spec: {
 			key,
 			kind: "agent",
+			role: "task",
 			disposition: "required",
 			after: (options.after ?? []).map((taskId) => ({ runId: RUN_ID, taskId })),
 			inputs: {},
@@ -118,6 +119,7 @@ function supportTask(key: string, sequence: number): MaterializedSupportTask {
 		spec: {
 			key,
 			kind: "support",
+			role: "task",
 			disposition: "required",
 			after: [],
 			inputs: {},
@@ -222,6 +224,7 @@ function agentExecution(
 						kind: "resume" as const,
 						ordinal: index + 2,
 						previousAttemptId: `attempt_child${generation}`,
+						origin: "policy" as const,
 						subagentAttemptId: `attempt_child${generation}x${index + 2}`,
 						status: "interrupted" as const,
 						intentSequence: 10 * generation + 3,

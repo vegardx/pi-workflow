@@ -81,10 +81,13 @@ describe("workflow authoring skill", () => {
 			"dynamic\nworkflows",
 			"writer (non-read-only) agent tasks",
 			"operator-triggered\nretry or resume tools",
-			"a Pi tool for invalidation",
 		]) {
 			expect(unavailable).toContain(api);
 		}
+		expect(unavailable).not.toContain("invalidation");
+		expect(skill).toContain("`workflow_invalidate { runId, taskId, reason }`");
+		expect(skill).toContain("`workflow_wait { runId, timeoutMs? }`");
+		expect(skill).toContain("`workflow_reconcile { runId, taskId? }`");
 		expect(unavailable).not.toContain("ctx.finalize");
 		expect(skill).toContain("## Finalizers");
 		expect(skill).toContain(
@@ -110,6 +113,10 @@ describe("workflow authoring skill", () => {
 			"workflow_wait",
 			"workflow_stop",
 			"workflow_reconcile",
+			"workflow_runs",
+			"workflow_inspect",
+			"workflow_logs",
+			"workflow_invalidate",
 		]) {
 			expect(skill).toContain(tool);
 		}

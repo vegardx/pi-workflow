@@ -109,6 +109,10 @@ describe("package contract", () => {
 			"workflow_wait",
 			"workflow_stop",
 			"workflow_reconcile",
+			"workflow_runs",
+			"workflow_inspect",
+			"workflow_logs",
+			"workflow_invalidate",
 		]);
 	});
 });
