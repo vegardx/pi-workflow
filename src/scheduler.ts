@@ -209,11 +209,15 @@ function dependencies(
 	});
 }
 
+/**
+ * Committed tasks on the current path in materialization order. Abandoned
+ * tasks stay in the projection as history and are never scheduled.
+ */
 function orderedTasks(
 	state: WorkflowStateProjection,
 ): readonly WorkflowTaskProjection[] {
 	return Object.values(state.tasks)
-		.filter((task) => task.committed)
+		.filter((task) => task.committed && task.abandoned !== true)
 		.sort(
 			(left, right) =>
 				left.task.materializationSequence - right.task.materializationSequence,

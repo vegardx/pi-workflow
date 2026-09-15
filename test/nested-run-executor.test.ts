@@ -425,6 +425,7 @@ async function importedByHand(
 	const artifact = await fx.artifacts.putJson(output.value, {
 		runId: RUN_ID,
 		producerTaskId: fx.taskId,
+		producerExecutionId: fx.executionId,
 		output: "result",
 		schemaSha256: outputSchemaSha256(),
 	});
@@ -554,12 +555,14 @@ async function expectCompleted(
 		id: deriveWorkflowArtifactId({
 			runId: RUN_ID,
 			producerTaskId: fx.taskId,
+			producerExecutionId: fx.executionId,
 			output: "result",
 			schemaSha256,
 			sha256: output.artifact.sha256,
 		}),
 		runId: RUN_ID,
 		producerTaskId: fx.taskId,
+		producerExecutionId: fx.executionId,
 		output: "result",
 		sha256: output.artifact.sha256,
 		bytes: output.artifact.bytes,

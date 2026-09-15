@@ -12,6 +12,7 @@ import {
 	type MaterializedNestedWorkflowTask,
 	type NestedWorkflowInputArtifacts,
 	type NestedWorkflowUsage,
+	type TaskExecutionGeneration,
 	type TaskExecutionOutcome,
 	type WorkflowArtifactId,
 	type WorkflowArtifactRef,
@@ -174,6 +175,38 @@ const MESSAGES = Object.freeze({
 
 const MAX_NESTED_INPUT_BYTES = 900 * 1024;
 
+/** The next generation for a task: one past every execution persisted for it. */
+function nextGeneration(
+	state: WorkflowStateProjection,
+	taskId: WorkflowTaskId,
+): TaskExecutionGeneration {
+	return (
+		1 +
+		Object.values(state.executions).filter(
+			(execution) => execution.execution.taskId === taskId,
+		).length
+	);
+}
+
+/**
+ * The result artifact bound to the producer's current execution. Artifacts of
+ * superseded generations remain durable history and never resolve an input.
+ */
+function resultArtifact(
+	state: WorkflowStateProjection,
+	producerTaskId: WorkflowTaskId,
+): WorkflowArtifactRef | undefined {
+	const executionId = state.tasks[producerTaskId]?.currentExecutionId;
+	if (executionId === undefined) return undefined;
+	const matches = Object.values(state.artifacts).filter(
+		(artifact) =>
+			artifact.producerTaskId === producerTaskId &&
+			artifact.producerExecutionId === executionId &&
+			artifact.output === "result",
+	);
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
 function compareNames(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -296,13 +329,8 @@ export function createWorkflowNestedRunExecutor(
 		for (const name of names) {
 			const input = spec.inputs[name];
 			if (!input) continue;
-			const matches = Object.values(current.artifacts).filter(
-				(artifact) =>
-					artifact.producerTaskId === input.producerTaskId &&
-					artifact.output === "result",
-			);
-			const artifact = matches[0];
-			if (matches.length !== 1 || !artifact) {
+			const artifact = resultArtifact(current, input.producerTaskId);
+			if (!artifact) {
 				throw new WorkflowNestedRunError("input", MESSAGES.inputArtifact);
 			}
 			digests[name] = artifact.sha256;
@@ -509,17 +537,22 @@ export function createWorkflowNestedRunExecutor(
 		}
 		const spec = selection.task.task.spec;
 		if (!selection.execution) {
+			const generation = nextGeneration(current, taskId);
 			await append({
 				type: "task-execution-created",
 				data: {
 					execution: {
 						kind: "workflow",
-						id: deriveTaskExecutionId(journal.runId, taskId, 1),
+						id: deriveTaskExecutionId(journal.runId, taskId, generation),
 						runId: journal.runId,
 						taskId,
-						generation: 1,
+						generation,
 						taskIdentitySha256: spec.identitySha256,
-						childRunId: deriveNestedWorkflowRunId(journal.runId, taskId, 1),
+						childRunId: deriveNestedWorkflowRunId(
+							journal.runId,
+							taskId,
+							generation,
+						),
 					},
 				},
 			});
@@ -865,6 +898,7 @@ export function createWorkflowNestedRunExecutor(
 		const artifact = await artifacts.putJson(value, {
 			runId: journal.runId,
 			producerTaskId: selection.task.task.id,
+			producerExecutionId: execution.execution.id,
 			output: "result",
 			schemaSha256,
 		});

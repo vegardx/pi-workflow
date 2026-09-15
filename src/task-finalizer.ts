@@ -331,6 +331,7 @@ export function createWorkflowTaskFinalizer(
 		const ref = await artifacts.putJson(structuredOutput, {
 			runId: journal.runId,
 			producerTaskId: task.task.id,
+			producerExecutionId: execution.execution.id,
 			output: "result",
 			schemaSha256,
 		});
@@ -481,8 +482,10 @@ export function createWorkflowTaskFinalizer(
 			return;
 		}
 		if (current.status === "stopping") {
+			// Abandoned tasks are history: they never count as work to drain.
 			const unsettled = Object.values(current.tasks).some(
 				(candidate) =>
+					candidate.abandoned !== true &&
 					candidate.status !== "completed" &&
 					candidate.status !== "failed" &&
 					candidate.status !== "cancelled" &&

@@ -14,6 +14,7 @@ import {
 } from "./artifact-store.js";
 import {
 	type MaterializedSupportTask,
+	type TaskExecutionGeneration,
 	type TaskExecutionOutcome,
 	type WorkflowArtifactRef,
 	type WorkflowRunStatus,
@@ -71,7 +72,7 @@ export interface WorkflowSupportExecutionResult {
 
 export interface WorkflowSupportTaskExecutor {
 	/**
-	 * Persists generation-1 execution, exact registry resolution, durable
+	 * Persists the next-generation execution, exact registry resolution, durable
 	 * support intent, and the `running` transition. Must be called under the
 	 * scheduler mutation lock so lane accounting is durable before it returns.
 	 */
@@ -141,13 +142,33 @@ function compareNames(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** The next generation for a task: one past every execution persisted for it. */
+function nextGeneration(
+	state: WorkflowStateProjection,
+	taskId: WorkflowTaskId,
+): TaskExecutionGeneration {
+	return (
+		1 +
+		Object.values(state.executions).filter(
+			(execution) => execution.execution.taskId === taskId,
+		).length
+	);
+}
+
+/**
+ * Result artifacts bound to the producer's current execution. Artifacts of
+ * superseded generations remain durable history and never satisfy a lookup.
+ */
 function resultArtifacts(
 	state: WorkflowStateProjection,
 	producerTaskId: WorkflowTaskId,
 ): readonly WorkflowArtifactRef[] {
+	const executionId = state.tasks[producerTaskId]?.currentExecutionId;
+	if (executionId === undefined) return [];
 	return Object.values(state.artifacts).filter(
 		(artifact) =>
 			artifact.producerTaskId === producerTaskId &&
+			artifact.producerExecutionId === executionId &&
 			artifact.output === "result",
 	);
 }
@@ -392,12 +413,14 @@ export function createWorkflowSupportTaskExecutor(
 
 	async function verifyResultArtifact(
 		task: MaterializedSupportTask,
+		execution: TaskExecutionProjection,
 		artifact: WorkflowArtifactRef,
 	): Promise<void> {
 		const outputSchema = task.spec.request.implementation.outputSchema;
 		if (
 			artifact.runId !== journal.runId ||
 			artifact.producerTaskId !== task.id ||
+			artifact.producerExecutionId !== execution.execution.id ||
 			artifact.output !== "result" ||
 			artifact.mediaType !== "application/json" ||
 			artifact.schemaSha256 !== deriveJsonValueSha256(outputSchema)
@@ -512,15 +535,16 @@ export function createWorkflowSupportTaskExecutor(
 		}
 		const spec = selection.task.task.spec;
 		if (!selection.execution) {
+			const generation = nextGeneration(current, taskId);
 			await append({
 				type: "task-execution-created",
 				data: {
 					execution: {
 						kind: "support",
-						id: deriveTaskExecutionId(journal.runId, taskId, 1),
+						id: deriveTaskExecutionId(journal.runId, taskId, generation),
 						runId: journal.runId,
 						taskId,
-						generation: 1,
+						generation,
 						taskIdentitySha256: spec.identitySha256,
 						implementationIdentitySha256:
 							deriveSupportImplementationIdentitySha256(
@@ -670,7 +694,7 @@ export function createWorkflowSupportTaskExecutor(
 					"Support task output commit has no declared artifact.",
 				);
 			}
-			await verifyResultArtifact(task, existing);
+			await verifyResultArtifact(task, execution, existing);
 			await commitFromArtifact(selection, existing, 0);
 			return result("completed");
 		}
@@ -681,7 +705,7 @@ export function createWorkflowSupportTaskExecutor(
 			);
 		}
 		if (existing) {
-			await verifyResultArtifact(task, existing);
+			await verifyResultArtifact(task, execution, existing);
 			await commitFromArtifact(selection, existing, 0);
 			return result("completed");
 		}
@@ -776,6 +800,7 @@ export function createWorkflowSupportTaskExecutor(
 		const artifact = await artifacts.putJson(value, {
 			runId: journal.runId,
 			producerTaskId: task.id,
+			producerExecutionId: execution.execution.id,
 			output: "result",
 			schemaSha256: deriveJsonValueSha256(outputSchema),
 		});
@@ -832,7 +857,7 @@ export function createWorkflowSupportTaskExecutor(
 					"Support task output commit has no declared artifact.",
 				);
 			}
-			await verifyResultArtifact(selection.task.task, existing);
+			await verifyResultArtifact(selection.task.task, execution, existing);
 			await commitFromArtifact(selection, existing, 0);
 			return result("completed");
 		}

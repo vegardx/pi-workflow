@@ -91,13 +91,19 @@ function validateInputName(name: string): void {
 	}
 }
 
+/**
+ * The result artifact bound to the producer's current execution. Artifacts of
+ * superseded generations remain durable history and never resolve an input.
+ */
 function resultArtifact(
 	state: WorkflowStateProjection,
 	producerTaskId: string,
 ): WorkflowArtifactRef {
+	const executionId = state.tasks[producerTaskId]?.currentExecutionId;
 	const matches = Object.values(state.artifacts).filter(
 		(artifact) =>
 			artifact.producerTaskId === producerTaskId &&
+			artifact.producerExecutionId === executionId &&
 			artifact.output === "result",
 	);
 	if (matches.length !== 1) {
