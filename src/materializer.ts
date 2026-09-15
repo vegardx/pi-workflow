@@ -47,6 +47,7 @@ import {
 	WorkflowEventInputSchema,
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
+	type WorkflowTaskProjection,
 } from "./events.js";
 import { deriveJsonValueSha256 } from "./execution.js";
 import type { SupportTaskDescriptor } from "./support.js";
@@ -170,13 +171,28 @@ export interface MaterializationCommit {
 	readonly events: readonly WorkflowEventInput[];
 }
 
+const REMATERIALIZATION_REASON = "Explicit invalidation re-executes the task.";
+
+function taskNamespaceKey(namespace: readonly TaskKey[], key: TaskKey): string {
+	return [...namespace, key].join("\u0000");
+}
+
+/** Position fields assigned to the next declaration of the current replay. */
+interface DeclarationPosition {
+	readonly expected: MaterializedWorkflowTask | undefined;
+	readonly materializationSequence: number;
+	readonly materializationEpoch: number;
+	readonly epochPosition: number;
+}
+
 export class WorkflowTaskMaterializer {
 	private readonly definitionIdentitySha256: string;
-	private readonly expectedBarriers: ReadonlyMap<
-		number,
-		WorkflowBarrierProjection
-	>;
+	/** Non-abandoned persisted barriers ordered by epoch, indexed by path position. */
+	private readonly expectedBarriers: readonly WorkflowBarrierProjection[];
+	/** Non-abandoned persisted tasks ordered by materialization sequence. */
 	private readonly expectedTasks: readonly MaterializedWorkflowTask[];
+	/** Abandoned persisted tasks by namespace key, awaiting readoption. */
+	private readonly abandonedByKey: Map<string, WorkflowTaskProjection>;
 	private readonly inputSha256: string;
 	private readonly namespace: readonly TaskKey[];
 	private readonly runId: WorkflowRunId;
@@ -185,8 +201,14 @@ export class WorkflowTaskMaterializer {
 	private readonly replayOnly: boolean;
 	private readonly uncommitted: MaterializedWorkflowTask[] = [];
 	private readonly controlAfter = new Map<string, TaskRef>();
-	private epoch = 1;
+	/** The epoch number the first epoch beyond the persisted path receives. */
+	private readonly nextPathEpoch: number;
+	/** Path position of the epoch currently being materialized (0-based). */
+	private epochIndex = 0;
 	private finalClosed = false;
+	/** Highest materialization sequence across every persisted or declared task. */
+	private maxSequence: number;
+	/** Number of declarations replayed or appended on the current path. */
 	private sequence = 0;
 
 	constructor(options: WorkflowTaskMaterializerOptions) {
@@ -218,30 +240,34 @@ export class WorkflowTaskMaterializer {
 				"previous materialization identity does not match",
 			);
 		}
-		if (
-			previous &&
-			Object.values(previous.tasks).some(
-				(projection) => projection.status === "invalidated",
-			)
-		) {
-			throw new WorkflowMaterializationError(
-				"invalidated materialization requires execution-generation support",
-			);
-		}
 		this.replayOnly =
 			previous?.status === "completed" ||
 			previous?.status === "completed-degraded";
-		this.expectedTasks = previous
-			? Object.values(previous.tasks)
-					.map((projection) => projection.task)
-					.sort(
-						(left, right) =>
-							left.materializationSequence - right.materializationSequence,
-					)
-			: [];
-		this.expectedBarriers = new Map(
-			(previous?.barriers ?? []).map((barrier) => [barrier.epoch, barrier]),
+		const previousTasks = previous ? Object.values(previous.tasks) : [];
+		this.expectedTasks = previousTasks
+			.filter((projection) => projection.abandoned !== true)
+			.map((projection) => projection.task)
+			.sort(
+				(left, right) =>
+					left.materializationSequence - right.materializationSequence,
+			);
+		this.abandonedByKey = new Map(
+			previousTasks
+				.filter((projection) => projection.abandoned === true)
+				.map((projection) => [
+					taskNamespaceKey(projection.task.namespace, projection.task.spec.key),
+					projection,
+				]),
 		);
+		this.maxSequence = previousTasks.reduce(
+			(max, projection) =>
+				Math.max(max, projection.task.materializationSequence),
+			0,
+		);
+		this.expectedBarriers = (previous?.barriers ?? [])
+			.filter((barrier) => barrier.abandoned !== true)
+			.sort((left, right) => left.epoch - right.epoch);
+		this.nextPathEpoch = previous?.currentEpoch ?? 1;
 		this.projectedState = previous
 			? structuredClone(previous)
 			: {
@@ -257,6 +283,84 @@ export class WorkflowTaskMaterializer {
 					artifacts: {},
 					barriers: [],
 				};
+	}
+
+	/**
+	 * The epoch number at a path position: persisted path epochs keep their
+	 * numbers, and epochs beyond the path continue from the projection's
+	 * current epoch (after every persisted barrier, abandoned or not).
+	 */
+	private epochAt(index: number): number {
+		return (
+			this.expectedBarriers[index]?.epoch ??
+			this.nextPathEpoch + (index - this.expectedBarriers.length)
+		);
+	}
+
+	private nextPosition(): DeclarationPosition {
+		const expected = this.expectedTasks[this.sequence];
+		const materializationEpoch = this.epochAt(this.epochIndex);
+		return {
+			expected,
+			materializationSequence:
+				expected?.materializationSequence ?? this.maxSequence + 1,
+			materializationEpoch,
+			epochPosition:
+				[...this.seen.values()].filter(
+					(task) => task.materializationEpoch === materializationEpoch,
+				).length + 1,
+		};
+	}
+
+	private assertUndeclared(namespace: readonly TaskKey[], key: TaskKey): void {
+		const namespaceKey = taskNamespaceKey(namespace, key);
+		if (
+			[...this.seen.values()].some(
+				(task) =>
+					taskNamespaceKey(task.namespace, task.spec.key) === namespaceKey,
+			)
+		) {
+			throw new WorkflowMaterializationError("duplicate task key in namespace");
+		}
+	}
+
+	/**
+	 * Replays a candidate against the persisted path prefix or, beyond it,
+	 * appends a new declaration; a key matching an abandoned task with the
+	 * same identity readopts that task onto the current path.
+	 */
+	private adopt(
+		task: MaterializedWorkflowTask,
+		expected: MaterializedWorkflowTask | undefined,
+	): MaterializedWorkflowTask {
+		if (!expected && this.replayOnly) {
+			throw new WorkflowMaterializationError(
+				"completed workflow materialization may only replay its exact prefix",
+			);
+		}
+		if (expected && !isDeepStrictEqual(task, expected)) {
+			throw new WorkflowMaterializationError(
+				"task declaration does not match the persisted ordered prefix",
+			);
+		}
+		const selected = expected ?? task;
+		if (!expected) {
+			const namespaceKey = taskNamespaceKey(task.namespace, task.spec.key);
+			const abandoned = this.abandonedByKey.get(namespaceKey);
+			if (abandoned) {
+				if (abandoned.task.spec.identitySha256 !== task.spec.identitySha256) {
+					throw new WorkflowMaterializationError(
+						"abandoned task key re-declared with a changed request",
+					);
+				}
+				this.abandonedByKey.delete(namespaceKey);
+			}
+			this.maxSequence = task.materializationSequence;
+			this.uncommitted.push(task);
+		}
+		this.sequence += 1;
+		this.seen.set(selected.id, selected);
+		return selected;
 	}
 
 	agent<TOutputSchema extends TSchema>(
@@ -288,15 +392,7 @@ export class WorkflowTaskMaterializer {
 		if (!Value.Check(TaskKeySchema, key)) {
 			throw new WorkflowMaterializationError("invalid task key");
 		}
-		const namespaceKey = [...namespace, key].join("\u0000");
-		if (
-			[...this.seen.values()].some(
-				(task) =>
-					[...task.namespace, task.spec.key].join("\u0000") === namespaceKey,
-			)
-		) {
-			throw new WorkflowMaterializationError("duplicate task key in namespace");
-		}
+		this.assertUndeclared(namespace, key);
 		const after = new Map<string, TaskRef>(this.controlAfter);
 		for (const dependency of request.after ?? []) {
 			if (
@@ -384,38 +480,19 @@ export class WorkflowTaskMaterializer {
 			}),
 		};
 		const id = deriveWorkflowTaskId(this.runId, namespace, key);
-		const position =
-			[...this.seen.values()].filter(
-				(task) => task.materializationEpoch === this.epoch,
-			).length + 1;
+		const { expected, ...position } = this.nextPosition();
 		const task = cloneFrozen({
 			id,
 			runId: this.runId,
 			namespace,
 			spec,
 			definitionIdentitySha256: this.definitionIdentitySha256,
-			materializationSequence: this.sequence + 1,
-			materializationEpoch: this.epoch,
-			epochPosition: position,
+			...position,
 		}) as MaterializedAgentTask;
 		if (!Value.Check(MaterializedAgentTaskSchema, task)) {
 			throw new WorkflowMaterializationError("invalid materialized agent task");
 		}
-		const expected = this.expectedTasks[this.sequence];
-		if (!expected && this.replayOnly) {
-			throw new WorkflowMaterializationError(
-				"completed workflow materialization may only replay its exact prefix",
-			);
-		}
-		if (expected && !isDeepStrictEqual(task, expected)) {
-			throw new WorkflowMaterializationError(
-				"task declaration does not match the persisted ordered prefix",
-			);
-		}
-		this.sequence += 1;
-		const selected = expected ?? task;
-		this.seen.set(selected.id, selected);
-		if (!expected) this.uncommitted.push(selected);
+		const selected = this.adopt(task, expected);
 		return createTaskHandle<Static<TOutputSchema>>(
 			{ runId: this.runId, taskId: selected.id },
 			{
@@ -441,15 +518,7 @@ export class WorkflowTaskMaterializer {
 		if (!Value.Check(TaskKeySchema, key)) {
 			throw new WorkflowMaterializationError("invalid task key");
 		}
-		const namespaceKey = [...this.namespace, key].join("\u0000");
-		if (
-			[...this.seen.values()].some(
-				(task) =>
-					[...task.namespace, task.spec.key].join("\u0000") === namespaceKey,
-			)
-		) {
-			throw new WorkflowMaterializationError("duplicate task key in namespace");
-		}
+		this.assertUndeclared(this.namespace, key);
 		if (descriptor.schema !== "pi-workflow-support-task-descriptor") {
 			throw new WorkflowMaterializationError("invalid support task descriptor");
 		}
@@ -523,40 +592,21 @@ export class WorkflowTaskMaterializer {
 			}),
 		};
 		const id = deriveWorkflowTaskId(this.runId, this.namespace, key);
-		const position =
-			[...this.seen.values()].filter(
-				(task) => task.materializationEpoch === this.epoch,
-			).length + 1;
+		const { expected, ...position } = this.nextPosition();
 		const task = cloneFrozen({
 			id,
 			runId: this.runId,
 			namespace: this.namespace,
 			spec,
 			definitionIdentitySha256: this.definitionIdentitySha256,
-			materializationSequence: this.sequence + 1,
-			materializationEpoch: this.epoch,
-			epochPosition: position,
+			...position,
 		}) as MaterializedSupportTask;
 		if (!Value.Check(MaterializedSupportTaskSchema, task)) {
 			throw new WorkflowMaterializationError(
 				"invalid materialized support task",
 			);
 		}
-		const expected = this.expectedTasks[this.sequence];
-		if (!expected && this.replayOnly) {
-			throw new WorkflowMaterializationError(
-				"completed workflow materialization may only replay its exact prefix",
-			);
-		}
-		if (expected && !isDeepStrictEqual(task, expected)) {
-			throw new WorkflowMaterializationError(
-				"task declaration does not match the persisted ordered prefix",
-			);
-		}
-		this.sequence += 1;
-		const selected = expected ?? task;
-		this.seen.set(selected.id, selected);
-		if (!expected) this.uncommitted.push(selected);
+		const selected = this.adopt(task, expected);
 		return createTaskHandle<Static<TOutputSchema>>(
 			{ runId: this.runId, taskId: selected.id },
 			{
@@ -582,15 +632,7 @@ export class WorkflowTaskMaterializer {
 		if (!Value.Check(TaskKeySchema, key)) {
 			throw new WorkflowMaterializationError("invalid task key");
 		}
-		const namespaceKey = [...this.namespace, key].join("\u0000");
-		if (
-			[...this.seen.values()].some(
-				(task) =>
-					[...task.namespace, task.spec.key].join("\u0000") === namespaceKey,
-			)
-		) {
-			throw new WorkflowMaterializationError("duplicate task key in namespace");
-		}
+		this.assertUndeclared(this.namespace, key);
 		const after = new Map<string, TaskRef>(this.controlAfter);
 		for (const dependency of declaration.after ?? []) {
 			if (
@@ -646,40 +688,21 @@ export class WorkflowTaskMaterializer {
 			}),
 		};
 		const id = deriveWorkflowTaskId(this.runId, this.namespace, key);
-		const position =
-			[...this.seen.values()].filter(
-				(task) => task.materializationEpoch === this.epoch,
-			).length + 1;
+		const { expected, ...position } = this.nextPosition();
 		const task = cloneFrozen({
 			id,
 			runId: this.runId,
 			namespace: this.namespace,
 			spec,
 			definitionIdentitySha256: this.definitionIdentitySha256,
-			materializationSequence: this.sequence + 1,
-			materializationEpoch: this.epoch,
-			epochPosition: position,
+			...position,
 		}) as MaterializedNestedWorkflowTask;
 		if (!Value.Check(MaterializedNestedWorkflowTaskSchema, task)) {
 			throw new WorkflowMaterializationError(
 				"invalid materialized nested workflow task",
 			);
 		}
-		const expected = this.expectedTasks[this.sequence];
-		if (!expected && this.replayOnly) {
-			throw new WorkflowMaterializationError(
-				"completed workflow materialization may only replay its exact prefix",
-			);
-		}
-		if (expected && !isDeepStrictEqual(task, expected)) {
-			throw new WorkflowMaterializationError(
-				"task declaration does not match the persisted ordered prefix",
-			);
-		}
-		this.sequence += 1;
-		const selected = expected ?? task;
-		this.seen.set(selected.id, selected);
-		if (!expected) this.uncommitted.push(selected);
+		const selected = this.adopt(task, expected);
 		return createTaskHandle<TOutput>(
 			{ runId: this.runId, taskId: selected.id },
 			{
@@ -717,6 +740,24 @@ export class WorkflowTaskMaterializer {
 		);
 	}
 
+	/** Re-materialization events for invalidated tasks in materialization order. */
+	private rematerializationEvents(
+		projected: WorkflowStateProjection,
+		tasks: readonly MaterializedWorkflowTask[],
+	): WorkflowEventInput[] {
+		return tasks
+			.filter((task) => projected.tasks[task.id]?.status === "invalidated")
+			.map((task) => ({
+				type: "task-status-changed",
+				data: {
+					taskId: task.id,
+					from: "invalidated",
+					to: "pending",
+					reason: REMATERIALIZATION_REASON,
+				},
+			}));
+	}
+
 	closeEpoch(
 		kind: "result" | "results" | "settled" | "final",
 		tasks: readonly TaskHandle<unknown>[],
@@ -726,7 +767,8 @@ export class WorkflowTaskMaterializer {
 				"materialization barrier follows the final barrier",
 			);
 		}
-		if (this.epoch > MAX_MATERIALIZATION_EPOCHS) {
+		const epoch = this.epochAt(this.epochIndex);
+		if (epoch > MAX_MATERIALIZATION_EPOCHS) {
 			throw new WorkflowMaterializationError(
 				"workflow materialization epoch limit exceeded",
 			);
@@ -743,17 +785,17 @@ export class WorkflowTaskMaterializer {
 				"materialization barrier contains an invalid task handle",
 			);
 		}
-		const unreplayed = this.expectedTasks.some(
-			(task) =>
-				task.materializationEpoch === this.epoch &&
-				task.materializationSequence > this.sequence,
-		);
+		// Every persisted path task of this epoch precedes the barrier that
+		// closes it; the unreplayed remainder of the prefix must not hold any.
+		const unreplayed = this.expectedTasks
+			.slice(this.sequence)
+			.some((task) => task.materializationEpoch === epoch);
 		if (unreplayed) {
 			throw new WorkflowMaterializationError(
 				"barrier omits declarations from the persisted epoch prefix",
 			);
 		}
-		const expected = this.expectedBarriers.get(this.epoch);
+		const expected = this.expectedBarriers[this.epochIndex];
 		if (expected) {
 			if (
 				expected.kind !== kind ||
@@ -768,6 +810,20 @@ export class WorkflowTaskMaterializer {
 					"cannot extend an already committed materialization epoch",
 				);
 			}
+			const projected = structuredClone(this.projectedState);
+			const events = this.rematerializationEvents(
+				projected,
+				this.expectedTasks.filter(
+					(task) => task.materializationEpoch === expected.epoch,
+				),
+			);
+			for (const event of events) {
+				if (event.type !== "task-status-changed") continue;
+				const task = projected.tasks[event.data.taskId];
+				if (task) task.status = "pending";
+			}
+			projected.lastSequence += events.length;
+			this.projectedState = projected;
 			if (taskIds.length > 0) {
 				this.controlAfter.clear();
 				for (const taskId of taskIds) {
@@ -775,11 +831,13 @@ export class WorkflowTaskMaterializer {
 				}
 			}
 			if (kind === "final") this.finalClosed = true;
-			const epoch = this.epoch;
-			this.epoch += 1;
-			return Object.freeze({ epoch, events: Object.freeze([]) });
+			this.epochIndex += 1;
+			return Object.freeze({
+				epoch: expected.epoch,
+				events: Object.freeze(events.map((event) => cloneFrozen(event))),
+			});
 		}
-		if (this.epoch <= this.expectedBarriers.size) {
+		if (this.epochIndex < this.expectedBarriers.length) {
 			throw new WorkflowMaterializationError(
 				"materialization barrier removed from persisted prefix",
 			);
@@ -795,7 +853,7 @@ export class WorkflowTaskMaterializer {
 		}));
 		events.push({
 			type: "barrier-reached",
-			data: { epoch: this.epoch, kind, taskIds },
+			data: { epoch, kind, taskIds },
 		});
 		if (
 			events.some(
@@ -810,12 +868,20 @@ export class WorkflowTaskMaterializer {
 			);
 		}
 		const projected = structuredClone(this.projectedState);
-		if (projected.currentEpoch !== this.epoch) {
+		if (projected.currentEpoch !== epoch) {
 			throw new WorkflowMaterializationError(
 				"persisted projection epoch does not match materialization replay",
 			);
 		}
 		for (const task of this.uncommitted) {
+			const readopted = projected.tasks[task.id];
+			if (readopted) {
+				// Readoption re-declares an abandoned task with fresh position
+				// fields; its status, commitment, and execution are retained.
+				readopted.task = structuredClone(task);
+				delete readopted.abandoned;
+				continue;
+			}
 			projected.tasks[task.id] = {
 				task: structuredClone(task),
 				status: "pending",
@@ -831,18 +897,35 @@ export class WorkflowTaskMaterializer {
 			);
 		}
 		for (const task of Object.values(projected.tasks)) {
-			if (task.task.materializationEpoch === this.epoch) {
+			if (task.task.materializationEpoch === epoch) {
 				task.committed = true;
 			}
 		}
 		projected.lastSequence += events.length;
 		projected.barriers.push({
-			epoch: this.epoch,
+			epoch,
 			kind,
 			taskIds: [...taskIds],
 			sequence: projected.lastSequence,
 		});
 		projected.currentEpoch += 1;
+		// Re-materialize from the projected epoch rather than from this drive's
+		// declarations: a crash after a readopted declaration but before its
+		// barrier leaves that task persisted, on-path, and still invalidated.
+		const rematerialized = this.rematerializationEvents(
+			projected,
+			Object.values(projected.tasks)
+				.filter((task) => task.task.materializationEpoch === epoch)
+				.map((task) => task.task)
+				.sort((left, right) => left.epochPosition - right.epochPosition),
+		);
+		for (const event of rematerialized) {
+			if (event.type !== "task-status-changed") continue;
+			const task = projected.tasks[event.data.taskId];
+			if (task) task.status = "pending";
+		}
+		projected.lastSequence += rematerialized.length;
+		events.push(...rematerialized);
 		if (
 			!Value.Check(WorkflowStateProjectionSchema, projected) ||
 			Buffer.byteLength(canonicalJson(projected)) > MAX_WORKFLOW_STATE_BYTES
@@ -860,8 +943,7 @@ export class WorkflowTaskMaterializer {
 		}
 		if (kind === "final") this.finalClosed = true;
 		this.uncommitted.length = 0;
-		const epoch = this.epoch;
-		this.epoch += 1;
+		this.epochIndex += 1;
 		return Object.freeze({
 			epoch,
 			events: Object.freeze(events.map((event) => cloneFrozen(event))),
