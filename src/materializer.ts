@@ -28,6 +28,7 @@ import {
 	type TaskKey,
 	TaskKeySchema,
 	type TaskRef,
+	type TaskRole,
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowArtifactHandleRef,
 	type WorkflowRunId,
@@ -36,6 +37,7 @@ import {
 	type AgentTaskAuthoringRequest,
 	type ArtifactHandle,
 	createTaskHandle,
+	type FinalizerKind,
 	type TaskHandle,
 	validateJsonSchemaDocument,
 } from "./definition.js";
@@ -166,12 +168,21 @@ export interface NestedWorkflowDeclaration {
 	readonly replay?: ReplayPolicy;
 }
 
+export interface FinalizerDeclaration<TOutputSchema extends TSchema> {
+	readonly kind: FinalizerKind;
+	readonly support?: SupportTaskDescriptor<TOutputSchema>;
+	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema>;
+	readonly workflow?: NestedWorkflowDeclaration;
+}
+
 export interface MaterializationCommit {
 	readonly epoch: number;
 	readonly events: readonly WorkflowEventInput[];
 }
 
 const REMATERIALIZATION_REASON = "Explicit invalidation re-executes the task.";
+const FINALIZER_MEMBER_MESSAGE =
+	"finalizer requires exactly one of support, agent, or workflow";
 
 function taskNamespaceKey(namespace: readonly TaskKey[], key: TaskKey): string {
 	return [...namespace, key].join("\u0000");
@@ -375,6 +386,96 @@ export class WorkflowTaskMaterializer {
 		key: TaskKey,
 		request: AgentTaskAuthoringRequest<TOutputSchema>,
 	): TaskHandle<Static<TOutputSchema>> {
+		return this.declareAgent(namespace, key, request, "task");
+	}
+
+	support<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		descriptor: SupportTaskDescriptor<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>> {
+		return this.declareSupport(key, descriptor, "task");
+	}
+
+	workflow<TOutput = unknown>(
+		key: TaskKey,
+		declaration: NestedWorkflowDeclaration,
+	): TaskHandle<TOutput> {
+		return this.declareWorkflow<TOutput>(key, declaration, "task");
+	}
+
+	/**
+	 * Declares a finalizer: a task the runtime drives itself while the run is
+	 * finalizing. Its kind lowers to the task disposition (required -> required,
+	 * advisory -> optional); everything else follows the ordinary declaration path.
+	 */
+	finalizer<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		declaration: FinalizerDeclaration<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>> {
+		if (declaration.kind !== "required" && declaration.kind !== "advisory") {
+			throw new WorkflowMaterializationError("invalid finalizer kind");
+		}
+		const { support, agent, workflow } = declaration;
+		const members = [support, agent, workflow].filter(
+			(member) => member !== undefined,
+		);
+		if (members.length !== 1) {
+			throw new WorkflowMaterializationError(FINALIZER_MEMBER_MESSAGE);
+		}
+		const inner: unknown = members[0];
+		if (
+			typeof inner === "object" &&
+			inner !== null &&
+			Object.hasOwn(inner, "disposition")
+		) {
+			throw new WorkflowMaterializationError(
+				"finalizer disposition is its kind",
+			);
+		}
+		const disposition: TaskDisposition =
+			declaration.kind === "required" ? "required" : "optional";
+		if (support !== undefined) {
+			return this.declareSupport(key, { ...support, disposition }, "finalizer");
+		}
+		if (agent !== undefined) {
+			return this.declareAgent(
+				this.namespace,
+				key,
+				{ ...agent, disposition },
+				"finalizer",
+			);
+		}
+		if (workflow === undefined) {
+			throw new WorkflowMaterializationError(FINALIZER_MEMBER_MESSAGE);
+		}
+		return this.declareWorkflow<Static<TOutputSchema>>(
+			key,
+			{ ...workflow, disposition },
+			"finalizer",
+		);
+	}
+
+	/** Ordinary tasks may only depend on ordinary tasks; finalizers may depend on either role. */
+	private assertRoleDependencies(
+		role: TaskRole,
+		after: ReadonlyMap<string, TaskRef>,
+	): void {
+		if (role !== "task") return;
+		for (const taskId of after.keys()) {
+			if (this.seen.get(taskId)?.spec.role === "finalizer") {
+				throw new WorkflowMaterializationError(
+					"ordinary task may not depend on a finalizer",
+				);
+			}
+		}
+	}
+
+	private declareAgent<TOutputSchema extends TSchema>(
+		namespace: readonly TaskKey[],
+		key: TaskKey,
+		request: AgentTaskAuthoringRequest<TOutputSchema>,
+		role: TaskRole,
+	): TaskHandle<Static<TOutputSchema>> {
 		if (
 			namespace.length > 32 ||
 			namespace.some((entry) => !Value.Check(TaskKeySchema, entry))
@@ -406,6 +507,7 @@ export class WorkflowTaskMaterializer {
 			after.set(dependency.taskId, dependency);
 		}
 		const inputs = this.resolveInputs(after, request.inputs);
+		this.assertRoleDependencies(role, after);
 		const outputSchema = validateJsonSchemaDocument(
 			request.outputSchema,
 			"agent task output schema",
@@ -458,6 +560,7 @@ export class WorkflowTaskMaterializer {
 		const specWithoutIdentity: Omit<AgentTaskSpec, "identitySha256"> = {
 			key,
 			kind: "agent",
+			role,
 			disposition: request.disposition ?? "required",
 			after: orderedAfter,
 			inputs,
@@ -467,6 +570,7 @@ export class WorkflowTaskMaterializer {
 		const spec: AgentTaskSpec = {
 			key,
 			kind: "agent",
+			role,
 			disposition: request.disposition ?? "required",
 			after: orderedAfter,
 			inputs,
@@ -503,9 +607,10 @@ export class WorkflowTaskMaterializer {
 		);
 	}
 
-	support<TOutputSchema extends TSchema>(
+	private declareSupport<TOutputSchema extends TSchema>(
 		key: TaskKey,
 		descriptor: SupportTaskDescriptor<TOutputSchema>,
+		role: TaskRole,
 	): TaskHandle<Static<TOutputSchema>> {
 		if (this.finalClosed) {
 			throw new WorkflowMaterializationError(
@@ -535,6 +640,7 @@ export class WorkflowTaskMaterializer {
 			after.set(dependency.taskId, dependency);
 		}
 		const inputs = this.resolveInputs(after, descriptor.inputs);
+		this.assertRoleDependencies(role, after);
 		const parametersSchema = validateJsonSchemaDocument(
 			descriptor.parametersSchema,
 			"support task parameters schema",
@@ -576,6 +682,7 @@ export class WorkflowTaskMaterializer {
 		const specWithoutIdentity: Omit<SupportTaskSpec, "identitySha256"> = {
 			key,
 			kind: "support",
+			role,
 			disposition: descriptor.disposition ?? "required",
 			after: orderedAfter,
 			inputs,
@@ -617,9 +724,10 @@ export class WorkflowTaskMaterializer {
 		);
 	}
 
-	workflow<TOutput = unknown>(
+	private declareWorkflow<TOutput = unknown>(
 		key: TaskKey,
 		declaration: NestedWorkflowDeclaration,
+		role: TaskRole,
 	): TaskHandle<TOutput> {
 		if (this.finalClosed) {
 			throw new WorkflowMaterializationError(
@@ -646,6 +754,7 @@ export class WorkflowTaskMaterializer {
 			after.set(dependency.taskId, dependency);
 		}
 		const inputs = this.resolveInputs(after, declaration.inputs);
+		this.assertRoleDependencies(role, after);
 		const request = declaration.request;
 		if (!Value.Check(NestedWorkflowTaskRequestSchema, request)) {
 			throw new WorkflowMaterializationError(
@@ -672,6 +781,7 @@ export class WorkflowTaskMaterializer {
 			{
 				key,
 				kind: "workflow",
+				role,
 				disposition: declaration.disposition ?? "required",
 				after: orderedAfter,
 				inputs,
@@ -783,6 +893,13 @@ export class WorkflowTaskMaterializer {
 		) {
 			throw new WorkflowMaterializationError(
 				"materialization barrier contains an invalid task handle",
+			);
+		}
+		if (
+			taskIds.some((taskId) => this.seen.get(taskId)?.spec.role === "finalizer")
+		) {
+			throw new WorkflowMaterializationError(
+				"a finalizer cannot be a barrier target",
 			);
 		}
 		// Every persisted path task of this epoch precedes the barrier that
