@@ -676,3 +676,34 @@ export const WorkflowRunObservationSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type WorkflowRunObservation = View<typeof WorkflowRunObservationSchema>;
+
+export const WorkflowInvalidationPreviewSchema = Type.Object(
+	{
+		runId: WorkflowRunIdSchema,
+		causeTaskId: WorkflowTaskIdSchema,
+		/** The closure in reducer order: the cause and its live transitive dependents. */
+		taskIds: Type.Array(WorkflowTaskIdSchema, {
+			maxItems: MAX_WORKFLOW_INSPECTION_ITEMS,
+			uniqueItems: true,
+		}),
+		/** `${namespace.join("/")}/${key}` per closure task, same order. */
+		taskKeys: Type.Array(
+			Type.String({ minLength: 1, maxLength: MAX_WORKFLOW_TASK_KEY_LENGTH }),
+			{ maxItems: MAX_WORKFLOW_INSPECTION_ITEMS },
+		),
+		/** Ascending on-path epochs after the exposing barrier. */
+		abandonedEpochs: Type.Array(Type.Integer({ minimum: 1 }), {
+			maxItems: 4096,
+			uniqueItems: true,
+		}),
+		/** On-path tasks declared in an abandoned epoch, in materialization order. */
+		abandonedTaskIds: Type.Array(WorkflowTaskIdSchema, {
+			maxItems: MAX_WORKFLOW_INSPECTION_ITEMS,
+			uniqueItems: true,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowInvalidationPreview = View<
+	typeof WorkflowInvalidationPreviewSchema
+>;

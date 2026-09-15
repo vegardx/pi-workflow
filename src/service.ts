@@ -79,6 +79,7 @@ import {
 	compareRunSummaries,
 	decodeWorkflowRunCursor,
 	encodeWorkflowRunCursor,
+	invalidationPreview,
 	isCompletedWorktreeTask,
 	runInspection,
 	runLogs,
@@ -98,6 +99,7 @@ import {
 	MAX_WORKFLOW_RUN_LIST_ISSUES,
 	type WorkflowInspectOptions,
 	WorkflowInspectOptionsSchema,
+	type WorkflowInvalidationPreview,
 	type WorkflowLogOptions,
 	WorkflowLogOptionsSchema,
 	type WorkflowLogPage,
@@ -252,6 +254,16 @@ export interface WorkflowService {
 		runId: WorkflowRunId,
 		options?: WorkflowLogOptions,
 	): Promise<WorkflowLogPage>;
+	/**
+	 * Lease-free preview of `invalidate(runId, causeTaskId, …)`: the exact
+	 * closure the reducer would admit, or the same reducer refusal invalidate
+	 * would raise for the cause. Never appends and never judges the run's
+	 * status, nesting, or deadline; that legality is `availableActions`.
+	 */
+	previewInvalidation(
+		runId: WorkflowRunId,
+		causeTaskId: WorkflowTaskId,
+	): Promise<WorkflowInvalidationPreview>;
 	/**
 	 * Observes every append this service makes to an owned run's journal, in
 	 * sequence order per run. Runs leased elsewhere never notify. Returns an
@@ -1921,6 +1933,26 @@ export async function createWorkflowService(
 			}
 			const source = await readCurrent(runIdValue);
 			return runLogs(source.events, source.state, options, runIdValue);
+		},
+		async previewInvalidation(
+			runIdValue: WorkflowRunId,
+			causeTaskId: WorkflowTaskId,
+		) {
+			assertOpen();
+			assertRunId(runIdValue);
+			assertTaskId(causeTaskId);
+			const source = await readCurrent(runIdValue);
+			if (!source.state) {
+				throw new WorkflowServiceError(
+					"validation",
+					"Workflow run has no tasks to invalidate.",
+				);
+			}
+			try {
+				return invalidationPreview(source.state, causeTaskId);
+			} catch (error) {
+				throw reducerRejection(error);
+			}
 		},
 		subscribe(listener: WorkflowRunListener) {
 			assertOpen();

@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,7 +29,6 @@ import {
 	initialInspectorState,
 	initialInspectorUiState,
 	invalidateConsequence,
-	invalidationPreviewFromInspection,
 	PLAIN_LINE_THEME,
 	paletteActions,
 	RUN_FILTER_NAMES,
@@ -232,11 +233,13 @@ function data(overrides: Partial<InspectorData> = {}): InspectorData {
 	return { runs: [], total: 0, issues: [], ...overrides };
 }
 
-function previewOf(view: WorkflowRunInspection, taskId: string) {
-	const preview = invalidationPreviewFromInspection(view, taskId);
-	if (!preview) throw new Error("preview fixture is undefined");
-	return preview;
-}
+/** What the service's `previewInvalidation` reports for `report` on the fixture. */
+const REPORT_PREVIEW = {
+	taskIds: ["task_report", "task_summary"],
+	taskKeys: ["/report", "/summary"],
+	abandonedEpochs: [2],
+	abandonedTaskIds: [],
+};
 
 function detailState(partial: Partial<InspectorState> = {}): InspectorState {
 	return initialInspectorState({
@@ -578,7 +581,7 @@ describe("inspector state machine", () => {
 		]);
 		const previewed = data({
 			inspection: inspection(),
-			preview: previewOf(inspection(), "task_report"),
+			preview: REPORT_PREVIEW,
 		});
 		const body = confirmBody(
 			chosen.state,
@@ -664,43 +667,56 @@ describe("inspector state machine", () => {
 });
 
 describe("invalidation preview", () => {
-	it("computes the closure and abandoned epochs from the inspect projection", () => {
-		const preview = invalidationPreviewFromInspection(
-			inspection(),
-			"task_report",
-		);
-		expect(preview).toEqual({
-			taskIds: ["task_report", "task_summary"],
-			taskKeys: ["report", "summary"],
-			abandonedEpochs: [2],
-		});
-		expect(
-			invalidateConsequence(
-				preview ?? { taskIds: [], taskKeys: [], abandonedEpochs: [] },
-			),
-		).toBe(
-			"2 task(s) re-execute as new generations: report, summary. 1 epoch(s) after the exposing barrier are abandoned, retiring the declarations made in them. Effects after that barrier are marked abandoned.",
+	it("renders the service's closure and never computes one itself", async () => {
+		expect(invalidateConsequence(REPORT_PREVIEW)).toBe(
+			"2 task(s) re-execute as new generations: report, summary. 1 epoch(s) after the exposing barrier are abandoned, retiring 0 declaration(s). Effects after that barrier are marked abandoned.",
 		);
 		expect(
 			invalidateConsequence({
-				taskIds: ["task_report"],
-				taskKeys: ["report"],
+				taskIds: Array.from({ length: 8 }, (_, index) => `task_${index}`),
+				taskKeys: Array.from({ length: 8 }, (_, index) => `/t${index}`),
 				abandonedEpochs: [],
 				abandonedTaskIds: [],
 			}),
 		).toBe(
-			"1 task(s) re-execute as new generations: report. 0 epoch(s) after the exposing barrier are abandoned, retiring 0 declaration(s). Effects after that barrier are marked abandoned.",
+			"8 task(s) re-execute as new generations: t0, t1, t2, t3, t4, t5, +2 more. 0 epoch(s) after the exposing barrier are abandoned, retiring 0 declaration(s). Effects after that barrier are marked abandoned.",
 		);
-		expect(
-			invalidationPreviewFromInspection(inspection(), "task_missing"),
-		).toBeUndefined();
-		const invalidated = inspection({
-			tasks: [task({ status: "invalidated" })],
-			barriers: [],
+		// The inspector module carries no closure logic: no dependency walk,
+		// no barrier scan, and no generation bound of its own.
+		const source = await readFile(
+			path.resolve("src", "ui", "inspector.ts"),
+			"utf8",
+		);
+		expect(source).not.toMatch(/MAX_TASK_EXECUTION_GENERATIONS|>= ?16\b/);
+		expect(source).not.toMatch(
+			/invalidationClosure|transitiveDependents|invalidationPreviewFromInspection/,
+		);
+	});
+
+	it("shows the service's refusal on the confirm screen", () => {
+		const state = detailState();
+		const ui = initialInspectorUiState(state);
+		const refused = data({
+			inspection: inspection(),
+			preview: {
+				taskIds: [],
+				taskKeys: [],
+				abandonedEpochs: [],
+				abandonedTaskIds: [],
+				refusal: "invalidation cause is already invalidated",
+			},
 		});
-		expect(
-			invalidationPreviewFromInspection(invalidated, "task_report")?.refusal,
-		).toBe("invalidation cause is already invalidated");
+		const chosen = drive(state, ui, refused, ["space", "enter", "enter"]);
+		expect(chosen.ui.screen).toBe("confirm");
+		const body = confirmBody(
+			chosen.state,
+			chosen.ui,
+			refused,
+			PLAIN_LINE_THEME,
+		);
+		expect(body.body).toContain(
+			"The service will refuse: invalidation cause is already invalidated.",
+		);
 	});
 });
 

@@ -1588,6 +1588,21 @@ not dropped. Declarations, barriers, artifact and identity events, digests,
 `output`, and child prose never appear. Entries ascend by sequence;
 `nextAfterSequence` is present only when later qualifying entries exist.
 
+`previewInvalidation(runId, causeTaskId)` is the lease-free preview of
+`invalidate`: it validates the ids ("Invalid workflow run ID.", "Invalid
+workflow task ID."), reads the run as `inspect` does ("Workflow run has no
+tasks to invalidate." for an empty journal), and runs the reducer's own
+`invalidationClosure` over the projection, returning `runId`, `causeTaskId`,
+`taskIds` (the cause and its live transitive dependents), `taskKeys`,
+`abandonedEpochs`, and `abandonedTaskIds` (the on-path tasks declared in those
+epochs, which the reducer marks abandoned when the invalidation is applied).
+It raises the reducer's refusal as `validation` with the reducer's message
+("invalidation cause task is unknown", "invalidation cause is already
+invalidated", "task execution generation bound exceeded"), never appends, and
+never judges the run's status, nesting, deadline, or ownership: whether
+`invalidate` is legal is `availableActions`. The command line and the
+inspector confirmation take their closure from this method only.
+
 `subscribe(listener)` observes every append this service makes to an owned
 run's journal as `{ runId, status, sequence }`, delivered from the journal's
 post-append microtask in sequence order per run without coalescing; a

@@ -25,7 +25,9 @@ import {
 	deriveTaskExecutionId,
 } from "../src/execution.js";
 import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
+import { invalidationClosure } from "../src/reducer.js";
 import {
+	invalidationPreview,
 	runInspection,
 	runLogs,
 	runSummary,
@@ -40,6 +42,7 @@ import {
 	WorkflowBudgetViewSchema,
 	WorkflowEffectViewSchema,
 	WorkflowExecutionViewSchema,
+	WorkflowInvalidationPreviewSchema,
 	WorkflowLogEntrySchema,
 	WorkflowLogPageSchema,
 	WorkflowRunInspectionSchema,
@@ -1908,5 +1911,85 @@ describe("projection bounds", () => {
 		expect(rest.entries).toHaveLength(100);
 		expect(rest.nextAfterSequence).toBeUndefined();
 		expect(Value.Check(WorkflowLogPageSchema, rest)).toBe(true);
+	});
+});
+
+describe("invalidationPreview", () => {
+	const cause = agentTask("cause", 11);
+	const dependent = agentTask("dependent", 12, { inputs: { cause: cause.id } });
+	const independent = agentTask("independent", 13);
+	const late: MaterializedAgentTask = {
+		...agentTask("late", 14),
+		materializationEpoch: 2,
+	};
+	const retired: MaterializedAgentTask = {
+		...agentTask("retired", 15),
+		materializationEpoch: 2,
+	};
+	const causeExecution: TaskExecutionProjection = {
+		execution: agentRecord(cause, 1),
+		phase: "terminal",
+		createdSequence: 7,
+		terminal: {
+			outcome: "failed",
+			evidence: evidence("failed", 1, subagentFailure("manual")),
+			sequence: 9,
+		},
+	};
+	const state = stateOf({
+		status: "failed",
+		entries: [
+			{ task: cause, status: "failed", executions: [causeExecution] },
+			{ task: dependent, status: "blocked" },
+			{ task: independent, status: "completed" },
+			{ task: late, status: "pending" },
+			{ task: retired, status: "completed", abandoned: true },
+			{ task: stale, status: "invalidated" },
+		],
+		barriers: [
+			{
+				epoch: 1,
+				kind: "results",
+				taskIds: [cause.id, independent.id],
+				sequence: 20,
+			},
+			{ epoch: 2, kind: "final", taskIds: [late.id], sequence: 30 },
+		],
+	});
+
+	it("reports the reducer's closure, the abandoned epochs, and the declarations they retire", () => {
+		const preview = invalidationPreview(state, cause.id);
+		expect(Value.Check(WorkflowInvalidationPreviewSchema, preview)).toBe(true);
+		expect(preview).toEqual({
+			runId: RUN_ID,
+			causeTaskId: cause.id,
+			taskIds: [cause.id, dependent.id],
+			taskKeys: ["/cause", "/dependent"],
+			abandonedEpochs: [2],
+			abandonedTaskIds: [late.id],
+		});
+		// The same function the reducer validates the append against.
+		expect({
+			taskIds: [...preview.taskIds],
+			abandonedEpochs: [...preview.abandonedEpochs],
+		}).toEqual(invalidationClosure(state, cause.id));
+		expect(Object.isFrozen(preview)).toBe(true);
+		expect(Object.isFrozen(preview.taskIds)).toBe(true);
+		// A cause outside every barrier abandons nothing.
+		expect(invalidationPreview(state, late.id)).toMatchObject({
+			taskIds: [late.id],
+			taskKeys: ["/late"],
+			abandonedEpochs: [],
+			abandonedTaskIds: [],
+		});
+	});
+
+	it("raises the reducer's refusals unchanged", () => {
+		expect(() => invalidationPreview(state, "task_unknown")).toThrow(
+			"invalidation cause task is unknown",
+		);
+		expect(() => invalidationPreview(state, stale.id)).toThrow(
+			"invalidation cause is already invalidated",
+		);
 	});
 });

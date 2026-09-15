@@ -8,6 +8,7 @@ import type {
 import type { WorkflowService } from "../service.js";
 import type {
 	WorkflowInspectSection,
+	WorkflowInvalidationPreview,
 	WorkflowLogPage,
 	WorkflowRunInspection,
 	WorkflowRunListIssue,
@@ -27,6 +28,7 @@ import {
 	keyValue,
 	logLine,
 	NONTERMINAL_RUN_STATUSES,
+	normalizeTaskKey,
 	ownershipLabel,
 	pad,
 	RUN_STATUS_ICON,
@@ -218,14 +220,16 @@ export interface InspectorState {
 	selectedTaskId?: WorkflowTaskId;
 }
 
-export interface InvalidationPreview {
-	readonly taskIds: readonly WorkflowTaskId[];
-	/** Task paths in `taskIds` order. */
-	readonly taskKeys: readonly string[];
-	readonly abandonedEpochs: readonly number[];
-	/** Known only when the service computed the preview over reduced state. */
-	readonly abandonedTaskIds?: readonly WorkflowTaskId[];
-	/** Reducer refusal the service would raise for this cause. */
+/**
+ * The service's `previewInvalidation` result as the confirm screen shows it,
+ * or the service's refusal for the cause with an empty closure.
+ */
+export interface InvalidationPreview
+	extends Pick<
+		WorkflowInvalidationPreview,
+		"taskIds" | "taskKeys" | "abandonedEpochs" | "abandonedTaskIds"
+	> {
+	/** The refusal `previewInvalidation` raised for this cause. */
 	readonly refusal?: string;
 }
 
@@ -399,83 +403,11 @@ export function currentActions(
 	return paletteActions(inspection.run);
 }
 
-function dependenciesOf(task: WorkflowServiceTaskView): WorkflowTaskId[] {
-	return [...(task.dependsOn ?? []), ...Object.values(task.inputs ?? {})];
-}
-
-/**
- * The invalidation closure derived from the inspect projection: the cause and
- * its transitive dependents that are not already invalidated, plus the
- * on-path epochs after the first on-path barrier exposing any closure task.
- * Abandoned declarations need the materialization epoch the projection does
- * not carry; `showWorkflowInspector` prefers `service.previewInvalidation`
- * when the service offers it.
- */
-export function invalidationPreviewFromInspection(
-	inspection: WorkflowRunInspection,
-	causeTaskId: WorkflowTaskId,
-): InvalidationPreview | undefined {
-	const tasks = inspection.tasks ?? [];
-	const cause = tasks.find((task) => task.id === causeTaskId);
-	if (!cause) return undefined;
-	const refusals: string[] = [];
-	if (cause.status === "invalidated") {
-		refusals.push("invalidation cause is already invalidated");
-	}
-	const selected = new Set<WorkflowTaskId>([causeTaskId]);
-	let changed = true;
-	while (changed) {
-		changed = false;
-		for (const task of tasks) {
-			if (selected.has(task.id)) continue;
-			if (dependenciesOf(task).some((id) => selected.has(id))) {
-				selected.add(task.id);
-				changed = true;
-			}
-		}
-	}
-	const byId = new Map(tasks.map((task) => [task.id, task]));
-	const taskIds = [...selected]
-		.filter((id) => byId.get(id)?.status !== "invalidated")
-		.sort();
-	if (
-		taskIds.some((id) => (byId.get(id)?.generation ?? 0) >= 16) &&
-		refusals.length === 0
-	) {
-		refusals.push("task execution generation bound exceeded");
-	}
-	const closure = new Set(taskIds);
-	const barriers = (inspection.barriers ?? []).filter(
-		(barrier) => barrier.abandoned !== true,
-	);
-	const exposing = barriers.find((barrier) =>
-		barrier.taskIds.some((id) => closure.has(id)),
-	);
-	const abandonedEpochs = exposing
-		? barriers
-				.filter((barrier) => barrier.epoch > exposing.epoch)
-				.map((barrier) => barrier.epoch)
-				.sort((left, right) => left - right)
-		: [];
-	return {
-		taskIds,
-		taskKeys: taskIds.map((id) => {
-			const task = byId.get(id);
-			return task ? taskPath(task) : id;
-		}),
-		abandonedEpochs,
-		...(refusals[0] ? { refusal: refusals[0] } : {}),
-	};
-}
-
 export function invalidateConsequence(preview: InvalidationPreview): string {
-	const shown = preview.taskKeys.slice(0, 6);
-	const more = preview.taskKeys.length - shown.length;
-	const retired =
-		preview.abandonedTaskIds === undefined
-			? "retiring the declarations made in them"
-			: `retiring ${preview.abandonedTaskIds.length} declaration(s)`;
-	return `${preview.taskIds.length} task(s) re-execute as new generations: ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}. ${preview.abandonedEpochs.length} epoch(s) after the exposing barrier are abandoned, ${retired}. Effects after that barrier are marked abandoned.`;
+	const keys = preview.taskKeys.map(normalizeTaskKey);
+	const shown = keys.slice(0, 6);
+	const more = keys.length - shown.length;
+	return `${preview.taskIds.length} task(s) re-execute as new generations: ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}. ${preview.abandonedEpochs.length} epoch(s) after the exposing barrier are abandoned, retiring ${preview.abandonedTaskIds.length} declaration(s). Effects after that barrier are marked abandoned.`;
 }
 
 /** Consequence lines for the confirm screen; invalidate needs the preview. */
@@ -1480,21 +1412,11 @@ export const INSPECTOR_INSPECT_SECTIONS: readonly WorkflowInspectSection[] =
 		"artifacts",
 	]);
 
-export interface InvalidationPreviewSource {
-	readonly taskIds: readonly WorkflowTaskId[];
-	readonly taskKeys: readonly string[];
-	readonly abandonedEpochs: readonly number[];
-	readonly abandonedTaskIds: readonly WorkflowTaskId[];
-}
-
-/** The read surface the inspector needs; `previewInvalidation` is used when present. */
-export interface InspectorService
-	extends Pick<WorkflowService, "listRuns" | "inspect" | "logs" | "subscribe"> {
-	previewInvalidation?(
-		runId: WorkflowRunId,
-		causeTaskId: WorkflowTaskId,
-	): Promise<InvalidationPreviewSource>;
-}
+/** The read surface the inspector needs; every method is lease-free. */
+export type InspectorService = Pick<
+	WorkflowService,
+	"listRuns" | "inspect" | "logs" | "subscribe" | "previewInvalidation"
+>;
 
 export interface ShowWorkflowInspectorOptions extends Partial<InspectorState> {
 	/** Same as passing the fields directly; kept for callers that wrap them. */
@@ -1629,31 +1551,26 @@ export async function showWorkflowInspector(
 		render();
 	};
 
+	// The closure comes from the service, which runs the reducer's own
+	// computation over durable state; the inspector never derives it.
 	const loadPreview = async (runId: WorkflowRunId, taskId: WorkflowTaskId) => {
 		delete data.preview;
 		try {
-			if (typeof service.previewInvalidation === "function") {
-				const preview = await service.previewInvalidation(runId, taskId);
-				if (disposed) return;
-				data.preview = {
-					taskIds: preview.taskIds,
-					taskKeys: preview.taskKeys,
-					abandonedEpochs: preview.abandonedEpochs,
-					abandonedTaskIds: preview.abandonedTaskIds,
-				};
-			} else {
-				const inspection = currentInspection(state, data);
-				if (inspection && inspection.run.runId === runId) {
-					const preview = invalidationPreviewFromInspection(inspection, taskId);
-					if (preview) data.preview = preview;
-				}
-			}
+			const preview = await service.previewInvalidation(runId, taskId);
+			if (disposed) return;
+			data.preview = {
+				taskIds: preview.taskIds,
+				taskKeys: preview.taskKeys,
+				abandonedEpochs: preview.abandonedEpochs,
+				abandonedTaskIds: preview.abandonedTaskIds,
+			};
 		} catch (cause) {
 			if (disposed) return;
 			data.preview = {
 				taskIds: [],
 				taskKeys: [],
 				abandonedEpochs: [],
+				abandonedTaskIds: [],
 				refusal: messageOf(cause),
 			};
 		}

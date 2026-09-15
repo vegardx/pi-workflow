@@ -868,6 +868,13 @@ describe("listRuns", () => {
 			const inspection = await service.inspect(runId);
 			expect(inspection.run.ownership).toBe("leased-elsewhere");
 			expect(inspection.run.availableActions).toEqual([]);
+			// The invalidation preview is a read too: it reaches the reducer over
+			// the held run's journal instead of failing on the lease.
+			await expectServiceError(
+				service.previewInvalidation(runId, "task_unknown0000"),
+				"validation",
+				"invalidation cause task is unknown",
+			);
 			// The empty action list is honest: lifecycle calls need the lease.
 			await expectServiceError(
 				service.wait(runId),
