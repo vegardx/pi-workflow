@@ -14,8 +14,7 @@ load through the real definition loader are in
 [references/examples.md](references/examples.md).
 
 Not available in revision 17: `ctx.checkpoint`, `ctx.artifact`, dynamic
-workflows, fork context, operator-triggered retry or resume tools, and a Pi
-tool for handoff export. Do not author against
+workflows, fork context, and a Pi tool for handoff export. Do not author against
 them; a definition that calls them fails when its source runs. `ctx.finalize`
 is available since revision 16 (see [Finalizers](#finalizers)); worktree agent
 tasks with `ctx.handoff` are available since revision 17 (see
@@ -63,14 +62,22 @@ tasks with `ctx.handoff` are available since revision 17 (see
    or only `taskId`; `workflow_invalidate { runId, taskId, reason }`
    re-executes a settled task and its dependents on a `failed` or
    `interrupted` run (see [Invalidation and
-   re-execution](#invalidation-and-re-execution)).
+   re-execution](#invalidation-and-re-execution));
+   `workflow_retry { runId, taskId, reason }` is the same restricted to a
+   task whose current execution ended `failed` or `interrupted`, giving it
+   a fresh child run as its next generation; `workflow_resume { runId,
+   reason, taskId? }` re-attempts an `interrupted` agent task on its
+   existing child run and attempt without invalidating anything. Use them
+   only on a durably `failed` or `interrupted` root run, after
+   `workflow_inspect` shows the action in `availableActions`.
 8. Fix the definition and repeat. Definition identity covers the file's
    source, path, meta, and schemas; an existing run refuses a changed
    definition ("Workflow definition or input identity changed during
    replay."). Start a new run after editing.
 
-The `/workflows`, `/workflow-status <run-id>`, and `/workflow-runs` commands
-are notification shortcuts for steps 2, 5, and 6.
+The `/workflow list`, `/workflow show <run-prefix>`, and `/workflow runs`
+subcommands are operator shortcuts for steps 2, 5, and 6; `/workflow` alone
+(or `alt+w`) opens the inspector.
 
 ## Where definitions live and trust
 
@@ -500,9 +507,12 @@ not influence the output.
   pi-subagent without release; the task ends `interrupted` with the reason
   "Interrupted child retained for recovery; no release performed." and the run
   never resumes it on its own. Recover a lost lease with `workflow_reconcile`;
-  recover an interrupted task with `workflow_invalidate { runId, taskId,
-  reason }`, which re-executes it as a new generation with a fresh child run.
-  There is no operator resume tool in revision 17.
+  recover an interrupted task with `workflow_resume { runId, reason, taskId? }`,
+  which re-attempts it on its existing child run when the failure is
+  classified `resume` (`taskId` is required when several tasks are
+  resumable), or with `workflow_retry { runId, taskId, reason }`, which
+  re-executes it and its dependents as a new generation with a fresh child
+  run. `workflow_invalidate` does the same for any settled task.
 - `cancelled` is the result of `workflow_stop`, session shutdown, or the
   deadline. Trusted source awaiting `ctx.signal` should unwind when it aborts.
 - Run statuses: `created`, `running`, `waiting`, `finalizing`, `stopping`,
@@ -516,9 +526,11 @@ not influence the output.
 `workflow_invalidate { runId, taskId, reason }` (the pass-through for
 `service.invalidate(runId, causeTaskId, reason)`) applies to a run that is
 durably `failed` or `interrupted`; `availableActions` in `workflow_runs` and
-`workflow_inspect` lists `invalidate` when it is admissible. The
-cause task and its transitive dependents become `invalidated`, the epochs after
-the barrier that exposed them are abandoned, and the run is driven again:
+`workflow_inspect` lists `invalidate` when it is admissible. `workflow_retry`
+is the same operation restricted to a cause task whose current execution
+ended `failed` or `interrupted` (listed as `retry`). The cause task and its
+transitive dependents become `invalidated`, the epochs after the barrier that
+exposed them are abandoned, and the run is driven again:
 
 - The source re-executes from the top. The on-path prefix must replay exactly
   (see Barriers and replay).

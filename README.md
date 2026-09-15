@@ -5,12 +5,14 @@ Custom workflow runtime for [Pi](https://pi.dev).
 This repository contains the durable static execution core and Pi extension for
 trusted agent workflows with read-only and worktree agent tasks, durable
 deterministic support-task execution, bounded nested static workflows executed
-as linked child runs, and declarative required and advisory finalizers
-(`ctx.finalize`). The runtime contract is revision 17 with the feature flag
-`worktrees: true` alongside the earlier flags, and it requires pi-subagent
-contract revision 6 (`handoffExport: true`). Dynamic workflows, the
-operator-triggered retry and resume surface, a Pi tool for handoff export, and
-polished UI remain unavailable.
+as linked child runs, declarative required and advisory finalizers
+(`ctx.finalize`), and an operator surface (`/workflow`, the `pi-workflow`
+widget, the `alt+w` inspector, and the `workflow_retry`/`workflow_resume`
+tools) that projects the service's read views. The runtime contract is
+revision 17 with the feature flag `worktrees: true` alongside the earlier
+flags, and it requires pi-subagent contract revision 6
+(`handoffExport: true`). Dynamic workflows, a Pi tool for handoff export, and
+checkpoint decisions remain unavailable.
 
 ## Goal
 
@@ -104,6 +106,8 @@ schema, output schema, and service binding:
 | `workflow_inspect` | `runId`, optional `include`, `taskId` | `WorkflowRunInspectionSchema` |
 | `workflow_logs` | `runId`, optional `afterSequence`, `limit` | `WorkflowLogPageSchema` |
 | `workflow_invalidate` | `runId`, `taskId`, `reason` | `WorkflowServiceRunViewSchema` |
+| `workflow_retry` | `runId`, `taskId`, `reason` | `WorkflowServiceRunViewSchema` |
+| `workflow_resume` | `runId`, `reason`, optional `taskId` | `WorkflowServiceRunViewSchema` |
 
 Each tool result carries the typed service value as `details` and the same
 value, checked against its output schema, as JSON text bounded to 48 KiB
@@ -120,8 +124,50 @@ unchanged to `reconcile(runId, { taskId })`) to reconcile one cleanup-blocked
 task instead of every blocked task in order. `workflow_runs`,
 `workflow_inspect`, and `workflow_logs` read without taking a run lease;
 `workflow_invalidate` re-executes a settled task and its dependents on a
-failed or interrupted run. The `/workflows`, `/workflow-status <run-id>`, and
-`/workflow-runs` commands are notification shortcuts.
+failed or interrupted run; `workflow_retry` is the same restricted to a task
+whose current execution failed or was interrupted, and `workflow_resume`
+re-attempts an interrupted agent task on its existing subagent run and
+attempt, preserving the child session. Both act only on durably failed or
+interrupted root runs; `availableActions` in `workflow_runs` and
+`workflow_inspect` lists them when they are legal. Every tool renders a
+one-line call and collapsed result in the TUI from the table's
+`summarizeCall`/`summarizeResult`.
+
+### Operator surface
+
+The extension registers one command, one shortcut, and one widget, all of
+which are projections of the service's read surface: they consume
+`availableActions`, `requiresAttention`, `ownership`, and `leasedElsewhere`
+from run summaries and never decide legality themselves.
+
+```
+/workflow                                   inspector (TUI) or run list (print, rpc, json)
+/workflow list                              trusted definitions
+/workflow runs [--all]                      durable runs; --all includes nested children
+/workflow validate <ref> [json]
+/workflow run <ref> [json]                  TUI without json opens an editor
+/workflow show|status <run-prefix>
+/workflow logs <run-prefix> [--tail <n>]    n: 1..500, default 20
+/workflow wait <run-prefix> [--timeout <ms>] ms: 1000..3600000
+/workflow stop <run-prefix> [reason…]
+/workflow reconcile <run-prefix> [task-key]
+/workflow invalidate <run-prefix> <task-key> [reason…]
+/workflow retry <run-prefix> <task-key> [reason…]
+/workflow resume <run-prefix> [task-key]
+```
+
+Run prefixes resolve through `listRuns` (children included) and an ambiguous
+prefix is refused with the candidates; task keys are paths
+(`phase-1/report`) or full task ids and never address abandoned tasks. The
+action subcommands are derived from `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, so
+the grammar, completions, and inspector palette only ever offer service
+methods that exist. `stop`, `invalidate`, `retry`, and `resume` ask for
+confirmation when a UI is present; `print` mode executes directly and writes
+to stdout. `alt+w` opens the inspector without interrupting input. In the
+TUI a two-line `pi-workflow` widget below the editor shows
+`workflows ongoing: …` and `workflows need action: …`, is hidden when neither
+applies, marks runs leased by another Pi process as `(n elsewhere)`, refreshes
+from `subscribe`, and polls only while nonterminal runs exist.
 
 ## Authoring skill
 
@@ -237,7 +283,9 @@ each attempt's settlement evidence is retained so budget usage sums across
 attempts. pi-subagent enforces backoff; the runtime waits until `retryAt`,
 bounded by the workflow deadline and stop signal, and declines the attempt when
 either arrives first. Failures classified `never` or `reconcile` are never
-retried, and there is no operator-triggered retry yet. The public entry points
+retried by policy; an operator may still re-execute the task through
+`workflow_retry` or, for an interrupted child classified `resume`, re-attempt
+it through `workflow_resume`. The public entry points
 are `createWorkflowTaskRetrier`, `AgentRetryPolicySchema`,
 `AgentResumePolicySchema`, `settledAgentUsage`, and
 `currentSubagentAttemptId`; see

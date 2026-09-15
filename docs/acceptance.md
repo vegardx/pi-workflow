@@ -168,8 +168,8 @@ An in-memory-only successful drive does not satisfy the first slice.
   operator `resume` intents only against the current unreleased interrupted
   execution while the run is `running`, `waiting`, or `interrupted`, reopening
   a terminalized `interrupted` execution and admitting `interrupted → running`
-  without invalidated work; no service method or tool appends operator intents
-  yet.
+  without invalidated work; the service `resume` method and the
+  `workflow_resume` tool are the only surfaces that append them.
 
 ## Invalidation and re-execution
 
@@ -302,6 +302,39 @@ An in-memory-only successful drive does not satisfy the first slice.
   launcher never lowers `handoff` into the pi-subagent request;
 - the runtime contract publishes `worktrees: true` and requires pi-subagent
   contract revision 6 with `handoffExport: true`.
+
+## Operator surface
+
+- `retry(runId, taskId, reason)` is `invalidate` restricted to a cause task
+  whose current execution ended `failed` or `interrupted` ("Workflow retry
+  requires a failed or interrupted task."); it shares every invalidation
+  refusal, re-executes the task and its dependents as the next generation
+  with a fresh child run, and never calls the subagent `retry`;
+- `resume(runId, reason, { taskId })` validates the run id, reason, and task
+  id before touching the run, refuses a run still being driven (`conflict`), a
+  status other than `interrupted`, a nested run, a run awaiting recovery, a
+  passed deadline, a run with no resumable task, several resumable tasks
+  without `taskId`, a task whose dependents already observed it, and a task
+  without a resumable failure, each with its fixed message and no journal
+  change; on success it journals the operator `resume` intent, then
+  `interrupted → running`, restarts the drive, and the child is resumed on its
+  existing subagent run with attempt ordinal 2 and no new launch;
+- a resume that pi-subagent refuses declines the attempt with the fixed
+  reason, terminalizes the execution `interrupted` again without release, and
+  leaves the run resumable; a crash between the intent and the transition
+  leaves the run offering only `wait`, whose next drive performs the same
+  transition and attempt;
+- `workflow_retry` and `workflow_resume` forward to the service, validate
+  their run-view output against the schema, and render from the table;
+- the unified `/workflow` command, the `pi-workflow` widget, and the `alt+w`
+  inspector consume `availableActions`, `requiresAttention`, `ownership`, and
+  `leasedElsewhere` from the service; no UI module imports the legality
+  predicates, an action the summary does not list is refused before the
+  service is called, and the action grammar, completions, and palette derive
+  from `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`;
+- the widget lists depth-0 runs that are ongoing or need action, hides when
+  neither applies, marks runs leased elsewhere, refreshes from `subscribe`,
+  and polls only while a listed run is nonterminal or awaits recovery.
 
 ## Structured output and support tasks
 
@@ -483,8 +516,9 @@ Later dynamic acceptance must prove:
 ## Product and distribution
 
 - widget and inspector are projections and recover after reload;
-- workflow list, validate, run, status, logs, wait, stop, retry, resume, and
-  reconcile work in a fresh `PI_CODING_AGENT_DIR` as their phases ship;
+- workflow list, validate, run, status, wait, stop, reconcile, runs,
+  inspect, logs, invalidate, retry, and resume work in a fresh
+  `PI_CODING_AGENT_DIR` through the tool table and the `/workflow` command;
 - package contents contain compiled ESM, declarations, license, and bounded docs;
 - Ubuntu CI is portability evidence; supported macOS Apple Silicon runtime
   qualification is driven locally;

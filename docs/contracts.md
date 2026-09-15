@@ -1044,8 +1044,9 @@ terminalized `interrupted`, may carry a `reason`, and is not bound by the
 task's `resume` policy or by a prior decline; ordinal contiguity and the
 previous attempt ID still apply. The attempt projection records `origin` and
 `reason`, and `interrupted -> running` is admitted while such an intent is
-open without invalidated work. No service method or tool appends operator
-intents yet; that operator resume surface arrives later.
+open without invalidated work. The service `resume` method (and the
+`workflow_resume` tool over it) is the only surface that appends operator
+intents; see [Lifecycle methods](#lifecycle-methods).
 
 ## Nested workflow tasks
 
@@ -1305,8 +1306,9 @@ not references the child can dereference.
 Retry calls the owner client's `retry` on the same subagent run and records
 the fresh attempt under the same task execution; resume behaves likewise
 through subagent `resume`. Both attempts sit under the subagent run of one
-agent execution and add no level to the hierarchy above. Operator-triggered
-retry remains later work. Re-execution after explicit invalidation is neither
+agent execution and add no level to the hierarchy above. An operator-triggered
+`retry` is an invalidation restricted to a failed or interrupted cause task,
+not a subagent retry. Re-execution after explicit invalidation is neither
 retry nor resume: it creates a new task-execution generation and a new
 preflight, idempotent operation ID, and subagent run, support computation, or
 child workflow run. A result or handoff artifact binds to the execution that
@@ -1423,8 +1425,9 @@ view with `timedOut: true` and leaves the drive running; a later `wait`
 observes it. Without a timeout the behaviour is unchanged. A `parked`
 field for checkpoint pauses is reserved and never emitted.
 
-`invalidate(runId, causeTaskId, reason)` is the only trigger for re-execution
-and is exposed by the `workflow_invalidate` tool as a pure pass-through. It
+`invalidate(runId, causeTaskId, reason)` is the trigger for re-execution
+(`retry` below is its restricted form) and is exposed by the
+`workflow_invalidate` tool as a pure pass-through. It
 validates the run ID, the task ID pattern, and a reason of 1 through 4096
 characters, rejects with `conflict` ("Workflow run is still being driven.")
 while an owned run's drive has not settled and with `validation` ("Workflow
@@ -1441,6 +1444,47 @@ the process crashes between the two appends, the restarted static runtime
 repairs the gap by appending the same transition when it finds a `failed` or
 `interrupted` run with at least one on-path `invalidated` task; otherwise the
 existing explicit-recovery refusal stands.
+
+`retry(runId, taskId, reason)` is `invalidate` restricted to a cause task
+whose current execution is terminal `failed` or `interrupted`
+(`retryableTasks`); any other task is refused with `validation` "Workflow
+retry requires a failed or interrupted task." (a bad reason with "Invalid
+workflow retry reason."), and every invalidation refusal applies unchanged.
+The task and its dependents re-execute as new generations with a fresh
+preflight, operation ID, and subagent run; the owner client's `retry` is never
+called. The `workflow_retry` tool is a pure pass-through.
+
+`resume(runId, reason, { taskId })` re-attempts an interrupted agent task on
+its existing subagent run without invalidating anything. It validates the run
+ID, a reason of 1 through 4096 characters ("Invalid workflow resume
+reason."), and the optional task ID ("Invalid workflow task ID.") before
+touching the run; rejects with `conflict` "Workflow run is still being
+driven." while an owned drive has not settled; and refuses with `validation`
+a status other than `interrupted` ("Workflow run status does not admit
+resume."), a nested child run ("Nested workflow runs are resumed through their
+parent run."), a run awaiting recovery ("Workflow run already awaits recovery
+of invalidated work."), and a passed deadline ("Workflow run deadline has
+passed."). Without `taskId` the run's single resumable task is selected
+("Workflow run has no resumable task.", "Workflow run has multiple resumable
+tasks; specify taskId."); with `taskId` the task must pass `resumeRefusal`:
+an on-path agent task ("Unknown workflow task.", "Workflow resume requires an
+agent task.") whose current execution is terminal `interrupted` with a
+`resume`-classified failure ("Workflow resume requires an interrupted task
+with a resumable failure."), headroom under the attempt bound ("Workflow task
+attempt bound exceeded."), and no dependent that already observed it ("Use
+workflow_invalidate; dependents already observed this task."). It then
+appends one `task-execution-attempt-intended` event (`kind: "resume"`,
+`origin: "operator"`, the operator's `reason`, the next ordinal, and the
+current attempt as `previousAttemptId`), appends `interrupted → running`
+(reason "Operator resume re-attempts the interrupted task."), restarts the
+drive without awaiting it (`wait` observes it), and returns the current view.
+The drive performs the attempt through the owner client's `resume`; a refusal
+declines the attempt with the fixed reason "Subagent refused the attempt.",
+terminalizes the execution `interrupted` again without release, and returns
+the run to `interrupted`, still resumable. A crash between the two appends
+leaves an open operator intent: the run then offers only `wait`, and the
+restarted static runtime performs the same transition before attempting. The
+`workflow_resume` tool is a pure pass-through.
 
 `reconcile(runId, { taskId })` returns a run view plus `reconciled`, one
 entry per reconciled execution with `taskId`, `executionId`, `before` and
@@ -1470,7 +1514,8 @@ Lifecycle methods refuse through the same predicates, and every summary
 carries `availableActions`: the subset of `stop`, `wait`, `reconcile`,
 `invalidate`, `retry`, `resume`, `decide` that is legal for the run's facts,
 filtered by the actions implemented in this build (`stop`, `wait`,
-`reconcile`, `invalidate`) and returned in that fixed order. A run leased by
+`reconcile`, `invalidate`, `retry`, `resume`; `decide` waits for
+checkpoints) and returned in that fixed order. A run leased by
 another live service has no available actions. `requiresAttention` is
 `cleanup-blocked`, or `failed`/`interrupted` without invalidated work awaiting
 recovery. Tools and widgets consume `availableActions`; nothing recomputes it.
@@ -1482,7 +1527,9 @@ recovery. Tools and widgets consume `availableActions`; nothing recomputes it.
 | `wait` | run status is not terminal, or the run awaits recovery |
 | `reconcile` | run is `cleanup-blocked`, or not terminal and not owned by any live service |
 | `invalidate` | `failed` or `interrupted`, not nested, not awaiting recovery, deadline not passed, not being driven |
-| `retry`, `resume`, `decide` | predicates ship; not emitted until their methods exist |
+| `retry` | `invalidate` is legal and a task's current execution is terminal `failed` or `interrupted` |
+| `resume` | `interrupted`, not nested, not awaiting recovery, deadline not passed, not being driven, and a task passes `resumeRefusal` |
+| `decide` | predicate ships; never emitted until checkpoints exist |
 
 ### Read surface
 
@@ -1549,6 +1596,32 @@ listener that throws affects nothing. It refuses after shutdown (`conflict`,
 notifies for runs leased elsewhere, which the widget must poll through
 `listRuns`.
 
+### Operator surface
+
+The Pi extension's `/workflow` command, `alt+w` inspector, and `pi-workflow`
+widget are projections of the read surface. They act only on
+`availableActions`, `requiresAttention`, `ownership`, and `leasedElsewhere`
+from run summaries; no UI module imports the legality predicates (only the
+`WORKFLOW_RUN_ACTIONS` and `IMPLEMENTED_WORKFLOW_RUN_ACTIONS` constants), and
+an action the summary does not list is refused before the service is called
+(`<action> is unavailable while the run is <status>.` or
+`<action> is unavailable: <runId> is leased by another Pi process.`). The
+grammar (`list`, `runs [--all]`, `validate`, `run`, `show|status`, `logs`,
+`wait`, then the run actions) derives its action subcommands from
+`IMPLEMENTED_WORKFLOW_RUN_ACTIONS` minus `wait` and `decide` (`stop`,
+`reconcile`, `invalidate`, `retry`, `resume` in this build), so an action
+appears only in builds whose service implements it, and a build
+that lists an action without its method fails with
+`<action> is not implemented by this workflow service.` Run prefixes resolve
+through `listRuns({ includeChildren: true })` with an exact id winning over an
+ambiguous prefix; task keys are `[...namespace, key].join("/")` (a leading
+`/` as log entries render it is accepted) or full task ids, and abandoned
+tasks are never actionable. The widget lists depth-0 runs in the nonterminal
+and attention statuses, shows at most two lines, hides when both are empty,
+refreshes from `subscribe`, and polls (unref'd, 5 s) only while a listed run
+is nonterminal or awaits recovery. Widget and inspector recover from durable
+state after reload; they own no lifecycle authority.
+
 ### Task view
 
 Every run view carries `tasks` once events exist: one frozen entry per
@@ -1574,9 +1647,10 @@ read through `readBytes`). A task without a handoff artifact is rejected with
 `validation` ("Workflow task has no handoff artifact."); a verification failure
 is a `persistence` error. No Pi tool exports handoffs.
 Declarative retry and resume attempts run under task policy without a service
-call. Operator-triggered `retry` and explicit interrupted-run `resume` remain
-later contract work; their predicates ship in `run-actions.ts` but their
-actions are not advertised.
+call. Operator-triggered `retry` and interrupted-run `resume` are the service
+methods described under [Lifecycle methods](#lifecycle-methods), advertised
+through `availableActions` and exposed as `workflow_retry` and
+`workflow_resume`.
 
 ## Checkpoints
 
