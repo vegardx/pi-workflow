@@ -16,7 +16,7 @@ checks fail when this document, the manifest, or the constants disagree.
 | Required `@vegardx/pi-subagent` | `0.10.0` (exact) | `package.json` `peerDependencies` |
 | Required pi-subagent contract revision | 6 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
 | pi-subagent commit built in CI | `172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf` | `.github/workflows/ci.yml` |
-| Pi (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-server`) | `>=0.85.0 <0.86` | `package.json` `peerDependencies` |
+| Pi (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-server`, `@earendil-works/pi-tui`) | `>=0.85.0 <0.86` | `package.json` `peerDependencies` |
 | Node.js engines | `>=23.6.0` | `package.json` `engines` |
 | Node.js in CI | 24.16.0 | `.github/workflows/ci.yml` |
 | `typebox` | `>=1.3.14 <2` | `package.json` `peerDependencies` |

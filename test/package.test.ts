@@ -60,6 +60,13 @@ describe("package contract", () => {
 		expect(packageJson.peerDependencies?.["@earendil-works/pi-server"]).toBe(
 			">=0.85.0 <0.86",
 		);
+		expect(packageJson.peerDependencies?.["@earendil-works/pi-tui"]).toBe(
+			">=0.85.0 <0.86",
+		);
+		// The TUI package is a peer like the other Pi packages, listed in order.
+		expect(Object.keys(packageJson.peerDependencies ?? {})).toEqual(
+			[...Object.keys(packageJson.peerDependencies ?? {})].sort(),
+		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
 			"0.10.0",
 		);
@@ -161,6 +168,7 @@ describe("compatibility matrix", () => {
 		expect(compatibility.pi.packages).toEqual([
 			"@earendil-works/pi-coding-agent",
 			"@earendil-works/pi-server",
+			"@earendil-works/pi-tui",
 		]);
 		for (const name of compatibility.pi.packages) {
 			expect(packageJson.peerDependencies?.[name]).toBe(
