@@ -1,20 +1,27 @@
 import { type Static, type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
 import {
-	MAX_NESTED_WORKFLOW_DEPTH,
-	MAX_TASK_EXECUTION_GENERATIONS,
 	MAX_WORKFLOW_CONCURRENCY,
-	NestedWorkflowInputArtifactsSchema,
-	TaskKeySchema,
-	TaskRoleSchema,
-	WorkflowArtifactIdSchema,
 	WorkflowBudgetSchema,
 	WorkflowDefinitionNameSchema,
 	WorkflowRunIdSchema,
 	WorkflowRunStatusSchema,
 	WorkflowTaskIdSchema,
-	WorkflowTaskStatusSchema,
 } from "./contracts.js";
+import { encodeWorkflowRunCursor } from "./run-projection.js";
 import type { WorkflowService } from "./service.js";
+import {
+	WorkflowInspectOptionsSchema,
+	WorkflowLogOptionsSchema,
+	WorkflowLogPageSchema,
+	WorkflowReconcileOptionsSchema,
+	WorkflowRunInspectionSchema,
+	WorkflowRunPageSchema,
+	WorkflowRunQuerySchema,
+	WorkflowServiceReconcileViewSchema,
+	WorkflowServiceRunViewSchema,
+	WorkflowServiceWaitViewSchema,
+} from "./service-views.js";
 
 export type WorkflowToolName =
 	| "workflow_list"
@@ -23,7 +30,11 @@ export type WorkflowToolName =
 	| "workflow_status"
 	| "workflow_wait"
 	| "workflow_stop"
-	| "workflow_reconcile";
+	| "workflow_reconcile"
+	| "workflow_runs"
+	| "workflow_inspect"
+	| "workflow_logs"
+	| "workflow_invalidate";
 
 type DeepReadonly<T> = T extends readonly (infer U)[]
 	? readonly DeepReadonly<U>[]
@@ -51,10 +62,140 @@ export interface WorkflowToolDeclaration<
 		service: WorkflowService,
 		params: Static<TParams>,
 	): Promise<WorkflowToolOutput<TOutput>>;
+	/**
+	 * Renders a schema-valid value as bounded JSON for the model context.
+	 * Absent for tools that use the shared rule (see `workflowToolText`).
+	 */
+	text?(value: WorkflowToolOutput<TOutput>): string;
+}
+
+/** Every tool text block fits this many bytes of pretty-printed JSON. */
+export const MAX_TOOL_OUTPUT_BYTES = 48 * 1024;
+
+function serialize(value: unknown): string {
+	return JSON.stringify(value, null, 2);
+}
+
+function fits(serialized: string): boolean {
+	return Buffer.byteLength(serialized) <= MAX_TOOL_OUTPUT_BYTES;
+}
+
+/**
+ * Control-plane output crosses the tool boundary only after it satisfies its
+ * schema; a failure here is a projection bug and is never masked.
+ */
+function checked<T extends TSchema>(
+	schema: T,
+	value: unknown,
+): WorkflowToolOutput<T> {
+	if (!Value.Check(schema, value)) {
+		throw new Error("workflow tool output violates its schema");
+	}
+	return value as WorkflowToolOutput<T>;
+}
+
+/**
+ * Shared bounding rule: the whole value when it fits; run views omit the
+ * output value (the durable artifact remains) when they do not; every other
+ * value must fit.
+ */
+function boundedText(value: unknown): string {
+	const serialized = serialize(value);
+	if (fits(serialized)) return serialized;
+	if (typeof value === "object" && value !== null && "output" in value) {
+		const bounded = { ...value, output: undefined };
+		return `${serialize(bounded)}\n\n[Workflow output omitted from tool context because it exceeds ${MAX_TOOL_OUTPUT_BYTES} bytes. Use the durable output artifact.]`;
+	}
+	throw new Error("workflow tool output exceeds context limit");
+}
+
+/** Legacy bounding for `workflow_list`, the only tool that returns a bare array. */
+function legacyListText(value: readonly unknown[]): string {
+	const serialized = serialize(value);
+	if (fits(serialized)) return serialized;
+	const bounded: unknown[] = [];
+	for (const entry of value) {
+		const candidate = [
+			...bounded,
+			entry,
+			{ truncated: true, totalItems: value.length },
+		];
+		if (!fits(serialize(candidate))) break;
+		bounded.push(entry);
+	}
+	bounded.push({ truncated: true, totalItems: value.length });
+	return serialize(bounded);
+}
+
+/**
+ * Pages shrink instead of cutting items: trailing runs are dropped until the
+ * page fits and the cursor points at the last kept run, so successive calls
+ * stay complete. At least one run is kept.
+ */
+function runsPageText(
+	page: WorkflowToolOutput<typeof WorkflowRunPageSchema>,
+): string {
+	const runs = [...page.runs];
+	for (;;) {
+		const last = runs.at(-1);
+		const candidate =
+			runs.length === page.runs.length || !last
+				? page
+				: checked(WorkflowRunPageSchema, {
+						...page,
+						runs,
+						nextCursor: encodeWorkflowRunCursor(last),
+					});
+		const serialized = serialize(candidate);
+		if (fits(serialized)) return serialized;
+		if (runs.length <= 1) {
+			throw new Error("workflow tool output exceeds context limit");
+		}
+		runs.pop();
+	}
+}
+
+/** Log pages shrink the same way; the cursor is the last kept sequence. */
+function logPageText(
+	page: WorkflowToolOutput<typeof WorkflowLogPageSchema>,
+): string {
+	const entries = [...page.entries];
+	for (;;) {
+		const last = entries.at(-1);
+		const candidate =
+			entries.length === page.entries.length || !last
+				? page
+				: checked(WorkflowLogPageSchema, {
+						...page,
+						entries,
+						nextAfterSequence: last.sequence,
+					});
+		const serialized = serialize(candidate);
+		if (fits(serialized)) return serialized;
+		if (entries.length <= 1) {
+			throw new Error("workflow tool output exceeds context limit");
+		}
+		entries.pop();
+	}
+}
+
+/**
+ * The text block for a tool result: the value is checked against the
+ * declared output schema, then rendered by the declaration's own bounding
+ * or the shared rule.
+ */
+export function workflowToolText<
+	TParams extends TSchema,
+	TOutput extends TSchema,
+>(
+	declaration: WorkflowToolDeclaration<TParams, TOutput>,
+	value: unknown,
+): string {
+	const valid = checked(declaration.output, value);
+	return declaration.text ? declaration.text(valid) : boundedText(valid);
 }
 
 const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
-const TimestampSchema = Type.String({ format: "date-time" });
 
 export const WorkflowRootScopeSchema = Type.Union([
 	Type.Literal("project"),
@@ -107,60 +248,12 @@ export const WorkflowServiceRunReceiptSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export const WorkflowServiceTaskViewSchema = Type.Object(
-	{
-		id: WorkflowTaskIdSchema,
-		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
-		key: TaskKeySchema,
-		kind: Type.Union([
-			Type.Literal("agent"),
-			Type.Literal("support"),
-			Type.Literal("workflow"),
-		]),
-		role: TaskRoleSchema,
-		status: WorkflowTaskStatusSchema,
-		/** Generation of the task's current execution; 0 when it has none. */
-		generation: Type.Integer({
-			minimum: 0,
-			maximum: MAX_TASK_EXECUTION_GENERATIONS,
-		}),
-		abandoned: Type.Optional(Type.Literal(true)),
-	},
-	{ additionalProperties: false },
-);
-
-export const WorkflowServiceRunViewSchema = Type.Object(
-	{
-		runId: WorkflowRunIdSchema,
-		status: WorkflowRunStatusSchema,
-		definitionName: WorkflowDefinitionNameSchema,
-		createdAt: TimestampSchema,
-		deadlineAt: TimestampSchema,
-		depth: Type.Integer({ minimum: 0, maximum: MAX_NESTED_WORKFLOW_DEPTH - 1 }),
-		parent: Type.Optional(
-			Type.Object(
-				{
-					runId: WorkflowRunIdSchema,
-					taskId: WorkflowTaskIdSchema,
-					inputArtifacts: NestedWorkflowInputArtifactsSchema,
-				},
-				{ additionalProperties: false },
-			),
-		),
-		output: Type.Optional(Type.Unknown()),
-		outputArtifactId: Type.Optional(WorkflowArtifactIdSchema),
-		/** Every declared task in materialization order; absent until events exist. */
-		tasks: Type.Optional(
-			Type.Array(WorkflowServiceTaskViewSchema, { maxItems: 256 }),
-		),
-	},
-	{ additionalProperties: false },
-);
-
 const WorkflowRefSchema = Type.String({ minLength: 1, maxLength: 4096 });
-const RunIdParameterSchema = Type.String({ pattern: "^workflow_[a-z0-9]+$" });
+const RunId = WorkflowRunIdSchema;
+const TaskId = WorkflowTaskIdSchema;
+const Reason = Type.String({ minLength: 1, maxLength: 4096 });
 const RunParametersSchema = Type.Object(
-	{ runId: RunIdParameterSchema },
+	{ runId: RunId },
 	{ additionalProperties: false },
 );
 
@@ -189,6 +282,7 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			execute(service) {
 				return service.list();
 			},
+			text: legacyListText,
 		}),
 		declare({
 			name: "workflow_validate",
@@ -243,12 +337,21 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			name: "workflow_wait",
 			label: "Wait for Workflow",
 			description:
-				"Wait for an active workflow run and return its durable terminal status and bounded output.",
+				"Wait for an active workflow run and return its durable terminal status and bounded output. With timeoutMs, return the current view marked timedOut when the run outlives the timeout; the run keeps driving.",
 			promptGuidelines: [],
-			parameters: RunParametersSchema,
-			output: WorkflowServiceRunViewSchema,
+			parameters: Type.Object(
+				{
+					runId: RunId,
+					timeoutMs: Type.Optional(
+						Type.Integer({ minimum: 1_000, maximum: 3_600_000 }),
+					),
+				},
+				{ additionalProperties: false },
+			),
+			output: WorkflowServiceWaitViewSchema,
 			execute(service, params) {
-				return service.wait(params.runId);
+				const { runId, ...options } = params;
+				return service.wait(runId, options);
 			},
 		}),
 		declare({
@@ -258,10 +361,7 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				"Persist stop intent, interrupt active delegated work, and drain durable terminal evidence.",
 			promptGuidelines: [],
 			parameters: Type.Object(
-				{
-					runId: RunIdParameterSchema,
-					reason: Type.String({ minLength: 1, maxLength: 4096 }),
-				},
+				{ runId: RunId, reason: Reason },
 				{ additionalProperties: false },
 			),
 			output: WorkflowServiceRunViewSchema,
@@ -275,10 +375,85 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			description:
 				"Reopen and reconcile a durable workflow run after restart or interruption.",
 			promptGuidelines: [],
-			parameters: RunParametersSchema,
+			parameters: Type.Object(
+				{ runId: RunId, ...WorkflowReconcileOptionsSchema.properties },
+				{ additionalProperties: false },
+			),
+			output: WorkflowServiceReconcileViewSchema,
+			execute(service, params) {
+				const { runId, ...options } = params;
+				return service.reconcile(runId, options);
+			},
+		}),
+		declare({
+			name: "workflow_runs",
+			label: "List Workflow Runs",
+			description:
+				"List durable workflow runs in this project with status, ownership, and the operator actions the service currently permits.",
+			promptGuidelines: [],
+			parameters: WorkflowRunQuerySchema,
+			output: WorkflowRunPageSchema,
+			execute(service, params) {
+				return service.listRuns(params);
+			},
+			text: runsPageText,
+		}),
+		declare({
+			name: "workflow_inspect",
+			label: "Inspect Workflow Run",
+			description:
+				"Inspect a workflow run's durable projection: budget, tasks, executions, effects, barriers, artifacts. Use include and taskId to bound the output.",
+			promptGuidelines: [],
+			parameters: Type.Object(
+				{ runId: RunId, ...WorkflowInspectOptionsSchema.properties },
+				{ additionalProperties: false },
+			),
+			output: WorkflowRunInspectionSchema,
+			execute(service, params) {
+				const { runId, ...options } = params;
+				return service.inspect(runId, options);
+			},
+			/** Never cut: the `run` section alone always fits, so the caller can narrow. */
+			text(inspection) {
+				const serialized = serialize(inspection);
+				if (!fits(serialized)) {
+					throw new Error(
+						"Workflow inspection exceeds the tool output bound; narrow include or pass taskId.",
+					);
+				}
+				return serialized;
+			},
+		}),
+		declare({
+			name: "workflow_logs",
+			label: "Workflow Run Logs",
+			description:
+				"Read redacted, paginated lifecycle log entries derived from a workflow run's journal.",
+			promptGuidelines: [],
+			parameters: Type.Object(
+				{ runId: RunId, ...WorkflowLogOptionsSchema.properties },
+				{ additionalProperties: false },
+			),
+			output: WorkflowLogPageSchema,
+			execute(service, params) {
+				const { runId, ...options } = params;
+				return service.logs(runId, options);
+			},
+			text: logPageText,
+		}),
+		declare({
+			name: "workflow_invalidate",
+			label: "Invalidate Workflow Task",
+			description:
+				"Invalidate a settled task and its dependents on a failed or interrupted run so they re-execute; returns the run view.",
+			promptGuidelines: [],
+			parameters: Type.Object(
+				{ runId: RunId, taskId: TaskId, reason: Reason },
+				{ additionalProperties: false },
+			),
 			output: WorkflowServiceRunViewSchema,
 			execute(service, params) {
-				return service.reconcile(params.runId);
+				return service.invalidate(params.runId, params.taskId, params.reason);
 			},
 		}),
 	]);

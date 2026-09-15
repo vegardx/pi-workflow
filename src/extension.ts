@@ -11,38 +11,7 @@ import {
 	type WorkflowServiceRunView,
 } from "./service.js";
 import { createWorkflowSubagentProvider } from "./subagent-provider.js";
-import { WORKFLOW_TOOL_DECLARATIONS } from "./tools.js";
-
-const MAX_TOOL_OUTPUT_BYTES = 48 * 1024;
-
-function text(value: unknown): string {
-	const serialized = JSON.stringify(value, null, 2);
-	if (Buffer.byteLength(serialized) <= MAX_TOOL_OUTPUT_BYTES) return serialized;
-	if (Array.isArray(value)) {
-		const bounded: unknown[] = [];
-		for (const entry of value) {
-			const candidate = [
-				...bounded,
-				entry,
-				{ truncated: true, totalItems: value.length },
-			];
-			if (
-				Buffer.byteLength(JSON.stringify(candidate, null, 2)) >
-				MAX_TOOL_OUTPUT_BYTES
-			) {
-				break;
-			}
-			bounded.push(entry);
-		}
-		bounded.push({ truncated: true, totalItems: value.length });
-		return JSON.stringify(bounded, null, 2);
-	}
-	if (typeof value === "object" && value !== null && "output" in value) {
-		const bounded = { ...value, output: undefined };
-		return `${JSON.stringify(bounded, null, 2)}\n\n[Workflow output omitted from tool context because it exceeds ${MAX_TOOL_OUTPUT_BYTES} bytes. Use the durable output artifact.]`;
-	}
-	throw new Error("workflow tool output exceeds context limit");
-}
+import { WORKFLOW_TOOL_DECLARATIONS, workflowToolText } from "./tools.js";
 
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let service: WorkflowService | undefined;
@@ -70,8 +39,10 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	});
 
 	// Every tool comes from the declaration table: the typed service value is
-	// the result `details`, and the text block is the same value as bounded
-	// JSON for the model context.
+	// the result `details`, and the text block is the same value, checked
+	// against the declared output schema and bounded for the model context.
+	// The tool layer forwards parameters and lets service errors propagate;
+	// `availableActions` in the views is the only legality signal it exposes.
 	for (const declaration of WORKFLOW_TOOL_DECLARATIONS) {
 		pi.registerTool({
 			name: declaration.name,
@@ -87,7 +58,12 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				const value = await declaration.execute(await getService(ctx), params);
 				return {
-					content: [{ type: "text" as const, text: text(value) }],
+					content: [
+						{
+							type: "text" as const,
+							text: workflowToolText(declaration, value),
+						},
+					],
 					details: value,
 				};
 			},
@@ -119,6 +95,24 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				runId,
 			);
 			ctx.ui.notify(`${view.runId}: ${view.status}`, "info");
+		},
+	});
+
+	pi.registerCommand("workflow-runs", {
+		description: "List durable workflow runs",
+		handler: async (_args, ctx) => {
+			const page = await (await getService(ctx)).listRuns({ limit: 20 });
+			ctx.ui.notify(
+				page.runs.length === 0
+					? "No workflow runs found"
+					: page.runs
+							.map(
+								(run) =>
+									`${run.runId} ${run.status} (${run.ownership}) [${run.availableActions.join(", ")}]`,
+							)
+							.join("\n"),
+				"info",
+			);
 		},
 	});
 }

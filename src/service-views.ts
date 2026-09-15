@@ -7,6 +7,7 @@ import {
 	TaskExecutionIdSchema,
 	TaskExecutionOutcomeSchema,
 	TaskKeySchema,
+	TaskRoleSchema,
 	WorkflowArtifactIdSchema,
 	WorkflowBudgetSchema,
 	WorkflowDefinitionNameSchema,
@@ -204,6 +205,7 @@ export const WorkflowServiceTaskViewSchema = Type.Object(
 		namespace: Type.Array(TaskKeySchema, { maxItems: 32 }),
 		key: TaskKeySchema,
 		kind: TaskKindSchema,
+		role: TaskRoleSchema,
 		disposition: TaskDispositionSchema,
 		status: WorkflowTaskStatusSchema,
 		/** Highest generation recorded for the task; 0 when it has none. */
