@@ -13,6 +13,7 @@ import {
 	type WorkflowArtifactStore,
 	WorkflowArtifactStoreError,
 } from "./artifact-store.js";
+import { currentSubagentAttemptId } from "./attempts.js";
 import type {
 	SubagentTerminalEvidence,
 	TaskExecutionOutcome,
@@ -98,17 +99,27 @@ function receipt(execution: TaskExecutionProjection): RunReceipt {
 	}
 	return {
 		runId: launch.subagentRunId,
-		attemptId: launch.subagentAttemptId,
+		attemptId: currentSubagentAttemptId(execution) ?? launch.subagentAttemptId,
 		status: execution.settlement?.evidence.status ?? launch.status,
 	};
 }
 
+function attemptOrdinalOf(execution: TaskExecutionProjection): number {
+	return (
+		1 +
+		(execution.attempts ?? []).filter(
+			(attempt) => attempt.subagentAttemptId !== undefined,
+		).length
+	);
+}
+
 function resultEvidence(
 	result: Parameters<typeof deriveSubagentResultSha256>[0],
+	attemptOrdinal: number,
 ): SubagentTerminalEvidence {
 	return {
 		kind: "subagent",
-		attemptOrdinal: 1,
+		attemptOrdinal,
 		resultSha256: deriveSubagentResultSha256(result),
 		status: result.status,
 		usage: structuredClone(result.usage),
@@ -214,7 +225,7 @@ export function createWorkflowTaskFinalizer(
 				"Child result is unavailable or invalid during finalization.",
 			);
 		}
-		const evidence = resultEvidence(waited.result);
+		const evidence = resultEvidence(waited.result, attemptOrdinalOf(execution));
 		if (!isDeepStrictEqual(evidence, execution.settlement?.evidence)) {
 			throw new WorkflowTaskFinalizationError(
 				"validation",
@@ -228,7 +239,24 @@ export function createWorkflowTaskFinalizer(
 		task: WorkflowTaskProjection,
 		execution: TaskExecutionProjection,
 	): Promise<void> {
-		const message = "Workflow result artifact import requires reconciliation.";
+		await blockExecution(
+			task,
+			execution,
+			"artifact-import",
+			"Workflow result artifact import requires reconciliation.",
+		);
+	}
+
+	/**
+	 * Records durable cleanup-blocked evidence so ordinary scheduling stops and
+	 * only explicit reconciliation may advance the task.
+	 */
+	async function blockExecution(
+		task: WorkflowTaskProjection,
+		execution: TaskExecutionProjection,
+		stage: "artifact-import" | "release",
+		message: string,
+	): Promise<void> {
 		const current = await state();
 		const projected = current.executions[execution.execution.id];
 		if (projected?.phase !== "terminal") {
@@ -239,11 +267,8 @@ export function createWorkflowTaskFinalizer(
 					outcome: "cleanup-blocked",
 					evidence: {
 						kind: "workflow",
-						stage: "artifact-import",
-						failureSha256: deriveWorkflowFailureSha256(
-							"artifact-import",
-							message,
-						),
+						stage,
+						failureSha256: deriveWorkflowFailureSha256(stage, message),
 						message,
 					},
 				},
@@ -356,7 +381,10 @@ export function createWorkflowTaskFinalizer(
 				"Released child result is unavailable or invalid.",
 			);
 		}
-		const evidence = resultEvidence(updated.result);
+		const evidence = resultEvidence(
+			updated.result,
+			attemptOrdinalOf(execution),
+		);
 		if (evidence.status !== releasedStatus) {
 			throw new WorkflowTaskFinalizationError(
 				"release",
@@ -582,7 +610,17 @@ export function createWorkflowTaskFinalizer(
 					{ cause: error },
 				);
 			}
-			validateReleaseReceipt(released, child);
+			try {
+				validateReleaseReceipt(released, child);
+			} catch (error) {
+				await blockExecution(
+					task,
+					execution,
+					"release",
+					"Child release returned an invalid receipt; reconciliation is required.",
+				);
+				throw error;
+			}
 			await append({
 				type: "task-execution-released",
 				data: {

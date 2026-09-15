@@ -304,3 +304,11 @@ export {
 	type WorkflowTaskLauncherOptions,
 	type WorkflowTaskLaunchOutcome,
 } from "./task-launcher.js";
+export {
+	createWorkflowTaskRetrier,
+	type WorkflowAttemptDecision,
+	WorkflowAttemptError,
+	type WorkflowAttemptKind,
+	type WorkflowTaskRetrier,
+	type WorkflowTaskRetrierOptions,
+} from "./task-retrier.js";
