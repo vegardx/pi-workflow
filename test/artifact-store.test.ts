@@ -49,6 +49,7 @@ describe("workflow artifact store", () => {
 		const metadata = {
 			runId: "workflow_artifacts" as const,
 			producerTaskId: "task_result" as const,
+			producerExecutionId: "execution_result" as const,
 			output: "result" as const,
 			schemaSha256: hash,
 		};
@@ -71,6 +72,7 @@ describe("workflow artifact store", () => {
 		const metadata = {
 			runId: "workflow_artifacts" as const,
 			producerTaskId: "task_result" as const,
+			producerExecutionId: "execution_result" as const,
 			output: "result" as const,
 			schemaSha256: hash,
 		};
@@ -93,6 +95,7 @@ describe("workflow artifact store", () => {
 			{
 				runId: "workflow_artifacts",
 				producerTaskId: "task_result",
+				producerExecutionId: "execution_result",
 				output: "result",
 				schemaSha256: hash,
 			},
@@ -128,6 +131,7 @@ describe("workflow artifact store", () => {
 				{
 					runId: "workflow_artifacts",
 					producerTaskId: "task_result",
+					producerExecutionId: "execution_result",
 					output: "result",
 					schemaSha256: hash,
 				},

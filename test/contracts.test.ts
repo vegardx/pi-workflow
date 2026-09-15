@@ -39,6 +39,7 @@ function artifactRef() {
 		id: `artifact_${sha}`,
 		runId: "workflow_abc123",
 		producerTaskId: "task_abc123",
+		producerExecutionId: "execution_abc123",
 		output: "result" as const,
 		sha256: sha,
 		bytes: 2,
@@ -127,15 +128,19 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 14 and rejects revision 13 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(14);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(14);
+	it("publishes revision 15 and rejects revision 14 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(15);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(15);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.executionGenerations).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation).toBe(
+			true,
+		);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 14,
+			contractRevision: 15,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -150,12 +155,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 13,
+				contractRevision: 14,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 14,
+			contractRevision: 15,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -179,7 +184,7 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 13,
+				contractRevision: 14,
 			}),
 		).toBe(false);
 	});
@@ -188,7 +193,12 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.retryAttempts).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.resumeAttempts).toBe(true);
 		expect(MAX_TASK_ATTEMPTS).toBe(21);
-		for (const feature of ["retryAttempts", "resumeAttempts"] as const) {
+		for (const feature of [
+			"retryAttempts",
+			"resumeAttempts",
+			"executionGenerations",
+			"transactionalInvalidation",
+		] as const) {
 			expect(
 				isWorkflowRuntimeContract({
 					...WORKFLOW_RUNTIME_CONTRACT,

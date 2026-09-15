@@ -16,7 +16,9 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 14 as const;
+export const WORKFLOW_CONTRACT_REVISION = 15 as const;
+/** Generations per task: the initial execution plus re-executions after invalidation. */
+export const MAX_TASK_EXECUTION_GENERATIONS = 16;
 // Initial attempt plus up to 10 retries and up to 10 resumes (pi-subagent caps).
 export const MAX_TASK_ATTEMPTS = 21;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
@@ -100,7 +102,7 @@ export type TaskExecutionId = Static<typeof TaskExecutionIdSchema>;
 
 export const TaskExecutionGenerationSchema = Type.Integer({
 	minimum: 1,
-	maximum: Number.MAX_SAFE_INTEGER,
+	maximum: MAX_TASK_EXECUTION_GENERATIONS,
 });
 export type TaskExecutionGeneration = Static<
 	typeof TaskExecutionGenerationSchema
@@ -217,6 +219,8 @@ export const WorkflowArtifactRefSchema = Type.Object(
 		id: WorkflowArtifactIdSchema,
 		runId: WorkflowRunIdSchema,
 		producerTaskId: Type.Optional(WorkflowTaskIdSchema),
+		/** The producing task execution; present iff producerTaskId is present. */
+		producerExecutionId: Type.Optional(TaskExecutionIdSchema),
 		output: Type.Optional(Type.Literal("result")),
 		sha256: Sha256Schema,
 		bytes: Type.Integer({ minimum: 0, maximum: 16 * 1024 * 1024 }),
@@ -674,6 +678,8 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				nestedArtifactInputs: Type.Boolean(),
 				retryAttempts: Type.Boolean(),
 				resumeAttempts: Type.Boolean(),
+				executionGenerations: Type.Boolean(),
+				transactionalInvalidation: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -733,6 +739,8 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			nestedArtifactInputs: true,
 			retryAttempts: true,
 			resumeAttempts: true,
+			executionGenerations: true,
+			transactionalInvalidation: true,
 		}),
 	},
 );

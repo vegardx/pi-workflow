@@ -88,7 +88,7 @@ const TASK_TRANSITIONS: Readonly<
 		"cancelled",
 		"interrupted",
 	]),
-	invalidated: new Set(),
+	invalidated: new Set(["pending"]),
 };
 
 export class InvalidWorkflowRunTransitionError extends Error {

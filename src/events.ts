@@ -494,6 +494,11 @@ const TaskInvalidatedEventSchema = Type.Object(
 					maxItems: 256,
 					uniqueItems: true,
 				}),
+				/** Ascending on-path epochs abandoned by this invalidation; may be empty. */
+				abandonedEpochs: Type.Array(Type.Integer({ minimum: 1 }), {
+					maxItems: 4096,
+					uniqueItems: true,
+				}),
 				reason: Type.String({ minLength: 1, maxLength: 4096 }),
 			},
 			{ additionalProperties: false },
@@ -569,6 +574,8 @@ export const WorkflowTaskProjectionSchema = Type.Object(
 		status: WorkflowTaskStatusSchema,
 		committed: Type.Boolean(),
 		currentExecutionId: Type.Optional(TaskExecutionIdSchema),
+		/** Declared in an abandoned epoch and not readopted by the current path. */
+		abandoned: Type.Optional(Type.Literal(true)),
 	},
 	{ additionalProperties: false },
 );
@@ -844,6 +851,7 @@ export const WorkflowBarrierProjectionSchema = Type.Object(
 			uniqueItems: true,
 		}),
 		sequence: Type.Integer({ minimum: 1 }),
+		abandoned: Type.Optional(Type.Literal(true)),
 	},
 	{ additionalProperties: false },
 );
@@ -857,9 +865,13 @@ const WorkflowEffectProjectionSchema = Type.Object(
 		kind: Type.Union([Type.Literal("phase"), Type.Literal("log")]),
 		value: Type.String({ minLength: 1, maxLength: 4096 }),
 		sequence: Type.Integer({ minimum: 1 }),
+		abandoned: Type.Optional(Type.Literal(true)),
 	},
 	{ additionalProperties: false },
 );
+export type WorkflowEffectProjection = Static<
+	typeof WorkflowEffectProjectionSchema
+>;
 
 export const WorkflowStateProjectionSchema = Type.Object(
 	{

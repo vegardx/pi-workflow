@@ -186,16 +186,21 @@ export class WorkflowArtifactStore {
 		metadata: {
 			runId: WorkflowArtifactRef["runId"];
 			producerTaskId?: NonNullable<WorkflowArtifactRef["producerTaskId"]>;
+			producerExecutionId?: NonNullable<
+				WorkflowArtifactRef["producerExecutionId"]
+			>;
 			output?: "result";
 			schemaSha256: string;
 		},
 	): Promise<WorkflowArtifactRef> {
 		if (
 			(metadata.producerTaskId === undefined) !==
-			(metadata.output === undefined)
+				(metadata.output === undefined) ||
+			(metadata.producerTaskId === undefined) !==
+				(metadata.producerExecutionId === undefined)
 		) {
 			throw new WorkflowArtifactStoreError(
-				"artifact producer and output must appear together",
+				"artifact producer, execution, and output must appear together",
 			);
 		}
 		const content = canonicalArtifactJson(value);
@@ -215,6 +220,7 @@ export class WorkflowArtifactStore {
 						? {}
 						: {
 								producerTaskId: metadata.producerTaskId,
+								producerExecutionId: metadata.producerExecutionId,
 								output: metadata.output,
 							}),
 					sha256: digest,
@@ -289,6 +295,7 @@ export class WorkflowArtifactStore {
 						? {}
 						: {
 								producerTaskId: ref.producerTaskId,
+								producerExecutionId: ref.producerExecutionId,
 								output: ref.output,
 							}),
 					schemaSha256: ref.schemaSha256,
