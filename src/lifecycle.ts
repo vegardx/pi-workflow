@@ -24,6 +24,7 @@ const RUN_TRANSITIONS: Readonly<
 		"completed",
 		"completed-degraded",
 		"failed",
+		"interrupted",
 		"cleanup-blocked",
 	]),
 	stopping: new Set(["cancelled", "failed", "cleanup-blocked"]),
@@ -80,7 +81,12 @@ const TASK_TRANSITIONS: Readonly<
 	failed: new Set(["running", "invalidated"]),
 	interrupted: new Set(["running", "cancelling", "invalidated"]),
 	blocked: new Set(["pending", "ready", "cancelled", "invalidated"]),
-	cancelling: new Set(["cancelled", "failed", "cleanup-blocked"]),
+	cancelling: new Set([
+		"cancelled",
+		"failed",
+		"interrupted",
+		"cleanup-blocked",
+	]),
 	cancelled: new Set(["invalidated"]),
 	"cleanup-blocked": new Set([
 		"completed",

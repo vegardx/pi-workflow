@@ -242,6 +242,11 @@ const TaskAttemptFailureRetrySchema = Type.Union([
 	Type.Literal("resume"),
 ]);
 
+const TaskAttemptOriginSchema = Type.Union([
+	Type.Literal("policy"),
+	Type.Literal("operator"),
+]);
+
 const TaskExecutionAttemptIntendedEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-attempt-intended"),
@@ -254,6 +259,8 @@ const TaskExecutionAttemptIntendedEventSchema = Type.Object(
 				previousAttemptId: SubagentAttemptIdSchema,
 				failureCode: Type.String({ minLength: 1, maxLength: 128 }),
 				failureRetry: TaskAttemptFailureRetrySchema,
+				origin: TaskAttemptOriginSchema,
+				reason: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
 			},
 			{ additionalProperties: false },
 		),
@@ -686,6 +693,8 @@ const SequencedAttemptSchema = Type.Object(
 		kind: TaskAttemptKindSchema,
 		ordinal: TaskAttemptOrdinalSchema,
 		previousAttemptId: SubagentAttemptIdSchema,
+		origin: TaskAttemptOriginSchema,
+		reason: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
 		subagentAttemptId: Type.Optional(SubagentAttemptIdSchema),
 		status: Type.Optional(SubagentRunStatusSchema),
 		intentSequence: Type.Integer({ minimum: 1 }),

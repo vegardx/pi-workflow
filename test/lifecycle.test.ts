@@ -37,6 +37,15 @@ describe("workflow lifecycle", () => {
 		);
 	});
 
+	it("lets interrupted children settle without release", () => {
+		expect(transitionWorkflowTaskStatus("cancelling", "interrupted")).toBe(
+			"interrupted",
+		);
+		expect(transitionWorkflowRunStatus("finalizing", "interrupted")).toBe(
+			"interrupted",
+		);
+	});
+
 	it("allows completed tasks to be invalidated but not restarted directly", () => {
 		expect(transitionWorkflowTaskStatus("completed", "invalidated")).toBe(
 			"invalidated",

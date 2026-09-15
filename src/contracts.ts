@@ -16,7 +16,7 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 15 as const;
+export const WORKFLOW_CONTRACT_REVISION = 16 as const;
 /** Generations per task: the initial execution plus re-executions after invalidation. */
 export const MAX_TASK_EXECUTION_GENERATIONS = 16;
 // Initial attempt plus up to 10 retries and up to 10 resumes (pi-subagent caps).
@@ -156,6 +156,12 @@ export const TaskDispositionSchema = Type.Union([
 	Type.Literal("optional"),
 ]);
 export type TaskDisposition = Static<typeof TaskDispositionSchema>;
+
+export const TaskRoleSchema = Type.Union([
+	Type.Literal("task"),
+	Type.Literal("finalizer"),
+]);
+export type TaskRole = Static<typeof TaskRoleSchema>;
 
 export const ReplayPolicySchema = Type.Union([
 	Type.Literal("auto"),
@@ -364,6 +370,7 @@ export const AgentTaskSpecSchema = Type.Object(
 	{
 		key: TaskKeySchema,
 		kind: Type.Literal("agent"),
+		role: TaskRoleSchema,
 		disposition: TaskDispositionSchema,
 		after: Type.Array(TaskRefSchema, {
 			maxItems: 256,
@@ -382,6 +389,7 @@ export const SupportTaskSpecSchema = Type.Object(
 	{
 		key: TaskKeySchema,
 		kind: Type.Literal("support"),
+		role: TaskRoleSchema,
 		disposition: TaskDispositionSchema,
 		after: Type.Array(TaskRefSchema, {
 			maxItems: 256,
@@ -400,6 +408,7 @@ export const NestedWorkflowTaskSpecSchema = Type.Object(
 	{
 		key: TaskKeySchema,
 		kind: Type.Literal("workflow"),
+		role: TaskRoleSchema,
 		disposition: TaskDispositionSchema,
 		after: Type.Array(TaskRefSchema, {
 			maxItems: 256,
@@ -680,6 +689,8 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				resumeAttempts: Type.Boolean(),
 				executionGenerations: Type.Boolean(),
 				transactionalInvalidation: Type.Boolean(),
+				finalizers: Type.Boolean(),
+				operatorAttempts: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -741,6 +752,8 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			resumeAttempts: true,
 			executionGenerations: true,
 			transactionalInvalidation: true,
+			finalizers: true,
+			operatorAttempts: true,
 		}),
 	},
 );

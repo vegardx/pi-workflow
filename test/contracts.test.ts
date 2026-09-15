@@ -52,6 +52,7 @@ function agentTaskSpec() {
 	return {
 		key: "answer",
 		kind: "agent" as const,
+		role: "task" as const,
 		disposition: "required" as const,
 		after: [],
 		inputs: {},
@@ -88,6 +89,7 @@ function nestedTaskSpec() {
 	return {
 		key: "child",
 		kind: "workflow" as const,
+		role: "task" as const,
 		disposition: "required" as const,
 		after: [],
 		inputs: {},
@@ -128,9 +130,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 15 and rejects revision 14 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(15);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(15);
+	it("publishes revision 16 and rejects revision 15 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(16);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(16);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -138,9 +140,11 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation).toBe(
 			true,
 		);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.finalizers).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 15,
+			contractRevision: 16,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -155,12 +159,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 14,
+				contractRevision: 15,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 15,
+			contractRevision: 16,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -184,7 +188,7 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 14,
+				contractRevision: 15,
 			}),
 		).toBe(false);
 	});
@@ -198,6 +202,8 @@ describe("workflow contracts", () => {
 			"resumeAttempts",
 			"executionGenerations",
 			"transactionalInvalidation",
+			"finalizers",
+			"operatorAttempts",
 		] as const) {
 			expect(
 				isWorkflowRuntimeContract({
