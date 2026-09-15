@@ -750,20 +750,22 @@ describe("operator resume", () => {
 				availableActions: ["wait"],
 				requiresAttention: false,
 			});
+			// The refusal names what is pending: the operator's resume, not
+			// invalidated work (none exists on this run).
 			await expectServiceError(
 				service.resume(runId, REASON),
 				"validation",
-				"Workflow run already awaits recovery of invalidated work.",
+				"Workflow run already awaits recovery of an operator resume.",
 			);
 			await expectServiceError(
 				service.retry(runId, taskId, REASON),
 				"validation",
-				"Workflow run already awaits recovery of invalidated work.",
+				"Workflow run already awaits recovery of an operator resume.",
 			);
 			await expectServiceError(
 				service.invalidate(runId, taskId, REASON),
 				"validation",
-				"Workflow run already awaits recovery of invalidated work.",
+				"Workflow run already awaits recovery of an operator resume.",
 			);
 			const untouched = await journalEvents(fixture.storeRoot, runId);
 			expect(countOf(untouched, "task-execution-attempt-intended")).toBe(1);

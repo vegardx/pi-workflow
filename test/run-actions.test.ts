@@ -1048,7 +1048,9 @@ function invalidateRefusal(state: WorkflowRunActionFacts): string | undefined {
 		return "Nested workflow runs are invalidated through their parent run.";
 	}
 	if (state.awaitsRecovery) {
-		return "Workflow run already awaits recovery of invalidated work.";
+		// The service names the pending recovery (invalidated work or an
+		// operator resume); the facts only carry that one is pending.
+		return "Workflow run already awaits recovery.";
 	}
 	if (state.deadlinePassed) return "Workflow run deadline has passed.";
 	return undefined;
@@ -1105,7 +1107,9 @@ function resumeRefusalOf(state: WorkflowRunActionFacts): string | undefined {
 		return "Nested workflow runs are resumed through their parent run.";
 	}
 	if (state.awaitsRecovery) {
-		return "Workflow run already awaits recovery of invalidated work.";
+		// The service names the pending recovery (invalidated work or an
+		// operator resume); the facts only carry that one is pending.
+		return "Workflow run already awaits recovery.";
 	}
 	if (state.deadlinePassed) return "Workflow run deadline has passed.";
 	if (state.resumableTaskCount === 0) {
