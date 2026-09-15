@@ -3,7 +3,10 @@ import {
 	type WorkflowRunStatus,
 	type WorkflowTaskId,
 } from "./contracts.js";
-import type { WorkflowStateProjection } from "./events.js";
+import type {
+	WorkflowStateProjection,
+	WorkflowTaskProjection,
+} from "./events.js";
 import { invalidationClosure } from "./reducer.js";
 
 export const WORKFLOW_RUN_ACTIONS = Object.freeze([
@@ -19,11 +22,21 @@ export type WorkflowRunAction = (typeof WORKFLOW_RUN_ACTIONS)[number];
 
 /**
  * Actions whose service method exists in this build; the emission gate for
- * `availableWorkflowRunActions`. Part 2 adds "retry" and "resume"; "decide"
- * waits for checkpoints.
+ * `availableWorkflowRunActions`. "decide" waits for checkpoints.
  */
 export const IMPLEMENTED_WORKFLOW_RUN_ACTIONS: ReadonlySet<WorkflowRunAction> =
-	new Set<WorkflowRunAction>(["stop", "wait", "reconcile", "invalidate"]);
+	new Set<WorkflowRunAction>([
+		"stop",
+		"wait",
+		"reconcile",
+		"invalidate",
+		"retry",
+		"resume",
+	]);
+
+/** Fixed reason of the `interrupted -> running` transition an operator resume appends. */
+export const OPERATOR_RESUME_REASON =
+	"Operator resume re-attempts the interrupted task.";
 
 export type WorkflowRunOwnership = "owned" | "leased-elsewhere" | "inactive";
 
@@ -44,30 +57,97 @@ export function admitsInvalidation(status: WorkflowRunStatus): boolean {
 	return status === "failed" || status === "interrupted";
 }
 
-type RecoveryTask = { readonly status: string; readonly abandoned?: true };
-
-/**
- * A durably failed or interrupted run whose on-path work was invalidated is
- * not final: the next drive performs the explicit recovery. Structural so a
- * run view (`tasks` array) and a state projection (`tasks` record) both
- * satisfy it.
- */
-export function awaitsRecovery(run: {
+type RecoveryTask = {
+	readonly status: string;
+	readonly abandoned?: true;
+	readonly currentExecutionId?: string;
+};
+type RecoveryAttempt = {
+	readonly origin?: string;
+	readonly receiptSequence?: number;
+	readonly declinedSequence?: number;
+};
+type RecoveryExecution = {
+	readonly phase: string;
+	readonly attempts?: readonly RecoveryAttempt[];
+};
+type RecoveryRun = {
 	readonly status: WorkflowRunStatus;
 	readonly tasks?:
 		| Iterable<RecoveryTask>
 		| Readonly<Record<string, RecoveryTask>>;
-}): boolean {
-	if (run.status !== "failed" && run.status !== "interrupted") return false;
+	/** Present on a state projection; a run view carries no executions. */
+	readonly executions?: Readonly<Record<string, RecoveryExecution>>;
+};
+
+function recoveryTasks(run: RecoveryRun): Iterable<RecoveryTask> {
 	const tasks = run.tasks ?? [];
-	const entries: Iterable<RecoveryTask> =
-		Symbol.iterator in tasks
-			? (tasks as Iterable<RecoveryTask>)
-			: Object.values(tasks as Readonly<Record<string, RecoveryTask>>);
-	for (const task of entries) {
-		if (task.status === "invalidated" && task.abandoned !== true) return true;
+	return Symbol.iterator in tasks
+		? (tasks as Iterable<RecoveryTask>)
+		: Object.values(tasks as Readonly<Record<string, RecoveryTask>>);
+}
+
+/**
+ * An on-path task whose current execution holds an operator resume intent
+ * that is neither receipted nor declined. The reducer admits
+ * `interrupted -> running` on this evidence exactly as it does on invalidated
+ * work, so the next drive performs the operator's attempt.
+ */
+export function hasOpenOperatorIntent(run: RecoveryRun): boolean {
+	const executions = run.executions;
+	if (!executions) return false;
+	for (const task of recoveryTasks(run)) {
+		if (task.abandoned === true || task.currentExecutionId === undefined) {
+			continue;
+		}
+		const execution = executions[task.currentExecutionId];
+		const open = execution?.attempts?.at(-1);
+		if (
+			execution?.phase === "attempt-intended" &&
+			open?.origin === "operator" &&
+			open.receiptSequence === undefined &&
+			open.declinedSequence === undefined
+		) {
+			return true;
+		}
 	}
 	return false;
+}
+
+/**
+ * A durably failed or interrupted run whose on-path work was invalidated, or
+ * whose interrupted task carries an open operator resume intent, is not
+ * final: the next drive performs the explicit recovery. Structural so a run
+ * view (`tasks` array) and a state projection (`tasks` record) both satisfy
+ * it; only the projection can expose an open operator intent.
+ */
+export function awaitsRecovery(run: RecoveryRun): boolean {
+	if (run.status !== "failed" && run.status !== "interrupted") return false;
+	for (const task of recoveryTasks(run)) {
+		if (task.status === "invalidated" && task.abandoned !== true) return true;
+	}
+	return run.status === "interrupted" && hasOpenOperatorIntent(run);
+}
+
+/**
+ * An interrupted task whose current execution an operator resume reopened
+ * and that has not re-terminalized: the attempt is intended, receipted and
+ * running, or declined and awaiting the finalizer. Every other interrupted
+ * task holds terminal evidence.
+ */
+export function isReopenedTask(
+	state: Pick<WorkflowStateProjection, "executions">,
+	task: WorkflowTaskProjection,
+): boolean {
+	if (
+		task.status !== "interrupted" ||
+		task.abandoned === true ||
+		task.currentExecutionId === undefined
+	) {
+		return false;
+	}
+	const execution = state.executions[task.currentExecutionId];
+	return execution !== undefined && execution.phase !== "terminal";
 }
 
 export function deadlinePassed(deadlineAt: string, now: number): boolean {

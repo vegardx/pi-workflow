@@ -430,10 +430,22 @@ export const WorkflowBudgetViewSchema = Type.Object(
 );
 export type WorkflowBudgetView = View<typeof WorkflowBudgetViewSchema>;
 
+export const WorkflowResumeOptionsSchema = Type.Object(
+	{ taskId: Type.Optional(WorkflowTaskIdSchema) },
+	{ additionalProperties: false },
+);
+export type WorkflowResumeOptions = View<typeof WorkflowResumeOptionsSchema>;
+
 export const WorkflowExecutionAttemptViewSchema = Type.Object(
 	{
 		kind: Type.Union([Type.Literal("retry"), Type.Literal("resume")]),
 		ordinal: Type.Integer({ minimum: 2 }),
+		/** Who intended the attempt: the authored policy or an operator. */
+		origin: Type.Optional(
+			Type.Union([Type.Literal("policy"), Type.Literal("operator")]),
+		),
+		/** Operator-authored reason journaled with an operator intent. */
+		reason: Type.Optional(FixedStringSchema),
 		status: Type.Optional(SubagentRunStatusSchema),
 		subagentAttemptId: Type.Optional(Type.String({ minLength: 1 })),
 		state: Type.Union([

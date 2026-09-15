@@ -2352,7 +2352,13 @@ function applyEvent(
 				const childStatus =
 					execution?.observation?.status ??
 					(execution ? currentSubagentAttempt(execution)?.status : undefined);
-				if (!execution || childStatus !== "active") {
+				// An operator-reopened interrupted task has no `waiting` transition,
+				// so a queued re-attempt receipt reactivates it as running too.
+				const reattempted =
+					input.data.from === "interrupted" &&
+					execution?.phase === "launched" &&
+					childStatus === "queued";
+				if (!execution || (childStatus !== "active" && !reattempted)) {
 					fail(
 						"task became running without an active execution",
 						event.sequence,

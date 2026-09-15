@@ -8,7 +8,10 @@ import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
 import { Value } from "typebox/value";
 import { WorkflowArtifactStore } from "./artifact-store.js";
-import { currentSubagentAttempt } from "./attempts.js";
+import {
+	currentSubagentAttempt,
+	currentSubagentAttemptId,
+} from "./attempts.js";
 import { settledWorkflowUsage } from "./budget.js";
 import {
 	MAX_WORKFLOW_CONCURRENCY,
@@ -66,6 +69,10 @@ import {
 	deadlinePassed,
 	isNestedRun,
 	isTerminalWorkflowRunStatus,
+	OPERATOR_RESUME_REASON,
+	resumableTasks,
+	resumeRefusal,
+	retryableTasks,
 	type WorkflowRunOwnership,
 } from "./run-actions.js";
 import {
@@ -96,6 +103,8 @@ import {
 	type WorkflowLogPage,
 	type WorkflowReconciledExecution,
 	type WorkflowReconcileOptions,
+	type WorkflowResumeOptions,
+	WorkflowResumeOptionsSchema,
 	type WorkflowRunInspection,
 	type WorkflowRunListIssue,
 	type WorkflowRunObservation,
@@ -209,6 +218,27 @@ export interface WorkflowService {
 		runId: WorkflowRunId,
 		taskId: string,
 	): Promise<WorkflowServiceHandoffExport>;
+	/**
+	 * Invalidation restricted to a cause task whose current execution ended
+	 * failed or interrupted: the task and its dependents re-execute as new
+	 * generations and the drive restarts.
+	 */
+	retry(
+		runId: WorkflowRunId,
+		taskId: WorkflowTaskId,
+		reason: string,
+	): Promise<WorkflowServiceRunView>;
+	/**
+	 * Re-attempts an interrupted agent task on its existing subagent run
+	 * without invalidating dependents: journals an operator resume intent,
+	 * reopens the interrupted run, and restarts the drive that performs it.
+	 * Without `taskId` the run's single resumable task is selected.
+	 */
+	resume(
+		runId: WorkflowRunId,
+		reason: string,
+		options?: WorkflowResumeOptions,
+	): Promise<WorkflowServiceRunView>;
 	shutdown(): Promise<void>;
 	/** Lease-free scan of every durable run in the store, newest first. */
 	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
@@ -336,7 +366,7 @@ function runId(): WorkflowRunId {
  * reducer's own message. The journal wraps reducer failures as the cause of an
  * invariant error, so that wrapper is unwrapped first.
  */
-function invalidationRejection(error: unknown): WorkflowServiceError {
+function reducerRejection(error: unknown): WorkflowServiceError {
 	const cause =
 		error instanceof Error && error.cause instanceof WorkflowEventReductionError
 			? error.cause
@@ -346,9 +376,48 @@ function invalidationRejection(error: unknown): WorkflowServiceError {
 	}
 	return new WorkflowServiceError(
 		"validation",
-		"Workflow invalidation was rejected.",
+		"Workflow operator action was rejected.",
 		{ cause },
 	);
+}
+
+/** Appends an operator event and surfaces a reducer refusal as validation. */
+async function appendOperatorEvent(
+	journal: WorkflowRunJournal,
+	input: Parameters<WorkflowRunJournal["appendEvent"]>[0],
+): Promise<void> {
+	try {
+		await journal.appendEvent(input);
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			error.cause instanceof WorkflowEventReductionError
+		) {
+			throw reducerRejection(error);
+		}
+		throw error;
+	}
+}
+
+function assertReason(
+	reason: unknown,
+	message: string,
+): asserts reason is string {
+	if (typeof reason !== "string" || reason.length < 1 || reason.length > 4096) {
+		throw new WorkflowServiceError("validation", message);
+	}
+}
+
+function assertRunId(runIdValue: unknown): asserts runIdValue is WorkflowRunId {
+	if (!Value.Check(WorkflowRunIdSchema, runIdValue)) {
+		throw new WorkflowServiceError("validation", "Invalid workflow run ID.");
+	}
+}
+
+function assertTaskId(taskId: unknown): asserts taskId is WorkflowTaskId {
+	if (!Value.Check(WorkflowTaskIdSchema, taskId)) {
+		throw new WorkflowServiceError("validation", "Invalid workflow task ID.");
+	}
 }
 
 export async function createWorkflowService(
@@ -784,7 +853,19 @@ export async function createWorkflowService(
 		artifacts?: WorkflowArtifactStore,
 	): Promise<WorkflowServiceRunView> {
 		const events = await journal.readEvents();
-		if (events.length === 0) {
+		return viewFromState(
+			record,
+			events.length === 0 ? undefined : reduceWorkflowEvents(events),
+			artifacts,
+		);
+	}
+
+	async function viewFromState(
+		record: WorkflowRunRecord,
+		state: WorkflowStateProjection | undefined,
+		artifacts?: WorkflowArtifactStore,
+	): Promise<WorkflowServiceRunView> {
+		if (state === undefined) {
 			return Object.freeze({
 				runId: record.runId,
 				status: "created" as const,
@@ -795,7 +876,6 @@ export async function createWorkflowService(
 				...lineageOf(record),
 			});
 		}
-		const state = reduceWorkflowEvents(events);
 		let output: unknown;
 		if (state.outputArtifactId && artifacts) {
 			const artifact = state.artifacts[state.outputArtifactId];
@@ -1171,20 +1251,42 @@ export async function createWorkflowService(
 	async function statusCurrent(
 		runIdValue: WorkflowRunId,
 	): Promise<WorkflowServiceRunView> {
-		if (!Value.Check(WorkflowRunIdSchema, runIdValue)) {
-			throw new WorkflowServiceError("validation", "Invalid workflow run ID.");
-		}
+		return (await snapshotCurrent(runIdValue)).view;
+	}
+
+	/**
+	 * The run view together with the state it was projected from; operator
+	 * preconditions read recovery evidence (invalidated work, open operator
+	 * intents) from the state, which the lean view does not carry.
+	 */
+	async function snapshotCurrent(runIdValue: WorkflowRunId): Promise<{
+		view: WorkflowServiceRunView;
+		state: WorkflowStateProjection | undefined;
+	}> {
+		assertRunId(runIdValue);
 		const current = owned.get(runIdValue);
 		if (current) {
-			if (current.settled && current.view) return current.view;
-			return viewFrom(current.record, current.journal, current.artifacts);
+			const events = await current.journal.readEvents();
+			const state =
+				events.length === 0 ? undefined : reduceWorkflowEvents(events);
+			const view =
+				current.settled && current.view
+					? current.view
+					: await viewFromState(current.record, state, current.artifacts);
+			return { view, state };
 		}
 		const opened = await openInactive(runIdValue);
 		try {
 			const artifacts = await WorkflowArtifactStore.open({
 				journal: opened.journal,
 			});
-			return await viewFrom(opened.record, opened.journal, artifacts);
+			const events = await opened.journal.readEvents();
+			const state =
+				events.length === 0 ? undefined : reduceWorkflowEvents(events);
+			return {
+				view: await viewFromState(opened.record, state, artifacts),
+				state,
+			};
 		} finally {
 			await opened.lease.release();
 		}
@@ -1302,12 +1404,12 @@ export async function createWorkflowService(
 			}
 			let run = owned.get(runIdValue);
 			if (!run) {
-				const current = await statusCurrent(runIdValue);
+				const { view, state } = await snapshotCurrent(runIdValue);
 				if (
-					isTerminalWorkflowRunStatus(current.status) &&
-					!awaitsRecovery(current)
+					isTerminalWorkflowRunStatus(view.status) &&
+					!(state !== undefined && awaitsRecovery(state))
 				) {
-					return current;
+					return view;
 				}
 				run = await resume(runIdValue);
 			}
@@ -1355,29 +1457,49 @@ export async function createWorkflowService(
 		invalidate(runIdValue: WorkflowRunId, causeTaskId: string, reason: string) {
 			return exclusive(async () => {
 				assertOpen();
-				if (!Value.Check(WorkflowRunIdSchema, runIdValue)) {
-					throw new WorkflowServiceError(
-						"validation",
-						"Invalid workflow run ID.",
-					);
-				}
-				if (!Value.Check(WorkflowTaskIdSchema, causeTaskId)) {
+				assertRunId(runIdValue);
+				assertTaskId(causeTaskId);
+				assertReason(reason, "Invalid workflow invalidation reason.");
+				return invalidateCurrent(runIdValue, causeTaskId, reason);
+			});
+		},
+		retry(runIdValue: WorkflowRunId, taskId: WorkflowTaskId, reason: string) {
+			return exclusive(async () => {
+				assertOpen();
+				assertRunId(runIdValue);
+				assertTaskId(taskId);
+				assertReason(reason, "Invalid workflow retry reason.");
+				return invalidateCurrent(runIdValue, taskId, reason, (state) => {
+					if (!retryableTasks(state).includes(taskId)) {
+						throw new WorkflowServiceError(
+							"validation",
+							"Workflow retry requires a failed or interrupted task.",
+						);
+					}
+				});
+			});
+		},
+		resume(
+			runIdValue: WorkflowRunId,
+			reason: string,
+			options: WorkflowResumeOptions = {},
+		) {
+			return exclusive(async () => {
+				assertOpen();
+				assertRunId(runIdValue);
+				assertReason(reason, "Invalid workflow resume reason.");
+				if (
+					!Value.Check(WorkflowResumeOptionsSchema, options) ||
+					(options.taskId !== undefined &&
+						!Value.Check(WorkflowTaskIdSchema, options.taskId))
+				) {
 					throw new WorkflowServiceError(
 						"validation",
 						"Invalid workflow task ID.",
 					);
 				}
-				if (
-					typeof reason !== "string" ||
-					reason.length < 1 ||
-					reason.length > 4096
-				) {
-					throw new WorkflowServiceError(
-						"validation",
-						"Invalid workflow invalidation reason.",
-					);
-				}
-				const current = await statusCurrent(runIdValue);
+				const { view: current, state: durable } =
+					await snapshotCurrent(runIdValue);
 				const active = owned.get(runIdValue);
 				if (active && !active.settled) {
 					throw new WorkflowServiceError(
@@ -1385,79 +1507,107 @@ export async function createWorkflowService(
 						"Workflow run is still being driven.",
 					);
 				}
-				if (!admitsInvalidation(current.status)) {
-					throw new WorkflowServiceError(
+				const refuseStatus = () =>
+					new WorkflowServiceError(
 						"validation",
-						"Workflow run status does not admit invalidation.",
+						"Workflow run status does not admit resume.",
 					);
-				}
+				if (current.status !== "interrupted") throw refuseStatus();
 				if (isNestedRun(current)) {
 					throw new WorkflowServiceError(
 						"validation",
-						"Nested workflow runs are invalidated through their parent run.",
+						"Nested workflow runs are resumed through their parent run.",
 					);
 				}
-				if (awaitsRecovery(current)) {
+				if (durable !== undefined && awaitsRecovery(durable)) {
 					throw new WorkflowServiceError(
 						"validation",
 						"Workflow run already awaits recovery of invalidated work.",
 					);
 				}
-				// Checked before the run is composed: resuming an expired run starts
-				// a drive that immediately stops on its deadline and cancels the run,
-				// consuming the only recovery path the operator has left.
+				// Checked before the run is composed, as invalidate does: resuming
+				// an expired run would only let its deadline cancel it.
 				if (deadlinePassed(current.deadlineAt, Date.now())) {
 					throw new WorkflowServiceError(
 						"validation",
 						"Workflow run deadline has passed.",
 					);
 				}
-				// A settled owned run still holds its lease, so it is reused rather
-				// than resumed; an inactive run is composed, and its initial drive of
-				// a failed or interrupted run settles before anything is appended.
 				const run = active ?? (await resume(runIdValue));
 				await run.drive;
 				const state = reduceWorkflowEvents(await run.journal.readEvents());
-				if (!admitsInvalidation(state.status)) {
+				if (state.status !== "interrupted") throw refuseStatus();
+				let taskId: WorkflowTaskId;
+				if (options.taskId === undefined) {
+					const candidates = resumableTasks(state);
+					if (candidates.length === 0) {
+						throw new WorkflowServiceError(
+							"validation",
+							"Workflow run has no resumable task.",
+						);
+					}
+					if (candidates.length > 1) {
+						throw new WorkflowServiceError(
+							"validation",
+							"Workflow run has multiple resumable tasks; specify taskId.",
+						);
+					}
+					taskId = candidates[0] as WorkflowTaskId;
+				} else {
+					taskId = options.taskId;
+					let refusal: string | undefined;
+					try {
+						refusal = resumeRefusal(state, taskId);
+					} catch (error) {
+						throw reducerRejection(error);
+					}
+					if (refusal !== undefined) {
+						throw new WorkflowServiceError("validation", refusal);
+					}
+				}
+				const task = state.tasks[taskId];
+				const execution = task?.currentExecutionId
+					? state.executions[task.currentExecutionId]
+					: undefined;
+				const failure = execution?.settlement?.evidence.failure;
+				const previousAttemptId = execution
+					? currentSubagentAttemptId(execution)
+					: undefined;
+				const subagentRunId = execution?.launchReceipt?.subagentRunId;
+				if (
+					!execution ||
+					!failure ||
+					previousAttemptId === undefined ||
+					subagentRunId === undefined
+				) {
 					throw new WorkflowServiceError(
 						"validation",
-						"Workflow run status does not admit invalidation.",
+						"Workflow resume requires an interrupted task with a resumable failure.",
 					);
 				}
-				let closure: WorkflowInvalidationClosure;
-				try {
-					closure = invalidationClosure(state, causeTaskId);
-				} catch (error) {
-					throw invalidationRejection(error);
-				}
-				try {
-					await run.journal.appendEvent({
-						type: "task-invalidated",
-						data: {
-							causeTaskId,
-							taskIds: closure.taskIds,
-							abandonedEpochs: closure.abandonedEpochs,
-							reason,
-						},
-					});
-				} catch (error) {
-					if (
-						error instanceof Error &&
-						error.cause instanceof WorkflowEventReductionError
-					) {
-						throw invalidationRejection(error);
-					}
-					throw error;
-				}
-				// The recovery transition is appended here so the returned view is
-				// already running; a crash before it is repaired by the runtime,
-				// which performs the same transition when it finds invalidated work.
-				await run.journal.appendEvent({
+				// The intent is durable before the run reopens: a crash here leaves
+				// an open operator intent, and the next drive performs the same
+				// `interrupted -> running` transition before attempting it.
+				await appendOperatorEvent(run.journal, {
+					type: "task-execution-attempt-intended",
+					data: {
+						executionId: execution.execution.id,
+						subagentRunId,
+						kind: "resume",
+						ordinal: 2 + (execution.attempts?.length ?? 0),
+						previousAttemptId,
+						failureCode: failure.code,
+						failureRetry: "resume",
+						origin: "operator",
+						reason,
+					},
+				});
+				await appendOperatorEvent(run.journal, {
 					type: "run-status-changed",
 					data: {
-						from: state.status,
+						from: "interrupted",
 						to: "running",
-						reason: "Explicit invalidation re-executes invalidated tasks.",
+						reason: OPERATOR_RESUME_REASON,
 					},
 				});
 				// The restarted drive is not awaited here; wait() observes it.
@@ -1918,6 +2068,97 @@ export async function createWorkflowService(
 			ownership: await ownershipOf(runIdValue),
 			driving: false,
 		};
+	}
+
+	/**
+	 * The shared invalidation flow behind `invalidate` and `retry`: the
+	 * precondition block in its normative order, the drive settle, `guard` on
+	 * the reduced state, then the closure, `task-invalidated`, the recovery
+	 * transition, and the restarted drive.
+	 */
+	async function invalidateCurrent(
+		runIdValue: WorkflowRunId,
+		causeTaskId: WorkflowTaskId,
+		reason: string,
+		guard?: (state: WorkflowStateProjection) => void,
+	): Promise<WorkflowServiceRunView> {
+		const { view: current, state: durable } = await snapshotCurrent(runIdValue);
+		const active = owned.get(runIdValue);
+		if (active && !active.settled) {
+			throw new WorkflowServiceError(
+				"conflict",
+				"Workflow run is still being driven.",
+			);
+		}
+		if (!admitsInvalidation(current.status)) {
+			throw new WorkflowServiceError(
+				"validation",
+				"Workflow run status does not admit invalidation.",
+			);
+		}
+		if (isNestedRun(current)) {
+			throw new WorkflowServiceError(
+				"validation",
+				"Nested workflow runs are invalidated through their parent run.",
+			);
+		}
+		if (durable !== undefined && awaitsRecovery(durable)) {
+			throw new WorkflowServiceError(
+				"validation",
+				"Workflow run already awaits recovery of invalidated work.",
+			);
+		}
+		// Checked before the run is composed: resuming an expired run starts
+		// a drive that immediately stops on its deadline and cancels the run,
+		// consuming the only recovery path the operator has left.
+		if (deadlinePassed(current.deadlineAt, Date.now())) {
+			throw new WorkflowServiceError(
+				"validation",
+				"Workflow run deadline has passed.",
+			);
+		}
+		// A settled owned run still holds its lease, so it is reused rather
+		// than resumed; an inactive run is composed, and its initial drive of
+		// a failed or interrupted run settles before anything is appended.
+		const run = active ?? (await resume(runIdValue));
+		await run.drive;
+		const state = reduceWorkflowEvents(await run.journal.readEvents());
+		if (!admitsInvalidation(state.status)) {
+			throw new WorkflowServiceError(
+				"validation",
+				"Workflow run status does not admit invalidation.",
+			);
+		}
+		guard?.(state);
+		let closure: WorkflowInvalidationClosure;
+		try {
+			closure = invalidationClosure(state, causeTaskId);
+		} catch (error) {
+			throw reducerRejection(error);
+		}
+		await appendOperatorEvent(run.journal, {
+			type: "task-invalidated",
+			data: {
+				causeTaskId,
+				taskIds: closure.taskIds,
+				abandonedEpochs: closure.abandonedEpochs,
+				reason,
+			},
+		});
+		// The recovery transition is appended here so the returned view is
+		// already running; a crash before it is repaired by the runtime,
+		// which performs the same transition when it finds invalidated work.
+		await appendOperatorEvent(run.journal, {
+			type: "run-status-changed",
+			data: {
+				from: state.status,
+				to: "running",
+				reason: "Explicit invalidation re-executes invalidated tasks.",
+			},
+		});
+		// The restarted drive is not awaited here; wait() observes it.
+		void run.restart();
+		return statusCurrent(runIdValue);
 	}
 
 	function reconcileSide(

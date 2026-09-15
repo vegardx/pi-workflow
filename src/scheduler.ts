@@ -40,6 +40,7 @@ import {
 } from "./nested-run-executor.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { reduceWorkflowEvents } from "./reducer.js";
+import { isReopenedTask, OPERATOR_RESUME_REASON } from "./run-actions.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 import type { SupportTaskRegistration } from "./support.js";
 import {
@@ -459,6 +460,21 @@ export function createWorkflowSequentialScheduler(
 		receipt: RunReceipt,
 	): Promise<void> {
 		if (task.status === "cancelling") return;
+		// An interrupted task an operator reopened re-enters `running` on its
+		// re-attempt receipt; `interrupted -> waiting` is not a task transition,
+		// so a queued re-attempt also runs (the reducer admits it).
+		if (task.status === "interrupted") {
+			if (receipt.status === "active" || receipt.status === "queued") {
+				await changeTask(
+					task.task.id,
+					"interrupted",
+					"running",
+					OPERATOR_RESUME_REASON,
+				);
+				return;
+			}
+			if (receipt.status !== "stopping") return;
+		}
 		if (receipt.status === "active") {
 			if (task.status !== "running") {
 				await changeTask(
@@ -602,6 +618,10 @@ export function createWorkflowSequentialScheduler(
 		current: WorkflowStateProjection,
 		task: WorkflowTaskProjection,
 	): boolean {
+		// An operator-reopened interrupted task is live work: its open intent
+		// is performed, its receipted re-attempt awaited, or its declined
+		// intent finalized, exactly like a settled task in an active status.
+		if (isReopenedTask(current, task)) return true;
 		if (!ACTIVE_TASK_STATUSES.has(task.status)) return false;
 		if (isSupportTask(task)) return task.status === "running";
 		if (isNestedTask(task)) {
@@ -1118,6 +1138,23 @@ export function createWorkflowSequentialScheduler(
 	}
 
 	/**
+	 * An operator resume receipt reactivates the interrupted task so its
+	 * re-attempt can settle through the ordinary lifecycle; policy attempts
+	 * leave the task in the active status it already holds.
+	 */
+	async function reactivateReopenedTask(
+		taskId: WorkflowTaskId,
+		receipt: RunReceipt,
+	): Promise<void> {
+		await mutate(async () => {
+			const current = await state();
+			const task = current.tasks[taskId];
+			if (task?.status !== "interrupted") return;
+			await normalizeTask(task, receipt);
+		});
+	}
+
+	/**
 	 * After a durable settlement, lets the retrier start a policy attempt.
 	 * A new attempt receipt is waited on like the initial launch; otherwise
 	 * the settled outcome proceeds to finalization.
@@ -1128,6 +1165,7 @@ export function createWorkflowSequentialScheduler(
 	): Promise<WorkflowSchedulerOutcome> {
 		const decision = await retrier.consider(taskId);
 		if (decision.kind === "attempt") {
+			await reactivateReopenedTask(taskId, decision.receipt);
 			return settle(taskId, decision.receipt);
 		}
 		if (settled) return settled;
