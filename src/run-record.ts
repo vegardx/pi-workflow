@@ -13,6 +13,7 @@ import {
 	WORKFLOW_CONTRACT_REVISION,
 	WorkflowBudgetSchema,
 	WorkflowDefinitionNameSchema,
+	type WorkflowRunId,
 	WorkflowRunIdSchema,
 	WorkflowTaskIdSchema,
 } from "./contracts.js";
@@ -219,7 +220,23 @@ export class WorkflowRunRecordStore {
 	}
 
 	async read(): Promise<WorkflowRunRecord> {
-		const content = await readFileNoFollow(this.path);
+		return WorkflowRunRecordStore.readFrom(
+			this.journal.directory,
+			this.journal.runId,
+		);
+	}
+
+	/**
+	 * Lease-free read of `<directory>/service.json` with the same schema,
+	 * limit, lineage, and identity checks as `read()`.
+	 */
+	static async readFrom(
+		directory: string,
+		runId: WorkflowRunId,
+	): Promise<WorkflowRunRecord> {
+		const content = await readFileNoFollow(
+			path.join(directory, "service.json"),
+		);
 		if (!content) {
 			throw new WorkflowRunRecordError("workflow run record is missing");
 		}
@@ -238,7 +255,7 @@ export class WorkflowRunRecordStore {
 		if (
 			!Value.Check(WorkflowRunRecordSchema, value) ||
 			!hasValidLimits(value as WorkflowRunRecord) ||
-			value.runId !== this.journal.runId ||
+			value.runId !== runId ||
 			!path.isAbsolute(value.definitionPath) ||
 			!path.isAbsolute(value.cwd)
 		) {
