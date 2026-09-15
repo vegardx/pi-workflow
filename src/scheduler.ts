@@ -462,7 +462,10 @@ export function createWorkflowSequentialScheduler(
 		if (task.status === "cancelling") return;
 		// An interrupted task an operator reopened re-enters `running` on its
 		// re-attempt receipt; `interrupted -> waiting` is not a task transition,
-		// so a queued re-attempt also runs (the reducer admits it).
+		// so a queued re-attempt also runs (the reducer admits it). A receipt
+		// that is already terminal has no legal task transition from
+		// `interrupted`, so it is refused here with its own message rather than
+		// left for the finalizer to trip over.
 		if (task.status === "interrupted") {
 			if (receipt.status === "active" || receipt.status === "queued") {
 				await changeTask(
@@ -473,7 +476,12 @@ export function createWorkflowSequentialScheduler(
 				);
 				return;
 			}
-			if (receipt.status !== "stopping") return;
+			if (receipt.status !== "stopping") {
+				throw new WorkflowSchedulerError(
+					"observation",
+					`Operator re-attempt receipt is already ${receipt.status}; an interrupted task re-enters running only through an active or queued attempt.`,
+				);
+			}
 		}
 		if (receipt.status === "active") {
 			if (task.status !== "running") {

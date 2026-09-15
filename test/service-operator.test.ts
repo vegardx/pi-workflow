@@ -532,6 +532,55 @@ describe("operator resume", () => {
 		}
 	});
 
+	it("refuses an already-terminal re-attempt receipt with its own message", async () => {
+		const fixture = await operatorFixture();
+		const { service, delegated, runId, taskId } = await interruptedRun(fixture);
+		try {
+			// pi-subagent hands back a receipt for an attempt that has already
+			// ended: no task transition from `interrupted` admits it.
+			vi.mocked(delegated.ownerClient.resume).mockImplementation(
+				async (childRunId: string) => ({
+					runId: childRunId,
+					attemptId: "attempt_alreadydone",
+					status: "completed" as const,
+				}),
+			);
+			await bounded(service.resume(runId, REASON), "resume");
+			const outcome = await bounded(service.wait(runId), "wait").then(
+				(view) => ({ view }),
+				(error: unknown) => ({ error }),
+			);
+			if (!("error" in outcome)) {
+				throw new Error(`wait resolved ${JSON.stringify(outcome.view)}`);
+			}
+			const messages: string[] = [];
+			for (
+				let cause: unknown = outcome.error;
+				cause instanceof Error;
+				cause = cause.cause
+			) {
+				messages.push(`${cause.name}: ${cause.message}`);
+			}
+			expect(messages).toContain(
+				"WorkflowSchedulerError: Operator re-attempt receipt is already completed; an interrupted task re-enters running only through an active or queued attempt.",
+			);
+			expect(messages.join("\n")).not.toMatch(/lifecycle|transition/i);
+
+			// The refusal happened before any task transition: the task is still
+			// interrupted with its receipted attempt, and nothing was finalized.
+			const state = await stateOf(fixture.storeRoot, runId);
+			expect(state.tasks[taskId]?.status).toBe("interrupted");
+			const events = await journalEvents(fixture.storeRoot, runId);
+			expect(countOf(events, "task-execution-attempt-receipted")).toBe(1);
+			expect(
+				taskStatusChanges(events).filter((c) => c.from === "interrupted"),
+			).toEqual([]);
+			expect(countOf(events, "task-execution-terminal")).toBe(1);
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
 	it("validates the run id, reason, and task id before touching the run", async () => {
 		const fixture = await operatorFixture();
 		const { service, runId } = await interruptedRun(fixture);
