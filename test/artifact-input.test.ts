@@ -13,7 +13,10 @@ import {
 } from "../src/artifact-input.js";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
 import type { MaterializedWorkflowTask } from "../src/contracts.js";
-import { deriveJsonValueSha256 } from "../src/execution.js";
+import {
+	deriveJsonValueSha256,
+	deriveTaskExecutionId,
+} from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
 import {
@@ -107,9 +110,15 @@ async function fixture(
 	const producerProjection = projected.tasks[producer.ref.taskId];
 	if (!producerProjection) throw new Error("missing producer projection");
 	const producerSpec = producerProjection.task.spec;
+	const producerExecutionId = deriveTaskExecutionId(
+		"workflow_inputs",
+		producer.ref.taskId,
+		1,
+	);
 	const artifact = await artifacts.putJson(value, {
 		runId: "workflow_inputs",
 		producerTaskId: producer.ref.taskId,
+		producerExecutionId,
 		output: "result",
 		schemaSha256:
 			schemaSha256 ??
@@ -120,6 +129,7 @@ async function fixture(
 			),
 	});
 	producerProjection.status = "completed";
+	producerProjection.currentExecutionId = producerExecutionId;
 	projected.artifacts[artifact.id] = artifact;
 	const consumerProjection = projected.tasks[consumer.ref.taskId];
 	if (!consumerProjection) throw new Error("missing consumer projection");

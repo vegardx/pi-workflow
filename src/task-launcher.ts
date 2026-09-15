@@ -21,6 +21,7 @@ import { currentSubagentAttempt } from "./attempts.js";
 import {
 	type MaterializedAgentTask,
 	type SubagentOperationId,
+	type TaskExecutionGeneration,
 	type TaskExecutionRecord,
 	type WorkflowTaskId,
 	WorkflowTaskIdSchema,
@@ -193,11 +194,24 @@ async function lowerRequest(
 	return request;
 }
 
+/** The next generation for a task: one past every execution persisted for it. */
+function nextGeneration(
+	state: WorkflowStateProjection,
+	taskId: WorkflowTaskId,
+): TaskExecutionGeneration {
+	return (
+		1 +
+		Object.values(state.executions).filter(
+			(execution) => execution.execution.taskId === taskId,
+		).length
+	);
+}
+
 function executionRecord(
 	state: WorkflowStateProjection,
 	task: MaterializedAgentTask,
 ): TaskExecutionRecord {
-	const generation = 1;
+	const generation = nextGeneration(state, task.id);
 	return {
 		kind: "agent",
 		id: deriveTaskExecutionId(state.runId, task.id, generation),

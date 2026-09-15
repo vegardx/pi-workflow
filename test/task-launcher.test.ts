@@ -364,6 +364,7 @@ async function readyJournalWithInput() {
 	const artifact = await artifacts.putJson(structuredOutput, {
 		runId: "workflow_launcher",
 		producerTaskId: producer.ref.taskId,
+		producerExecutionId: executionId,
 		output: "result",
 		schemaSha256: deriveJsonValueSha256(producerTask.spec.request.outputSchema),
 	});

@@ -393,6 +393,7 @@ async function declareByHand(
 	const artifact = await fx.artifacts.putJson(value, {
 		runId: RUN_ID,
 		producerTaskId: taskId,
+		producerExecutionId: deriveTaskExecutionId(RUN_ID, taskId, 1),
 		output: "result",
 		schemaSha256: deriveJsonValueSha256(
 			spec.request.implementation.outputSchema,
