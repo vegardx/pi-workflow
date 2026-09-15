@@ -1405,7 +1405,7 @@ describe("invalidation and re-execution", () => {
 	});
 
 	it("refuses invalidation once the workflow deadline has passed", async () => {
-		const fixture = await attemptWorkflowFixture({ timeoutMs: 3_000 });
+		const fixture = await attemptWorkflowFixture();
 		const { service, delegated, runId, taskId, first } =
 			await settledAttemptRun(fixture, [
 				{ status: "failed", failure: childFailure("manual") },
@@ -1413,8 +1413,7 @@ describe("invalidation and re-execution", () => {
 			]);
 		let resumed: WorkflowService | undefined;
 		try {
-			// The task failed on its own, well inside the deadline: a deadline
-			// stop would have cancelled the run instead.
+			// The task failed on its own, inside the deadline.
 			expect(first.status).toBe("failed");
 			expect(first.tasks?.[0]).toMatchObject({ id: taskId, status: "failed" });
 			const record = JSON.parse(
@@ -1423,13 +1422,13 @@ describe("invalidation and re-execution", () => {
 					"utf8",
 				),
 			) as WorkflowRunRecord;
-			expect(record.effectiveTimeoutMs).toBe(3_000);
 			const deadlineAt = Date.parse(record.deadlineAt);
-			const remaining = deadlineAt - Date.now();
-			await new Promise((resolve) =>
-				setTimeout(resolve, Math.max(remaining, 0) + 50),
-			);
-			expect(deadlineAt).toBeLessThanOrEqual(Date.now());
+			expect(deadlineAt).toBeGreaterThan(Date.now());
+			// Only the wall clock moves past the deadline. Real timers keep the
+			// service, the test bounds, and fsync latency out of the assertion,
+			// so a slow machine cannot turn this into a deadline cancellation.
+			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.setSystemTime(deadlineAt + 1_000);
 
 			// Owned and settled: the deadline is checked before anything is
 			// appended, so the journal never gains a `task-invalidated`.
@@ -1478,6 +1477,7 @@ describe("invalidation and re-execution", () => {
 				bounded(resumed.wait(runId), "resumed wait"),
 			).resolves.toMatchObject({ status: "failed" });
 		} finally {
+			vi.useRealTimers();
 			await shutdownQuietly(service);
 			await shutdownQuietly(resumed);
 		}

@@ -109,6 +109,8 @@ export type WorkflowServiceTaskView = {
 export type WorkflowServiceRunView = WorkflowServiceRunReceipt & {
 	readonly definitionName: string;
 	readonly createdAt: string;
+	/** Absolute deadline fixed at run creation. */
+	readonly deadlineAt: string;
 	readonly depth: number;
 	readonly parent?: {
 		readonly runId: WorkflowRunId;
@@ -735,6 +737,7 @@ export async function createWorkflowService(
 				status: "created" as const,
 				definitionName: record.definitionName,
 				createdAt: record.createdAt,
+				deadlineAt: record.deadlineAt,
 				depth: record.depth,
 				...lineageOf(record),
 			});
@@ -756,6 +759,7 @@ export async function createWorkflowService(
 			status: state.status,
 			definitionName: record.definitionName,
 			createdAt: record.createdAt,
+			deadlineAt: record.deadlineAt,
 			depth: record.depth,
 			...lineageOf(record),
 			...(state.outputArtifactId
@@ -1272,17 +1276,20 @@ export async function createWorkflowService(
 						"Workflow run already awaits recovery of invalidated work.",
 					);
 				}
-				// A settled owned run still holds its lease, so it is reused rather
-				// than resumed; an inactive run is composed, and its initial drive of
-				// a failed or interrupted run settles before anything is appended.
-				const run = active ?? (await resume(runIdValue));
-				await run.drive;
-				if (Date.parse(run.record.deadlineAt) <= Date.now()) {
+				// Checked before the run is composed: resuming an expired run starts
+				// a drive that immediately stops on its deadline and cancels the run,
+				// consuming the only recovery path the operator has left.
+				if (Date.parse(current.deadlineAt) <= Date.now()) {
 					throw new WorkflowServiceError(
 						"validation",
 						"Workflow run deadline has passed.",
 					);
 				}
+				// A settled owned run still holds its lease, so it is reused rather
+				// than resumed; an inactive run is composed, and its initial drive of
+				// a failed or interrupted run settles before anything is appended.
+				const run = active ?? (await resume(runIdValue));
+				await run.drive;
 				const state = reduceWorkflowEvents(await run.journal.readEvents());
 				if (!admitsInvalidation(state.status)) {
 					throw new WorkflowServiceError(
