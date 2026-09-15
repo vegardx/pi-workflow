@@ -1,11 +1,20 @@
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+	type WorkflowHandoffDescriptor,
+	WorkflowHandoffDescriptorSchema,
+} from "../src/contracts.js";
 import {
 	type AgentTaskAuthoringRequest,
 	createTaskHandle,
 	defineWorkflow,
+	isArtifactHandle,
+	isHandoffHandle,
+	isTaskHandle,
 	isWorkflowDefinition,
 	type NestedWorkflowRequest,
+	type TaskHandle,
+	type WorktreeTaskHandle,
 } from "../src/definition.js";
 
 describe("workflow definitions", () => {
@@ -286,5 +295,184 @@ describe("workflow definitions", () => {
 				run() {},
 			}),
 		).toBe(false);
+	});
+});
+
+describe("worktree handoff handles", () => {
+	const runId = "workflow_definition";
+	const writerTaskId = `task_${"c".repeat(64)}`;
+	const readerTaskId = `task_${"d".repeat(64)}`;
+	const resultRef = {
+		runId,
+		producerTaskId: writerTaskId,
+		output: "result" as const,
+	};
+	const handoffRef = {
+		runId,
+		producerTaskId: writerTaskId,
+		output: "handoff" as const,
+	};
+	const outputSchema = Type.Object({ answer: Type.String() });
+	const base = {
+		agent: "writer",
+		task: { goal: "Edit", context: [], instructions: ["Edit."] },
+		contextMode: "fresh" as const,
+		tools: ["read", "edit"],
+		preloadSkills: [],
+		contextScopes: ["project" as const],
+		outputSchema,
+		limits: {
+			cumulativeRuntimeMs: 300_000,
+			attemptTimeoutMs: 300_000,
+			cost: 100,
+			outputBytes: 1_048_576,
+			workspaceWriteBytes: 1_048_576,
+			retries: 0,
+			resumes: 0,
+		},
+	};
+
+	it("carries a branded handoff handle only when a handoff reference is given", () => {
+		const plain = createTaskHandle<{ answer: string }>(
+			{ runId, taskId: writerTaskId },
+			resultRef,
+		);
+		expect(Object.hasOwn(plain, "handoff")).toBe(false);
+		expect(plain.handoff).toBeUndefined();
+		expect(isTaskHandle(plain)).toBe(true);
+		expect(isHandoffHandle(plain)).toBe(false);
+		expect(isHandoffHandle(plain.output)).toBe(false);
+		const worktree = createTaskHandle<{ answer: string }>(
+			{ runId, taskId: writerTaskId },
+			resultRef,
+			handoffRef,
+		);
+		expectTypeOf(worktree).toEqualTypeOf<
+			WorktreeTaskHandle<{ answer: string }>
+		>();
+		expect(worktree.ref).toEqual({ runId, taskId: writerTaskId });
+		expect(worktree.output.ref).toEqual(resultRef);
+		expect(worktree.handoff.ref).toEqual(handoffRef);
+		expect(isTaskHandle(worktree)).toBe(true);
+		expect(isHandoffHandle(worktree.handoff)).toBe(true);
+		expect(isArtifactHandle(worktree.handoff)).toBe(false);
+		expect(isTaskHandle(worktree.handoff)).toBe(false);
+		expect(isArtifactHandle(worktree.output)).toBe(true);
+		expect(isHandoffHandle(worktree.output)).toBe(false);
+		expect(Object.isFrozen(worktree)).toBe(true);
+		expect(Object.isFrozen(worktree.handoff)).toBe(true);
+		expect(Object.isFrozen(worktree.handoff.ref)).toBe(true);
+		expect(isHandoffHandle({ ref: handoffRef })).toBe(false);
+		expect(isHandoffHandle(handoffRef)).toBe(false);
+		expect(isHandoffHandle(null)).toBe(false);
+		expect(isHandoffHandle(undefined)).toBe(false);
+	});
+
+	it("types worktree declarations, handoff inputs, ctx.handoff, and handoff returns", async () => {
+		const worktreeRequest: AgentTaskAuthoringRequest<
+			typeof outputSchema,
+			{ mode: "worktree"; cwd: string }
+		> = {
+			...base,
+			workspace: { mode: "worktree", cwd: "/repo" },
+			handoff: "optional",
+		};
+		expect(worktreeRequest.handoff).toBe("optional");
+		const readOnlyRequest: AgentTaskAuthoringRequest<typeof outputSchema> = {
+			...base,
+			workspace: { mode: "read-only", cwd: "/repo" },
+		};
+		expect(readOnlyRequest.handoff).toBeUndefined();
+		const resolved: unknown[] = [];
+		const definition = defineWorkflow({
+			meta: {
+				name: "handoff",
+				description: "Worktree handoff",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
+			inputSchema: Type.Object({}),
+			outputSchema: WorkflowHandoffDescriptorSchema,
+			async run(ctx) {
+				const writer = ctx.agent("writer", {
+					...base,
+					workspace: { mode: "worktree", cwd: "/repo" },
+				});
+				expectTypeOf(writer).toEqualTypeOf<
+					WorktreeTaskHandle<{ answer: string }>
+				>();
+				const reader = ctx.agent("reader", {
+					...base,
+					workspace: { mode: "read-only", cwd: "/repo" },
+					inputs: { patch: writer.handoff, answer: writer.output },
+				});
+				expectTypeOf(reader).toEqualTypeOf<TaskHandle<{ answer: string }>>();
+				// Compile-time only: a read-only handle has no guaranteed handoff.
+				const rejectReadOnly = () =>
+					// @ts-expect-error TaskHandle is not a WorktreeTaskHandle
+					ctx.handoff(reader);
+				expect(typeof rejectReadOnly).toBe("function");
+				resolved.push(await ctx.handoff(writer));
+				return writer.handoff;
+			},
+		});
+		expect(isWorkflowDefinition(definition)).toBe(true);
+		const writerHandle = createTaskHandle<{ answer: string }>(
+			{ runId, taskId: writerTaskId },
+			resultRef,
+			handoffRef,
+		);
+		const readerHandle = createTaskHandle<{ answer: string }>(
+			{ runId, taskId: readerTaskId },
+			{ runId, producerTaskId: readerTaskId, output: "result" },
+		);
+		const descriptor: WorkflowHandoffDescriptor = {
+			artifactId: `artifact_${"1".repeat(64)}`,
+			runId,
+			producerTaskId: writerTaskId,
+			producerExecutionId: `execution_${"2".repeat(64)}`,
+			subagentRunId: "run-1",
+			subagentAttemptId: "attempt-1",
+			baselineHead: "3".repeat(40),
+			handoffCommit: "4".repeat(40),
+			format: "git-format-patch",
+			mediaType: "application/x-git-format-patch",
+			sha256: "5".repeat(64),
+			bytes: 512,
+		};
+		const declared: Array<{
+			key: string;
+			request: AgentTaskAuthoringRequest<typeof outputSchema>;
+		}> = [];
+		const barriers: unknown[] = [];
+		const context = {
+			agent(
+				key: string,
+				request: AgentTaskAuthoringRequest<typeof outputSchema>,
+			) {
+				declared.push({ key, request });
+				return request.workspace.mode === "worktree"
+					? writerHandle
+					: readerHandle;
+			},
+			async handoff(task: WorktreeTaskHandle<unknown>) {
+				barriers.push(task);
+				return descriptor;
+			},
+		} as unknown as Parameters<typeof definition.run>[0];
+		await expect(definition.run(context)).resolves.toBe(writerHandle.handoff);
+		expect(declared.map((entry) => entry.key)).toEqual(["writer", "reader"]);
+		expect(declared[0]?.request.workspace).toEqual({
+			mode: "worktree",
+			cwd: "/repo",
+		});
+		expect(declared[0]?.request.handoff).toBeUndefined();
+		expect(declared[1]?.request.inputs).toEqual({
+			patch: writerHandle.handoff,
+			answer: writerHandle.output,
+		});
+		expect(barriers).toEqual([writerHandle]);
+		expect(resolved).toEqual([descriptor]);
 	});
 });

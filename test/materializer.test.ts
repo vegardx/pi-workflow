@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { NestedWorkflowTaskRequest } from "../src/contracts.js";
-import { createTaskHandle } from "../src/definition.js";
+import { createTaskHandle, isHandoffHandle } from "../src/definition.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import { deriveJsonValueSha256 } from "../src/execution.js";
 import {
@@ -106,7 +106,7 @@ function records(
 	];
 	return all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 16,
+		contractRevision: 17,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-08-20T00:00:00.000Z",
@@ -730,5 +730,266 @@ describe("nested workflow task materialization", () => {
 				data: { epoch: 1, kind: "final", taskIds: [] },
 			},
 		]);
+	});
+});
+
+function worktreeRequest(goal = "Edit") {
+	const base = request(goal);
+	return {
+		...base,
+		tools: ["read", "edit", "write"],
+		workspace: { mode: "worktree" as const, cwd: "/repo" },
+		limits: { ...base.limits, workspaceWriteBytes: 1_048_576 },
+	};
+}
+
+describe("worktree agent task materialization", () => {
+	it("lowers worktree requests with a default handoff policy and a handoff handle", () => {
+		const runtime = materializer();
+		const writer = runtime.agent("writer", worktreeRequest());
+		const optional = runtime.agent("optional", {
+			...worktreeRequest("Optional"),
+			handoff: "optional",
+		});
+		const reader = runtime.agent("reader", request());
+		expect(writer.handoff.ref).toEqual({
+			runId: "workflow_materializer",
+			producerTaskId: writer.ref.taskId,
+			output: "handoff",
+		});
+		expect(writer.output.ref).toEqual({
+			runId: "workflow_materializer",
+			producerTaskId: writer.ref.taskId,
+			output: "result",
+		});
+		expect(isHandoffHandle(writer.handoff)).toBe(true);
+		expect(isHandoffHandle(optional.handoff)).toBe(true);
+		expect(Object.hasOwn(reader, "handoff")).toBe(false);
+		const commit = runtime.closeEpoch("final", [writer, optional, reader]);
+		const [first, second, third] = commit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		);
+		if (
+			first?.spec.kind !== "agent" ||
+			second?.spec.kind !== "agent" ||
+			third?.spec.kind !== "agent"
+		) {
+			throw new Error("missing agent declarations");
+		}
+		expect(first.spec.request.workspace).toEqual({
+			mode: "worktree",
+			cwd: "/repo",
+		});
+		expect(first.spec.request.handoff).toBe("required");
+		expect(first.spec.request.limits.workspaceWriteBytes).toBe(1_048_576);
+		expect(second.spec.request.handoff).toBe("optional");
+		expect(third.spec.request.workspace).toEqual({
+			mode: "read-only",
+			cwd: "/repo",
+		});
+		expect(Object.hasOwn(third.spec.request, "handoff")).toBe(false);
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[first.id]?.task).toEqual(first);
+		expect(projected.tasks[second.id]?.task).toEqual(second);
+		expect(projected.tasks[third.id]?.task).toEqual(third);
+	});
+
+	it("rejects the fixed worktree and handoff request errors", () => {
+		const runtime = materializer();
+		expect(() =>
+			runtime.agent("policy", { ...request(), handoff: "required" }),
+		).toThrow("handoff policy requires a worktree workspace");
+		expect(() =>
+			runtime.agent("optional-policy", { ...request(), handoff: "optional" }),
+		).toThrow("handoff policy requires a worktree workspace");
+		expect(() =>
+			runtime.agent("bytes", {
+				...worktreeRequest(),
+				limits: { ...worktreeRequest().limits, workspaceWriteBytes: 0 },
+			}),
+		).toThrow(
+			"worktree workspace requires a positive workspaceWriteBytes limit",
+		);
+		expect(() =>
+			runtime.agent("invalid-policy", {
+				...worktreeRequest(),
+				handoff: "sometimes" as never,
+			}),
+		).toThrow("invalid agent task request");
+		expect(() =>
+			runtime.agent("invalid-mode", {
+				...request(),
+				workspace: { mode: "shared" as never, cwd: "/repo" },
+			}),
+		).toThrow("invalid agent task request");
+		expect(() =>
+			runtime.agent("invalid-extra", {
+				...worktreeRequest(),
+				workspace: {
+					mode: "worktree" as const,
+					cwd: "/repo",
+					branch: "main",
+				} as never,
+			}),
+		).toThrow("invalid agent task request");
+		const reader = runtime.agent("reader", request());
+		const forgedAgent = createTaskHandle(
+			{ runId: "workflow_materializer", taskId: reader.ref.taskId },
+			reader.output.ref,
+			{
+				runId: "workflow_materializer",
+				producerTaskId: reader.ref.taskId,
+				output: "handoff",
+			},
+		);
+		const message = "handoff input producer is not a worktree agent task";
+		expect(() =>
+			runtime.agent("consumer", {
+				...request("Consume"),
+				inputs: { patch: forgedAgent.handoff },
+			}),
+		).toThrow(message);
+		const summary = runtime.support(
+			"summary",
+			supportHelper({ parameters: { strict: true } }),
+		);
+		const forgedSupport = createTaskHandle(
+			{ runId: "workflow_materializer", taskId: summary.ref.taskId },
+			summary.output.ref,
+			{
+				runId: "workflow_materializer",
+				producerTaskId: summary.ref.taskId,
+				output: "handoff",
+			},
+		);
+		expect(() =>
+			runtime.workflow("child", {
+				request: nestedRequest({}),
+				inputs: { patch: forgedSupport.handoff },
+			}),
+		).toThrow(message);
+		const unknown = createTaskHandle(
+			{ runId: "workflow_materializer", taskId: "task_unknown" },
+			{
+				runId: "workflow_materializer",
+				producerTaskId: "task_unknown",
+				output: "result",
+			},
+			{
+				runId: "workflow_materializer",
+				producerTaskId: "task_unknown",
+				output: "handoff",
+			},
+		);
+		expect(() =>
+			runtime.agent("unknown", {
+				...request("Consume"),
+				inputs: { patch: unknown.handoff },
+			}),
+		).toThrow(
+			"task data dependency is invalid, unknown, or belongs to another run",
+		);
+		expect(runtime.closeEpoch("final", []).events).toHaveLength(3);
+	});
+
+	it("binds the handoff policy to identity and replays exact worktree prefixes", () => {
+		const initial = materializer();
+		const writer = initial.agent("writer", worktreeRequest());
+		const commit = initial.closeEpoch("result", [writer]);
+		const declaration = commit.events[0];
+		if (declaration?.type !== "task-declared") {
+			throw new Error("missing declaration");
+		}
+		const task = declaration.data.task;
+		if (task.spec.kind !== "agent") throw new Error("wrong task kind");
+		const { identitySha256, ...specWithoutIdentity } = task.spec;
+		const identity = (spec: typeof specWithoutIdentity) =>
+			deriveAgentTaskIdentity({
+				definitionIdentitySha256,
+				inputSha256,
+				namespace: [],
+				spec,
+			});
+		expect(identitySha256).toBe(identity(specWithoutIdentity));
+		expect(
+			identity({
+				...specWithoutIdentity,
+				request: { ...specWithoutIdentity.request, handoff: "optional" },
+			}),
+		).not.toBe(identitySha256);
+		const explicit = materializer();
+		const explicitWriter = explicit.agent("writer", {
+			...worktreeRequest(),
+			handoff: "required",
+		});
+		expect(explicit.closeEpoch("result", [explicitWriter]).events).toEqual(
+			commit.events,
+		);
+		const previousState = reduceWorkflowEvents(records(commit.events));
+		const replay = materializer(previousState);
+		const replayed = replay.agent("writer", worktreeRequest());
+		expect(replayed.ref).toEqual(writer.ref);
+		expect(replayed.handoff.ref).toEqual(writer.handoff.ref);
+		expect(replay.closeEpoch("result", [replayed]).events).toEqual([]);
+		const drifted = materializer(previousState);
+		expect(() =>
+			drifted.agent("writer", { ...worktreeRequest(), handoff: "optional" }),
+		).toThrow("task declaration does not match the persisted ordered prefix");
+		const degraded = materializer(previousState);
+		expect(() =>
+			degraded.agent("writer", {
+				...worktreeRequest(),
+				workspace: { mode: "read-only" as const, cwd: "/repo" },
+			}),
+		).toThrow("task declaration does not match the persisted ordered prefix");
+	});
+
+	it("accepts handoff inputs from worktree producers and orders after them", () => {
+		const runtime = materializer();
+		const writer = runtime.agent("writer", worktreeRequest());
+		const reviewer = runtime.agent("reviewer", {
+			...request("Review"),
+			inputs: { patch: writer.handoff, answer: writer.output },
+		});
+		const child = runtime.workflow("child", {
+			request: nestedRequest({}),
+			inputs: { patch: writer.handoff },
+		});
+		const commit = runtime.closeEpoch("final", [reviewer, child]);
+		const declarations = commit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		);
+		expect(declarations).toHaveLength(3);
+		const [, reviewerTask, childTask] = declarations;
+		if (reviewerTask?.spec.kind !== "agent") {
+			throw new Error("missing reviewer declaration");
+		}
+		if (childTask?.spec.kind !== "workflow") {
+			throw new Error("missing child declaration");
+		}
+		expect(reviewerTask.spec.inputs).toEqual({
+			answer: writer.output.ref,
+			patch: writer.handoff.ref,
+		});
+		expect(Object.keys(reviewerTask.spec.inputs)).toEqual(["answer", "patch"]);
+		expect(reviewerTask.spec.after).toEqual([writer.ref]);
+		expect(childTask.spec.inputs).toEqual({ patch: writer.handoff.ref });
+		expect(childTask.spec.after).toEqual([writer.ref]);
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[reviewerTask.id]?.task).toEqual(reviewerTask);
+		expect(projected.tasks[childTask.id]?.task).toEqual(childTask);
+		const plain = materializer();
+		plain.agent("writer", worktreeRequest());
+		const plainReviewer = plain.agent("reviewer", request("Review"));
+		const plainDeclaration = plain
+			.closeEpoch("final", [plainReviewer])
+			.events.filter((event) => event.type === "task-declared")[1];
+		if (plainDeclaration?.type !== "task-declared") {
+			throw new Error("missing declaration");
+		}
+		expect(plainDeclaration.data.task.spec.after).toEqual([]);
+		expect(plainDeclaration.data.task.spec.identitySha256).not.toBe(
+			reviewerTask.spec.identitySha256,
+		);
 	});
 });
