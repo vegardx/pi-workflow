@@ -1016,11 +1016,15 @@ describe("retry and resume attempts", () => {
 			projectTrusted: () => true,
 			subagents: delegated.provider,
 		});
+		// Freeze only the wall clock: this tests retryAt versus the persisted
+		// deadline, not whether fsync and finalization finish within real time.
+		// Timers, including bounded(), remain real.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
 			const receipt = await service.run("attempts", {});
 			// The attempt is declined immediately because `retryAt` lies past the
-			// deadline, so the settled failure finalizes and the run fails well
-			// before the 3 s deadline itself would have cancelled it.
+			// deadline. Finalization must preserve the settled failure rather
+			// than waiting for that future deadline to cancel the run.
 			await expect(
 				bounded(service.wait(receipt.runId), "wait"),
 			).resolves.toMatchObject({ status: "failed" });
@@ -1047,7 +1051,11 @@ describe("retry and resume attempts", () => {
 				status: "failed",
 			});
 		} finally {
-			await bounded(service.shutdown(), "shutdown");
+			try {
+				await bounded(service.shutdown(), "shutdown");
+			} finally {
+				vi.useRealTimers();
+			}
 		}
 	});
 

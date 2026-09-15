@@ -913,11 +913,13 @@ describe("invalidation and re-execution", () => {
 		const fixture = await attemptWorkflowFixture();
 		const delegated = attemptProvider([{ status: "completed" }]);
 		const gate = deferred<void>();
+		const entered = deferred<void>();
 		const scripted = vi
 			.mocked(delegated.ownerClient.wait)
 			.getMockImplementation();
 		vi.mocked(delegated.ownerClient.wait).mockImplementation(
 			async (...args) => {
+				entered.resolve();
 				await gate.promise;
 				if (!scripted) throw new Error("missing scripted child wait");
 				return scripted(...args);
@@ -930,9 +932,8 @@ describe("invalidation and re-execution", () => {
 		});
 		try {
 			const receipt = await service.run("attempts", {});
-			await vi.waitFor(() => {
-				expect(delegated.ownerClient.wait).toHaveBeenCalled();
-			});
+			await bounded(entered.promise, "child wait entered");
+			expect(delegated.ownerClient.wait).toHaveBeenCalled();
 			const taskId = agentTaskOf(
 				await stateOf(fixture.storeRoot, receipt.runId),
 			).task.id;
@@ -1584,6 +1585,7 @@ describe("invalidation and re-execution", () => {
 			{ status: "completed" },
 		]);
 		const gate = deferred<void>();
+		const entered = deferred<void>();
 		const scripted = vi
 			.mocked(delegated.ownerClient.wait)
 			.getMockImplementation();
@@ -1592,7 +1594,10 @@ describe("invalidation and re-execution", () => {
 			async (...args) => {
 				childWaits += 1;
 				// The second generation's child blocks until the test releases it.
-				if (childWaits === 2) await gate.promise;
+				if (childWaits === 2) {
+					entered.resolve();
+					await gate.promise;
+				}
 				if (!scripted) throw new Error("missing scripted child wait");
 				return scripted(...args);
 			},
@@ -1611,9 +1616,8 @@ describe("invalidation and re-execution", () => {
 			const taskId = agentTaskOf(await stateOf(fixture.storeRoot, runId)).task
 				.id;
 			await bounded(service.invalidate(runId, taskId, "first"), "invalidate");
-			await vi.waitFor(() => {
-				expect(childWaits).toBe(2);
-			});
+			await bounded(entered.promise, "second child wait entered");
+			expect(childWaits).toBe(2);
 			await expectServiceError(
 				service.invalidate(runId, taskId, "second"),
 				"conflict",
