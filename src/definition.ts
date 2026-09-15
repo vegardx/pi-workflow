@@ -152,6 +152,15 @@ export interface NestedWorkflowRequest<TInput = unknown> {
 	readonly replay?: ReplayPolicy;
 }
 
+export type FinalizerKind = "required" | "advisory";
+
+export interface FinalizeRequest<TOutputSchema extends TSchema> {
+	readonly kind: FinalizerKind;
+	readonly support?: SupportTaskDescriptor<TOutputSchema>;
+	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema>;
+	readonly workflow?: NestedWorkflowRequest;
+}
+
 export type SettledTaskFailure = Readonly<{
 	message: string;
 	code?: string;
@@ -225,6 +234,10 @@ export interface WorkflowContext<TInput> {
 		namespace: TaskKey,
 		build: (stage: PipelineStage) => TaskHandle<T>,
 	): TaskHandle<T>;
+	finalize<TOutputSchema extends TSchema>(
+		key: TaskKey,
+		request: FinalizeRequest<TOutputSchema>,
+	): TaskHandle<Static<TOutputSchema>>;
 	result<T>(task: TaskHandle<T>): Promise<T>;
 	results<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,
