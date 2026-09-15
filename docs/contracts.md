@@ -4,8 +4,9 @@ This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
 nested run executor, artifact store, and static source runtime implement the
 current subset; later interfaces remain design contracts. The runtime contract
-is revision 13 and declares the feature flags `supportTaskExecution: true`,
-`nestedWorkflows: true`, and `nestedArtifactInputs: true`.
+is revision 14 and declares the feature flags `supportTaskExecution: true`,
+`nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
+and `resumeAttempts: true`.
 
 ## Static definition
 
@@ -97,7 +98,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 13 identities cover the complete definition module but not a
+Contract revision 14 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
 `typebox`, and the module specifiers present in the constructor-injected
 support registry; every other static import, dynamic import, CommonJS require,
@@ -480,7 +481,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow"` in revision 13; a checkpoint task
+`kind` is `"agent" | "support" | "workflow"` in revision 14; a checkpoint task
 kind remains a design contract. Keys are unique within a workflow namespace.
 Pipelines and fan-out create explicit child namespaces; a nested workflow task
 is one node in its parent's namespace whose child run owns a separate graph.
@@ -575,6 +576,8 @@ interface AgentTask<T> extends TaskRequestBase {
 	workspace: WorkspaceRequest;
 	outputSchema: JsonSchema<T>;
 	limits: RunLimits;
+	retry?: { attempts: number; on?: readonly ("backoff" | "manual")[] };
+	resume?: { attempts: number };
 }
 
 interface TaskRequestBase {
@@ -607,9 +610,12 @@ contract and cannot silently use this projection.
 
 Workflow derives deterministic task-execution and subagent operation IDs from
 workflow run ID, task ID, and task-execution generation. Generation 1 is the
-only executable generation in the initial slice; later generations require the
-transactional invalidation contract. One agent task execution corresponds to
-one subagent run and may contain multiple subagent attempts. Before its initial
+only executable generation in revision 14; generations 2 and later remain
+reserved for re-execution after invalidation and require the transactional
+invalidation contract. One agent task execution corresponds to one subagent run
+and may contain multiple subagent attempts: the initial attempt plus the retry
+and resume attempts described under
+[Retry and resume attempts](#retry-and-resume-attempts). Before its initial
 launch it:
 
 1. acquires the extension-owned service from
@@ -658,6 +664,110 @@ remains subagent-owned at execution time. Workflow accepts
 only JSON-serializable output-schema documents within the runtime's bounded
 16-level schema-value depth, then revalidates and imports the value and every
 downstream artifact into workflow-owned storage before task completion.
+
+### Retry and resume attempts
+
+An agent request may declare attempt policies:
+
+```ts
+interface AgentRetryPolicy {
+	attempts: number; // 1..10, at most limits.retries
+	on: Array<"backoff" | "manual">; // defaults to ["backoff"], sorted
+}
+
+interface AgentResumePolicy {
+	attempts: number; // 1..10, at most limits.resumes
+}
+```
+
+The materializer normalizes `retry.on` to `["backoff"]` when omitted and sorts
+it, rejects `retry.attempts > limits.retries` with "agent retry policy exceeds
+the declared retry limit", and rejects `resume.attempts > limits.resumes` with
+"agent resume policy exceeds the declared resume limit". The normalized
+policies are part of the persisted request and therefore of task identity; a
+changed policy is a changed request. The public schemas are
+`AgentRetryPolicySchema` and `AgentResumePolicySchema`.
+
+A retry is a fresh pi-subagent attempt on the same child run obtained through
+the owner client's `retry(runId)`; a resume is the same through
+`resume(runId)` for an `interrupted` child. Both are recorded under the same
+task execution: the generation stays 1, and no new preflight, operation ID, or
+subagent run is created. A retry requires a durable `failed` settlement whose
+classified failure is `backoff` or `manual` and listed in `retry.on`; a resume
+requires a durable `interrupted` settlement whose classified failure is
+`resume`. Failures classified `never` or `reconcile` never enter the attempt
+path. Attempts happen after the settlement and before release; the task stays
+`running` or `waiting` and never becomes `failed` or `interrupted` between
+attempts.
+
+Three events extend the agent execution ladder:
+
+```text
+task-execution-attempt-intended
+    { executionId, subagentRunId, kind: "retry" | "resume", ordinal,
+      previousAttemptId, failureCode, failureRetry }
+task-execution-attempt-receipted
+    { executionId, subagentRunId, ordinal, subagentAttemptId, status }
+task-execution-attempt-declined
+    { executionId, subagentRunId, ordinal, reason }
+```
+
+`ordinal` numbers attempts from 2 (the initial attempt is 1) up to
+`MAX_TASK_ATTEMPTS = 21`. The execution phase `attempt-intended` follows
+`settled`; a receipt returns the execution to `launched`, and a decline returns
+it to `settled`. The projection gains `attempts` (one entry per intent with
+`kind`, `ordinal`, `previousAttemptId`, and, once known, `subagentAttemptId`,
+`status`, and the intent, receipt, and declined sequences), `priorSettlements`
+(the superseded attempts' settlement evidence in order), and `attemptsClosed`
+(set by a decline; no further intents are accepted). `SubagentTerminalEvidence`
+carries the required `attemptOrdinal` of the settlement it describes, so
+terminal evidence for a completed or failed agent execution names the final
+attempt. `currentSubagentAttemptId(execution)` is the last receipted attempt's
+ID, else the launch receipt's attempt ID; the scheduler and finalizer wait on
+and release that attempt.
+
+The reducer accepts an intent only when the execution is an agent execution in
+phase `settled`, `attemptsClosed` is unset, the run is `running` or `waiting`
+(never `stopping`), `subagentRunId` equals the launch receipt's run,
+`previousAttemptId` equals the current attempt ID, `ordinal` equals
+`2 + attempts.length` and does not exceed `MAX_TASK_ATTEMPTS`, the settlement
+status and classification match the kind, `failureCode` and `failureRetry`
+equal the settlement's failure, the task spec carries the matching policy with
+`failureRetry` listed in `retry.on` for a retry, and the number of receipted
+attempts of that kind is below `policy.attempts`. A receipt must match the open
+attempt's ordinal and run, and its `subagentAttemptId` must differ from
+`previousAttemptId` and from every earlier attempt; it moves the current
+settlement to `priorSettlements`, clears the observation, and records the new
+attempt as current. A decline must match the open attempt's ordinal; it sets
+`attemptsClosed` and keeps the settlement. A `task-execution-child-observed`
+event must name the current attempt, a `task-execution-child-settled` event
+must carry `attemptOrdinal === 1 + receipted attempts`, and an execution in
+`attempt-intended` cannot be released.
+
+Budget treats one execution as one reservation: declared limits are
+cumulative, every attempt's settlement evidence is retained, and settled usage
+is `settledAgentUsage(execution)`, the sum of cost, total tokens, and runtime
+over `priorSettlements` and `settlement`, complete only when every settlement
+is complete. Admission and the post-settlement overage check both use that
+sum.
+
+The task retrier (`createWorkflowTaskRetrier({ journal, binding, signal,
+deadlineAt? })`) drives attempts. After a durable settlement the scheduler
+asks it to `consider` the task: it persists the intent, calls `retry` or
+`resume` on the owner client, persists the receipt, and the scheduler waits on
+the new attempt exactly like the initial launch. Backoff is enforced by
+pi-subagent: a `RetryBackoffError` carries `retryAt`, and the retrier waits
+until then, bounded by the scheduler stop signal and the workflow deadline,
+before calling again. A stop signal or deadline before the call declines the
+intent with "Workflow stop requested before the attempt." or "Workflow
+deadline passed before the attempt."; a backoff that would end at or after the
+deadline is declined the same way. Any other rejection is reconciled through
+`findByOperation`: a receipt whose attempt ID differs from `previousAttemptId`
+is adopted, otherwise the intent is declined with "Subagent refused the
+attempt." (or "Attempt call ended without a durable receipt." when the call
+returned nothing). A reconciliation error is thrown, never converted into a
+decline. Stop declines any open intent before finalization. There is no
+operator retry surface in revision 14.
 
 ## Nested workflow tasks
 
@@ -912,13 +1022,14 @@ was merged into the child input (`{}` when none); every `runId` must equal
 source digest, and merged input. These identities are provenance records,
 not references the child can dereference.
 
-Phase 3 retry control will call the owner client's `retry` on the same subagent
-run and record the fresh attempt and VM under the same task execution. Resume
-will behave likewise through subagent `resume`. Re-execution after dependency
-invalidation is neither retry nor
-resume: it creates a new task-execution generation and a new preflight,
-idempotent operation ID, and subagent run. Every identity and relationship is
-persisted explicitly.
+Retry calls the owner client's `retry` on the same subagent run and records
+the fresh attempt under the same task execution; resume behaves likewise
+through subagent `resume`. Both attempts sit under the subagent run of a
+generation-1 agent execution and add no level to the hierarchy above.
+Operator-triggered retry remains later work. Re-execution after dependency
+invalidation is neither retry nor resume: it creates a new task-execution
+generation and a new preflight, idempotent operation ID, and subagent run.
+Every identity and relationship is persisted explicitly.
 
 Subagent terminal outcomes map using both primary status and cleanup evidence:
 
@@ -984,8 +1095,9 @@ is addressable by its own run ID for status, wait, stop, and reconcile. `createW
 accepts an optional `supportTasks` registration list that becomes the frozen
 constructor registry and supplies the nested run provider to every run it
 composes.
-Retry, explicit interrupted-run resume, logs, and polished inspection remain
-later contract work.
+Declarative retry and resume attempts run under task policy without a service
+call. Operator-triggered `retry`, explicit interrupted-run `resume`, logs, and
+polished inspection remain later contract work.
 
 ## Checkpoints
 

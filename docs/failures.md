@@ -9,7 +9,8 @@
 | Dependency | Required predecessor failed or artifact missing | Block dependent task |
 | Service provider | Missing, duplicate, or incompatible pi-subagent provider | Fail before run |
 | Subagent preflight | Missing feature, tool, model, trust, workspace | Fail task before launch |
-| Subagent launch/runtime | Child startup, provider, tool, timeout | Classified retry policy |
+| Subagent launch/runtime | Child startup, provider, tool, timeout | Terminal settlement with a classified failure; the task's attempt policy decides whether a fresh attempt follows |
+| Retry and resume attempts | `failed` child classified `backoff` or `manual` under a `retry` policy that lists that class; `interrupted` child classified `resume` under a `resume` policy; `never` and `reconcile` classifications, an unlisted class, an exhausted policy, or a declined earlier attempt | Fresh pi-subagent attempt on the same child run under the same task execution; pi-subagent enforces backoff through `RetryBackoffError.retryAt`, which the runtime waits out under the stop signal and workflow deadline; stop or deadline declines with a fixed message; a refusal is reconciled by operation ID and declined when no new attempt exists; an execution without an admissible attempt proceeds to release and its settled outcome |
 | Structured output | Terminating schema repair exhausted | Task failure |
 | Support task | Unregistered or drifted implementation (`support-resolution`); missing input evidence, input digest mismatch, unreadable inputs, or parameters failing the registered schema (`support-input`); implementation exception (`support-execution`); non-JSON, oversized, schema-invalid, or conflicting output (`support-output`) | Task failure with a fixed message; a required task fails the run |
 | Nested workflow | Undiscovered name, depth bound, recursion, schema-invalid input without artifact inputs, non-object authored input or an authored key colliding with an input name when artifact inputs are declared, or an unknown, foreign, or undeclared input producer at declaration (materialization failure); missing or ambiguous producer artifact, unreadable or unverifiable input, or a merged input that is not lossless JSON, exceeds 900 KiB, or fails the child schema at launch (`nested-input`); child not resolvable by exact identity and source at launch (`nested-resolution`); no remaining time before the parent deadline, lease or record creation failure, or an existing child run whose lineage, definition, merged input, or injected artifacts do not match the intent (`nested-launch`); child output unreadable, unverifiable, or schema-invalid (`nested-import`) | Declaration failures fail the run closed; `nested-input`, `nested-resolution`, and `nested-launch` fail the task; `nested-import` leaves the task `cleanup-blocked` until reconciliation; a required task propagates to the run |
@@ -23,12 +24,48 @@
 | Unknown | Unclassified or unprovable state | Interrupt and reconcile |
 
 Retryability is a stable code-level property combined with explicit workflow
-policy, never string matching. Retry and resume preserve prior executions,
-usage, artifacts, and budget consumption.
+policy, never string matching: the subagent settlement carries a failure `code`
+and a `retry` classification, and the task's `retry.on` and `resume` policies
+decide whether an attempt is admissible. Retry and resume preserve prior
+executions, usage, artifacts, and budget consumption; every attempt's
+settlement evidence is retained and settled usage sums across attempts.
 
 A task result cannot override persistence, lease, cleanup, or artifact-import
 failure. An advisory observation failure cannot replace an otherwise valid
 required result, but remains visible as degradation evidence when policy permits.
+
+## Agent attempt sequences
+
+An admissible attempt keeps the task `running` or `waiting`; it never passes
+through `failed` or `interrupted`. Its journal sequences are:
+
+```text
+attempt:  task-execution-child-settled (status failed, failure.retry
+          backoff | manual, or status interrupted, failure.retry resume)
+          → task-execution-attempt-intended (kind retry | resume)
+          → task-execution-attempt-receipted
+          → task-execution-child-observed
+          → task-execution-child-settled (next attemptOrdinal)
+          → another attempt, or release and terminal outcome
+
+decline:  task-execution-attempt-intended
+          → task-execution-attempt-declined (fixed reason)
+          → release and the retained settlement's terminal outcome
+```
+
+Decline reasons are fixed strings: "Workflow stop requested before the
+attempt." when the scheduler stop signal is aborted before the call or while
+waiting out backoff, "Workflow deadline passed before the attempt." when the
+persisted deadline has passed before the call, "Subagent refused the attempt."
+when the owner client rejects the call and `findByOperation` shows no attempt
+beyond the previous one, and "Attempt call ended without a durable receipt."
+when the call returned nothing and reconciliation found no new attempt. A
+backoff whose `retryAt` is at or after the deadline is declined as stopped
+rather than waited. A call that created an attempt before failing is adopted
+through `findByOperation` rather than duplicated, and a reconciliation error
+is thrown as a `WorkflowAttemptError`, never converted into a decline or a
+task failure. Explicit stop declines any open intent before finalization.
+Once an intent is declined the execution accepts no further intents.
 
 ## Support task sequences
 

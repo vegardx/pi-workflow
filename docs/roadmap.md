@@ -60,7 +60,7 @@ Delivered:
   input path at launch and merged into the authored input, the merged input is
   validated against the child schema and bound, and intent carries the
   artifact digest map and merged-input digest (runtime contract feature
-  `nestedArtifactInputs: true`, contract revision 13);
+  `nestedArtifactInputs: true`);
 - cross-run artifact references as provenance: the child run record and view
   carry `parent.inputArtifacts` identifying the exact parent artifacts merged
   into its input, re-verified on resume; these are provenance records, not a
@@ -73,8 +73,19 @@ Remaining:
 
 ## Phase 3 — durable control
 
-- explicit retry policies and task-execution generations;
-- interrupted-child resume;
+Delivered:
+
+- retry and resume attempts under one execution: declarative `retry` and
+  `resume` policies on agent requests, durable attempt intent, receipt, and
+  decline events, backoff waited under the stop signal and deadline, settled
+  usage summed across attempts (runtime contract features
+  `retryAttempts: true` and `resumeAttempts: true`, contract revision 14);
+- interrupted-child resume through the `resume` policy.
+
+Remaining:
+
+- task-execution generations 2 and later for re-execution after invalidation;
+- operator-triggered retry;
 - replay identity and transitive invalidation;
 - required and advisory finalizers;
 - checkpoints and immutable decisions;

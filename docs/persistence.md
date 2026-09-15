@@ -42,14 +42,16 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-13 rejects revision-1 through revision-12 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 13 accepts only
+14 rejects revision-1 through revision-13 leases, journals, snapshots, and run
+records; no migration or dual-format reader is provided. Revision 14 accepts only
 the declared run, workflow phase/log effect, task, artifact, barrier,
 output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent, uncertain launch
 and reconciled absence or a launch receipt, child observation, bounded terminal
-child settlement, artifact import, release intent and receipt, and terminal
-outcome in that order. Support task-execution evidence records generation
+child settlement, zero or more retry or resume attempts (each an intent followed
+by a receipt with the next observation and settlement, or by a decline),
+artifact import, release intent and receipt, and terminal outcome in that
+order. Support task-execution evidence records generation
 creation, support intent, output commit, and terminal outcome in that order.
 Nested workflow task-execution evidence records generation creation, nested
 intent, nested launch, nested settlement, nested output import, and terminal
@@ -111,7 +113,8 @@ may extend the last reached path. Explicit re-execution that replaces a concrete
 invalidates its downstream epochs before a different branch can materialize;
 those prior records become abandoned history. The current reducer validates and
 records exact transitive invalidation, while materializer replay of invalidated
-state remains unavailable until task-execution generations land in phase 3.
+state remains unavailable until task-execution generations 2 and later land for
+re-execution after invalidation.
 Duplicate keys, ambiguous
 matches, changed requests, or insertion/removal/reordering inside a valid prefix
 fail closed.
@@ -119,8 +122,9 @@ fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 13 currently admits generation 1 only; later generations
-remain unavailable until transactional invalidation lands. The execution record
+invalidation. Revision 14 admits generation 1 only; generations 2 and later
+remain reserved for re-execution after invalidation and are unavailable until
+transactional invalidation lands. The execution record
 is discriminated by `kind: "agent" | "support" | "workflow"`; all kinds share
 the derived execution ID, run, task, generation, and task identity digest.
 
@@ -130,7 +134,8 @@ An agent execution (`kind: "agent"`) owns one subagent run and contains:
 - budget allocation and cumulative usage baseline;
 - one subagent operation ID and preflight identity;
 - initial launch intent and receipt;
-- the initial child attempt in Phase 1;
+- the initial child attempt and every retry or resume attempt: its intent,
+  its receipt or decline, and the superseded attempt's settlement evidence;
 - imported artifacts;
 - terminal classification.
 
@@ -181,9 +186,44 @@ identity only. The child record additionally carries `parent.inputArtifacts`,
 the identities of the parent artifacts whose verified values were merged into
 its input; the parent's intent carries the matching digest map.
 
-Phase 3 adds subagent retry/resume attempts and control receipts to the existing
+Revision 14 records subagent retry and resume attempts under the existing
 agent task execution. A new execution generation requires a new preflight,
 operation ID, launch intent, and subagent run.
+
+### Agent attempt recovery
+
+An attempt extends the agent ladder after a durable `failed` or `interrupted`
+settlement and before release:
+
+```text
+task-execution-child-settled (attemptOrdinal n)
+→ task-execution-attempt-intended (ordinal n + 1)
+→ task-execution-attempt-receipted (ordinal n + 1)
+→ task-execution-child-observed (the new attempt)
+→ task-execution-child-settled (attemptOrdinal n + 1)
+→ another attempt, or release intent, receipt, and terminal outcome
+
+task-execution-child-settled (attemptOrdinal n)
+→ task-execution-attempt-intended (ordinal n + 1)
+→ task-execution-attempt-declined (ordinal n + 1)
+→ release intent, receipt, and terminal outcome
+```
+
+Restart repairs an agent execution with attempt evidence from its durable
+prefix:
+
+| Durable prefix | Recovery |
+| --- | --- |
+| settled, policy allows another attempt | the retrier persists an intent and performs the attempt call |
+| attempt intent only | the retrier reconciles the open intent by operation ID by repeating the attempt call for it: a receipt naming a new attempt ID is recorded; a `RetryBackoffError` is waited out under the stop signal and deadline and the call repeated; a refusal is checked through `findByOperation`, adopting a receipt whose attempt ID differs from `previousAttemptId` and declining the intent otherwise |
+| attempt receipted | the new attempt is waited on exactly like the initial launch; observation and settlement then describe that attempt |
+| attempt declined | the retained settlement proceeds to release and terminal outcome; no further intents are accepted |
+| stop with an open intent | the intent is declined before finalization |
+
+An attempt call that fails for any reason other than backoff is reconciled
+through the same operation ID before the intent is declined, so a call that
+created an attempt before failing is adopted rather than duplicated. A
+reconciliation error is thrown, never converted into a decline or task failure.
 
 ### Support execution recovery
 
@@ -315,9 +355,9 @@ Resume:
 1. acquires or reclaims the run lease with evidence;
 2. reconstructs state from journal events;
 3. validates definition, input, runtime, and service compatibility;
-4. reconciles active agent executions by subagent operation ID, repairs or
-   recomputes intended support executions, and resumes launched child runs
-   without launching them again;
+4. reconciles active agent executions and open attempt intents by subagent
+   operation ID, repairs or recomputes intended support executions, and resumes
+   launched child runs without launching them again;
 5. re-executes the workflow function from its entry point;
 6. replays matching declarations and completed results;
 7. incrementally materializes only the newly reached path;
@@ -328,13 +368,23 @@ reinterpret prior model outputs or human decisions under changed code.
 
 ## Retry versus resume
 
-Retry after a classified agent-task failure calls pi-subagent `retry` on the
-existing child run and records its fresh attempt and VM under the same workflow
-task execution. Resume continues an interrupted workflow run and records a
-subagent `resume` attempt under that same execution. Re-execution after explicit
-dependency invalidation creates a new workflow task-execution generation,
-preflight, operation ID, and child run. All paths preserve prior evidence and
-cumulative budget usage.
+A retry attempt follows a durable `failed` settlement whose failure is
+classified `backoff` or `manual` and listed in the task's `retry.on`; the
+retrier persists `task-execution-attempt-intended`, calls pi-subagent `retry`
+on the existing child run, and persists the receipt of the fresh attempt under
+the same workflow task execution. A resume attempt follows a durable
+`interrupted` settlement whose failure is classified `resume` and calls
+`resume` on the same run under the task's `resume` policy. Both count receipted
+attempts of their kind against `policy.attempts`, never exceed
+`MAX_TASK_ATTEMPTS`, and stop once an intent has been declined. Neither
+changes the execution generation. Resuming an interrupted workflow run is a
+separate concern: it reconstructs state and continues scheduling, and a child
+attempt happens only when the task policy allows it. Re-execution after
+explicit dependency invalidation creates a new workflow task-execution
+generation, preflight, operation ID, and child run. All paths preserve prior
+evidence: each superseded attempt's settlement is retained in
+`priorSettlements`, and settled usage is summed across every attempt of the
+execution.
 
 ## Artifact ownership
 

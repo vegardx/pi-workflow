@@ -83,8 +83,9 @@ An in-memory-only successful drive does not satisfy the first slice.
   evidence, and permits explicit stop retry without inventing cancellation;
 - checkpoint waits can be stopped and resumed;
 - child retry and resume record fresh attempts under the existing workflow task
-  execution, while explicit invalidation creates a new execution generation,
-  preflight, operation ID, and child run;
+  execution (see [Retry and resume attempts](#retry-and-resume-attempts)),
+  while explicit invalidation creates a new execution generation, preflight,
+  operation ID, and child run;
 - declared and effective workflow budgets plus the absolute deadline survive
   restart;
 - task admission reserves declared maxima against settled usage and active
@@ -103,6 +104,44 @@ An in-memory-only successful drive does not satisfy the first slice.
   found after restart directly; subagent cleanup and `cleanup-blocked` semantics are
   unchanged;
 - no work begins from an uncommitted declaration or stale fencing generation.
+
+## Retry and resume attempts
+
+- a `failed` child classified `backoff` under a `retry` policy is retried
+  through the owner client's `retry` on the same child run, the fresh attempt
+  is recorded under the same generation-1 execution, and a completed retry
+  imports its result and completes the task;
+- a policy is exhausted after `attempts` receipted attempts of its kind: the
+  next settlement of that kind proceeds to release and its terminal outcome
+  without another intent;
+- a `manual` classification is retried only when `retry.on` lists it; the
+  default policy retries `backoff` alone, `never` and `reconcile` are never
+  attempted, and an `interrupted` child is resumed only under a `resume`
+  policy when its failure is classified `resume`;
+- the materializer normalizes and sorts `retry.on`, binds the policies into
+  task identity, and rejects `retry.attempts` above `limits.retries` and
+  `resume.attempts` above `limits.resumes` with the fixed messages;
+- a `RetryBackoffError` is waited out until `retryAt` and the call repeated;
+  a `retryAt` at or after the workflow deadline, or a deadline reached before
+  the call, declines the intent with the fixed deadline or stop message;
+- stop during backoff declines the open intent with the fixed stop message,
+  and stop with an open intent declines it before finalization;
+- restart after a durable intent repeats the attempt call for that intent, a
+  refusal is reconciled through `findByOperation` (a new attempt ID is
+  adopted, otherwise the intent is declined), and no second intent is written;
+- the reducer enforces ordinal contiguity, the previous attempt ID, the
+  classification and policy binding, the per-kind count, no intent while the
+  run is `stopping`, receipt clearing the observation and moving the
+  settlement to `priorSettlements`, and a decline closing attempts;
+- `task-execution-child-settled` carries `attemptOrdinal` equal to one plus
+  the receipted attempts, and terminal evidence names the final attempt;
+- settled cost, tokens, and runtime are summed across every attempt of an
+  execution for admission and the post-settlement overage check, and an
+  incomplete settlement in any attempt fails closed;
+- the finalizer and scheduler verify, release, and reconcile the current
+  attempt (`currentSubagentAttemptId`), not the launch receipt's attempt;
+- the runtime contract publishes `retryAttempts: true` and
+  `resumeAttempts: true`, and no operator retry surface exists.
 
 ## Structured output and support tasks
 
@@ -246,7 +285,7 @@ An in-memory-only successful drive does not satisfy the first slice.
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-13 stores reject revision 1 through 12 records;
+  and revision-14 stores reject revision 1 through 13 records;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - required finalizer failure prevents success;
 - bounded private stores redact sensitive metadata.
