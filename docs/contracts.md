@@ -1252,7 +1252,9 @@ abandoned task is "Unknown workflow task.", a task that is not on-path
 `cleanup-blocked` is "Workflow task is not cleanup-blocked." (checked against
 the durable view before any lease is taken and again after the drive), and
 only that task is reconciled. `reconciled` is empty when the run was already
-completed or not cleanup-blocked. A settled run this service still owns is
+completed or not cleanup-blocked; a completed run returns that empty list for
+any known `taskId` and refuses only an unknown one. The `workflow_reconcile`
+tool accepts `runId` and the optional `taskId` and forwards them unchanged. A settled run this service still owns is
 reused rather than re-leased.
 
 ### Action legality
@@ -1295,8 +1297,10 @@ leasing as before.
 a foreign cursor "Invalid workflow run cursor.". It scans `<store>/runs`,
 reports per-directory problems as `issues` (`invalid-directory`,
 `missing-record`, `invalid-record`, `corrupt-journal`, `invalid-projection`,
-`torn-tail`; basename only, fixed messages, at most 16 sorted by directory
-with the rest counted in `issuesTruncated`) instead of failing, and returns
+`torn-tail`, and `unreadable` ("Workflow run could not be read.") for any
+other failure while reading one run, such as a permission error; basename
+only, fixed messages, at most 16 sorted by directory with the rest counted in
+`issuesTruncated`) instead of failing, and returns
 summaries newest first (`createdAt` descending, `runId` descending). The
 cursor encodes the last returned position, so runs created between pages
 appear only on a fresh first page. A summary carries `runId`,

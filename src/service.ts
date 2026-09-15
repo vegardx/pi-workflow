@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -98,6 +98,7 @@ import {
 	type WorkflowRunSummary,
 	type WorkflowServiceReconcileView,
 	type WorkflowServiceRunView,
+	type WorkflowServiceTaskView,
 	type WorkflowServiceWaitView,
 	type WorkflowWaitOptions,
 	WorkflowWaitOptionsSchema,
@@ -1258,11 +1259,20 @@ export async function createWorkflowService(
 			// A settled owned run still holds its lease; reuse it as invalidate
 			// and reconcile do instead of colliding with our own lease.
 			const run = owned.get(runIdValue) ?? (await resume(runIdValue));
+			const idle = run.settled;
 			await run.scheduler.stop(reason);
 			await run.drive;
 			// Stopping a settled run appends after its cached view was taken.
 			delete run.view;
-			return statusCurrent(runIdValue);
+			let view = await statusCurrent(runIdValue);
+			// With no drive running, nothing drains a stop the scheduler left
+			// non-terminal (support or several agent tasks still active); restart
+			// the drive and await it, as reconcile does.
+			if (idle && !isTerminalWorkflowRunStatus(view.status)) {
+				await run.restart();
+				view = await statusCurrent(runIdValue);
+			}
+			return view;
 		},
 		invalidate(runIdValue: WorkflowRunId, causeTaskId: string, reason: string) {
 			return exclusive(async () => {
@@ -1465,15 +1475,14 @@ export async function createWorkflowService(
 				}
 				pending.push(entry.name);
 			}
-			const scan = async (runIdValue: WorkflowRunId): Promise<void> => {
-				const issue = (kind: WorkflowRunListIssue["kind"], message: string) => {
-					issues.push({
-						runId: runIdValue,
-						directory: runIdValue,
-						kind,
-						message,
-					});
-				};
+			type Issue = (
+				kind: WorkflowRunListIssue["kind"],
+				message: string,
+			) => void;
+			const summarize = async (
+				runIdValue: WorkflowRunId,
+				issue: Issue,
+			): Promise<WorkflowRunSummary | undefined> => {
 				let record: WorkflowRunRecord;
 				let events: readonly WorkflowJournalEvent[];
 				let ownership: WorkflowRunOwnership;
@@ -1497,18 +1506,9 @@ export async function createWorkflowService(
 						} else {
 							issue("invalid-record", "Workflow run record is invalid.");
 						}
-						return;
+						return undefined;
 					}
-					let read: Awaited<ReturnType<typeof readWorkflowJournalUnleased>>;
-					try {
-						read = await readWorkflowJournalUnleased(storeRoot, runIdValue);
-					} catch (error) {
-						if (!(error instanceof WorkflowPersistenceCorruptionError)) {
-							throw error;
-						}
-						issue("corrupt-journal", "Workflow run journal is corrupt.");
-						return;
-					}
+					const read = await readWorkflowJournalUnleased(storeRoot, runIdValue);
 					events = read.events;
 					if (read.tornTailBytes > 0) {
 						issue(
@@ -1528,11 +1528,33 @@ export async function createWorkflowService(
 						"invalid-projection",
 						"Workflow run journal violates run invariants.",
 					);
+					return undefined;
+				}
+				return runSummary(record, state, events, ownership, driving, now);
+			};
+			// One run's problem never fails the listing: a corrupt journal (owned
+			// or not) is reported as such, anything else as unreadable.
+			const scan = async (runIdValue: WorkflowRunId): Promise<void> => {
+				const issue: Issue = (kind, message) => {
+					issues.push({
+						runId: runIdValue,
+						directory: runIdValue,
+						kind,
+						message,
+					});
+				};
+				let summary: WorkflowRunSummary | undefined;
+				try {
+					summary = await summarize(runIdValue, issue);
+				} catch (error) {
+					if (error instanceof WorkflowPersistenceCorruptionError) {
+						issue("corrupt-journal", "Workflow run journal is corrupt.");
+					} else {
+						issue("unreadable", "Workflow run could not be read.");
+					}
 					return;
 				}
-				summaries.push(
-					runSummary(record, state, events, ownership, driving, now),
-				);
+				if (summary) summaries.push(summary);
 			};
 			await Promise.all(
 				Array.from({ length: Math.min(8, pending.length) }, async () => {
@@ -1707,7 +1729,19 @@ export async function createWorkflowService(
 	}> {
 		const current = owned.get(runIdValue);
 		if (current) {
-			const events = await current.journal.readEvents();
+			let events: readonly WorkflowJournalEvent[];
+			try {
+				events = await current.journal.readEvents();
+			} catch (error) {
+				if (error instanceof WorkflowPersistenceCorruptionError) {
+					throw new WorkflowServiceError(
+						"persistence",
+						"Workflow run journal is corrupt.",
+						{ cause: error },
+					);
+				}
+				throw error;
+			}
 			return {
 				record: current.record,
 				events,
@@ -1717,23 +1751,21 @@ export async function createWorkflowService(
 			};
 		}
 		const directory = path.join(storeRoot, "runs", runIdValue);
+		const notFound = () =>
+			new WorkflowServiceError(
+				"not-found",
+				`Workflow run not found: ${runIdValue}`,
+			);
+		let metadata: Stats;
 		try {
-			const metadata = await lstat(directory);
-			if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-				throw new WorkflowServiceError(
-					"persistence",
-					"Workflow run directory is invalid.",
-				);
-			}
+			metadata = await lstat(directory);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-				throw new WorkflowServiceError(
-					"not-found",
-					`Workflow run not found: ${runIdValue}`,
-				);
-			}
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") throw notFound();
 			throw error;
 		}
+		// An entry that is not a run directory (a file or a symlink) is "no such
+		// run" to a reader, exactly like a missing entry.
+		if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw notFound();
 		let record: WorkflowRunRecord;
 		try {
 			record = await WorkflowRunRecordStore.readFrom(directory, runIdValue);
@@ -1795,16 +1827,24 @@ export async function createWorkflowService(
 		});
 	}
 
-	function assertReconcilable(
+	function knownTask(
 		view: WorkflowServiceRunView,
 		taskId: WorkflowTaskId,
-	): void {
+	): WorkflowServiceTaskView {
 		const task = (view.tasks ?? []).find(
 			(candidate) => candidate.id === taskId && candidate.abandoned !== true,
 		);
 		if (!task) {
 			throw new WorkflowServiceError("validation", "Unknown workflow task.");
 		}
+		return task;
+	}
+
+	function assertReconcilable(
+		view: WorkflowServiceRunView,
+		taskId: WorkflowTaskId,
+	): void {
+		const task = knownTask(view, taskId);
 		if (task.status !== "cleanup-blocked") {
 			throw new WorkflowServiceError(
 				"validation",
@@ -1819,15 +1859,19 @@ export async function createWorkflowService(
 	): Promise<WorkflowServiceReconcileView> {
 		const current = await statusCurrent(runIdValue);
 		// A named task is refused against the durable view before any lease or
-		// drive is touched; the check repeats after the drive settles because
-		// the drive itself may have resolved the task.
-		if (taskId !== undefined) assertReconcilable(current, taskId);
+		// drive is touched: an unknown task always, a task that is not
+		// cleanup-blocked only when the run is not already completed (a
+		// completed run has nothing to reconcile and reports an empty list).
+		// The check repeats after the drive settles because the drive itself
+		// may have resolved the task.
+		if (taskId !== undefined) knownTask(current, taskId);
 		if (
 			current.status === "completed" ||
 			current.status === "completed-degraded"
 		) {
 			return Object.freeze({ ...current, reconciled: Object.freeze([]) });
 		}
+		if (taskId !== undefined) assertReconcilable(current, taskId);
 		// A settled owned run still holds its lease, so it is reused rather than
 		// resumed, exactly as invalidate does.
 		const run = owned.get(runIdValue) ?? (await resume(runIdValue));

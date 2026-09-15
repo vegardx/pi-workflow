@@ -106,6 +106,9 @@ and an oversized run `output` is omitted in favor of the durable output
 artifact). `workflow_run` returns a durable run ID immediately. Use
 `workflow_wait` for the bounded result or `workflow_stop` to persist stop
 intent, abort in-process support work, and drain active child work.
+`workflow_reconcile` takes `runId` and an optional `taskId` (forwarded
+unchanged to `reconcile(runId, { taskId })`) to reconcile one cleanup-blocked
+task instead of every blocked task in order.
 
 ## Authoring skill
 

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
 	appendFile,
+	chmod,
 	mkdir,
 	readFile,
 	realpath,
@@ -26,8 +27,14 @@ import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkflowStateProjection } from "../src/events.js";
 import workflowExtension from "../src/extension.js";
-import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
-import type { WorkflowRunLeaseRecord } from "../src/persistence/run-lease.js";
+import {
+	type WorkflowJournalEvent,
+	WorkflowRunJournal,
+} from "../src/persistence/journal.js";
+import {
+	WorkflowPersistenceCorruptionError,
+	type WorkflowRunLeaseRecord,
+} from "../src/persistence/run-lease.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
 import {
 	createWorkflowService,
@@ -994,6 +1001,17 @@ describe("listRuns", () => {
 				"not-found",
 				"Workflow run not found: workflow_doesnotexist",
 			);
+			// A file or a symlink where a run directory would be is no run either.
+			await expectServiceError(
+				service.inspect("workflow_plainfile"),
+				"not-found",
+				"Workflow run not found: workflow_plainfile",
+			);
+			await expectServiceError(
+				service.logs("workflow_symlinked"),
+				"not-found",
+				"Workflow run not found: workflow_symlinked",
+			);
 			// The torn run's complete prefix is used.
 			const tornInspection = await service.inspect(torn);
 			expect(tornInspection.run.status).toBe("completed");
@@ -1052,6 +1070,84 @@ describe("listRuns", () => {
 				].sort((left, right) => left.directory.localeCompare(right.directory)),
 			);
 		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("reports an unreadable record and a corrupt owned journal as issues, never as failures", async () => {
+		const fixture = await projectFixture("unreadable");
+		const first = await serviceFor(fixture);
+		const unreadable = await completedRun(first, "example", { value: "a" });
+		await bounded(first.shutdown(), "first shutdown");
+		const raw = await serviceFor(fixture);
+		const service = asRead(raw);
+		const owned = await completedRun(raw, "example", { value: "b" });
+		const record = path.join(
+			fixture.storeRoot,
+			"runs",
+			unreadable,
+			"service.json",
+		);
+		await chmod(record, 0o000);
+		// Root reads a mode-000 file, so that half of the check is skipped there.
+		const privileged = process.getuid?.() === 0;
+		const corruption = () =>
+			new WorkflowPersistenceCorruptionError(
+				"workflow journal append outcome is uncertain",
+			);
+		const readEvents = vi.spyOn(WorkflowRunJournal.prototype, "readEvents");
+		try {
+			// Only the owned run reads through its journal object; the unleased
+			// reader is a free function, so the rejection lands on the owned run.
+			readEvents.mockRejectedValueOnce(corruption());
+			const page = await service.listRuns();
+			expect(Value.Check(WorkflowRunPageSchema, page)).toBe(true);
+			expect(page.issues).toContainEqual({
+				runId: owned,
+				directory: owned,
+				kind: "corrupt-journal",
+				message: "Workflow run journal is corrupt.",
+			});
+			if (privileged) {
+				expect(page.runs.map((run) => run.runId)).toEqual([unreadable]);
+			} else {
+				expect(page.runs).toEqual([]);
+				expect(page.issues).toContainEqual({
+					runId: unreadable,
+					directory: unreadable,
+					kind: "unreadable",
+					message: "Workflow run could not be read.",
+				});
+				expect(page.issues).toHaveLength(2);
+			}
+			// With the record readable and the journal intact, both runs list.
+			await chmod(record, 0o600);
+			const healthy = await service.listRuns();
+			expect(healthy.issues).toEqual([]);
+			expect(healthy.runs.map((run) => run.runId).sort()).toEqual(
+				[owned, unreadable].sort(),
+			);
+
+			readEvents.mockRejectedValueOnce(corruption());
+			const inspected = await expectServiceError(
+				service.inspect(owned),
+				"persistence",
+				"Workflow run journal is corrupt.",
+			);
+			expect(inspected.cause).toBeInstanceOf(
+				WorkflowPersistenceCorruptionError,
+			);
+			readEvents.mockRejectedValueOnce(corruption());
+			const logged = await expectServiceError(
+				service.logs(owned),
+				"persistence",
+				"Workflow run journal is corrupt.",
+			);
+			expect(logged.cause).toBeInstanceOf(WorkflowPersistenceCorruptionError);
+			expect((await service.inspect(owned)).run.status).toBe("completed");
+		} finally {
+			readEvents.mockRestore();
+			await chmod(record, 0o600);
 			await shutdownQuietly(service);
 		}
 	});
@@ -1638,6 +1734,27 @@ describe("reconcile with a task id", () => {
 			await shutdownQuietly(service);
 		}
 	});
+
+	it("returns an empty reconciled list for a known task on a completed run and refuses an unknown one", async () => {
+		const fixture = await projectFixture("reconcile-completed-task");
+		const settled = await settledAttemptRun(fixture, [{ status: "completed" }]);
+		const service = asRead(settled.service);
+		try {
+			expect(settled.first.status).toBe("completed");
+			const view = await service.reconcile(settled.runId, {
+				taskId: settled.taskId,
+			});
+			expect(view).toMatchObject({ status: "completed", reconciled: [] });
+			expect(Value.Check(WorkflowServiceReconcileViewSchema, view)).toBe(true);
+			await expectServiceError(
+				service.reconcile(settled.runId, { taskId: "task_unknownzz" }),
+				"validation",
+				"Unknown workflow task.",
+			);
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1929,6 +2046,25 @@ describe("read tools", () => {
 			) as { status: string; timedOut?: true };
 			expect(waited.status).toBe("completed");
 			expect(waited).not.toHaveProperty("timedOut");
+			// workflow_reconcile forwards the optional task id unchanged.
+			await expect(
+				runTool(
+					tool("workflow_reconcile"),
+					{ runId: exampleId, taskId: "task_unknownzz" },
+					context,
+				),
+			).rejects.toMatchObject({
+				code: "validation",
+				message: "Unknown workflow task.",
+			});
+			const reconciled = JSON.parse(
+				await runTool(
+					tool("workflow_reconcile"),
+					{ runId: exampleId },
+					context,
+				),
+			) as { status: string; reconciled: unknown[] };
+			expect(reconciled).toMatchObject({ status: "completed", reconciled: [] });
 		} finally {
 			await handlers.get("session_shutdown")?.({}, context);
 			await shutdownQuietly(oracle);
