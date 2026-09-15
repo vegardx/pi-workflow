@@ -1432,8 +1432,9 @@ validates the run ID, the task ID pattern, and a reason of 1 through 4096
 characters, rejects with `conflict` ("Workflow run is still being driven.")
 while an owned run's drive has not settled and with `validation` ("Workflow
 run status does not admit invalidation.") unless the run is durably `failed`
-or `interrupted`, refuses nested child runs, runs that already hold on-path
-invalidated work awaiting recovery, and runs whose deadline has passed (each
+or `interrupted`, refuses nested child runs, runs that already await recovery
+(of on-path invalidated work, or of an open operator resume intent, each named
+in its message), and runs whose deadline has passed (each
 `validation`), then computes `invalidationClosure`, appends one
 `task-invalidated` event carrying the exact closure and abandoned epochs,
 appends the recovery transition `failed|interrupted → running` (reason
@@ -1463,7 +1464,9 @@ driven." while an owned drive has not settled; and refuses with `validation`
 a status other than `interrupted` ("Workflow run status does not admit
 resume."), a nested child run ("Nested workflow runs are resumed through their
 parent run."), a run awaiting recovery ("Workflow run already awaits recovery
-of invalidated work."), and a passed deadline ("Workflow run deadline has
+of invalidated work.", or "Workflow run already awaits recovery of an operator
+resume." when the pending recovery is an open operator intent rather than
+invalidated work), and a passed deadline ("Workflow run deadline has
 passed."). Without `taskId` the run's single resumable task is selected
 ("Workflow run has no resumable task.", "Workflow run has multiple resumable
 tasks; specify taskId."); with `taskId` the task must pass `resumeRefusal`:

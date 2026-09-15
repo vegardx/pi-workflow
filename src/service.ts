@@ -67,6 +67,7 @@ import {
 	admitsInvalidation,
 	awaitsRecovery,
 	deadlinePassed,
+	hasOpenOperatorIntent,
 	isNestedRun,
 	isTerminalWorkflowRunStatus,
 	OPERATOR_RESUME_REASON,
@@ -367,6 +368,23 @@ function validateInput(workflow: DiscoveredWorkflow, input: unknown): void {
 			{ cause: error },
 		);
 	}
+}
+
+/**
+ * Names the pending recovery that blocks a new operator action on a durably
+ * failed or interrupted run: invalidated on-path work, or (when no such work
+ * exists) an operator resume intent the next drive still has to perform.
+ */
+function recoveryRefusal(state: WorkflowStateProjection): WorkflowServiceError {
+	const invalidated = Object.values(state.tasks).some(
+		(task) => task.status === "invalidated" && task.abandoned !== true,
+	);
+	return new WorkflowServiceError(
+		"validation",
+		invalidated || !hasOpenOperatorIntent(state)
+			? "Workflow run already awaits recovery of invalidated work."
+			: "Workflow run already awaits recovery of an operator resume.",
+	);
 }
 
 function runId(): WorkflowRunId {
@@ -1532,10 +1550,7 @@ export async function createWorkflowService(
 					);
 				}
 				if (durable !== undefined && awaitsRecovery(durable)) {
-					throw new WorkflowServiceError(
-						"validation",
-						"Workflow run already awaits recovery of invalidated work.",
-					);
+					throw recoveryRefusal(durable);
 				}
 				// Checked before the run is composed, as invalidate does: resuming
 				// an expired run would only let its deadline cancel it.
@@ -2135,10 +2150,7 @@ export async function createWorkflowService(
 			);
 		}
 		if (durable !== undefined && awaitsRecovery(durable)) {
-			throw new WorkflowServiceError(
-				"validation",
-				"Workflow run already awaits recovery of invalidated work.",
-			);
+			throw recoveryRefusal(durable);
 		}
 		// Checked before the run is composed: resuming an expired run starts
 		// a drive that immediately stops on its deadline and cancels the run,
