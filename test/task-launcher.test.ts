@@ -14,14 +14,25 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
-import type { TaskExecutionProjection } from "../src/events.js";
+import type {
+	AgentTaskSpec,
+	MaterializedAgentTask,
+	MaterializedWorkflowTask,
+} from "../src/contracts.js";
+import type {
+	TaskExecutionProjection,
+	WorkflowEventInput,
+} from "../src/events.js";
 import {
 	deriveJsonValueSha256,
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
 } from "../src/execution.js";
-import { WorkflowTaskMaterializer } from "../src/materializer.js";
+import {
+	deriveAgentTaskIdentity,
+	WorkflowTaskMaterializer,
+} from "../src/materializer.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
 import {
 	acquireWorkflowRunLease,
@@ -37,6 +48,7 @@ import {
 const definitionIdentitySha256 = "a".repeat(64);
 const inputSha256 = "b".repeat(64);
 const hash = "c".repeat(64);
+const baselineSha256 = "d".repeat(64);
 const leases = new Set<WorkflowRunLease>();
 
 function request() {
@@ -69,6 +81,7 @@ function request() {
 function launchPlan(
 	request: SubagentRequest,
 	ownerId: string,
+	baseline: string = baselineSha256,
 ): AgentLaunchPlan {
 	const draft = {
 		schema: "pi-subagent-launch" as const,
@@ -103,7 +116,7 @@ function launchPlan(
 		workspace: {
 			mode: request.workspace.mode,
 			hostPathSha256: hash,
-			baselineSha256: hash,
+			baselineSha256: baseline,
 		},
 		sandbox: {
 			backend: "gondolin" as const,
@@ -129,8 +142,9 @@ function launchPlan(
 function preflight(
 	request: SubagentRequest,
 	ownerId: string,
+	baseline?: string,
 ): SubagentPreflight {
-	const plan = launchPlan(request, ownerId);
+	const plan = launchPlan(request, ownerId, baseline);
 	return {
 		preflightId: "preflight-launcher",
 		identitySha256: plan.identitySha256,
@@ -174,7 +188,53 @@ function binding(ownerClient: SubagentClient): WorkflowSubagentBinding {
 	};
 }
 
-async function readyJournal() {
+/**
+ * Rewrites a read-only agent declaration into the worktree declaration the
+ * materializer persists for a worktree request: worktree workspace, a
+ * positive workspace write budget, and the workflow-only handoff policy.
+ */
+function isAgentDeclaration(
+	task: MaterializedWorkflowTask,
+): task is MaterializedAgentTask {
+	return task.spec.kind === "agent";
+}
+
+function worktreeDeclaration(event: WorkflowEventInput): WorkflowEventInput {
+	if (event.type !== "task-declared" || !isAgentDeclaration(event.data.task)) {
+		return event;
+	}
+	const task: MaterializedAgentTask = event.data.task;
+	const { identitySha256: _identity, ...spec } = task.spec;
+	const request: AgentTaskSpec["request"] = {
+		...structuredClone(spec.request),
+		workspace: { mode: "worktree", cwd: spec.request.workspace.cwd },
+		handoff: "required",
+		limits: { ...spec.request.limits, workspaceWriteBytes: 1 },
+	};
+	const worktreeSpec: Omit<AgentTaskSpec, "identitySha256"> = {
+		...spec,
+		request,
+	};
+	return {
+		type: "task-declared",
+		data: {
+			task: {
+				...task,
+				spec: {
+					...worktreeSpec,
+					identitySha256: deriveAgentTaskIdentity({
+						definitionIdentitySha256,
+						inputSha256,
+						namespace: task.namespace,
+						spec: worktreeSpec,
+					}),
+				},
+			},
+		},
+	};
+}
+
+async function readyJournal(workspace: "read-only" | "worktree" = "read-only") {
 	const root = path.resolve(".pi", "test-task-launcher", `run-${randomUUID()}`);
 	const lease = await acquireWorkflowRunLease({
 		storeRoot: root,
@@ -198,7 +258,9 @@ async function readyJournal() {
 	});
 	const task = materializer.agent("answer", request());
 	for (const event of materializer.closeEpoch("final", [task]).events) {
-		await journal.appendEvent(event);
+		await journal.appendEvent(
+			workspace === "worktree" ? worktreeDeclaration(event) : event,
+		);
 	}
 	await journal.append("run-status-changed", {
 		from: "created",
@@ -303,6 +365,8 @@ async function readyJournalWithInput() {
 		plannedSubagentRunId: "run_producer",
 		plannedSubagentAttemptId: "attempt_producer",
 		expiresAt: "2099-01-01T00:00:00.000Z",
+		workspaceMode: "read-only",
+		workspaceBaselineSha256: baselineSha256,
 	});
 	await journal.append("task-execution-launch-intended", {
 		executionId,
@@ -457,6 +521,8 @@ async function primePreflight(
 		plannedSubagentRunId: "run_launcher",
 		plannedSubagentAttemptId: "attempt_launcher",
 		expiresAt: "2099-01-01T00:00:00.000Z",
+		workspaceMode: "read-only",
+		workspaceBaselineSha256: baselineSha256,
 	});
 	return { executionId, operationId };
 }
@@ -525,6 +591,124 @@ describe("workflow task launcher", () => {
 		});
 		expect(preflightCall).toHaveBeenCalledOnce();
 		expect(launch).toHaveBeenCalledOnce();
+	});
+
+	it("persists the launch plan workspace identity on the preflight event", async () => {
+		const { journal, taskId } = await readyJournal();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					preflight: async (input) =>
+						preflight(input, "pi-workflow:workflow_launcher"),
+					launch: vi.fn(async () => ({
+						runId: "run_launcher",
+						attemptId: "attempt_launcher",
+						status: "active" as const,
+					})),
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).resolves.toMatchObject({
+			state: "launched",
+		});
+		const events = await journal.readEvents();
+		const preflighted = events.find(
+			(event) => event.type === "task-execution-preflighted",
+		);
+		expect(preflighted?.data).toMatchObject({
+			workspaceMode: "read-only",
+			workspaceBaselineSha256: baselineSha256,
+		});
+		const execution = Object.values((await projection(journal)).executions)[0];
+		expect(execution?.preflight).toMatchObject({
+			workspaceMode: "read-only",
+			workspaceBaselineSha256: baselineSha256,
+		});
+	});
+
+	it("lowers a worktree task without its workflow-only handoff policy", async () => {
+		const { journal, taskId } = await readyJournal("worktree");
+		const declared = (await projection(journal)).tasks[taskId]?.task.spec;
+		if (declared?.kind !== "agent") throw new Error("missing agent task");
+		expect(declared.request.workspace).toEqual({
+			mode: "worktree",
+			cwd: "/repo",
+		});
+		expect(declared.request.handoff).toBe("required");
+		const preflightCall = vi.fn(async (input: SubagentRequest) =>
+			preflight(input, "pi-workflow:workflow_launcher"),
+		);
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					preflight: preflightCall,
+					launch: vi.fn(async () => ({
+						runId: "run_launcher",
+						attemptId: "attempt_launcher",
+						status: "active" as const,
+					})),
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).resolves.toMatchObject({
+			state: "launched",
+		});
+		expect(preflightCall).toHaveBeenCalledOnce();
+		const lowered = preflightCall.mock.calls[0]?.[0];
+		if (!lowered) throw new Error("missing lowered request");
+		expect(lowered.workspace).toEqual({ mode: "worktree", cwd: "/repo" });
+		expect(lowered.limits.workspaceWriteBytes).toBe(1);
+		expect("handoff" in lowered).toBe(false);
+		expect(Object.keys(lowered).sort()).toEqual([
+			"agent",
+			"contextMode",
+			"contextScopes",
+			"limits",
+			"operationId",
+			"outputSchema",
+			"preloadSkills",
+			"task",
+			"tools",
+			"workspace",
+		]);
+		const execution = Object.values((await projection(journal)).executions)[0];
+		expect(execution?.preflight).toMatchObject({
+			workspaceMode: "worktree",
+			workspaceBaselineSha256: baselineSha256,
+		});
+	});
+
+	it("rejects a preflight whose workspace baseline digest is malformed", async () => {
+		const { journal, taskId } = await readyJournal();
+		const launch = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					preflight: async (input) =>
+						preflight(input, "pi-workflow:workflow_launcher", "HEAD"),
+					launch,
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "preflight",
+			message: "Subagent preflight failed before launch.",
+		});
+		expect(launch).not.toHaveBeenCalled();
+		const state = await projection(journal);
+		const execution = Object.values(state.executions)[0];
+		expect(execution?.preflight).toBeUndefined();
+		expect(execution?.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { kind: "workflow", stage: "preflight" },
+		});
+		expect(state.tasks[taskId]?.status).toBe("failed");
 	});
 
 	it("reopens and binds verified artifacts into delegated context", async () => {

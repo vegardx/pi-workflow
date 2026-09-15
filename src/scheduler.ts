@@ -30,8 +30,7 @@ import type {
 	WorkflowTaskProjection,
 } from "./events.js";
 import {
-	deriveJsonValueSha256,
-	deriveSubagentResultSha256,
+	deriveSubagentSettlementEvidence,
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import {
@@ -263,34 +262,6 @@ function outcomeFromStatus(
 
 function terminalOutcome(result: RunResult) {
 	return outcomeFromStatus(result.status);
-}
-
-function settlementEvidence(
-	result: RunResult,
-	attemptOrdinal: number,
-): SubagentTerminalEvidence {
-	const evidence: SubagentTerminalEvidence = {
-		kind: "subagent",
-		attemptOrdinal,
-		resultSha256: deriveSubagentResultSha256(result),
-		status: result.status,
-		usage: structuredClone(result.usage),
-		usageComplete: result.usageComplete,
-		runtimeMs: result.runtimeMs,
-		...(result.failure ? { failure: structuredClone(result.failure) } : {}),
-		sandboxCleanup: result.sandboxCleanup,
-		workspaceCleanup: result.workspaceCleanup,
-		truncated: result.truncated,
-		...(result.output ? { output: structuredClone(result.output) } : {}),
-		...(result.structuredOutput === undefined
-			? {}
-			: {
-					structuredOutputSha256: deriveJsonValueSha256(
-						result.structuredOutput,
-					),
-				}),
-	};
-	return evidence;
 }
 
 function validateReceipt(
@@ -1063,8 +1034,8 @@ export function createWorkflowSequentialScheduler(
 			execution: TaskExecutionProjection,
 		): SubagentTerminalEvidence => {
 			try {
-				return settlementEvidence(
-					executionResult.result,
+				return deriveSubagentSettlementEvidence(
+					executionResult,
 					1 + receiptedAttemptCount(execution),
 				);
 			} catch (error) {
@@ -1095,9 +1066,15 @@ export function createWorkflowSequentialScheduler(
 			}
 			validateReceipt(terminalReceipt, persisted, "observation");
 			const evidence = evidenceFor(execution);
+			// Only a child that was observed cleanup-blocked and now reports another
+			// terminal status gets a replacement settlement. A workflow-evidence
+			// block (artifact or handoff import, release) keeps its settlement and
+			// lets the finalizer retry the blocked step.
 			const reconcilesCleanup =
 				execution.phase === "terminal" &&
-				execution.terminal?.outcome === "cleanup-blocked";
+				execution.terminal?.outcome === "cleanup-blocked" &&
+				execution.observation?.status === "cleanup-blocked" &&
+				terminalReceipt.status !== "cleanup-blocked";
 			if (
 				execution.settlement &&
 				!reconcilesCleanup &&

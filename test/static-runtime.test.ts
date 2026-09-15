@@ -1,10 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { RunResult } from "@vegardx/pi-subagent";
+import {
+	HANDOFF_EXPORT_MEDIA_TYPE,
+	type RunResult,
+} from "@vegardx/pi-subagent";
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
+import {
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
+	type WorkflowHandoffDescriptor,
+	WorkflowHandoffDescriptorSchema,
+} from "../src/contracts.js";
 import { defineWorkflow, type WorkflowContext } from "../src/definition.js";
 import {
 	deriveJsonValueSha256,
@@ -14,13 +23,14 @@ import {
 	deriveTaskExecutionId,
 	deriveWorkflowFailureSha256,
 } from "../src/execution.js";
+import { WorkflowHandoffVerificationError } from "../src/handoff.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
 import {
 	acquireWorkflowRunLease,
 	type WorkflowRunLease,
 } from "../src/persistence/run-lease.js";
-import { reduceWorkflowEvents } from "../src/reducer.js";
+import { invalidationClosure, reduceWorkflowEvents } from "../src/reducer.js";
 import { type DiscoveredWorkflow, discoverWorkflows } from "../src/registry.js";
 import type {
 	WorkflowSchedulerOutcome,
@@ -485,6 +495,8 @@ function schedulerFor(
 				executionId,
 				operationId,
 				preflightId: `preflight-${task.task.spec.key}`,
+				workspaceMode: "read-only" as const,
+				workspaceBaselineSha256: "c".repeat(64),
 				planIdentitySha256,
 				plannedSubagentRunId: childRunId,
 				plannedSubagentAttemptId: childAttemptId,
@@ -1939,5 +1951,741 @@ describe("static workflow runtime", () => {
 			runtime.drive(),
 		]);
 		expect(second).toEqual(first);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Worktree tasks and handoffs (spec sections 5, 7, 8.3).
+// ---------------------------------------------------------------------------
+
+const HANDOFF_BASELINE_HEAD = "b".repeat(40);
+const HANDOFF_UNVERIFIED_MESSAGE =
+	"Completed worktree task has no verified handoff artifact.";
+
+/** The rendered commit of a generation; distinct generations capture distinct commits. */
+function handoffCommitFor(generation: number): string {
+	return `${"a".repeat(39)}${generation}`;
+}
+
+/** A single-commit `git format-patch` rendering with git's fixed mbox date. */
+function handoffPatch(commit: string): Buffer {
+	return Buffer.from(
+		[
+			`From ${commit} Mon Sep 17 00:00:00 2001`,
+			"From: Writer <writer@example.com>",
+			"Subject: [PATCH] Write the change",
+			"",
+			"---",
+			"diff --git a/file.txt b/file.txt",
+			"--- a/file.txt",
+			"+++ b/file.txt",
+			"@@ -1 +1 @@",
+			"-before",
+			`+after ${commit}`,
+			"",
+		].join("\n"),
+		"utf8",
+	);
+}
+
+function worktreeRequest(goal = "Write") {
+	const base = request(goal);
+	return {
+		...base,
+		agent: "writer",
+		tools: ["read", "write"],
+		workspace: { mode: "worktree" as const, cwd: "/repo" },
+		limits: { ...base.limits, workspaceWriteBytes: 1_048_576 },
+	};
+}
+
+interface WorktreeOutcome {
+	readonly output: unknown;
+	/** The commit rendered on the patch's first line when it must disagree. */
+	readonly patchCommit?: string;
+}
+
+/**
+ * Settles the first on-path pending/ready worktree agent task with the next
+ * execution generation through spec 4.5's "worktree success" ladder: the
+ * settlement carries handoff identity, the result and handoff artifacts are
+ * declared and imported before release intent, then the child is released
+ * and terminalized on subagent evidence.
+ */
+function worktreeSchedulerFor(
+	journal: WorkflowRunJournal,
+	artifacts: WorkflowArtifactStore,
+	outcomes: ReadonlyMap<string, WorktreeOutcome>,
+): WorkflowSequentialScheduler & { calls: number } {
+	const scheduler = {
+		concurrency: 1,
+		stopSignal: new AbortController().signal,
+		calls: 0,
+		async drive(): Promise<WorkflowSchedulerOutcome> {
+			scheduler.calls += 1;
+			let current = reduceWorkflowEvents(await journal.readEvents());
+			if (current.status === "created" || current.status === "waiting") {
+				await journal.append("run-status-changed", {
+					from: current.status,
+					to: "running",
+				});
+				current = reduceWorkflowEvents(await journal.readEvents());
+			}
+			const task = Object.values(current.tasks)
+				.filter((candidate) => candidate.abandoned !== true)
+				.sort(
+					(left, right) =>
+						left.task.materializationSequence -
+						right.task.materializationSequence,
+				)
+				.find(
+					(candidate) =>
+						candidate.status === "pending" || candidate.status === "ready",
+				);
+			if (!task) return { state: "idle", runStatus: current.status };
+			const spec = task.task.spec;
+			if (spec.kind !== "agent" || spec.request.workspace.mode !== "worktree") {
+				throw new Error("fake worktree scheduler only supports worktree tasks");
+			}
+			const outcome = outcomes.get(spec.key);
+			if (!outcome) throw new Error(`missing fake outcome for ${spec.key}`);
+			const taskId = task.task.id;
+			const generation =
+				1 +
+				Object.values(current.executions).filter(
+					(execution) => execution.execution.taskId === taskId,
+				).length;
+			if (task.status === "pending") {
+				await journal.append("task-status-changed", {
+					taskId,
+					from: "pending",
+					to: "ready",
+				});
+			}
+			const executionId = deriveTaskExecutionId(
+				current.runId,
+				taskId,
+				generation,
+			);
+			const operationId = deriveSubagentOperationId(
+				current.runId,
+				taskId,
+				generation,
+			);
+			const childKey = `${spec.key.replaceAll("-", "")}g${generation}`;
+			const childRunId = `run_${childKey}`;
+			const childAttemptId = `attempt_${childKey}`;
+			await journal.append("task-execution-created", {
+				execution: {
+					kind: "agent",
+					id: executionId,
+					runId: current.runId,
+					taskId,
+					generation,
+					taskIdentitySha256: spec.identitySha256,
+					operationId,
+				},
+			});
+			await journal.append("task-execution-preflighted", {
+				executionId,
+				operationId,
+				preflightId: `preflight-${childKey}`,
+				workspaceMode: "worktree",
+				workspaceBaselineSha256: `${"c".repeat(63)}${generation}`,
+				planIdentitySha256,
+				plannedSubagentRunId: childRunId,
+				plannedSubagentAttemptId: childAttemptId,
+				expiresAt: "2099-01-01T00:00:00.000Z",
+			});
+			await journal.append("task-execution-launch-intended", {
+				executionId,
+				operationId,
+				preflightId: `preflight-${childKey}`,
+				planIdentitySha256,
+			});
+			await journal.append("task-execution-launch-receipted", {
+				executionId,
+				operationId,
+				subagentRunId: childRunId,
+				subagentAttemptId: childAttemptId,
+				status: "completed",
+			});
+			await journal.append("task-status-changed", {
+				taskId,
+				from: "ready",
+				to: "waiting",
+			});
+			await journal.append("task-execution-child-observed", {
+				executionId,
+				subagentRunId: childRunId,
+				subagentAttemptId: childAttemptId,
+				status: "completed",
+			});
+			const handoffCommit = handoffCommitFor(generation);
+			const result = completedResult(childRunId, outcome.output);
+			const evidence = {
+				kind: "subagent" as const,
+				attemptOrdinal: 1,
+				resultSha256: deriveSubagentResultSha256(result),
+				status: "completed" as const,
+				usage: result.usage,
+				usageComplete: true,
+				runtimeMs: 10,
+				sandboxCleanup: "proved" as const,
+				workspaceCleanup: "proved" as const,
+				truncated: false,
+				structuredOutputSha256: deriveJsonValueSha256(outcome.output),
+				handoff: {
+					attemptId: childAttemptId,
+					baselineHead: HANDOFF_BASELINE_HEAD,
+					handoffCommit,
+				},
+			};
+			await journal.append("task-execution-child-settled", {
+				executionId,
+				evidence,
+			});
+			const artifact = await artifacts.putJson(outcome.output, {
+				runId: current.runId,
+				producerTaskId: taskId,
+				producerExecutionId: executionId,
+				output: "result",
+				schemaSha256: deriveJsonValueSha256(spec.request.outputSchema),
+			});
+			await journal.append("artifact-declared", { artifact });
+			await journal.append("task-execution-artifact-imported", {
+				executionId,
+				subagentRunId: childRunId,
+				artifactId: artifact.id,
+				sourceResultSha256: evidence.resultSha256,
+			});
+			const handoff = await artifacts.putBytes(
+				handoffPatch(outcome.patchCommit ?? handoffCommit),
+				{
+					runId: current.runId,
+					producerTaskId: taskId,
+					producerExecutionId: executionId,
+					output: "handoff",
+					mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+					schemaSha256: WORKFLOW_HANDOFF_FORMAT_SHA256,
+				},
+			);
+			await journal.append("artifact-declared", { artifact: handoff });
+			await journal.append("task-execution-handoff-imported", {
+				executionId,
+				subagentRunId: childRunId,
+				subagentAttemptId: childAttemptId,
+				artifactId: handoff.id,
+				handoffCommit,
+				baselineHead: HANDOFF_BASELINE_HEAD,
+				sha256: handoff.sha256,
+				bytes: handoff.bytes,
+			});
+			await journal.append("task-execution-release-intended", {
+				executionId,
+				subagentRunId: childRunId,
+			});
+			await journal.append("task-execution-released", {
+				executionId,
+				subagentRunId: childRunId,
+				status: "completed",
+			});
+			await journal.append("task-execution-terminal", {
+				executionId,
+				outcome: "completed",
+				evidence,
+			});
+			await journal.append("task-status-changed", {
+				taskId,
+				from: "waiting",
+				to: "completed",
+			});
+			return {
+				state: "awaiting-finalization",
+				runStatus: "running",
+				taskId,
+				executionId,
+				child: {
+					runId: childRunId,
+					attemptId: childAttemptId,
+					status: "completed",
+				},
+				outcome: "completed",
+			};
+		},
+		async reconcile() {
+			throw new Error("fake worktree workflow has no cleanup-blocked task");
+		},
+		async stop() {
+			return { state: "terminal", runStatus: "cancelled" } as const;
+		},
+	};
+	return scheduler;
+}
+
+function worktreeMeta(name: string) {
+	return {
+		name,
+		description: "Worktree",
+		version: 1,
+		budget: { cost: 1000, childRuntimeMs: 3600000 },
+		timeoutMs: 3600000,
+	};
+}
+
+/** The handoff artifacts a task declared, in declaration order. */
+function handoffArtifactsOf(
+	state: ReturnType<typeof reduceWorkflowEvents>,
+	taskId: string,
+) {
+	return Object.values(state.artifacts).filter(
+		(artifact) =>
+			artifact.producerTaskId === taskId && artifact.output === "handoff",
+	);
+}
+
+function writerTaskId(state: ReturnType<typeof reduceWorkflowEvents>): string {
+	const writer = Object.values(state.tasks).find(
+		(task) => task.task.spec.key === "writer",
+	);
+	if (!writer) throw new Error("missing writer task");
+	return writer.task.id;
+}
+
+describe("static workflow runtime worktree handoffs", () => {
+	it("resolves a verified handoff descriptor through ctx.handoff as a result barrier", async () => {
+		const { journal, artifacts } = await fixture();
+		let seen: WorkflowHandoffDescriptor | undefined;
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-descriptor"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ commit: Type.String() }),
+			async run(ctx) {
+				const writer = ctx.agent("writer", worktreeRequest());
+				const descriptor = await ctx.handoff(writer);
+				seen = descriptor;
+				return { commit: descriptor?.handoffCommit ?? "none" };
+			},
+		});
+		const scheduler = worktreeSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["writer", { output: { answer: "written" } }]]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { commit: handoffCommitFor(1) },
+		});
+		expect(scheduler.calls).toBe(1);
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const taskId = writerTaskId(state);
+		const executionId = deriveTaskExecutionId(journal.runId, taskId, 1);
+		const [handoff] = handoffArtifactsOf(state, taskId);
+		if (!handoff) throw new Error("missing handoff artifact");
+		expect(seen).toEqual({
+			artifactId: handoff.id,
+			runId: journal.runId,
+			producerTaskId: taskId,
+			producerExecutionId: executionId,
+			subagentRunId: "run_writerg1",
+			subagentAttemptId: "attempt_writerg1",
+			baselineHead: HANDOFF_BASELINE_HEAD,
+			handoffCommit: handoffCommitFor(1),
+			format: "git-format-patch",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			sha256: handoff.sha256,
+			bytes: handoff.bytes,
+		});
+		expect(Value.Check(WorkflowHandoffDescriptorSchema, seen)).toBe(true);
+		expect(Object.isFrozen(seen)).toBe(true);
+		// The descriptor carries identity only: no path, branch, or ref.
+		const serialized = JSON.stringify(seen);
+		expect(serialized).not.toContain("worktreePath");
+		expect(serialized).not.toContain("refs/pi-subagent");
+		expect(serialized).not.toContain("branch");
+		// A persisted "result"-kind barrier, no new barrier kind.
+		expect(state.barriers.map((barrier) => barrier.kind)).toEqual([
+			"result",
+			"final",
+		]);
+		expect(state.barriers[0]?.taskIds).toEqual([taskId]);
+		// Replay reuses the verified artifact without driving the scheduler.
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { commit: handoffCommitFor(1) },
+		});
+		expect(scheduler.calls).toBe(1);
+	});
+
+	it("rejects ctx.handoff on a handle without a handoff", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-read-only"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({}),
+			async run(ctx) {
+				const reader = ctx.agent("reader", request("Read"));
+				await ctx.handoff(reader as never);
+				return {};
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(journal, artifacts, new Map()),
+		});
+		const error = await runtime.drive().then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toMatchObject({ stage: "execution" });
+		expect((error as StaticWorkflowRuntimeError).cause).toMatchObject({
+			stage: "validation",
+			message: "Workflow handoff barrier requires a worktree task handle.",
+		});
+	});
+
+	it("commits a returned handoff handle's descriptor as the JSON run output", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-output"),
+			inputSchema: Type.Object({}),
+			outputSchema: WorkflowHandoffDescriptorSchema,
+			run(ctx) {
+				const writer = ctx.agent("writer", worktreeRequest());
+				return writer.handoff;
+			},
+		});
+		const scheduler = worktreeSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["writer", { output: { answer: "written" } }]]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const result = await runtime.drive();
+		expect(result.status).toBe("completed");
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const taskId = writerTaskId(state);
+		const [handoff] = handoffArtifactsOf(state, taskId);
+		if (!handoff) throw new Error("missing handoff artifact");
+		expect(result.value).toEqual({
+			artifactId: handoff.id,
+			runId: journal.runId,
+			producerTaskId: taskId,
+			producerExecutionId: deriveTaskExecutionId(journal.runId, taskId, 1),
+			subagentRunId: "run_writerg1",
+			subagentAttemptId: "attempt_writerg1",
+			baselineHead: HANDOFF_BASELINE_HEAD,
+			handoffCommit: handoffCommitFor(1),
+			format: "git-format-patch",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			sha256: handoff.sha256,
+			bytes: handoff.bytes,
+		});
+		// The run output is the ordinary JSON artifact, never the patch blob.
+		expect(result.artifact.id).toBe(state.outputArtifactId);
+		expect(result.artifact.id).not.toBe(handoff.id);
+		expect(result.artifact).toMatchObject({
+			mediaType: "application/json",
+			schemaSha256: deriveJsonValueSha256(WorkflowHandoffDescriptorSchema),
+		});
+		expect(result.artifact.producerTaskId).toBeUndefined();
+		expect(await artifacts.readJson(result.artifact)).toEqual(result.value);
+		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["final"]);
+		const replay = await runtime.drive();
+		expect(replay).toEqual(result);
+		expect(scheduler.calls).toBe(1);
+	});
+
+	it("rejects a returned handoff handle the run never declared", async () => {
+		const { journal, artifacts } = await fixture();
+		const foreign = new WorkflowTaskMaterializer({
+			runId: journal.runId,
+			definitionIdentitySha256,
+			inputSha256: deriveJsonValueSha256({}),
+		}).agent("foreign", worktreeRequest("Foreign")).handoff;
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-foreign"),
+			inputSchema: Type.Object({}),
+			outputSchema: WorkflowHandoffDescriptorSchema,
+			run() {
+				return foreign;
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(journal, artifacts, new Map()),
+		});
+		await expect(runtime.drive()).rejects.toMatchObject({
+			stage: "finalization",
+			message: "Workflow returned an unknown handoff handle.",
+		});
+	});
+
+	it("fails the result when the handoff blob names another commit", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-corrupt-commit"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				return ctx.agent("writer", worktreeRequest());
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: worktreeSchedulerFor(
+				journal,
+				artifacts,
+				new Map([
+					[
+						"writer",
+						{ output: { answer: "written" }, patchCommit: "f".repeat(40) },
+					],
+				]),
+			),
+		});
+		const error = await runtime.drive().then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(StaticWorkflowRuntimeError);
+		expect(error).toMatchObject({
+			stage: "result",
+			message: HANDOFF_UNVERIFIED_MESSAGE,
+		});
+		const cause = (error as StaticWorkflowRuntimeError).cause;
+		expect(cause).toBeInstanceOf(WorkflowHandoffVerificationError);
+		expect((cause as WorkflowHandoffVerificationError).reason).toBe(
+			"commit-mismatch",
+		);
+		// The journal is valid; only the workflow-owned bytes fail identity.
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.tasks[writerTaskId(state)]?.status).toBe("completed");
+		expect(state.outputArtifactId).toBeUndefined();
+	});
+
+	it("fails the result with the fixed message when the handoff blob is missing or corrupt", async () => {
+		const { journal, artifacts } = await fixture();
+		let handoffCalls = 0;
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-blob"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			async run(ctx) {
+				const writer = ctx.agent("writer", worktreeRequest());
+				const result = await ctx.result(writer);
+				handoffCalls += 1;
+				return result;
+			},
+		});
+		const scheduler = worktreeSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["writer", { output: { answer: "written" } }]]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { answer: "written" },
+		});
+		expect(handoffCalls).toBe(1);
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		const [handoff] = handoffArtifactsOf(state, writerTaskId(state));
+		if (!handoff) throw new Error("missing handoff artifact");
+		const blob = path.join(artifacts.root, `${handoff.sha256}.patch`);
+
+		async function replayFailure(): Promise<WorkflowHandoffVerificationError> {
+			const error = await runtime.drive().then(
+				() => undefined,
+				(reason: unknown) => reason,
+			);
+			// ctx.result rejected inside the source: the runtime reports the
+			// source failure and keeps the exact result error as its cause.
+			expect(error).toMatchObject({
+				stage: "execution",
+				message: "Static workflow source execution failed.",
+			});
+			const cause = (error as StaticWorkflowRuntimeError).cause;
+			expect(cause).toBeInstanceOf(StaticWorkflowRuntimeError);
+			expect(cause).toMatchObject({
+				stage: "result",
+				message: HANDOFF_UNVERIFIED_MESSAGE,
+			});
+			const verification = (cause as StaticWorkflowRuntimeError).cause;
+			expect(verification).toBeInstanceOf(WorkflowHandoffVerificationError);
+			return verification as WorkflowHandoffVerificationError;
+		}
+
+		// Corrupt: same length, different bytes, so the digest no longer matches.
+		await writeFile(blob, Buffer.alloc(handoff.bytes, 0x78));
+		expect((await replayFailure()).reason).toBe("artifact-unreadable");
+		// Missing: the content-addressed blob is gone.
+		await rm(blob);
+		expect((await replayFailure()).reason).toBe("artifact-unreadable");
+		expect(scheduler.calls).toBe(1);
+		expect(handoffCalls).toBe(1);
+		// The durable journal is untouched by the failed replays.
+		const after = reduceWorkflowEvents(await journal.readEvents());
+		expect(after.tasks[writerTaskId(after)]?.status).toBe("completed");
+		expect(after.status).toBe("completed");
+		expect(after.lastSequence).toBe(state.lastSequence);
+	});
+
+	it("selects the generation-2 handoff artifact while the generation-1 artifact remains declared", async () => {
+		const { journal, artifacts } = await fixture();
+		let failSource = true;
+		const descriptors: (WorkflowHandoffDescriptor | undefined)[] = [];
+		const definition = defineWorkflow({
+			meta: worktreeMeta("handoff-generations"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({
+				commit: Type.String(),
+				answer: Type.String(),
+			}),
+			async run(ctx) {
+				const writer = ctx.agent("writer", worktreeRequest());
+				const descriptor = await ctx.handoff(writer);
+				descriptors.push(descriptor);
+				if (failSource) throw new Error("source failure after the handoff");
+				const result = await ctx.result(writer);
+				return {
+					commit: descriptor?.handoffCommit ?? "none",
+					answer: result.answer,
+				};
+			},
+		});
+		const outcomes = new Map<string, WorktreeOutcome>([
+			["writer", { output: { answer: "first" } }],
+		]);
+		const scheduler = worktreeSchedulerFor(journal, artifacts, outcomes);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).rejects.toMatchObject({
+			stage: "execution",
+			message: "Static workflow source execution failed.",
+		});
+		let state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.status).toBe("failed");
+		const taskId = writerTaskId(state);
+		const gen1 = deriveTaskExecutionId(journal.runId, taskId, 1);
+		const gen2 = deriveTaskExecutionId(journal.runId, taskId, 2);
+		expect(state.tasks[taskId]).toMatchObject({
+			status: "completed",
+			currentExecutionId: gen1,
+		});
+		const [firstHandoff] = handoffArtifactsOf(state, taskId);
+		if (!firstHandoff) throw new Error("missing generation-1 handoff");
+		expect(descriptors).toEqual([
+			expect.objectContaining({
+				artifactId: firstHandoff.id,
+				producerExecutionId: gen1,
+				handoffCommit: handoffCommitFor(1),
+			}),
+		]);
+
+		// Explicit invalidation re-executes the writer as generation 2 with a
+		// fresh preflight, subagent run, worktree, and handoff.
+		const closure = invalidationClosure(state, taskId);
+		expect(closure).toEqual({ taskIds: [taskId], abandonedEpochs: [] });
+		await journal.append("task-invalidated", {
+			causeTaskId: taskId,
+			taskIds: [...closure.taskIds],
+			abandonedEpochs: [...closure.abandonedEpochs],
+			reason: "Re-execute the writer.",
+		});
+		failSource = false;
+		outcomes.set("writer", { output: { answer: "second" } });
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { commit: handoffCommitFor(2), answer: "second" },
+		});
+		expect(scheduler.calls).toBe(2);
+
+		state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.tasks[taskId]).toMatchObject({
+			status: "completed",
+			currentExecutionId: gen2,
+		});
+		expect(state.executions[gen2]?.execution.generation).toBe(2);
+		expect(state.executions[gen1]?.preflight?.workspaceBaselineSha256).not.toBe(
+			state.executions[gen2]?.preflight?.workspaceBaselineSha256,
+		);
+		const handoffs = handoffArtifactsOf(state, taskId);
+		expect(handoffs).toHaveLength(2);
+		const secondHandoff = handoffs.find(
+			(artifact) => artifact.producerExecutionId === gen2,
+		);
+		if (!secondHandoff) throw new Error("missing generation-2 handoff");
+		// The generation-1 artifact is retained history with its own producer.
+		expect(state.artifacts[firstHandoff.id]).toEqual(firstHandoff);
+		expect(state.executions[gen1]?.handoffImport?.artifactId).toBe(
+			firstHandoff.id,
+		);
+		expect(state.executions[gen2]?.handoffImport?.artifactId).toBe(
+			secondHandoff.id,
+		);
+		expect(secondHandoff.sha256).not.toBe(firstHandoff.sha256);
+		expect(descriptors).toHaveLength(2);
+		expect(descriptors[1]).toEqual(
+			expect.objectContaining({
+				artifactId: secondHandoff.id,
+				producerExecutionId: gen2,
+				subagentRunId: "run_writerg2",
+				subagentAttemptId: "attempt_writerg2",
+				handoffCommit: handoffCommitFor(2),
+				sha256: secondHandoff.sha256,
+			}),
+		);
+		// Replay still selects the current generation without driving.
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { commit: handoffCommitFor(2), answer: "second" },
+		});
+		expect(scheduler.calls).toBe(2);
 	});
 });

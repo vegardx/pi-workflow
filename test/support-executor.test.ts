@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
-import type {
-	MaterializedSupportTask,
-	WorkflowArtifactRef,
-	WorkflowTaskId,
+import {
+	type MaterializedAgentTask,
+	type MaterializedSupportTask,
+	type SubagentTerminalEvidence,
+	WORKFLOW_HANDOFF_FORMAT_SHA256,
+	type WorkflowArtifactRef,
+	type WorkflowHandoffDescriptor,
+	type WorkflowTaskId,
 } from "../src/contracts.js";
 import type {
 	TaskExecutionProjection,
@@ -16,9 +21,11 @@ import type {
 } from "../src/events.js";
 import {
 	deriveJsonValueSha256,
+	deriveSubagentOperationId,
 	deriveSupportImplementationIdentitySha256,
 	deriveTaskExecutionId,
 	deriveWorkflowFailureSha256,
+	deriveWorkflowHandoffDescriptor,
 } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
@@ -88,6 +95,313 @@ function register<TParameters>(
 
 function shoutImpl(fn: (context: ShoutContext) => unknown = shoutValue) {
 	return register<{ value: string }>(shout, fn);
+}
+
+const HANDOFF_PLAN_SHA256 = "c".repeat(64);
+const HANDOFF_BASELINE_SHA256 = "f".repeat(64);
+const HANDOFF_RESULT_SHA256 = "7".repeat(64);
+/** Git object ids (spec 1.2 GitObjectIdSchema). */
+const BASELINE_HEAD = "0123456789abcdef0123456789abcdef01234567";
+const HANDOFF_COMMIT = "89abcdef0123456789abcdef0123456789abcdef";
+
+/** A worktree writer request (spec D3): worktree workspace, positive write limit. */
+function writerRequest(goal = "Write the change") {
+	return {
+		agent: "writer",
+		task: { goal, context: [], instructions: ["Return structured output."] },
+		contextMode: "fresh" as const,
+		tools: ["read", "write"],
+		preloadSkills: [],
+		contextScopes: ["project" as const],
+		workspace: { mode: "worktree" as const, cwd: "/repo" },
+		outputSchema: Type.Object({ answer: Type.String() }),
+		limits: {
+			cumulativeRuntimeMs: 300_000,
+			attemptTimeoutMs: 300_000,
+			totalTokens: 1_000_000,
+			cost: 100,
+			outputBytes: 1_048_576,
+			workspaceWriteBytes: 1_048_576,
+			retries: 0,
+			resumes: 0,
+		},
+	};
+}
+
+/** A single-commit git-format-patch as pi-subagent renders it (spec 4.4 step 6). */
+function patchContent(commit: string, padding = 0): Buffer {
+	return Buffer.from(
+		[
+			`From ${commit} Mon Sep 17 00:00:00 2001`,
+			"From: writer <writer@example.test>",
+			"Date: Tue, 15 Sep 2026 00:00:00 +0000",
+			"Subject: [PATCH] change",
+			"",
+			"---",
+			"diff --git a/notes.txt b/notes.txt",
+			"--- a/notes.txt",
+			"+++ b/notes.txt",
+			"@@ -0,0 +1 @@",
+			`+${"x".repeat(padding)}`,
+			"",
+		].join("\n"),
+		"utf8",
+	);
+}
+
+function agentTask(
+	state: WorkflowStateProjection,
+	taskId: WorkflowTaskId,
+): MaterializedAgentTask {
+	const task = state.tasks[taskId]?.task;
+	if (task?.spec.kind !== "agent") throw new Error("missing agent task");
+	return task as MaterializedAgentTask;
+}
+
+function executionOf(
+	state: WorkflowStateProjection,
+	executionId: string,
+): TaskExecutionProjection {
+	const execution = state.executions[executionId];
+	if (!execution) throw new Error("missing execution projection");
+	return execution;
+}
+
+interface CompletedWorktreeTask {
+	readonly executionId: string;
+	readonly subagentRunId: string;
+	readonly subagentAttemptId: string;
+	readonly result: WorkflowArtifactRef;
+	readonly patch: WorkflowArtifactRef;
+}
+
+/**
+ * Drives a ready worktree task through the spec 4.5 success ladder with a
+ * real result artifact and a digest-verified handoff blob, exactly as the
+ * scheduler and finalizer would persist it.
+ */
+async function completeWorktreeTask(
+	journal: WorkflowRunJournal,
+	artifacts: WorkflowArtifactStore,
+	task: MaterializedAgentTask,
+	generation: number,
+	options: { commit?: string; padding?: number } = {},
+): Promise<CompletedWorktreeTask> {
+	const runId = journal.runId;
+	const executionId = deriveTaskExecutionId(runId, task.id, generation);
+	const operationId = deriveSubagentOperationId(runId, task.id, generation);
+	const stem = `${task.id.slice(5, 13)}g${generation}`;
+	const subagentRunId = `run_${stem}`;
+	const subagentAttemptId = `attempt_${stem}`;
+	const preflightId = `preflight-${generation}`;
+	const commit = options.commit ?? HANDOFF_COMMIT;
+	await journal.append("task-execution-created", {
+		execution: {
+			kind: "agent",
+			id: executionId,
+			runId,
+			taskId: task.id,
+			generation,
+			taskIdentitySha256: task.spec.identitySha256,
+			operationId,
+		},
+	});
+	await journal.append("task-execution-preflighted", {
+		executionId,
+		operationId,
+		preflightId,
+		planIdentitySha256: HANDOFF_PLAN_SHA256,
+		plannedSubagentRunId: subagentRunId,
+		plannedSubagentAttemptId: subagentAttemptId,
+		expiresAt: "2027-01-01T00:00:00.000Z",
+		workspaceMode: "worktree",
+		workspaceBaselineSha256: HANDOFF_BASELINE_SHA256,
+	});
+	await journal.append("task-execution-launch-intended", {
+		executionId,
+		operationId,
+		preflightId,
+		planIdentitySha256: HANDOFF_PLAN_SHA256,
+	});
+	await journal.append("task-execution-launch-receipted", {
+		executionId,
+		operationId,
+		subagentRunId,
+		subagentAttemptId,
+		status: "active",
+	});
+	await journal.append("task-status-changed", {
+		taskId: task.id,
+		from: "ready",
+		to: "running",
+	});
+	await journal.append("task-execution-child-observed", {
+		executionId,
+		subagentRunId,
+		subagentAttemptId,
+		status: "completed",
+	});
+	const result = await artifacts.putJson(
+		{ answer: `generation ${generation}` },
+		{
+			runId,
+			producerTaskId: task.id,
+			producerExecutionId: executionId,
+			output: "result",
+			schemaSha256: deriveJsonValueSha256(task.spec.request.outputSchema),
+		},
+	);
+	const evidence: SubagentTerminalEvidence = {
+		kind: "subagent",
+		attemptOrdinal: 1,
+		resultSha256: HANDOFF_RESULT_SHA256,
+		status: "completed",
+		usage: {
+			input: 10,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+			cost: 0.01,
+		},
+		usageComplete: true,
+		runtimeMs: 1000,
+		sandboxCleanup: "proved",
+		workspaceCleanup: "proved",
+		truncated: false,
+		structuredOutputSha256: result.sha256,
+		handoff: {
+			attemptId: subagentAttemptId,
+			baselineHead: BASELINE_HEAD,
+			handoffCommit: commit,
+		},
+	};
+	await journal.append("task-execution-child-settled", {
+		executionId,
+		evidence,
+	});
+	await journal.append("artifact-declared", { artifact: result });
+	await journal.append("task-execution-artifact-imported", {
+		executionId,
+		subagentRunId,
+		artifactId: result.id,
+		sourceResultSha256: HANDOFF_RESULT_SHA256,
+	});
+	const patch = await artifacts.putBytes(
+		patchContent(commit, options.padding ?? 0),
+		{
+			runId,
+			producerTaskId: task.id,
+			producerExecutionId: executionId,
+			output: "handoff",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			schemaSha256: WORKFLOW_HANDOFF_FORMAT_SHA256,
+		},
+	);
+	await journal.append("artifact-declared", { artifact: patch });
+	await journal.append("task-execution-handoff-imported", {
+		executionId,
+		subagentRunId,
+		subagentAttemptId,
+		artifactId: patch.id,
+		handoffCommit: commit,
+		baselineHead: BASELINE_HEAD,
+		sha256: patch.sha256,
+		bytes: patch.bytes,
+	});
+	await journal.append("task-execution-release-intended", {
+		executionId,
+		subagentRunId,
+	});
+	await journal.append("task-execution-released", {
+		executionId,
+		subagentRunId,
+		status: "completed",
+	});
+	await journal.append("task-execution-terminal", {
+		executionId,
+		outcome: "completed",
+		evidence,
+	});
+	await journal.append("task-status-changed", {
+		taskId: task.id,
+		from: "running",
+		to: "completed",
+	});
+	return { executionId, subagentRunId, subagentAttemptId, result, patch };
+}
+
+const describePatch = defineSupportTask({
+	name: `${MODULE}/describe-patch`,
+	moduleSpecifier: MODULE,
+	revision: 1,
+	implementationSha256: "e".repeat(64),
+	parametersSchema: Type.Object({}),
+	outputSchema: Type.Object({ commit: Type.String(), bytes: Type.Integer() }),
+});
+
+interface HandoffFixture extends Fixture {
+	readonly writerId: WorkflowTaskId;
+	readonly writerExecutionId: string;
+	readonly patch: WorkflowArtifactRef;
+}
+
+/** A completed worktree writer whose handoff feeds a support consumer (spec 6). */
+async function handoffFixture(): Promise<HandoffFixture> {
+	const root = path.resolve(
+		".pi",
+		"test-support-executor",
+		`run-${randomUUID()}`,
+	);
+	const { lease, journal } = await openJournal(root, "support-executor-test");
+	await journal.append("run-created", {
+		definitionIdentitySha256,
+		inputSha256,
+	});
+	const materializer = new WorkflowTaskMaterializer({
+		runId: RUN_ID,
+		definitionIdentitySha256,
+		inputSha256,
+	});
+	const writer = materializer.agent("writer", writerRequest());
+	if (!writer.handoff) throw new Error("worktree handle lacks a handoff");
+	const consumer = materializer.support(
+		"describe",
+		describePatch({ parameters: {}, inputs: { patch: writer.handoff } }),
+	);
+	for (const event of materializer.closeEpoch("final", [consumer]).events) {
+		await journal.appendEvent(event);
+	}
+	await journal.append("run-status-changed", {
+		from: "created",
+		to: "running",
+	});
+	await journal.append("task-status-changed", {
+		taskId: writer.ref.taskId,
+		from: "pending",
+		to: "ready",
+	});
+	const artifacts = await WorkflowArtifactStore.open({ journal });
+	const declared = reduceWorkflowEvents(await journal.readEvents());
+	const produced = await completeWorktreeTask(
+		journal,
+		artifacts,
+		agentTask(declared, writer.ref.taskId),
+		1,
+	);
+	return {
+		root,
+		lease,
+		journal,
+		artifacts,
+		taskId: writer.ref.taskId,
+		secondId: undefined,
+		consumerId: consumer.ref.taskId,
+		maxArtifactBytes: undefined,
+		writerId: writer.ref.taskId,
+		writerExecutionId: produced.executionId,
+		patch: produced.patch,
+	};
 }
 
 function defer<T>() {
@@ -1117,5 +1431,77 @@ describe("support task executor cancellation", () => {
 		expect(repair.execute).not.toHaveBeenCalled();
 		const { execution } = await expectCompleted(committed, committed.taskId);
 		expect(execution.terminal?.evidence).toMatchObject({ durationMs: 0 });
+	});
+});
+
+describe("support task executor handoff inputs", () => {
+	it("digests the handoff by its output and feeds the descriptor to the implementation", async () => {
+		const fx = await handoffFixture();
+		let seen: SupportTaskExecutionContext<Record<string, never>> | undefined;
+		const consumer = register<Record<string, never>>(
+			describePatch,
+			(context) => {
+				seen = context;
+				const patch = context.inputs.patch as WorkflowHandoffDescriptor;
+				return { commit: patch.handoffCommit, bytes: patch.bytes };
+			},
+		);
+		const ex = executor(fx, [consumer.registration]);
+		const consumerId = await readyConsumer(fx);
+		expect((await ex.intend(consumerId)).state).toBe("intended");
+		// Spec 2.3: the intent digest selects the handoff artifact by ref.output
+		// and the reducer accepted it, so taskInputsSha256 agrees.
+		const { execution } = view(await projection(fx), consumerId);
+		expect(execution.supportIntent?.inputsSha256).toBe(
+			deriveJsonValueSha256({ patch: fx.patch.sha256 }),
+		);
+
+		expect((await ex.execute(consumerId)).outcome).toBe("completed");
+		expect(consumer.execute).toHaveBeenCalledTimes(1);
+		if (!seen) throw new Error("consumer was not invoked");
+		const state = await projection(fx);
+		const descriptor = deriveWorkflowHandoffDescriptor(
+			fx.patch,
+			executionOf(state, fx.writerExecutionId),
+		);
+		expect(seen.inputs).toEqual({ patch: descriptor });
+		expect(descriptor).toMatchObject({
+			format: "git-format-patch",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			handoffCommit: HANDOFF_COMMIT,
+			baselineHead: BASELINE_HEAD,
+			producerExecutionId: fx.writerExecutionId,
+		});
+		expect(JSON.stringify(seen.inputs)).not.toContain("Mon Sep 17");
+		expect(Object.getPrototypeOf(seen.inputs)).toBeNull();
+		expect(Object.isFrozen(seen.inputs.patch)).toBe(true);
+		const { artifact } = await expectCompleted(fx, consumerId);
+		expect(await fx.artifacts.readJson(artifact)).toEqual({
+			commit: HANDOFF_COMMIT,
+			bytes: fx.patch.bytes,
+		});
+	});
+
+	it("fails input verification when the handoff blob does not verify", async () => {
+		const fx = await handoffFixture();
+		const consumer = register<Record<string, never>>(describePatch, () => ({
+			commit: "never",
+			bytes: 1,
+		}));
+		const ex = executor(fx, [consumer.registration]);
+		await writeFile(
+			path.join(fx.artifacts.root, `${fx.patch.sha256}.patch`),
+			"corrupt",
+		);
+		const consumerId = await readyConsumer(fx);
+		expect((await ex.intend(consumerId)).state).toBe("intended");
+		expect((await ex.execute(consumerId)).outcome).toBe("failed");
+		expect(consumer.execute).not.toHaveBeenCalled();
+		await expectFailure(
+			fx,
+			consumerId,
+			"support-input",
+			"Support task inputs could not be read and verified.",
+		);
 	});
 });
