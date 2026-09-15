@@ -113,6 +113,8 @@ describe("package contract", () => {
 			"workflow_inspect",
 			"workflow_logs",
 			"workflow_invalidate",
+			"workflow_retry",
+			"workflow_resume",
 		]);
 	});
 });

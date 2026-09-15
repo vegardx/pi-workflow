@@ -87,17 +87,21 @@ describe("workflow authoring skill", () => {
 			"`ctx.checkpoint`",
 			"`ctx.artifact`",
 			"dynamic workflows",
-			"operator-triggered retry or resume tools",
 			"a Pi tool for handoff export",
 		]) {
 			expect(unavailable).toContain(api);
 		}
-		// Invalidation has a Pi tool and writer (worktree) agent tasks are
-		// available since revision 17.
+		// Invalidation, retry, and resume have Pi tools and writer (worktree)
+		// agent tasks are available since revision 17.
 		expect(unavailable).not.toContain("invalidation");
 		expect(unavailable).not.toContain("writer");
 		expect(unavailable).not.toContain("worktree");
+		expect(unavailable).not.toContain("retry");
+		expect(unavailable).not.toContain("resume");
 		expect(skill).toContain("`workflow_invalidate { runId, taskId, reason }`");
+		expect(skill).toContain("`workflow_retry { runId, taskId, reason }`");
+		expect(skill).toContain("`workflow_resume { runId, reason, taskId? }`");
+		expect(skill).not.toContain("There is no operator resume tool");
 		expect(skill).toContain("`workflow_wait { runId, timeoutMs? }`");
 		expect(skill).toContain("`workflow_reconcile { runId, taskId? }`");
 		expect(unavailable).not.toContain("ctx.finalize");
@@ -138,6 +142,8 @@ describe("workflow authoring skill", () => {
 			"workflow_inspect",
 			"workflow_logs",
 			"workflow_invalidate",
+			"workflow_retry",
+			"workflow_resume",
 		]) {
 			expect(skill).toContain(tool);
 		}

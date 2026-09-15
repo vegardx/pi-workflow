@@ -1067,7 +1067,7 @@ describe("runSummary", () => {
 			false,
 			NOW,
 		);
-		expect(failed.availableActions).toEqual(["invalidate"]);
+		expect(failed.availableActions).toEqual(["invalidate", "retry"]);
 		expect(failed.requiresAttention).toBe(true);
 		const expired = runSummary(
 			record,

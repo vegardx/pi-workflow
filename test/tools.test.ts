@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { SubagentClient } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { encodeWorkflowRunCursor } from "../src/run-projection.js";
@@ -22,32 +21,14 @@ import {
 	type WorkflowToolName,
 	workflowToolText,
 } from "../src/tools.js";
-
-function unavailableClient(): SubagentClient {
-	const unavailable = vi.fn(async () => {
-		throw new Error("unexpected subagent call");
-	});
-	return {
-		preflight: unavailable,
-		launch: unavailable,
-		findByOperation: unavailable,
-		status: unavailable,
-		listRuns: unavailable,
-		logs: unavailable,
-		wait: unavailable,
-		interrupt: unavailable,
-		steer: unavailable,
-		followUp: unavailable,
-		retry: unavailable,
-		resume: unavailable,
-		reconcile: unavailable,
-		release: unavailable,
-		abandon: unavailable,
-		pin: unavailable,
-		unpin: unavailable,
-		exportArtifact: unavailable,
-	} as unknown as SubagentClient;
-}
+import {
+	attemptProvider,
+	COMPLETED,
+	childFailure,
+	client,
+	INTERRUPTED,
+	operatorFixture,
+} from "./fixtures/attempt-provider.js";
 
 function provider(): WorkflowSubagentProvider {
 	return {
@@ -56,7 +37,7 @@ function provider(): WorkflowSubagentProvider {
 				({
 					workflowRunId: runId,
 					ownerId: `pi-workflow:${runId}`,
-					client: unavailableClient(),
+					client: client(),
 				}) satisfies WorkflowSubagentBinding,
 		),
 	};
@@ -115,6 +96,66 @@ async function fixture() {
 	return { cwd, agentDir, storeRoot };
 }
 
+/**
+ * Real results for the operator attempt tools. The scripted owner client
+ * settles children so both paths complete: launch 1 is interrupted with a
+ * resumable failure and completes once resumed on its existing child run;
+ * launch 2 fails and its retry, generation 2 on launch 3, completes.
+ */
+async function operatorResults() {
+	const delegated = attemptProvider((launch) =>
+		launch === 1
+			? [INTERRUPTED, COMPLETED]
+			: launch === 2
+				? [{ status: "failed", failure: childFailure("manual") }]
+				: [COMPLETED],
+	);
+	const service = await createWorkflowService({
+		...(await operatorFixture()),
+		projectTrusted: () => true,
+		subagents: delegated.provider,
+	});
+	try {
+		const interrupted = await service.run("attempts", {});
+		expect(await service.wait(interrupted.runId)).toMatchObject({
+			status: "interrupted",
+		});
+		const resumed = await declaration("workflow_resume").execute(service, {
+			runId: interrupted.runId,
+			reason: "tool schema test",
+		});
+		expect(await service.wait(interrupted.runId)).toMatchObject({
+			status: "completed",
+			tasks: [expect.objectContaining({ generation: 1, attempts: 1 })],
+		});
+		const failed = await service.run("attempts", {});
+		const failedView = await service.wait(failed.runId);
+		expect(failedView.status).toBe("failed");
+		const taskId = failedView.tasks?.[0]?.id;
+		if (!taskId) throw new Error("failed run has no task");
+		const retried = await declaration("workflow_retry").execute(service, {
+			runId: failed.runId,
+			taskId,
+			reason: "tool schema test",
+		});
+		expect(await service.wait(failed.runId)).toMatchObject({
+			status: "completed",
+			tasks: [expect.objectContaining({ id: taskId, generation: 2 })],
+		});
+		expect(delegated.ownerClient.resume).toHaveBeenCalledOnce();
+		expect(delegated.ownerClient.retry).not.toHaveBeenCalled();
+		expect(delegated.ownerClient.launch).toHaveBeenCalledTimes(3);
+		return {
+			interruptedRunId: interrupted.runId,
+			failedRunId: failed.runId,
+			workflow_retry: retried,
+			workflow_resume: resumed,
+		};
+	} finally {
+		await service.shutdown();
+	}
+}
+
 function declaration(name: WorkflowToolName) {
 	const found = WORKFLOW_TOOL_DECLARATIONS.find(
 		(candidate) => candidate.name === name,
@@ -135,10 +176,12 @@ const TOOL_NAMES: readonly WorkflowToolName[] = [
 	"workflow_inspect",
 	"workflow_logs",
 	"workflow_invalidate",
+	"workflow_retry",
+	"workflow_resume",
 ];
 
 describe("workflow tool declarations", () => {
-	it("declares eleven uniquely named frozen tools with closed parameter schemas", () => {
+	it("declares thirteen uniquely named frozen tools with closed parameter schemas", () => {
 		const names = WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name);
 		expect(names).toEqual(TOOL_NAMES);
 		expect(new Set(names).size).toBe(names.length);
@@ -198,6 +241,35 @@ describe("workflow tool declarations", () => {
 		expect(Value.Check(invalidate, { runId, taskId: "task_abcdef" })).toBe(
 			false,
 		);
+		const retry = declaration("workflow_retry");
+		expect(
+			Value.Check(retry.parameters, {
+				runId,
+				taskId: "task_abcdef",
+				reason: "why",
+			}),
+		).toBe(true);
+		expect(Value.Check(retry.parameters, { runId, reason: "why" })).toBe(false);
+		expect(
+			retry.summarizeCall({ runId, taskId: "task_abcdef", reason: "why" }),
+		).toBe(`${runId} · task_abcdef`);
+		const resume = declaration("workflow_resume");
+		expect(Value.Check(resume.parameters, { runId, reason: "why" })).toBe(true);
+		expect(
+			Value.Check(resume.parameters, {
+				runId,
+				reason: "why",
+				taskId: "task_abcdef",
+			}),
+		).toBe(true);
+		expect(Value.Check(resume.parameters, { runId, reason: "" })).toBe(false);
+		expect(
+			Value.Check(resume.parameters, { runId, taskId: "task_abcdef" }),
+		).toBe(false);
+		expect(resume.summarizeCall({ runId, reason: "why" })).toBe(runId);
+		expect(
+			resume.summarizeCall({ runId, reason: "why", taskId: "task_abcdef" }),
+		).toBe(`${runId} · task_abcdef`);
 	});
 
 	it("validates every real service result against its declared output schema", async () => {
@@ -236,6 +308,7 @@ describe("workflow tool declarations", () => {
 				},
 			);
 			await service.wait(delegatingRunId);
+			const operator = await operatorResults();
 			const results: Record<WorkflowToolName, unknown> = {
 				workflow_list: await declaration("workflow_list").execute(service, {}),
 				workflow_validate: await declaration("workflow_validate").execute(
@@ -282,6 +355,8 @@ describe("workflow tool declarations", () => {
 					limit: 100,
 				}),
 				workflow_invalidate: invalidated,
+				workflow_retry: operator.workflow_retry,
+				workflow_resume: operator.workflow_resume,
 			};
 			for (const tool of WORKFLOW_TOOL_DECLARATIONS) {
 				const value = results[tool.name];
@@ -338,6 +413,18 @@ describe("workflow tool declarations", () => {
 			);
 			expect(results.workflow_invalidate).toMatchObject({
 				runId: delegatingRunId,
+			});
+			expect(results.workflow_retry).toMatchObject({
+				runId: operator.failedRunId,
+				definitionName: "attempts",
+			});
+			expect(results.workflow_retry).not.toMatchObject({ status: "failed" });
+			expect(results.workflow_resume).toMatchObject({
+				runId: operator.interruptedRunId,
+				definitionName: "attempts",
+			});
+			expect(results.workflow_resume).not.toMatchObject({
+				status: "interrupted",
 			});
 		} finally {
 			await service.shutdown();
