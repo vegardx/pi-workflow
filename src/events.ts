@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import {
+	MAX_TASK_ATTEMPTS,
 	MAX_WORKFLOW_CONCURRENCY,
 	MaterializedWorkflowTaskSchema,
 	NestedWorkflowUsageSchema,
@@ -218,6 +219,74 @@ const TaskExecutionChildSettledEventSchema = Type.Object(
 			{
 				executionId: TaskExecutionIdSchema,
 				evidence: SubagentTerminalEvidenceSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskAttemptKindSchema = Type.Union([
+	Type.Literal("retry"),
+	Type.Literal("resume"),
+]);
+
+const TaskAttemptOrdinalSchema = Type.Integer({
+	minimum: 2,
+	maximum: MAX_TASK_ATTEMPTS,
+});
+
+const TaskAttemptFailureRetrySchema = Type.Union([
+	Type.Literal("backoff"),
+	Type.Literal("manual"),
+	Type.Literal("resume"),
+]);
+
+const TaskExecutionAttemptIntendedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-attempt-intended"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				kind: TaskAttemptKindSchema,
+				ordinal: TaskAttemptOrdinalSchema,
+				previousAttemptId: SubagentAttemptIdSchema,
+				failureCode: Type.String({ minLength: 1, maxLength: 128 }),
+				failureRetry: TaskAttemptFailureRetrySchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionAttemptReceiptedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-attempt-receipted"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				ordinal: TaskAttemptOrdinalSchema,
+				subagentAttemptId: SubagentAttemptIdSchema,
+				status: SubagentRunStatusSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionAttemptDeclinedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-attempt-declined"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				ordinal: TaskAttemptOrdinalSchema,
+				reason: Type.String({ minLength: 1, maxLength: 4096 }),
 			},
 			{ additionalProperties: false },
 		),
@@ -473,6 +542,9 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionLaunchReceiptedEventSchema,
 	TaskExecutionChildObservedEventSchema,
 	TaskExecutionChildSettledEventSchema,
+	TaskExecutionAttemptIntendedEventSchema,
+	TaskExecutionAttemptReceiptedEventSchema,
+	TaskExecutionAttemptDeclinedEventSchema,
 	TaskExecutionArtifactImportedEventSchema,
 	TaskExecutionReleaseIntendedEventSchema,
 	TaskExecutionReleasedEventSchema,
@@ -513,6 +585,7 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("launched"),
 	Type.Literal("observed"),
 	Type.Literal("settled"),
+	Type.Literal("attempt-intended"),
 	Type.Literal("artifact-imported"),
 	Type.Literal("release-intended"),
 	Type.Literal("released"),
@@ -600,6 +673,23 @@ const SequencedSettlementSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+
+const SequencedAttemptSchema = Type.Object(
+	{
+		kind: TaskAttemptKindSchema,
+		ordinal: TaskAttemptOrdinalSchema,
+		previousAttemptId: SubagentAttemptIdSchema,
+		subagentAttemptId: Type.Optional(SubagentAttemptIdSchema),
+		status: Type.Optional(SubagentRunStatusSchema),
+		intentSequence: Type.Integer({ minimum: 1 }),
+		receiptSequence: Type.Optional(Type.Integer({ minimum: 1 })),
+		declinedSequence: Type.Optional(Type.Integer({ minimum: 1 })),
+	},
+	{ additionalProperties: false },
+);
+export type TaskExecutionAttemptProjection = Static<
+	typeof SequencedAttemptSchema
+>;
 
 const SequencedArtifactImportSchema = Type.Object(
 	{
@@ -716,6 +806,13 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		launchReceipt: Type.Optional(SequencedLaunchReceiptSchema),
 		observation: Type.Optional(SequencedChildObservationSchema),
 		settlement: Type.Optional(SequencedSettlementSchema),
+		attempts: Type.Optional(
+			Type.Array(SequencedAttemptSchema, { maxItems: MAX_TASK_ATTEMPTS }),
+		),
+		priorSettlements: Type.Optional(
+			Type.Array(SequencedSettlementSchema, { maxItems: MAX_TASK_ATTEMPTS }),
+		),
+		attemptsClosed: Type.Optional(Type.Literal(true)),
 		artifactImport: Type.Optional(SequencedArtifactImportSchema),
 		releaseIntent: Type.Optional(SequencedReleaseIntentSchema),
 		release: Type.Optional(SequencedReleaseSchema),

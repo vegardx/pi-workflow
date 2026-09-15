@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
+	type AgentTaskAuthoringRequest,
 	createTaskHandle,
 	defineWorkflow,
 	isWorkflowDefinition,
@@ -64,6 +65,83 @@ describe("workflow definitions", () => {
 		} as unknown as Parameters<typeof definition.run>[0];
 		expect(definition.run(context)).toBe(handle);
 		expect(declared).toEqual([{ key: "child", request }]);
+	});
+
+	it("carries agent attempt policies through the authoring context", () => {
+		const outputSchema = Type.Object({ answer: Type.String() });
+		const request: AgentTaskAuthoringRequest<typeof outputSchema> = {
+			agent: "researcher",
+			task: { goal: "Answer", context: [], instructions: ["Answer."] },
+			contextMode: "fresh",
+			tools: ["read"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: "/repo" },
+			outputSchema,
+			limits: {
+				cumulativeRuntimeMs: 300_000,
+				attemptTimeoutMs: 300_000,
+				cost: 100,
+				outputBytes: 1_048_576,
+				workspaceWriteBytes: 0,
+				retries: 2,
+				resumes: 1,
+			},
+			retry: { attempts: 2, on: ["backoff", "manual"] },
+			resume: { attempts: 1 },
+		};
+		const defaulted: AgentTaskAuthoringRequest<typeof outputSchema> = {
+			...request,
+			retry: { attempts: 1 },
+		};
+		expect(defaulted.retry?.on).toBeUndefined();
+		const definition = defineWorkflow({
+			meta: {
+				name: "attempts",
+				description: "Attempt policies",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
+			inputSchema: Type.Object({}),
+			outputSchema,
+			run(ctx) {
+				ctx.agent("first", defaulted);
+				return ctx.agent("answer", request);
+			},
+		});
+		const taskId = `task_${"a".repeat(64)}`;
+		const handle = createTaskHandle<{ answer: string }>(
+			{ runId: "workflow_definition", taskId },
+			{
+				runId: "workflow_definition",
+				producerTaskId: taskId,
+				output: "result",
+			},
+		);
+		const declared: Array<{
+			key: string;
+			request: AgentTaskAuthoringRequest<typeof outputSchema>;
+		}> = [];
+		const context = {
+			agent(
+				key: string,
+				agent: AgentTaskAuthoringRequest<typeof outputSchema>,
+			) {
+				declared.push({ key, request: agent });
+				return handle;
+			},
+		} as unknown as Parameters<typeof definition.run>[0];
+		expect(definition.run(context)).toBe(handle);
+		expect(declared).toEqual([
+			{ key: "first", request: defaulted },
+			{ key: "answer", request },
+		]);
+		expect(declared[1]?.request.retry).toEqual({
+			attempts: 2,
+			on: ["backoff", "manual"],
+		});
+		expect(declared[1]?.request.resume).toEqual({ attempts: 1 });
 	});
 
 	it("creates an immutable typed definition", () => {

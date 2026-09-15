@@ -16,7 +16,9 @@ import {
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const WORKFLOW_CONTRACT_REVISION = 13 as const;
+export const WORKFLOW_CONTRACT_REVISION = 14 as const;
+// Initial attempt plus up to 10 retries and up to 10 resumes (pi-subagent caps).
+export const MAX_TASK_ATTEMPTS = 21;
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_WORKFLOW_CONCURRENCY = 16;
 export const MAX_NESTED_WORKFLOW_DEPTH = 4;
@@ -255,6 +257,33 @@ export const SupportTaskRequestSchema = Type.Object(
 );
 export type SupportTaskRequest = Static<typeof SupportTaskRequestSchema>;
 
+export const AgentRetryClassSchema = Type.Union([
+	Type.Literal("backoff"),
+	Type.Literal("manual"),
+]);
+export type AgentRetryClass = Static<typeof AgentRetryClassSchema>;
+
+export const AgentRetryPolicySchema = Type.Object(
+	{
+		attempts: Type.Integer({ minimum: 1, maximum: 10 }),
+		on: Type.Array(AgentRetryClassSchema, {
+			minItems: 1,
+			maxItems: 2,
+			uniqueItems: true,
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type AgentRetryPolicy = Static<typeof AgentRetryPolicySchema>;
+
+export const AgentResumePolicySchema = Type.Object(
+	{
+		attempts: Type.Integer({ minimum: 1, maximum: 10 }),
+	},
+	{ additionalProperties: false },
+);
+export type AgentResumePolicy = Static<typeof AgentResumePolicySchema>;
+
 export const AgentTaskRequestSchema = Type.Object(
 	{
 		agent: ResourceNameSchema,
@@ -282,6 +311,8 @@ export const AgentTaskRequestSchema = Type.Object(
 		),
 		outputSchema: JsonSchemaDocumentSchema,
 		limits: RunLimitsSchema,
+		retry: Type.Optional(AgentRetryPolicySchema),
+		resume: Type.Optional(AgentResumePolicySchema),
 	},
 	{ additionalProperties: false },
 );
@@ -497,6 +528,7 @@ export type TaskExecutionRecord = Static<typeof TaskExecutionRecordSchema>;
 export const SubagentTerminalEvidenceSchema = Type.Object(
 	{
 		kind: Type.Literal("subagent"),
+		attemptOrdinal: Type.Integer({ minimum: 1, maximum: MAX_TASK_ATTEMPTS }),
 		resultSha256: Sha256Schema,
 		status: SubagentRunStatusSchema,
 		usage: SubagentUsageSchema,
@@ -640,6 +672,8 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				supportTaskExecution: Type.Boolean(),
 				nestedWorkflows: Type.Boolean(),
 				nestedArtifactInputs: Type.Boolean(),
+				retryAttempts: Type.Boolean(),
+				resumeAttempts: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -697,6 +731,8 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			supportTaskExecution: true,
 			nestedWorkflows: true,
 			nestedArtifactInputs: true,
+			retryAttempts: true,
+			resumeAttempts: true,
 		}),
 	},
 );

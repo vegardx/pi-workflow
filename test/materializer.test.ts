@@ -5,6 +5,7 @@ import { createTaskHandle } from "../src/definition.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import { deriveJsonValueSha256 } from "../src/execution.js";
 import {
+	deriveAgentTaskIdentity,
 	deriveNestedWorkflowTaskIdentity,
 	deriveWorkflowTaskId,
 	WorkflowMaterializationError,
@@ -105,7 +106,7 @@ function records(
 	];
 	return all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 13,
+		contractRevision: 14,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-08-20T00:00:00.000Z",
@@ -592,6 +593,113 @@ describe("nested workflow task materialization", () => {
 		const replayed = replay.workflow("child", { request: nestedRequest() });
 		expect(replayed.ref).toEqual(child.ref);
 		expect(replay.closeEpoch("result", [replayed]).events).toEqual([]);
+	});
+
+	it("normalizes agent attempt policies and binds them to task identity", () => {
+		const runtime = materializer();
+		const defaulted = runtime.agent("defaulted", {
+			...request(),
+			retry: { attempts: 1 },
+		});
+		const sorted = runtime.agent("sorted", {
+			...request(),
+			retry: { attempts: 1, on: ["manual", "backoff"] },
+			resume: { attempts: 1 },
+		});
+		const plain = runtime.agent("plain", request());
+		const commit = runtime.closeEpoch("final", [defaulted, sorted, plain]);
+		const declarations = commit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		);
+		const [first, second, third] = declarations;
+		if (
+			first?.spec.kind !== "agent" ||
+			second?.spec.kind !== "agent" ||
+			third?.spec.kind !== "agent"
+		) {
+			throw new Error("missing agent declarations");
+		}
+		expect(first.spec.request.retry).toEqual({
+			attempts: 1,
+			on: ["backoff"],
+		});
+		expect(first.spec.request.resume).toBeUndefined();
+		expect(second.spec.request.retry).toEqual({
+			attempts: 1,
+			on: ["backoff", "manual"],
+		});
+		expect(second.spec.request.resume).toEqual({ attempts: 1 });
+		expect(third.spec.request.retry).toBeUndefined();
+		expect(third.spec.request.resume).toBeUndefined();
+		expect(Object.isFrozen(first.spec.request.retry)).toBe(true);
+		const identity = (
+			spec: Parameters<typeof deriveAgentTaskIdentity>[0]["spec"],
+		) =>
+			deriveAgentTaskIdentity({
+				definitionIdentitySha256,
+				inputSha256,
+				namespace: [],
+				spec,
+			});
+		const { identitySha256: _plainIdentity, ...plainSpec } = third.spec;
+		const { identitySha256: _policyIdentity, ...policySpec } = first.spec;
+		expect(identity({ ...plainSpec, key: "same" })).not.toBe(
+			identity({ ...policySpec, key: "same" }),
+		);
+		expect(
+			identity({
+				...plainSpec,
+				key: "same",
+				request: {
+					...plainSpec.request,
+					resume: { attempts: 1 },
+				},
+			}),
+		).not.toBe(identity({ ...plainSpec, key: "same" }));
+		expect(reduceWorkflowEvents(records(commit.events)).tasks).toBeDefined();
+	});
+
+	it("rejects attempt policies that exceed the declared limits", () => {
+		const runtime = materializer();
+		expect(() =>
+			runtime.agent("retry", {
+				...request(),
+				limits: { ...request().limits, retries: 1 },
+				retry: { attempts: 2 },
+			}),
+		).toThrow("agent retry policy exceeds the declared retry limit");
+		expect(() =>
+			runtime.agent("resume", {
+				...request(),
+				limits: { ...request().limits, resumes: 0 },
+				resume: { attempts: 1 },
+			}),
+		).toThrow("agent resume policy exceeds the declared resume limit");
+		expect(() =>
+			runtime.agent("bounds", {
+				...request(),
+				limits: { ...request().limits, retries: 10 },
+				retry: { attempts: 11 },
+			}),
+		).toThrow("invalid agent task request");
+		expect(() =>
+			runtime.agent("duplicate", {
+				...request(),
+				retry: { attempts: 1, on: ["backoff", "backoff"] },
+			}),
+		).toThrow("invalid agent task request");
+		expect(() =>
+			runtime.agent("unknown", {
+				...request(),
+				retry: { attempts: 1, on: ["resume" as never] },
+			}),
+		).toThrow("invalid agent task request");
+		expect(runtime.closeEpoch("final", []).events).toEqual([
+			{
+				type: "barrier-reached",
+				data: { epoch: 1, kind: "final", taskIds: [] },
+			},
+		]);
 	});
 
 	it("rejects malformed requests and input digest mismatches", () => {

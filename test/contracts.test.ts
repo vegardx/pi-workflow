@@ -2,17 +2,22 @@ import { SUBAGENT_RUNTIME_CONTRACT } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+	AgentResumePolicySchema,
+	AgentRetryPolicySchema,
+	AgentTaskRequestSchema,
 	AgentTaskSpecSchema,
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_NESTED_WORKFLOW_TASKS,
+	MAX_TASK_ATTEMPTS,
 	MaterializedAgentTaskSchema,
 	MaterializedWorkflowTaskSchema,
 	NestedWorkflowInputArtifactSchema,
 	NestedWorkflowInputArtifactsSchema,
 	NestedWorkflowTaskSpecSchema,
 	NestedWorkflowTerminalEvidenceSchema,
+	SubagentTerminalEvidenceSchema,
 	SupportTaskTerminalEvidenceSchema,
 	TaskExecutionRecordSchema,
 	TaskExecutionTerminalEvidenceSchema,
@@ -122,15 +127,15 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 13 and rejects revision 12 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(13);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(13);
+	it("publishes revision 14 and rejects revision 13 durable records", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(14);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(14);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 13,
+			contractRevision: 14,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -145,12 +150,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 12,
+				contractRevision: 13,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 13,
+			contractRevision: 14,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -174,9 +179,123 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 12,
+				contractRevision: 13,
 			}),
 		).toBe(false);
+	});
+
+	it("publishes the attempt features, policies, and evidence ordinal", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.retryAttempts).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.resumeAttempts).toBe(true);
+		expect(MAX_TASK_ATTEMPTS).toBe(21);
+		for (const feature of ["retryAttempts", "resumeAttempts"] as const) {
+			expect(
+				isWorkflowRuntimeContract({
+					...WORKFLOW_RUNTIME_CONTRACT,
+					features: {
+						...WORKFLOW_RUNTIME_CONTRACT.features,
+						[feature]: undefined,
+					},
+				}),
+			).toBe(false);
+		}
+		expect(
+			Value.Check(AgentRetryPolicySchema, { attempts: 1, on: ["backoff"] }),
+		).toBe(true);
+		expect(
+			Value.Check(AgentRetryPolicySchema, {
+				attempts: 10,
+				on: ["backoff", "manual"],
+			}),
+		).toBe(true);
+		for (const invalid of [
+			{ attempts: 0, on: ["backoff"] },
+			{ attempts: 11, on: ["backoff"] },
+			{ attempts: 1.5, on: ["backoff"] },
+			{ attempts: 1, on: [] },
+			{ attempts: 1, on: ["backoff", "backoff"] },
+			{ attempts: 1, on: ["resume"] },
+			{ attempts: 1, on: ["never"] },
+			{ attempts: 1 },
+			{ attempts: 1, on: ["backoff"], extra: true },
+		]) {
+			expect(Value.Check(AgentRetryPolicySchema, invalid)).toBe(false);
+		}
+		expect(Value.Check(AgentResumePolicySchema, { attempts: 1 })).toBe(true);
+		expect(Value.Check(AgentResumePolicySchema, { attempts: 10 })).toBe(true);
+		for (const invalid of [
+			{ attempts: 0 },
+			{ attempts: 11 },
+			{ attempts: 1, on: ["backoff"] },
+			{},
+		]) {
+			expect(Value.Check(AgentResumePolicySchema, invalid)).toBe(false);
+		}
+		const spec = agentTaskSpec();
+		const withPolicies = {
+			...spec.request,
+			retry: { attempts: 1, on: ["backoff", "manual"] },
+			resume: { attempts: 1 },
+		};
+		expect(Value.Check(AgentTaskRequestSchema, spec.request)).toBe(true);
+		expect(Value.Check(AgentTaskRequestSchema, withPolicies)).toBe(true);
+		expect(
+			Value.Check(AgentTaskSpecSchema, { ...spec, request: withPolicies }),
+		).toBe(true);
+		expect(
+			Value.Check(AgentTaskRequestSchema, {
+				...spec.request,
+				retry: { attempts: 1 },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(AgentTaskRequestSchema, {
+				...spec.request,
+				resume: { attempts: 0 },
+			}),
+		).toBe(false);
+		const evidence = {
+			kind: "subagent",
+			attemptOrdinal: 1,
+			resultSha256: sha,
+			status: "completed",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: 0.01,
+			},
+			usageComplete: true,
+			runtimeMs: 10,
+			sandboxCleanup: "proved",
+			workspaceCleanup: "not-needed",
+			truncated: false,
+			structuredOutputSha256: sha,
+		};
+		expect(Value.Check(SubagentTerminalEvidenceSchema, evidence)).toBe(true);
+		expect(Value.Check(TaskExecutionTerminalEvidenceSchema, evidence)).toBe(
+			true,
+		);
+		expect(
+			Value.Check(SubagentTerminalEvidenceSchema, {
+				...evidence,
+				attemptOrdinal: MAX_TASK_ATTEMPTS,
+			}),
+		).toBe(true);
+		const { attemptOrdinal: _attemptOrdinal, ...withoutOrdinal } = evidence;
+		expect(Value.Check(SubagentTerminalEvidenceSchema, withoutOrdinal)).toBe(
+			false,
+		);
+		for (const attemptOrdinal of [0, MAX_TASK_ATTEMPTS + 1, 1.5]) {
+			expect(
+				Value.Check(SubagentTerminalEvidenceSchema, {
+					...evidence,
+					attemptOrdinal,
+				}),
+			).toBe(false);
+		}
 	});
 
 	it("publishes the nested artifact input feature and its schemas", () => {
