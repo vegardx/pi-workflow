@@ -111,6 +111,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	let service: WorkflowService | undefined;
 	let serviceCwd: string | undefined;
 	let widget: WidgetController | undefined;
+	// Each TUI session start supersedes the previous one; a start that lost
+	// the race while awaiting the service never installs its controller.
+	let widgetGeneration = 0;
 
 	async function getService(ctx: ExtensionContext): Promise<WorkflowService> {
 		if (service && serviceCwd === ctx.cwd) return service;
@@ -127,14 +130,18 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	}
 
 	// The widget lives only in the TUI. `session_start` fires again on reload,
-	// new, resume, and fork, so the previous controller is stopped first.
+	// new, resume, and fork, so the previous controller is stopped first, and
+	// two starts that overlap while the service opens leave exactly one
+	// controller subscribed: the later one.
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		await loadTextComponent();
+		const generation = ++widgetGeneration;
 		widget?.stop();
 		widget = undefined;
 		try {
+			await loadTextComponent();
 			const runtime = await getService(ctx);
+			if (generation !== widgetGeneration) return;
 			const controller = createWidgetController({
 				service: runtime,
 				setWidget: (lines) =>
@@ -144,12 +151,17 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			});
 			widget = controller;
 			await controller.start();
+			// A start that overlapped this one's first refresh already stopped
+			// the controller through `widget`; nothing else to release.
 		} catch {
-			ctx.ui.setWidget(WORKFLOW_WIDGET_KEY, undefined);
+			if (generation === widgetGeneration) {
+				ctx.ui.setWidget(WORKFLOW_WIDGET_KEY, undefined);
+			}
 		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		widgetGeneration += 1;
 		widget?.stop();
 		widget = undefined;
 		if (ctx?.mode === "tui") ctx.ui.setWidget(WORKFLOW_WIDGET_KEY, undefined);
