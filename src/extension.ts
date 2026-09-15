@@ -5,13 +5,13 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import {
 	createWorkflowService,
 	type WorkflowService,
 	type WorkflowServiceRunView,
 } from "./service.js";
 import { createWorkflowSubagentProvider } from "./subagent-provider.js";
+import { WORKFLOW_TOOL_DECLARATIONS } from "./tools.js";
 
 const MAX_TOOL_OUTPUT_BYTES = 48 * 1024;
 
@@ -44,13 +44,6 @@ function text(value: unknown): string {
 	throw new Error("workflow tool output exceeds context limit");
 }
 
-function result(value: unknown) {
-	return {
-		content: [{ type: "text" as const, text: text(value) }],
-		details: {},
-	};
-}
-
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let service: WorkflowService | undefined;
 	let serviceCwd: string | undefined;
@@ -76,117 +69,30 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		await active?.shutdown();
 	});
 
-	pi.registerTool({
-		name: "workflow_list",
-		label: "List Workflows",
-		description:
-			"List trusted static workflows available in the current project context.",
-		promptSnippet: "List trusted durable workflows",
-		promptGuidelines: [
-			"Use workflow_list before workflow_run when the available workflow name is unknown.",
-		],
-		parameters: Type.Object({}, { additionalProperties: false }),
-		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			return result(await (await getService(ctx)).list());
-		},
-	});
-
-	pi.registerTool({
-		name: "workflow_validate",
-		label: "Validate Workflow",
-		description:
-			"Validate a trusted static workflow reference and optionally its JSON input without creating a run.",
-		parameters: Type.Object(
-			{
-				ref: Type.String({ minLength: 1, maxLength: 4096 }),
-				input: Type.Optional(Type.Unknown()),
+	// Every tool comes from the declaration table: the typed service value is
+	// the result `details`, and the text block is the same value as bounded
+	// JSON for the model context.
+	for (const declaration of WORKFLOW_TOOL_DECLARATIONS) {
+		pi.registerTool({
+			name: declaration.name,
+			label: declaration.label,
+			description: declaration.description,
+			...(declaration.promptSnippet === undefined
+				? {}
+				: { promptSnippet: declaration.promptSnippet }),
+			...(declaration.promptGuidelines.length === 0
+				? {}
+				: { promptGuidelines: [...declaration.promptGuidelines] }),
+			parameters: declaration.parameters,
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				const value = await declaration.execute(await getService(ctx), params);
+				return {
+					content: [{ type: "text" as const, text: text(value) }],
+					details: value,
+				};
 			},
-			{ additionalProperties: false },
-		),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const workflowService = await getService(ctx);
-			return result(
-				params.input === undefined
-					? await workflowService.validate(params.ref)
-					: await workflowService.validate(params.ref, params.input),
-			);
-		},
-	});
-
-	pi.registerTool({
-		name: "workflow_run",
-		label: "Run Workflow",
-		description:
-			"Start a trusted durable static workflow. Returns a run ID immediately; use workflow_wait or workflow_status to observe it.",
-		parameters: Type.Object(
-			{
-				ref: Type.String({ minLength: 1, maxLength: 4096 }),
-				input: Type.Unknown(),
-			},
-			{ additionalProperties: false },
-		),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			return result(
-				await (await getService(ctx)).run(params.ref, params.input),
-			);
-		},
-	});
-
-	const RunInput = Type.Object(
-		{ runId: Type.String({ pattern: "^workflow_[a-z0-9]+$" }) },
-		{ additionalProperties: false },
-	);
-
-	pi.registerTool({
-		name: "workflow_status",
-		label: "Workflow Status",
-		description: "Read durable status for a workflow run.",
-		parameters: RunInput,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			return result(await (await getService(ctx)).status(params.runId));
-		},
-	});
-
-	pi.registerTool({
-		name: "workflow_wait",
-		label: "Wait for Workflow",
-		description:
-			"Wait for an active workflow run and return its durable terminal status and bounded output.",
-		parameters: RunInput,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			return result(await (await getService(ctx)).wait(params.runId));
-		},
-	});
-
-	pi.registerTool({
-		name: "workflow_stop",
-		label: "Stop Workflow",
-		description:
-			"Persist stop intent, interrupt active delegated work, and drain durable terminal evidence.",
-		parameters: Type.Object(
-			{
-				runId: Type.String({ pattern: "^workflow_[a-z0-9]+$" }),
-				reason: Type.String({ minLength: 1, maxLength: 4096 }),
-			},
-			{ additionalProperties: false },
-		),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			return result(
-				await (await getService(ctx)).stop(params.runId, params.reason),
-			);
-		},
-	});
-
-	pi.registerTool({
-		name: "workflow_reconcile",
-		label: "Reconcile Workflow",
-		description:
-			"Reopen and reconcile a durable workflow run after restart or interruption.",
-		parameters: RunInput,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			return result(await (await getService(ctx)).reconcile(params.runId));
-		},
-	});
+		});
+	}
 
 	pi.registerCommand("workflows", {
 		description: "List trusted static workflows",
