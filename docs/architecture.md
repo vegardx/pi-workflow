@@ -40,9 +40,14 @@ this runtime.
 
 ## Layers
 
-1. **Extension adapter** registers the current list, validate, run, status,
-   wait, stop, and reconcile tools plus compact status commands and session
-   shutdown draining.
+1. **Extension adapter** registers the list, validate, run, status, wait,
+   stop, reconcile, runs, inspect, logs, and invalidate tools plus compact
+   status commands and session shutdown draining. Tool output is validated
+   against the `service-views.ts` schemas before serialization and bounded to
+   48 KiB: pages shrink and re-cursor, an oversized inspection is refused with
+   guidance to narrow `include` or pass `taskId`, and run views omit only the
+   output value. Tools forward parameters and never compute action legality;
+   `availableActions` from the service is the only legality signal.
 2. **Registry** discovers definitions using Pi's effective agent directory and
    project trust.
 3. **Authoring frontend** exposes typed task and artifact handles to trusted
