@@ -1391,7 +1391,7 @@ describe("inspect and logs", () => {
 			expect(Value.Check(WorkflowRunInspectionSchema, inspection)).toBe(true);
 			expect(inspection.run).toMatchObject({
 				status: "failed",
-				availableActions: ["invalidate"],
+				availableActions: ["invalidate", "retry"],
 				requiresAttention: true,
 			});
 			expect(inspection.tasks?.[0]).toMatchObject({
@@ -1439,7 +1439,7 @@ describe("inspect and logs", () => {
 			const listed = await service.listRuns();
 			expect(listed.runs[0]).toMatchObject({
 				runId,
-				availableActions: ["invalidate"],
+				availableActions: ["invalidate", "retry"],
 				requiresAttention: true,
 			});
 		} finally {
@@ -1774,6 +1774,7 @@ function captureExtension() {
 		registerCommand(name: string) {
 			commands.push(name);
 		},
+		registerShortcut() {},
 		on(event: string, handler: (...args: unknown[]) => unknown) {
 			handlers.set(event, handler);
 		},
@@ -1819,7 +1820,7 @@ describe("read tools", () => {
 		]) {
 			expect(names).toContain(name);
 		}
-		expect(commands).toContain("workflow-runs");
+		expect(commands).toEqual(["workflow"]);
 		expect(tool("workflow_runs").description).toBe(
 			"List durable workflow runs in this project with status, ownership, and the operator actions the service currently permits.",
 		);

@@ -22,8 +22,10 @@ import {
 	availableWorkflowRunActions,
 	awaitsRecovery,
 	deadlinePassed,
+	hasOpenOperatorIntent,
 	IMPLEMENTED_WORKFLOW_RUN_ACTIONS,
 	isNestedRun,
+	isReopenedTask,
 	isTerminalWorkflowRunStatus,
 	requiresAttention,
 	resumableTasks,
@@ -240,6 +242,31 @@ function agentExecution(
 	};
 }
 
+/** An interrupted execution reopened by an operator resume intent that is still open. */
+function reopenedExecution(
+	task: MaterializedWorkflowTask,
+): TaskExecutionProjection {
+	const settled = agentExecution(task, 1, {
+		outcome: "interrupted",
+		failureRetry: "resume",
+	});
+	const { terminal: _terminal, ...reopened } = settled;
+	return {
+		...reopened,
+		phase: "attempt-intended",
+		attempts: [
+			{
+				kind: "resume",
+				ordinal: 2,
+				previousAttemptId: "attempt_child1",
+				origin: "operator",
+				reason: "Operator resumed the seat.",
+				intentSequence: 60,
+			},
+		],
+	};
+}
+
 interface TaskEntry {
 	readonly task: MaterializedWorkflowTask;
 	readonly status: WorkflowTaskStatus;
@@ -318,7 +345,7 @@ const nestedRecord = {
 // ---------------------------------------------------------------------------
 
 describe("run action predicates", () => {
-	it("exposes the seven-action vocabulary and the Part 1 implemented gate", () => {
+	it("exposes the seven-action vocabulary and the implemented gate", () => {
 		expect([...WORKFLOW_RUN_ACTIONS]).toEqual([
 			"stop",
 			"wait",
@@ -332,6 +359,8 @@ describe("run action predicates", () => {
 		expect([...IMPLEMENTED_WORKFLOW_RUN_ACTIONS].sort()).toEqual([
 			"invalidate",
 			"reconcile",
+			"resume",
+			"retry",
 			"stop",
 			"wait",
 		]);
@@ -383,6 +412,80 @@ describe("run action predicates", () => {
 				status,
 			).toBe(false);
 		}
+	});
+
+	it("detects awaited recovery from an open operator resume intent", () => {
+		const task = agentTask("reopened", 1);
+		const reopened = reopenedExecution(task);
+		const intent = reopened.attempts?.[0];
+		if (!intent) throw new Error("reopened execution has no intent");
+		const open = stateOf("interrupted", [
+			{ task, status: "interrupted", execution: reopened },
+		]);
+		expect(hasOpenOperatorIntent(open)).toBe(true);
+		expect(awaitsRecovery(open)).toBe(true);
+		expect(isReopenedTask(open, open.tasks[task.id] as never)).toBe(true);
+		// A run view carries no executions and cannot expose the intent.
+		expect(
+			awaitsRecovery({
+				status: "interrupted",
+				tasks: [{ status: "interrupted" }],
+			}),
+		).toBe(false);
+		// Only an interrupted run reopens on an operator intent.
+		expect(awaitsRecovery({ ...open, status: "failed" })).toBe(false);
+		// A receipted or declined intent is no longer open, but the task stays
+		// reopened until its execution terminalizes again.
+		for (const closed of [
+			{ receiptSequence: 61 },
+			{ declinedSequence: 61 },
+		] as const) {
+			const execution: TaskExecutionProjection = {
+				...reopened,
+				phase: "receiptSequence" in closed ? "launched" : "settled",
+				attempts: [{ ...intent, ...closed }],
+			};
+			const state = stateOf("interrupted", [
+				{ task, status: "interrupted", execution },
+			]);
+			expect(hasOpenOperatorIntent(state)).toBe(false);
+			expect(awaitsRecovery(state)).toBe(false);
+			expect(isReopenedTask(state, state.tasks[task.id] as never)).toBe(true);
+		}
+		// A policy intent never counts as operator recovery.
+		const policy = stateOf("interrupted", [
+			{
+				task,
+				status: "interrupted",
+				execution: {
+					...reopened,
+					attempts: [{ ...intent, origin: "policy" }],
+				},
+			},
+		]);
+		expect(hasOpenOperatorIntent(policy)).toBe(false);
+		// An abandoned task's intent is history.
+		const abandoned = stateOf("interrupted", [
+			{ task, status: "interrupted", execution: reopened, abandoned: true },
+		]);
+		expect(hasOpenOperatorIntent(abandoned)).toBe(false);
+		expect(isReopenedTask(abandoned, abandoned.tasks[task.id] as never)).toBe(
+			false,
+		);
+		// Terminal interrupted evidence is settled, not reopened.
+		const terminal = stateOf("interrupted", [
+			{
+				task,
+				status: "interrupted",
+				execution: agentExecution(task, 1, {
+					outcome: "interrupted",
+					failureRetry: "resume",
+				}),
+			},
+		]);
+		expect(isReopenedTask(terminal, terminal.tasks[task.id] as never)).toBe(
+			false,
+		);
 	});
 
 	it("treats a deadline at or before now as passed", () => {
@@ -737,7 +840,7 @@ describe("availableWorkflowRunActions", () => {
 		}
 	});
 
-	it("offers only invalidate for a settled failed or interrupted root run", () => {
+	it("offers invalidate, retry, and resume for a settled failed or interrupted root run by cause set", () => {
 		for (const status of ["failed", "interrupted"] as const) {
 			for (const ownership of ["owned", "inactive"] as const) {
 				expect(
@@ -750,12 +853,26 @@ describe("availableWorkflowRunActions", () => {
 						}),
 					),
 					`${status}/${ownership}`,
+				).toEqual(
+					status === "interrupted"
+						? ["invalidate", "retry", "resume"]
+						: ["invalidate", "retry"],
+				);
+				expect(
+					availableWorkflowRunActions(facts({ status, ownership })),
+					`${status}/${ownership} without causes`,
 				).toEqual(["invalidate"]);
 			}
 		}
+		// A failed run never resumes, whatever the predicate counts.
+		expect(
+			availableWorkflowRunActions(
+				facts({ status: "failed", resumableTaskCount: 1 }),
+			),
+		).toEqual(["invalidate"]);
 	});
 
-	it("never emits retry, resume, or decide in Part 1", () => {
+	it("never emits decide", () => {
 		const emitted = new Set<WorkflowRunAction>();
 		for (const status of RUN_STATUSES) {
 			for (const ownership of ["owned", "inactive"] as const) {
@@ -771,8 +888,8 @@ describe("availableWorkflowRunActions", () => {
 				}
 			}
 		}
-		expect(emitted.has("retry")).toBe(false);
-		expect(emitted.has("resume")).toBe(false);
+		expect(emitted.has("retry")).toBe(true);
+		expect(emitted.has("resume")).toBe(true);
 		expect(emitted.has("decide")).toBe(false);
 	});
 
@@ -962,6 +1079,41 @@ function reconcileActs(state: WorkflowRunActionFacts): boolean {
 	);
 }
 
+/**
+ * `retry` is the invalidate block followed by the cause-task guard; the
+ * guard's refusal is what an empty retryable set stands for here.
+ */
+function retryRefusal(state: WorkflowRunActionFacts): string | undefined {
+	const invalidate = invalidateRefusal(state);
+	if (invalidate !== undefined) return invalidate;
+	if (state.retryableTaskCount === 0) {
+		return "Workflow retry requires a failed or interrupted task.";
+	}
+	return undefined;
+}
+
+/** The service's `resume` precondition block in its normative order (spec §2.2). */
+function resumeRefusalOf(state: WorkflowRunActionFacts): string | undefined {
+	if (state.ownership === "leased-elsewhere") {
+		return "Workflow run is owned by another live service.";
+	}
+	if (state.driving) return "Workflow run is still being driven.";
+	if (state.status !== "interrupted") {
+		return "Workflow run status does not admit resume.";
+	}
+	if (state.nested) {
+		return "Nested workflow runs are resumed through their parent run.";
+	}
+	if (state.awaitsRecovery) {
+		return "Workflow run already awaits recovery of invalidated work.";
+	}
+	if (state.deadlinePassed) return "Workflow run deadline has passed.";
+	if (state.resumableTaskCount === 0) {
+		return "Workflow run has no resumable task.";
+	}
+	return undefined;
+}
+
 function* enumerateFacts(): Generator<WorkflowRunActionFacts> {
 	for (const status of RUN_STATUSES) {
 		for (const ownership of [
@@ -977,17 +1129,21 @@ function* enumerateFacts(): Generator<WorkflowRunActionFacts> {
 								? [false, true]
 								: [false];
 						for (const recovery of recoveries) {
-							yield facts({
-								status,
-								ownership,
-								driving,
-								nested,
-								deadlinePassed: deadline,
-								awaitsRecovery: recovery,
-								hasCleanupBlockedTask: status === "cleanup-blocked",
-								retryableTaskCount: 1,
-								resumableTaskCount: status === "interrupted" ? 1 : 0,
-							});
+							for (const retryable of [0, 1]) {
+								for (const resumable of [0, 1]) {
+									yield facts({
+										status,
+										ownership,
+										driving,
+										nested,
+										deadlinePassed: deadline,
+										awaitsRecovery: recovery,
+										hasCleanupBlockedTask: status === "cleanup-blocked",
+										retryableTaskCount: retryable,
+										resumableTaskCount: resumable,
+									});
+								}
+							}
 						}
 					}
 				}
@@ -1018,6 +1174,19 @@ describe("legality and service preconditions agree", () => {
 			expect(offered.includes("wait"), label).toBe(waitActs(candidate));
 			expect(offered.includes("reconcile"), label).toBe(
 				reconcileActs(candidate),
+			);
+		}
+	});
+
+	it("offers retry and resume exactly when their precondition blocks pass", () => {
+		for (const candidate of enumerateFacts()) {
+			const offered = availableWorkflowRunActions(candidate);
+			const label = JSON.stringify(candidate);
+			expect(offered.includes("retry"), label).toBe(
+				retryRefusal(candidate) === undefined,
+			);
+			expect(offered.includes("resume"), label).toBe(
+				resumeRefusalOf(candidate) === undefined,
 			);
 		}
 	});
