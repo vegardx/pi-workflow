@@ -131,6 +131,19 @@ digest, canonical encoding, and producer schema, and embeds bounded untrusted
 JSON envelopes into the concrete delegated context before subagent preflight.
 Artifact paths and unrelated predecessor outputs are never exposed.
 
+A worktree agent task (`workspace.mode: "worktree"`) runs in a pi-subagent
+worktree. After the structured-output import and before release intent, the
+task finalizer imports the child's handoff through the owner client's
+`exportHandoff`: it verifies the returned reference against the settled
+`{ attemptId, baselineHead, handoffCommit }` identity, checks format, digest,
+size, and the single-commit `git format-patch` shape, stores the bytes as a
+content-addressed `.patch` blob in the same fenced artifact store, and persists
+`task-execution-handoff-imported` (or `task-execution-handoff-absent` when the
+child captured no changes). The workflow exposes the handoff only as a JSON
+descriptor to the author and to downstream tasks, and as bytes through the
+service's `exportHandoff`; it never applies, pushes, merges, or checks out a
+handoff and never reads a subagent worktree path or branch.
+
 Resume reconstructs state from the append-only journal and re-executes the
 workflow function from its entry point. Matching task, result, phase, and log
 effects replay or reconcile. Concrete result effects are loaded only from

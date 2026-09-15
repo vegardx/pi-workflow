@@ -61,7 +61,7 @@ describe("package contract", () => {
 			">=0.85.0 <0.86",
 		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
-			"0.9.0",
+			"0.10.0",
 		);
 		expect(packageJson.peerDependencies?.typebox).toBe(">=1.3.14 <2");
 		expect(packageJson.exports?.["."]).toEqual({

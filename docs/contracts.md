@@ -4,11 +4,12 @@ This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
 nested run executor, artifact store, and static source runtime implement the
 current subset; later interfaces remain design contracts. The runtime contract
-is revision 16 and declares the feature flags `supportTaskExecution: true`,
+is revision 17 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
-`transactionalInvalidation: true`, `finalizers: true`, and
-`operatorAttempts: true`.
+`transactionalInvalidation: true`, `finalizers: true`,
+`operatorAttempts: true`, and `worktrees: true`. It requires pi-subagent
+contract revision 6, whose features include `handoffExport: true`.
 
 ## Static definition
 
@@ -69,7 +70,7 @@ interface WorkflowDefinition<TInput, TOutput> {
 	): WorkflowReturn<TOutput> | Promise<WorkflowReturn<TOutput>>;
 }
 
-type WorkflowReturn<T> = T | TaskHandle<T> | ArtifactHandle<T>;
+type WorkflowReturn<T> = T | TaskHandle<T> | ArtifactHandle<T> | HandoffHandle;
 ```
 
 Concurrency defaults to 4 and has a hard maximum of 16. The workflow service
@@ -100,7 +101,7 @@ committed as a provenance-bound workflow-owned artifact through a durable
 output commit finishes the terminal run transition without reevaluating or
 rewriting the output.
 
-Contract revision 16 identities cover the complete definition module but not a
+Contract revision 17 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
 `typebox`, and the module specifiers present in the constructor-injected
 support registry; every other static import, dynamic import, CommonJS require,
@@ -144,7 +145,10 @@ parameters, dependencies, and replay policy into task identity. Static workflow
 imports remain denied unless their exact module specifier is present in the
 constructor-injected support registry.
 
-`ctx.support(key, descriptor)` is the only authoring surface. There is no
+`ctx.support(key, descriptor)` is the only authoring surface. The descriptor's
+`inputs` accept result handles (`handle.output`) and worktree handoff handles
+(`handle.handoff`); a handoff input delivers the `WorkflowHandoffDescriptor`
+to the implementation under its input name, never patch bytes. There is no
 string-addressed API and no inline callback: the implementation is referenced
 by descriptor identity and resolved at execution time from the registry. A
 future dynamic frontend lowers the same descriptor into the same
@@ -317,6 +321,7 @@ model results directly.
 interface TaskHandle<T> {
 	readonly ref: TaskRef;
 	readonly output: ArtifactHandle<T>;
+	readonly handoff?: HandoffHandle; // present only on worktree agent tasks
 }
 
 interface ArtifactHandle<T> {
@@ -326,7 +331,26 @@ interface ArtifactHandle<T> {
 		output: "result";
 	};
 }
+
+interface HandoffHandle {
+	readonly ref: {
+		runId: WorkflowRunId;
+		producerTaskId: WorkflowTaskId;
+		output: "handoff";
+	};
+}
+
+type WorktreeTaskHandle<T> = TaskHandle<T> & { readonly handoff: HandoffHandle };
 ```
+
+`WorkflowArtifactHandleRef.output` is `"result" | "handoff"`
+(`WorkflowArtifactOutputSchema`). An agent declaration whose request literal
+has `workspace.mode === "worktree"` is typed `WorktreeTaskHandle`; at runtime
+`createTaskHandle` attaches `handoff` exactly when the materialized spec is a
+worktree agent task. A `HandoffHandle` (`isHandoffHandle`) may be named in
+`inputs`, where the consumer receives the handoff descriptor and never patch
+bytes, and may be returned as the workflow value, in which case the output
+schema must accept a `WorkflowHandoffDescriptor`.
 
 Concrete values cross an explicit execution barrier:
 
@@ -404,6 +428,9 @@ interface WorkflowContext<TInput> {
 	settled<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,
 	): Promise<SettledResultTuple<T>>;
+	handoff<T>(
+		task: WorktreeTaskHandle<T>,
+	): Promise<WorkflowHandoffDescriptor | undefined>;
 	finalize<TOutputSchema extends TSchema>(
 		key: TaskKey,
 		request: FinalizeRequest<TOutputSchema>,
@@ -430,6 +457,14 @@ rejected ("finalizer requires exactly one of support, agent, or workflow").
 The returned handle exists so other finalizers may depend on it through
 `after` or `inputs`; it is never a barrier target and never awaited by the
 author. See [Finalizers](#finalizers).
+
+`ctx.handoff(handle)` is a persisted `"result"`-kind barrier on a worktree
+task; there is no separate barrier kind. It runs the scheduler until the task
+completes and finalizes, verifies the task's handoff evidence, and resolves the
+`WorkflowHandoffDescriptor`, or `undefined` only when the task's `handoff`
+policy is `"optional"` and `task-execution-handoff-absent` was recorded. A
+finalizer handle is rejected exactly like `ctx.result` ("a finalizer cannot be
+a barrier target"). See [Worktree tasks and handoffs](#worktree-tasks-and-handoffs).
 
 `ctx.fanOut(namespace, items, options)` synchronously materializes at most 64
 ordinary agent tasks in the named child namespace. The caller supplies a stable
@@ -507,7 +542,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow"` in revision 16; a checkpoint task
+`kind` is `"agent" | "support" | "workflow"` in revision 17; a checkpoint task
 kind remains a design contract. `role` is `"task"` for every ordinary
 declaration (`ctx.agent`, `ctx.support`, `ctx.workflow`, fan-out, fan-in, and
 pipelines) and `"finalizer"` for `ctx.finalize`; it participates in task
@@ -632,16 +667,23 @@ interface AgentTask<T> extends TaskRequestBase {
 	preloadSkills: string[];
 	contextScopes: Array<"global" | "project">;
 	workspace: WorkspaceRequest;
+	handoff?: HandoffPolicy; // worktree tasks only; workflow-only
 	outputSchema: JsonSchema<T>;
 	limits: RunLimits;
 	retry?: { attempts: number; on?: readonly ("backoff" | "manual")[] };
 	resume?: { attempts: number };
 }
 
+type WorkspaceRequest =
+	| { mode: "read-only"; cwd: string }
+	| { mode: "worktree"; cwd: string };
+
+type HandoffPolicy = "required" | "optional";
+
 interface TaskRequestBase {
 	disposition?: "required" | "optional";
 	after?: TaskRef[];
-	inputs?: Record<string, ArtifactHandle<unknown>>;
+	inputs?: Record<string, ArtifactHandle<unknown> | HandoffHandle>;
 	replay?: "auto" | "off" | "read-only";
 }
 ```
@@ -730,6 +772,158 @@ remains subagent-owned at execution time. Workflow accepts
 only JSON-serializable output-schema documents within the runtime's bounded
 16-level schema-value depth, then revalidates and imports the value and every
 downstream artifact into workflow-owned storage before task completion.
+
+### Worktree tasks and handoffs
+
+`workspace: { mode: "worktree", cwd }` requests an isolated pi-subagent
+worktree for the child (`AgentWorkspaceRequestSchema`). The materializer
+additionally requires `limits.workspaceWriteBytes >= 1` ("worktree workspace
+requires a positive workspaceWriteBytes limit") and normalizes the
+workflow-only `handoff` policy (`HandoffPolicySchema`) to
+`request.handoff ?? "required"`; the normalized value is part of the persisted
+request and therefore of task identity, so a changed policy is a changed
+request. `handoff` on a read-only request is rejected ("handoff policy
+requires a worktree workspace"), read-only requests persist no `handoff`
+field, and the launcher lowers request fields explicitly and never sends
+`handoff` to pi-subagent. `workspaceWriteBytes: 0` on read-only tasks is not
+newly enforced.
+
+The preflight event persists the launch plan's `workspaceMode` and
+`workspaceBaselineSha256` (pi-subagent's digest of the clean checkout
+baseline, opaque to the workflow, which never recomputes it from git). The
+reducer rejects a preflight whose mode differs from the task request ("task
+execution preflight workspace does not match its task"); a superseding
+preflight may carry a different baseline digest, and the preflight named by
+`launch-intended` is authoritative.
+
+A settled worktree attempt may carry handoff identity in its evidence:
+`SubagentTerminalEvidence.handoff = { attemptId, baselineHead, handoffCommit }`
+(`SubagentHandoffEvidenceSchema`, object ids `^[a-f0-9]{40,64}$`), projected
+by the shared `deriveSubagentSettlementEvidence` from pi-subagent's worktree
+record when the record names a handoff commit that differs from the baseline;
+a record without a handoff commit yields no `handoff` field, and any other
+malformed record is an observation error. Repository root, worktree path,
+record path, branch, ref names, and timestamps are never persisted. A
+read-only task whose settlement carries a handoff is rejected ("read-only task
+settlement carries a handoff"), a handoff naming an attempt other than the
+current one is rejected ("settlement handoff names another attempt"), and an
+`abandoned` settlement may not carry one.
+
+The agent execution ladder for a completed worktree child is `settled →
+artifact-imported → handoff-resolved → release-intended → released →
+terminal`; read-only children are unchanged. After the structured-output
+import and before release intent the finalizer either imports the handoff or
+records its absence:
+
+- with settlement handoff evidence it calls the owner client's
+  `exportHandoff(childRunId, { maxBytes: MAX_WORKFLOW_HANDOFF_BYTES })`,
+  requires the returned `HandoffRef` to name the child run, the current
+  attempt (`currentSubagentAttemptId`), and the settled `baselineHead` and
+  `handoffCommit` (which must differ), requires `format: "git-format-patch"`
+  and `mediaType: "application/x-git-format-patch"`, verifies byte length and
+  SHA-256 against the reference, requires 1 to `MAX_WORKFLOW_HANDOFF_BYTES`
+  (16 MiB) bytes beginning with the single-commit
+  `From <handoffCommit> Mon Sep 17 00:00:00 2001` separator, writes the bytes
+  through `artifacts.putBytes` as a content-addressed `<sha256>.patch` blob
+  with `output: "handoff"`, `mediaType: "application/x-git-format-patch"`, and
+  `schemaSha256 = WORKFLOW_HANDOFF_FORMAT_SHA256`, declares the artifact
+  unless an equal reference exists, and appends
+  `task-execution-handoff-imported { executionId, subagentRunId,
+  subagentAttemptId, artifactId, handoffCommit, baselineHead, sha256, bytes }`;
+- without settlement handoff evidence it appends
+  `task-execution-handoff-absent { executionId, subagentRunId,
+  subagentAttemptId }`.
+
+Import precedes release because pi-subagent requires a handoff to be exported
+or pinned before ordinary retention selects its run, and because the workflow
+must hold workflow-owned evidence before it declares the child disposable, the
+same rule that already orders artifact import before release. Release after
+import is safe: pi-subagent's handoff ref keeps the commit reachable. The
+reducer accepts the import only on a worktree task ("handoff import requires a
+worktree task") from phase `artifact-imported`, or from a `cleanup-blocked`
+terminal at stage `handoff-import` during recovery ("task execution handoff
+import is invalid"), requires the event identity to equal the settlement's
+("handoff import does not match the settlement handoff") and the declared
+artifact to match the producer execution, output, media type, format digest,
+digest, and size ("handoff import artifact does not match"); absence is
+accepted only from `artifact-imported` and only when the settlement carries no
+handoff ("handoff absence contradicts a captured handoff"). Release intent on a
+completed worktree child requires phase `handoff-resolved`. A handoff artifact
+declaration requires a worktree producer ("handoff artifact requires a
+worktree producer") and the fixed media type and format digest ("handoff
+artifact format is invalid"); one result and one handoff artifact coexist per
+execution.
+
+Any export, reference, identity, format, digest, size, or store failure during
+the import terminalizes the execution `cleanup-blocked` with workflow evidence
+at stage `handoff-import` (message "Workflow handoff artifact import requires
+reconciliation."), the task and run become `cleanup-blocked`, and explicit
+reconciliation reconciles the child and retries the import exactly as for
+`artifact-import`. A completed child that captured no handoff is released
+normally; under `handoff: "required"` it is then terminalized `failed` at
+stage `handoff-import` with the fixed message "Completed worktree task
+captured no handoff." (admitted only from phase `released` with absence
+recorded), while under `"optional"` it completes and `ctx.handoff` resolves
+`undefined`. Terminal `completed` evidence for a worktree task requires the
+imported handoff artifact to match the settlement handoff ("subagent terminal
+handoff does not match"). A handoff larger than 16 MiB is not importable:
+the task stays `cleanup-blocked` and the handoff remains exportable from
+pi-subagent by the operator.
+
+The workflow exposes a handoff only as identity:
+
+```ts
+interface WorkflowHandoffDescriptor {
+	artifactId: WorkflowArtifactId;
+	runId: WorkflowRunId;
+	producerTaskId: WorkflowTaskId;
+	producerExecutionId: TaskExecutionId;
+	subagentRunId: SubagentRunId;
+	subagentAttemptId: SubagentAttemptId;
+	baselineHead: GitObjectId; // ^[a-f0-9]{40,64}$
+	handoffCommit: GitObjectId;
+	format: "git-format-patch";
+	mediaType: "application/x-git-format-patch";
+	sha256: string;
+	bytes: number; // 1 .. MAX_WORKFLOW_HANDOFF_BYTES
+}
+```
+
+The descriptor (`WorkflowHandoffDescriptorSchema`, derived by
+`deriveWorkflowHandoffDescriptor` from the declared artifact and the
+execution's handoff import) is what `ctx.handoff` resolves, what a returned
+`HandoffHandle` commits as the ordinary JSON output artifact (the binary
+artifact is never the run output), and what a downstream task receives when it
+names `handle.handoff` in `inputs`: the delegated-context envelope keeps the
+artifact's `application/x-git-format-patch` media type and marks
+`content: "descriptor"`, so the child model receives identity, not bytes;
+support implementations and child workflows receive the same descriptor JSON.
+A handoff input whose producer is not a worktree agent task is rejected at
+declaration ("handoff input producer is not a worktree agent task") and by the
+reducer ("task input names a handoff of a non-worktree task"); input digests
+select the artifact whose `output` matches the reference, so result inputs
+hash exactly as before. The workflow declares, retains, verifies, and exposes
+the handoff and exports its bytes through `WorkflowService.exportHandoff`; it
+never applies, pushes, merges, or checks out a handoff, and it never reads
+subagent-private paths or branches. Chaining a second writer task on top of a
+handoff would need a pi-subagent workspace-input contract that does not exist;
+the workflow does not apply a patch into a downstream worktree.
+
+Retry and resume attempts on a worktree child follow the rules in the next
+section: same execution, same generation, no new preflight. pi-subagent
+creates a fresh worktree per attempt from the revalidated baseline, each
+attempt's settlement evidence may carry its own `handoff`, and only the
+current (final) attempt's handoff is exported and imported; its `attemptId`
+must equal `currentSubagentAttemptId(execution)`, and prior attempts' handoff
+identities stay in `priorSettlements` as evidence. An interrupted worktree
+child is retained without release exactly like a read-only one, and its
+uncaptured writes stay in pi-subagent. A later execution generation receives a
+fresh preflight (new `workspaceBaselineSha256`), operation ID, subagent run,
+and worktree; the prior generation's handoff artifact stays declared under its
+own `producerExecutionId`, every lookup selects the current execution's
+artifact, and identical bytes across generations share one `.patch` blob
+under distinct references. A worktree finalizer re-executed after
+invalidation gets a new worktree as its next generation.
 
 ### Retry and resume attempts
 
@@ -837,7 +1031,7 @@ decline. Stop declines any open intent before finalization.
 
 Every attempt intent carries `origin`. The retrier writes `origin: "policy"`
 and no `reason`; a policy intent that carries a `reason` is rejected ("policy
-attempt intent may not carry a reason"). Revision 16 additionally admits
+attempt intent may not carry a reason"). The reducer additionally admits
 `origin: "operator"` intents in the reducer: they must be `resume` intents
 ("operator attempt intent requires a resume") against the task's current,
 on-path, non-invalidated execution ("operator attempt intent targets a
@@ -851,7 +1045,7 @@ task's `resume` policy or by a prior decline; ordinal contiguity and the
 previous attempt ID still apply. The attempt projection records `origin` and
 `reason`, and `interrupted -> running` is admitted while such an intent is
 open without invalidated work. No service method or tool appends operator
-intents in revision 16; that operator resume surface arrives later.
+intents yet; that operator resume surface arrives later.
 
 ## Nested workflow tasks
 
@@ -1087,6 +1281,8 @@ Workflow definition
       Task execution generation (kind agent | support | workflow)
         Subagent run (agent tasks only)
           Subagent attempt
+          Imported result artifact
+          Imported handoff artifact (worktree tasks only)
         Support computation (support tasks only)
           Result artifact
         Child workflow run (workflow tasks only; depth + 1)
@@ -1113,21 +1309,28 @@ agent execution and add no level to the hierarchy above. Operator-triggered
 retry remains later work. Re-execution after explicit invalidation is neither
 retry nor resume: it creates a new task-execution generation and a new
 preflight, idempotent operation ID, and subagent run, support computation, or
-child workflow run. A result artifact binds to the execution that produced it:
-`WorkflowArtifactRef.producerExecutionId` is required exactly when
-`producerTaskId` is present, participates in `deriveWorkflowArtifactId`, and
-must name an execution of the producer task. Every lookup of a task's result
-artifact (completion, `taskInputsSha256`, delegated-context projection, and
-nested input resolution) selects the artifact whose `producerExecutionId`
-equals the task's `currentExecutionId`; artifacts of prior generations remain
-history and valid provenance. Every identity and relationship is persisted
-explicitly.
+child workflow run. A result or handoff artifact binds to the execution that
+produced it: `WorkflowArtifactRef.producerExecutionId` is required exactly
+when `producerTaskId` is present, participates in `deriveWorkflowArtifactId`
+together with `output` (`"result"` or `"handoff"`), and must name an execution
+of the producer task. Every lookup of a task's artifact (completion,
+`taskInputsSha256`, delegated-context projection, nested input resolution,
+`ctx.handoff`, and `exportHandoff`) selects the artifact whose
+`producerExecutionId` equals the task's `currentExecutionId` and whose
+`output` matches the reference; artifacts of prior generations remain history
+and valid provenance. One result and one handoff artifact may coexist per
+execution; a second artifact for the same `(producerTaskId,
+producerExecutionId, output)` is ambiguous. Every identity and relationship is
+persisted explicitly.
 
 Subagent terminal outcomes map using both primary status and cleanup evidence:
 
 | Subagent evidence | Workflow task outcome |
 | --- | --- |
 | `completed` and required artifacts imported, with cleanup proved/not-needed | `completed` |
+| `completed` worktree child with its handoff imported, or its absence recorded under an `optional` policy, with cleanup proved/not-needed | `completed` |
+| `completed` worktree child released after recording handoff absence under a `required` policy | `failed` (workflow evidence, stage `handoff-import`) |
+| `completed` worktree child whose handoff export, identity, format, digest, or size verification failed | `cleanup-blocked` at stage `handoff-import`; reconciliation retries the import |
 | `failed` with cleanup proved/not-needed | `failed` |
 | `cancelled` with cleanup proved/not-needed | `cancelled` |
 | `interrupted` with cleanup proved/not-needed | `interrupted` |
@@ -1182,6 +1385,7 @@ interface WorkflowService {
 	inspect(runId: WorkflowRunId, options?: WorkflowInspectOptions): Promise<WorkflowRunInspection>;
 	logs(runId: WorkflowRunId, options?: WorkflowLogOptions): Promise<WorkflowLogPage>;
 	subscribe(listener: (observation: WorkflowRunObservation) => void): () => void;
+	exportHandoff(runId: WorkflowRunId, taskId: string): Promise<WorkflowServiceHandoffExport>;
 	shutdown(): Promise<void>;
 }
 ```
@@ -1353,9 +1557,22 @@ declared task in materialization order with `id`, `namespace`, `key`, `kind`,
 highest generation recorded for the task, or 0), the current execution's `executionId`, `attempts` (agent
 executions: the attempt count), `settlement` (`attemptOrdinal`, `status`,
 `failureCode`, `failureRetry`, `usageComplete` from the agent or nested
-settlement), `outcome` (the terminal outcome), and `abandoned: true` for
-abandoned history. `inspect` adds `dependsOn` and `inputs`.
+settlement), `outcome` (the terminal outcome), `abandoned: true` for abandoned
+history, and, for a completed worktree task, `handoff` (its
+`WorkflowHandoffDescriptor`; status views need no subagent acquisition).
+`inspect` adds `dependsOn` and `inputs`.
 
+### Handoff export
+
+`exportHandoff(runId, taskId)` opens the run through the same inactive-open
+path as status, requires the task to be `completed`, selects the current
+execution's handoff artifact, verifies it (`verifyWorkflowHandoffEvidence`:
+preflight mode, artifact provenance, digest, format, embedded commit, and
+identity equal to the settlement and import), and returns a
+`WorkflowServiceHandoffExport` (`descriptor` with the verified `content` bytes
+read through `readBytes`). A task without a handoff artifact is rejected with
+`validation` ("Workflow task has no handoff artifact."); a verification failure
+is a `persistence` error. No Pi tool exports handoffs.
 Declarative retry and resume attempts run under task policy without a service
 call. Operator-triggered `retry` and explicit interrupted-run `resume` remain
 later contract work; their predicates ship in `run-actions.ts` but their
@@ -1427,12 +1644,13 @@ Physical process and worktree cleanup remain subagent-owned. Workflow verifies
 or imports required handoff evidence and invokes the subagent service's
 idempotent release operation rather than manipulating a child worktree.
 
-The current pi-subagent service exports output artifacts but not portable
-worktree handoff content. The first workflow slice therefore accepts only
-read-only agent workspaces. Worktree tasks remain unavailable until a later
-subagent contract exposes a bounded, digest-verified handoff export that
-workflow can import before release. Workflow never substitutes direct reads of
-subagent-private paths or branches.
+pi-subagent contract revision 6 exports a completed worktree attempt's handoff
+as bounded `git format-patch` bytes with a digest-bearing `HandoffRef`
+(`exportHandoff`, feature `handoffExport`). Workflow imports that export into
+its own store, verifies identity, format, digest, and size, and records
+`task-execution-handoff-imported` before it persists release intent; the
+rules are in [Worktree tasks and handoffs](#worktree-tasks-and-handoffs).
+Workflow never substitutes direct reads of subagent-private paths or branches.
 
 ## States
 
@@ -1477,10 +1695,10 @@ degradations remain visible. Completion (`finalizing -> completed` or
 `completed-degraded`) treats `completed`, `failed`, `cancelled`, `blocked`, and
 `interrupted` tasks as settled, so an interrupted optional task or advisory
 finalizer degrades completion rather than preventing it; `stopping ->
-cancelled` likewise treats `interrupted` tasks as drained. Revision 16 adds the transitions `finalizing -> interrupted`
+cancelled` likewise treats `interrupted` tasks as drained. The transitions `finalizing -> interrupted`
 (a required finalizer's child was interrupted) and `cancelling -> interrupted`
 (a task being stopped whose child settled `interrupted` and is retained
-without release).
+without release) exist since revision 16.
 
 `invalidated` leaves only to `pending`, through the re-materialization event
 appended when the task's epoch barrier is matched; that transition requires

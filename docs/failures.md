@@ -19,6 +19,7 @@
 | Tool output bound | A validated view that fails its schema ("workflow tool output violates its schema"); an inspection larger than 48 KiB ("Workflow inspection exceeds the tool output bound; narrow include or pass taskId.") | The schema failure is a bug and is never masked; pages shrink and re-cursor; the inspection is refused with guidance, and `include: ["run"]` always fits |
 | Support task | Unregistered or drifted implementation (`support-resolution`); missing input evidence, input digest mismatch, unreadable inputs, or parameters failing the registered schema (`support-input`); implementation exception (`support-execution`); non-JSON, oversized, schema-invalid, or conflicting output (`support-output`) | Task failure with a fixed message; a required task fails the run |
 | Nested workflow | Undiscovered name, depth bound, recursion, schema-invalid input without artifact inputs, non-object authored input or an authored key colliding with an input name when artifact inputs are declared, or an unknown, foreign, or undeclared input producer at declaration (materialization failure); missing or ambiguous producer artifact, unreadable or unverifiable input, or a merged input that is not lossless JSON, exceeds 900 KiB, or fails the child schema at launch (`nested-input`); child not resolvable by exact identity and source at launch (`nested-resolution`); no remaining time before the parent deadline, lease or record creation failure, or an existing child run whose lineage, definition, merged input, or injected artifacts do not match the intent (`nested-launch`); child output unreadable, unverifiable, or schema-invalid (`nested-import`) | Declaration failures fail the run closed; `nested-input`, `nested-resolution`, and `nested-launch` fail the task; `nested-import` leaves the task `cleanup-blocked` until reconciliation; a required task propagates to the run |
+| Handoff import | Owner client `exportHandoff` rejection, an invalid `HandoffRef`, an identity that differs from the settled `{ attemptId, baselineHead, handoffCommit }`, an unsupported format, a digest or size mismatch, bytes above `MAX_WORKFLOW_HANDOFF_BYTES` (16 MiB), or bytes that are not a single-commit `git format-patch`; a completed worktree child that captured no handoff under `handoff: "required"` | Import failures terminalize the execution `cleanup-blocked` at stage `handoff-import` before any release intent; the task and run become `cleanup-blocked` until `workflow_reconcile` reconciles the child and retries the import. The no-handoff case is released normally and then `failed` at stage `handoff-import` with "Completed worktree task captured no handoff."; under `handoff: "optional"` it completes without a handoff |
 | Checkpoint | No approver, expired, headless block | Waiting or blocked |
 | Budget | Cost, optional total-token, or cumulative child-runtime cap reached; a nested child's declared budget does not fit the parent's remaining budget | Reserve before launch; block inadmissible task; fail post-settlement overage; incomplete child usage fails closed |
 | Deadline | Persisted workflow wall deadline reached | Stop and drain; abort in-process support work; stop linked child runs through their parent tasks; cleanup uncertainty remains cleanup-blocked |
@@ -74,7 +75,7 @@ operator: task-execution-terminal (outcome interrupted)
 Policy intents carry `origin: "policy"` and never a `reason`. Operator intents
 are admitted by the reducer only as `resume` against the task's current
 unreleased interrupted execution while the run is `running`, `waiting`, or
-`interrupted`; no service surface appends them in revision 16.
+`interrupted`; no service surface appends them yet.
 
 Decline reasons are fixed strings: "Workflow stop requested before the
 attempt." when the scheduler stop signal is aborted before the call or while
@@ -89,6 +90,67 @@ through `findByOperation` rather than duplicated, and a reconciliation error
 is thrown as a `WorkflowAttemptError`, never converted into a decline or a
 task failure. Explicit stop declines any open intent before finalization.
 Once an intent is declined the execution accepts no further intents.
+
+## Worktree handoff sequences
+
+A completed worktree child resolves its handoff after the structured-output
+import and before release intent. Its journal sequences are:
+
+```text
+success:  task-execution-child-settled (status completed,
+          handoff { attemptId, baselineHead, handoffCommit })
+          → artifact-declared (output result)
+          → task-execution-artifact-imported
+          → artifact-declared (output handoff, application/x-git-format-patch)
+          → task-execution-handoff-imported
+          → task-execution-release-intended
+          → task-execution-released
+          → task-execution-terminal (outcome completed, evidence kind subagent)
+          → task-status-changed running|waiting→completed
+
+no changes, optional policy:
+          … → task-execution-artifact-imported
+          → task-execution-handoff-absent
+          → release intent and receipt
+          → task-execution-terminal (outcome completed)
+          → task-status-changed → completed
+
+no changes, required policy:
+          … → task-execution-artifact-imported
+          → task-execution-handoff-absent
+          → release intent and receipt
+          → task-execution-terminal (outcome failed, evidence kind workflow,
+            stage handoff-import,
+            "Completed worktree task captured no handoff.")
+          → task-status-changed → failed
+
+export failure:
+          … → task-execution-artifact-imported
+          → task-execution-terminal (outcome cleanup-blocked, evidence kind
+            workflow, stage handoff-import)
+          → task-status-changed → cleanup-blocked
+          → run-status-changed → cleanup-blocked
+```
+
+The import verifies, in order, that the export succeeded, that the returned
+reference is a valid `HandoffRef` with binary content, that it names the child
+run, the current attempt, and the settled `baselineHead` and `handoffCommit`
+(which differ), that its format is `git-format-patch` with media type
+`application/x-git-format-patch`, that size and SHA-256 match the reference
+and stay within 16 MiB, and that the bytes begin with the single-commit
+`From <handoffCommit> Mon Sep 17 00:00:00 2001` separator. Each check fails
+with a fixed message ("Subagent handoff export failed.", "Subagent handoff
+export returned an invalid reference.", "Exported handoff does not match the
+settled handoff identity.", "Exported handoff has an unsupported format.",
+"Exported handoff digest or size does not match its reference.", "Exported
+handoff exceeds the workflow handoff bound.", "Exported handoff is not a
+single-commit git-format-patch."); the persisted terminal message is
+"Workflow handoff artifact import requires reconciliation." and raw error
+text is never journaled. A handoff above 16 MiB is not importable: the task
+stays `cleanup-blocked` and the operator exports or pins it in pi-subagent.
+Journal, lease, and artifact-store uncertainty is thrown rather than converted
+into task failure. See the recovery ladder in
+[Persistence and recovery](persistence.md#worktree-handoff-recovery).
 
 ## Support task sequences
 
