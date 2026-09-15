@@ -104,7 +104,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 15,
+		contractRevision: 16,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -1713,6 +1713,7 @@ function nestedTask(
 	const spec = {
 		key,
 		kind: "workflow" as const,
+		role: "task" as const,
 		disposition: "required" as const,
 		after: options.after ?? [],
 		inputs: options.inputs ?? {},
@@ -3472,6 +3473,7 @@ function attemptIntended(
 			previousAttemptId: "attempt_child",
 			failureCode: "provider-transient",
 			failureRetry: "backoff",
+			origin: "policy",
 			...overrides,
 		},
 	};

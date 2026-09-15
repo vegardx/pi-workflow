@@ -47,7 +47,7 @@ function journalEvents(inputs: readonly WorkflowEventInput[]) {
 	return inputs.map(
 		(input, index): WorkflowJournalEvent => ({
 			schema: "pi-workflow-event",
-			contractRevision: 15,
+			contractRevision: 16,
 			sequence: index + 1,
 			eventId: `event-${index + 1}`,
 			timestamp: "2026-08-20T00:00:00.000Z",
@@ -483,6 +483,7 @@ describe("workflow event reducer", () => {
 					previousAttemptId: "attempt_child",
 					failureCode: "provider-transient",
 					failureRetry: "backoff",
+					origin: "policy",
 				},
 			},
 			{
@@ -586,6 +587,7 @@ describe("workflow event reducer", () => {
 					kind: "retry",
 					ordinal: 2,
 					previousAttemptId: "attempt_child",
+					origin: "policy",
 					subagentAttemptId: "attempt_retry",
 					status: "active",
 					intentSequence: 4,
@@ -595,6 +597,7 @@ describe("workflow event reducer", () => {
 					kind: "retry",
 					ordinal: 3,
 					previousAttemptId: "attempt_retry",
+					origin: "policy",
 					intentSequence: 7,
 				},
 			],

@@ -113,6 +113,26 @@ function pathTasks(state: WorkflowStateProjection): WorkflowTaskProjection[] {
 	return Object.values(state.tasks).filter(isOnPath);
 }
 
+function isFinalizer(task: WorkflowTaskProjection): boolean {
+	return task.task.spec.role === "finalizer";
+}
+
+/** An operator resume intent that has neither been receipted nor declined. */
+function hasOpenOperatorIntent(state: WorkflowStateProjection): boolean {
+	return pathTasks(state).some((task) => {
+		const execution = task.currentExecutionId
+			? state.executions[task.currentExecutionId]
+			: undefined;
+		const open = execution?.attempts?.at(-1);
+		return (
+			execution?.phase === "attempt-intended" &&
+			open?.origin === "operator" &&
+			open.receiptSequence === undefined &&
+			open.declinedSequence === undefined
+		);
+	});
+}
+
 function pathBarriers(
 	state: WorkflowStateProjection,
 ): WorkflowStateProjection["barriers"][number][] {
@@ -657,6 +677,9 @@ function applyEvent(
 					if (!isOnPath(target)) {
 						fail("task dependency is abandoned", event.sequence);
 					}
+					if (task.spec.role === "task" && isFinalizer(target)) {
+						fail("ordinary task may not depend on a finalizer", event.sequence);
+					}
 					return dependency.taskId;
 				}),
 			);
@@ -667,6 +690,9 @@ function applyEvent(
 				}
 				if (!isOnPath(producer)) {
 					fail("task dependency is abandoned", event.sequence);
+				}
+				if (task.spec.role === "task" && isFinalizer(producer)) {
+					fail("ordinary task may not depend on a finalizer", event.sequence);
 				}
 				if (!explicitDependencies.has(inputRef.producerTaskId)) {
 					fail(
@@ -789,6 +815,9 @@ function applyEvent(
 				if (!isOnPath(target)) {
 					fail("barrier references an abandoned task", event.sequence);
 				}
+				if (isFinalizer(target)) {
+					fail("a finalizer cannot be a barrier target", event.sequence);
+				}
 			}
 			for (const task of Object.values(state.tasks)) {
 				if (task.task.materializationEpoch === state.currentEpoch) {
@@ -811,6 +840,19 @@ function applyEvent(
 			}
 			if (task.status !== "ready") {
 				fail("task execution requires a ready task", event.sequence);
+			}
+			if (isFinalizer(task)) {
+				if (
+					state.status !== "finalizing" ||
+					state.outputArtifactId === undefined
+				) {
+					fail(
+						"finalizer execution requires a finalizing workflow run",
+						event.sequence,
+					);
+				}
+			} else if (state.status !== "running" && state.status !== "waiting") {
+				fail("task execution requires a running workflow run", event.sequence);
 			}
 			if (!isOnPath(task)) {
 				fail("abandoned task may not execute", event.sequence);
@@ -1115,22 +1157,78 @@ function applyEvent(
 			const receipt = projection.launchReceipt;
 			const settlement = projection.settlement;
 			const attempts = projection.attempts ?? [];
-			if (projection.attemptsClosed) {
-				fail("task execution attempt intents are closed", event.sequence);
-			}
-			if (
-				projection.phase !== "settled" ||
-				!receipt ||
-				!settlement ||
-				projection.releaseIntent !== undefined
-			) {
-				fail("task execution attempt intent is out of order", event.sequence);
-			}
-			if (state.status !== "running" && state.status !== "waiting") {
-				fail(
-					"task execution attempt intent requires a running workflow run",
-					event.sequence,
-				);
+			const task = state.tasks[projection.execution.taskId];
+			const origin = input.data.origin;
+			// An operator may reopen an interrupted execution that was terminalized
+			// without release; the terminal record is dropped when the intent lands.
+			const reopens =
+				projection.phase === "terminal" &&
+				projection.terminal?.outcome === "interrupted" &&
+				projection.terminal.evidence.kind === "subagent";
+			if (origin === "policy") {
+				if (input.data.reason !== undefined) {
+					fail("policy attempt intent may not carry a reason", event.sequence);
+				}
+				if (projection.attemptsClosed) {
+					fail("task execution attempt intents are closed", event.sequence);
+				}
+				if (
+					projection.phase !== "settled" ||
+					!receipt ||
+					!settlement ||
+					projection.releaseIntent !== undefined
+				) {
+					fail("task execution attempt intent is out of order", event.sequence);
+				}
+				// Finalizer tasks settle while the run is finalizing; their
+				// declared policies apply there like anywhere else.
+				if (
+					state.status !== "running" &&
+					state.status !== "waiting" &&
+					state.status !== "finalizing"
+				) {
+					fail(
+						"task execution attempt intent requires a running workflow run",
+						event.sequence,
+					);
+				}
+			} else {
+				if (input.data.kind !== "resume") {
+					fail("operator attempt intent requires a resume", event.sequence);
+				}
+				if (
+					(projection.phase !== "settled" && !reopens) ||
+					!receipt ||
+					!settlement ||
+					projection.releaseIntent !== undefined ||
+					projection.release !== undefined
+				) {
+					fail(
+						"operator attempt intent requires an unreleased interrupted execution",
+						event.sequence,
+					);
+				}
+				if (
+					!task ||
+					task.currentExecutionId !== projection.execution.id ||
+					!isOnPath(task) ||
+					task.status === "invalidated"
+				) {
+					fail(
+						"operator attempt intent targets a superseded execution",
+						event.sequence,
+					);
+				}
+				if (
+					state.status !== "running" &&
+					state.status !== "waiting" &&
+					state.status !== "interrupted"
+				) {
+					fail(
+						"operator attempt intent requires a running or interrupted workflow run",
+						event.sequence,
+					);
+				}
 			}
 			if (
 				input.data.subagentRunId !== receipt.subagentRunId ||
@@ -1211,26 +1309,35 @@ function applyEvent(
 						event.sequence,
 					);
 				}
-				const policy = spec.request.resume;
-				if (!policy) {
-					fail(
-						"task execution resume intent lacks a resume policy",
-						event.sequence,
-					);
-				}
-				if (receiptedAttempts(projection, "resume") >= policy.attempts) {
-					fail(
-						"task execution resume intent exceeds the resume policy",
-						event.sequence,
-					);
+				// Operator intents carry their own evidence and are not bounded by
+				// the authored resume policy.
+				if (origin === "policy") {
+					const policy = spec.request.resume;
+					if (!policy) {
+						fail(
+							"task execution resume intent lacks a resume policy",
+							event.sequence,
+						);
+					}
+					if (receiptedAttempts(projection, "resume") >= policy.attempts) {
+						fail(
+							"task execution resume intent exceeds the resume policy",
+							event.sequence,
+						);
+					}
 				}
 			}
+			if (reopens) delete projection.terminal;
 			projection.attempts = [
 				...attempts,
 				{
 					kind: input.data.kind,
 					ordinal: input.data.ordinal,
 					previousAttemptId: input.data.previousAttemptId,
+					origin,
+					...(input.data.reason === undefined
+						? {}
+						: { reason: input.data.reason }),
 					intentSequence: event.sequence,
 				},
 			];
@@ -1380,6 +1487,9 @@ function applyEvent(
 				!isTerminalSubagentStatus(observation.status)
 			) {
 				fail("task execution release intent is invalid", event.sequence);
+			}
+			if (observation.status === "interrupted") {
+				fail("interrupted child is not releasable", event.sequence);
 			}
 			if (recoversRelease) delete projection.terminal;
 			const { executionId: _executionId, ...releaseIntent } = input.data;
@@ -1718,7 +1828,21 @@ function applyEvent(
 				const importedArtifact = projection.artifactImport
 					? state.artifacts[projection.artifactImport.artifactId]
 					: undefined;
-				if (projection.phase !== "released") {
+				// Interrupted children are retained for recovery: their terminal
+				// evidence is the settlement itself and no release ever happens.
+				const interruptedSettlement = evidence.status === "interrupted";
+				if (interruptedSettlement) {
+					if (
+						projection.phase !== "settled" ||
+						projection.releaseIntent !== undefined ||
+						projection.release !== undefined
+					) {
+						fail(
+							"interrupted terminal evidence requires an unreleased settled execution",
+							event.sequence,
+						);
+					}
+				} else if (projection.phase !== "released") {
 					fail("subagent terminal evidence precedes release", event.sequence);
 				}
 				if (!observation || observation.status !== evidence.status) {
@@ -1733,7 +1857,10 @@ function applyEvent(
 				if (!expectedOutcome || expectedOutcome !== input.data.outcome) {
 					fail("subagent terminal outcome does not match", event.sequence);
 				}
-				if (projection.release?.status !== evidence.status) {
+				if (
+					!interruptedSettlement &&
+					projection.release?.status !== evidence.status
+				) {
 					fail("subagent terminal release does not match", event.sequence);
 				}
 				if (
@@ -2049,6 +2176,23 @@ function applyEvent(
 					event.sequence,
 				);
 			}
+			if (input.data.to === "ready" && isFinalizer(task)) {
+				if (
+					state.status !== "finalizing" ||
+					state.outputArtifactId === undefined
+				) {
+					fail("finalizer became ready outside finalizing", event.sequence);
+				}
+			} else if (
+				input.data.to === "ready" &&
+				state.status !== "running" &&
+				state.status !== "waiting"
+			) {
+				fail(
+					"task became ready outside a running workflow run",
+					event.sequence,
+				);
+			}
 			if (
 				input.data.to === "ready" &&
 				[...dependencies(state, input.data.taskId)].some(
@@ -2126,6 +2270,19 @@ function applyEvent(
 					event.sequence,
 				);
 			}
+			// The output is never recommitted, so re-executing an ordinary task
+			// after the commit could not change it; only finalizers may rerun.
+			if (
+				state.outputArtifactId !== undefined &&
+				closure.taskIds.some(
+					(taskId) => state.tasks[taskId]?.task.spec.role === "task",
+				)
+			) {
+				fail(
+					"invalidation after output commit may only cover finalizers",
+					event.sequence,
+				);
+			}
 			for (const taskId of actual) {
 				const task = state.tasks[taskId];
 				if (!task) fail("invalidation target is unknown", event.sequence);
@@ -2200,7 +2357,8 @@ function applyEvent(
 			if (
 				input.data.to === "running" &&
 				(input.data.from === "failed" || input.data.from === "interrupted") &&
-				!pathTasks(state).some((task) => task.status === "invalidated")
+				!pathTasks(state).some((task) => task.status === "invalidated") &&
+				!(input.data.from === "interrupted" && hasOpenOperatorIntent(state))
 			) {
 				fail("recovery requires invalidated work", event.sequence);
 			}
@@ -2210,12 +2368,32 @@ function applyEvent(
 				(!hasPathFinalBarrier(state) ||
 					liveTasks.some(
 						(task) =>
+							!isFinalizer(task) &&
 							task.task.spec.disposition === "required" &&
 							task.status !== "completed",
 					))
 			) {
 				fail(
 					"run finalized before its required work completed",
+					event.sequence,
+				);
+			}
+			// Ordinary tasks are unschedulable once finalizing, so any still active
+			// (an optional one, given the check above) could never settle.
+			if (
+				input.data.to === "finalizing" &&
+				liveTasks.some(
+					(task) =>
+						!isFinalizer(task) &&
+						(task.status === "pending" ||
+							task.status === "ready" ||
+							task.status === "running" ||
+							task.status === "waiting" ||
+							task.status === "cancelling"),
+				)
+			) {
+				fail(
+					"run finalized while ordinary tasks remain active",
 					event.sequence,
 				);
 			}
@@ -2229,6 +2407,39 @@ function applyEvent(
 					event.sequence,
 				);
 			}
+			// A blocked task is settled for completion (an advisory finalizer behind
+			// a failed optional task degrades the run instead of stalling it).
+			// Interrupted children finalize without release and are retained for
+			// recovery, so an interrupted optional task or advisory finalizer is
+			// settled work that degrades completion rather than preventing it.
+			const unsettledTasks = liveTasks.some(
+				(task) =>
+					task.status !== "completed" &&
+					task.status !== "failed" &&
+					task.status !== "cancelled" &&
+					task.status !== "blocked" &&
+					task.status !== "interrupted",
+			);
+			// Interrupted children are retained without release, so a stopping
+			// drain counts them as drained.
+			const uncancelledTasks = liveTasks.some(
+				(task) =>
+					task.status !== "completed" &&
+					task.status !== "failed" &&
+					task.status !== "cancelled" &&
+					task.status !== "invalidated" &&
+					task.status !== "interrupted",
+			);
+			if (
+				(input.data.to === "completed" ||
+					input.data.to === "completed-degraded") &&
+				unsettledTasks
+			) {
+				fail("run completed while tasks remain unsettled", event.sequence);
+			}
+			if (input.data.to === "cancelled" && uncancelledTasks) {
+				fail("run cancelled while tasks remain unsettled", event.sequence);
+			}
 			if (
 				(input.data.to === "completed" ||
 					input.data.to === "completed-degraded") &&
@@ -2239,29 +2450,6 @@ function applyEvent(
 				)
 			) {
 				fail("run completed before required tasks completed", event.sequence);
-			}
-			const unsettledTasks = liveTasks.some(
-				(task) =>
-					task.status !== "completed" &&
-					task.status !== "failed" &&
-					task.status !== "cancelled",
-			);
-			const uncancelledTasks = liveTasks.some(
-				(task) =>
-					task.status !== "completed" &&
-					task.status !== "failed" &&
-					task.status !== "cancelled" &&
-					task.status !== "invalidated",
-			);
-			if (input.data.to === "cancelled" && uncancelledTasks) {
-				fail("run cancelled while tasks remain unsettled", event.sequence);
-			}
-			if (
-				(input.data.to === "completed" ||
-					input.data.to === "completed-degraded") &&
-				unsettledTasks
-			) {
-				fail("run completed while tasks remain unsettled", event.sequence);
 			}
 			const degradedOptionalTask = liveTasks.some(
 				(task) =>
