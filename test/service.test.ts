@@ -1349,3 +1349,143 @@ describe("retry and resume attempts", () => {
 		}
 	});
 });
+
+describe("reconciliation of runs this service owns", () => {
+	it("refuses task ids against the durable view of an owned failed run without re-leasing it", async () => {
+		const fixture = await attemptWorkflowFixture();
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("manual") },
+		]);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "failed" });
+			const { task } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			await expect(
+				service.reconcile(receipt.runId, { taskId: "task_unknownzz" }),
+			).rejects.toMatchObject({
+				code: "validation",
+				message: "Unknown workflow task.",
+			});
+			await expect(
+				service.reconcile(receipt.runId, { taskId: task.task.id }),
+			).rejects.toMatchObject({
+				code: "validation",
+				message: "Workflow task is not cleanup-blocked.",
+			});
+			// The settled run still holds its lease; reconcile reuses it instead
+			// of colliding with it, and a failed run has nothing to reconcile.
+			const view = await bounded(service.reconcile(receipt.runId), "reconcile");
+			expect(view).toMatchObject({ status: "failed", reconciled: [] });
+			expect(Object.isFrozen(view.reconciled)).toBe(true);
+			await expect(
+				service.stop(receipt.runId, "already failed"),
+			).resolves.toMatchObject({ status: "failed" });
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("reconciles an owned cleanup-blocked run and reports the child facts", async () => {
+		const fixture = await attemptWorkflowFixture();
+		const delegated = attemptProvider([
+			{ status: "failed", failure: childFailure("never") },
+		]);
+		// The first settlement is cleanup-blocked with unproved sandbox cleanup;
+		// the reconciled child then settles as failed, and release echoes each.
+		const blocked = childResult({
+			status: "cleanup-blocked",
+			failure: {
+				code: "sandbox-cleanup",
+				origin: "sandbox",
+				retry: "reconcile",
+				message: "cleanup blocked",
+				guidance: "Reconcile the child.",
+			},
+		});
+		vi.mocked(delegated.ownerClient.wait)
+			.mockResolvedValueOnce({
+				...blocked,
+				result: { ...blocked.result, sandboxCleanup: "blocked" },
+			})
+			.mockResolvedValueOnce(
+				childResult({ status: "failed", failure: childFailure("never") }),
+			);
+		vi.mocked(delegated.ownerClient.release)
+			.mockResolvedValueOnce({
+				runId: "run_servicechild",
+				attemptId: "attempt_servicechild",
+				status: "cleanup-blocked",
+			})
+			.mockResolvedValueOnce({
+				runId: "run_servicechild",
+				attemptId: "attempt_servicechild",
+				status: "failed",
+			});
+		const ownerClient = delegated.ownerClient as unknown as Record<
+			string,
+			unknown
+		>;
+		const reconcile = vi.fn(async () => ({
+			run: {
+				runId: "run_servicechild",
+				attemptId: "attempt_servicechild",
+				status: "failed" as const,
+			},
+			sandboxProcess: "absent" as const,
+			workspace: "not-needed" as const,
+		}));
+		ownerClient.reconcile = reconcile;
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: delegated.provider,
+		});
+		try {
+			const receipt = await service.run("attempts", {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "cleanup-blocked" });
+			const { task, execution } = agentExecutionOf(
+				await stateOf(fixture.storeRoot, receipt.runId),
+			);
+			expect(task.status).toBe("cleanup-blocked");
+			const view = await bounded(service.reconcile(receipt.runId), "reconcile");
+			expect(view.status).toBe("failed");
+			expect(view.reconciled).toEqual([
+				{
+					taskId: task.task.id,
+					executionId: execution.execution.id,
+					before: {
+						phase: "terminal",
+						outcome: "cleanup-blocked",
+						childStatus: "cleanup-blocked",
+					},
+					after: {
+						phase: "terminal",
+						outcome: "failed",
+						childStatus: "failed",
+					},
+					subagent: { sandboxProcess: "absent", workspace: "not-needed" },
+				},
+			]);
+			expect(reconcile).toHaveBeenCalledOnce();
+			await expect(
+				service.reconcile(receipt.runId, { taskId: task.task.id }),
+			).rejects.toMatchObject({
+				code: "validation",
+				message: "Workflow task is not cleanup-blocked.",
+			});
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+});
