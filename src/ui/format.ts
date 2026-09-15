@@ -1,4 +1,3 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	MAX_TASK_EXECUTION_GENERATIONS,
 	type WorkflowRunStatus,
@@ -12,7 +11,9 @@ import type {
 
 /**
  * Pure rendering helpers for the operator surface. Everything here maps
- * persisted views to strings; nothing decides legality or lifecycle.
+ * persisted views to strings; nothing decides legality or lifecycle, and
+ * nothing here touches pi-tui: terminal-width padding and truncation live in
+ * the lazily loaded inspector module.
  */
 
 export const RUN_STATUS_ICON: Readonly<Record<WorkflowRunStatus, string>> =
@@ -170,27 +171,4 @@ export function logLine(entry: WorkflowLogEntry): string {
 	const task = entry.taskKey ? `${normalizeTaskKey(entry.taskKey)} ` : "";
 	const abandoned = entry.abandoned ? " (abandoned)" : "";
 	return `${String(entry.sequence).padStart(5)} ${entry.timestamp} ${entry.kind.padEnd(12)} ${task}${entry.message}${abandoned}`;
-}
-
-/** Truncates to `width` terminal columns with an ellipsis; never widens. */
-export function truncate(value: string, width: number): string {
-	return truncateToWidth(value, Math.max(1, width), "…");
-}
-
-/** Truncates and right-pads to exactly `width` terminal columns. */
-export function pad(value: string, width: number): string {
-	const truncated = truncate(value, width);
-	return `${truncated}${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}`;
-}
-
-/** `label      value` with the label column bounded to a quarter of the width. */
-export function keyValue(label: string, value: string, width: number): string {
-	const labelWidth = Math.max(
-		1,
-		Math.min(16, Math.max(10, Math.floor(width / 4)), width - 2),
-	);
-	return truncate(
-		`${pad(label, labelWidth)} ${truncate(value, Math.max(1, width - labelWidth - 1))}`,
-		width,
-	);
 }

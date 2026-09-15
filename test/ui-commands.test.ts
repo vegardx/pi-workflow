@@ -870,4 +870,29 @@ describe("ui import discipline", () => {
 			}
 		}
 	});
+
+	it("loads pi-tui only from the lazily imported TUI modules", async () => {
+		const runtimeImport =
+			/^import\s+(?!type\b)[^;]*?from\s+"@earendil-works\/pi-tui"/m;
+		const anyImport = /from\s+"@earendil-works\/pi-tui"/;
+		for (const file of [
+			"src/ui/format.ts",
+			"src/ui/widget.ts",
+			"src/extension.ts",
+		]) {
+			const source = await readFile(path.resolve(file), "utf8");
+			expect(source, file).not.toMatch(anyImport);
+		}
+		// Type-only imports are erased and load nothing.
+		const commands = await readFile(path.resolve("src/ui/commands.ts"), "utf8");
+		expect(commands).not.toMatch(runtimeImport);
+		// The extension reaches pi-tui only through dynamic imports.
+		const extension = await readFile(path.resolve("src/extension.ts"), "utf8");
+		expect(extension).toMatch(/import\("\.\/ui\/inspector\.js"\)/);
+		expect(extension).toMatch(/import\("\.\/ui\/tool-render\.js"\)/);
+		for (const file of ["src/ui/inspector.ts", "src/ui/tool-render.ts"]) {
+			const source = await readFile(path.resolve(file), "utf8");
+			expect(source, file).toMatch(runtimeImport);
+		}
+	});
 });

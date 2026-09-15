@@ -1,5 +1,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Input, Key, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	Input,
+	Key,
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type {
 	WorkflowRunId,
 	WorkflowRunStatus,
@@ -25,20 +31,40 @@ import {
 	formatTokens,
 	formatUntil,
 	isNonterminalRunStatus,
-	keyValue,
 	logLine,
 	NONTERMINAL_RUN_STATUSES,
 	normalizeTaskKey,
 	ownershipLabel,
-	pad,
 	RUN_STATUS_ICON,
 	runLine,
 	shortId,
 	TERMINAL_RUN_STATUSES,
 	taskLine,
 	taskPath,
-	truncate,
 } from "./format.js";
+
+/** Truncates to `width` terminal columns with an ellipsis; never widens. */
+export function truncate(value: string, width: number): string {
+	return truncateToWidth(value, Math.max(1, width), "…");
+}
+
+/** Truncates and right-pads to exactly `width` terminal columns. */
+export function pad(value: string, width: number): string {
+	const truncated = truncate(value, width);
+	return `${truncated}${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}`;
+}
+
+/** `label      value` with the label column bounded to a quarter of the width. */
+export function keyValue(label: string, value: string, width: number): string {
+	const labelWidth = Math.max(
+		1,
+		Math.min(16, Math.max(10, Math.floor(width / 4)), width - 2),
+	);
+	return truncate(
+		`${pad(label, labelWidth)} ${truncate(value, Math.max(1, width - labelWidth - 1))}`,
+		width,
+	);
+}
 
 /**
  * Workflow inspector. The first half is a pure state machine over persisted
