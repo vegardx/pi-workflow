@@ -29,7 +29,9 @@ import {
 	initialInspectorState,
 	initialInspectorUiState,
 	invalidateConsequence,
+	keyValue,
 	PLAIN_LINE_THEME,
+	pad,
 	paletteActions,
 	RUN_FILTER_NAMES,
 	reduceInspector,
@@ -38,6 +40,7 @@ import {
 	showWorkflowInspector,
 	taskActions,
 	taskPickerBody,
+	truncate,
 } from "../src/ui/inspector.js";
 
 const NOW = Date.parse("2026-09-15T12:05:00.000Z");
@@ -864,6 +867,24 @@ describe("detail rendering", () => {
 		expect(runsBody(state, ui, data(), 80, PLAIN_LINE_THEME, NOW)).toContain(
 			"No workflow runs in this project.",
 		);
+	});
+});
+
+describe("terminal width helpers", () => {
+	it("bounds truncated, padded, and key-value output to the width", () => {
+		const wide =
+			"定義名が非常に長いワークフロー definition name that keeps going";
+		for (const width of [1, 5, 12, 40]) {
+			expect(visibleWidth(truncate(wide, width))).toBeLessThanOrEqual(width);
+			expect(visibleWidth(pad(wide, width))).toBe(width);
+			expect(visibleWidth(pad("x", width))).toBe(width);
+			expect(
+				visibleWidth(keyValue("Definition", wide, width)),
+			).toBeLessThanOrEqual(width);
+		}
+		expect(truncate("short", 10)).toBe("short");
+		expect(pad("ab", 4)).toBe("ab  ");
+		expect(keyValue("Status", "running", 40)).toBe("Status     running");
 	});
 });
 

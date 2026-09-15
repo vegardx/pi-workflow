@@ -1,4 +1,3 @@
-import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type {
 	WorkflowLogEntry,
@@ -14,12 +13,10 @@ import {
 	formatTokens,
 	formatUntil,
 	isNonterminalRunStatus,
-	keyValue,
 	logLine,
 	NONTERMINAL_RUN_STATUSES,
 	normalizeTaskKey,
 	ownershipLabel,
-	pad,
 	RUN_STATUS_ICON,
 	runLine,
 	shortId,
@@ -27,7 +24,6 @@ import {
 	TERMINAL_RUN_STATUSES,
 	taskLine,
 	taskPath,
-	truncate,
 } from "../src/ui/format.js";
 
 const NOW = Date.parse("2026-09-15T12:05:00.000Z");
@@ -218,21 +214,5 @@ describe("format helpers", () => {
 		).toBe(
 			"    1 2026-09-15T12:00:00.000Z run          Run status changed from created to running.",
 		);
-	});
-
-	it("bounds truncated, padded, and key-value output to the width", () => {
-		const wide =
-			"定義名が非常に長いワークフロー definition name that keeps going";
-		for (const width of [1, 5, 12, 40]) {
-			expect(visibleWidth(truncate(wide, width))).toBeLessThanOrEqual(width);
-			expect(visibleWidth(pad(wide, width))).toBe(width);
-			expect(visibleWidth(pad("x", width))).toBe(width);
-			expect(
-				visibleWidth(keyValue("Definition", wide, width)),
-			).toBeLessThanOrEqual(width);
-		}
-		expect(truncate("short", 10)).toBe("short");
-		expect(pad("ab", 4)).toBe("ab  ");
-		expect(keyValue("Status", "running", 40)).toBe("Status     running");
 	});
 });

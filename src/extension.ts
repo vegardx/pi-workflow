@@ -5,7 +5,6 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import type { WorkflowRunId } from "./contracts.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
 import type {
@@ -57,6 +56,32 @@ function loadInspector() {
 	return import("./ui/inspector.js");
 }
 
+/** The structural shape of a pi-tui component; pi-tui itself is never imported here. */
+interface TextComponent {
+	render(width: number): string[];
+	invalidate(): void;
+}
+
+let textComponent: ((text: string) => TextComponent) | undefined;
+
+/** Loads pi-tui's `Text` for tool rendering; a TUI session does this at start. */
+async function loadTextComponent(): Promise<void> {
+	textComponent ??= (await import("./ui/tool-render.js")).textComponent;
+}
+
+/**
+ * Wraps rendered tool text in pi-tui's `Text` once the TUI module is loaded;
+ * until then (or outside the TUI) the lines are returned as they are.
+ */
+function renderText(text: string): TextComponent {
+	if (textComponent) return textComponent(text);
+	const lines = text.split("\n");
+	return {
+		render: () => lines,
+		invalidate() {},
+	};
+}
+
 function operatorOutput(
 	ctx: ExtensionContext,
 	message: string,
@@ -105,6 +130,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	// new, resume, and fork, so the previous controller is stopped first.
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		await loadTextComponent();
 		widget?.stop();
 		widget = undefined;
 		try {
@@ -151,13 +177,11 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				: { promptGuidelines: [...declaration.promptGuidelines] }),
 			parameters: declaration.parameters,
 			renderCall(args, theme) {
-				return new Text(
+				return renderText(
 					`${theme.fg("toolTitle", theme.bold(declaration.name))} ${theme.fg(
 						"muted",
 						declaration.summarizeCall(args),
 					)}`.trimEnd(),
-					0,
-					0,
 				);
 			},
 			renderResult(result, { expanded, isPartial }, theme) {
@@ -166,10 +190,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				const display = expanded
 					? content
 					: declaration.summarizeResult(result.details as never);
-				return new Text(
+				return renderText(
 					`\n${theme.fg(isPartial ? "warning" : "success", display)}`,
-					0,
-					0,
 				);
 			},
 			async execute(_id, params, _signal, _onUpdate, ctx) {

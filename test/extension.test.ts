@@ -209,6 +209,41 @@ describe("workflow Pi extension", () => {
 		).toEqual(["", "0 workflow(s)"]);
 	});
 
+	it("wraps rendered tool text with pi-tui only after a TUI session loaded it", async () => {
+		const { tools, handlers } = capture();
+		const runs = tools.find((tool) => tool.name === "workflow_runs");
+		if (!runs) throw new Error("workflow_runs missing");
+		const call = () =>
+			runs.renderCall?.(
+				{ statuses: ["running", "failed"], includeChildren: true },
+				theme,
+				{} as never,
+			);
+		// Outside the TUI nothing from pi-tui is loaded: lines pass through.
+		expect(call()?.render(12)).toEqual([
+			"workflow_runs running,failed · children",
+		]);
+		const context = {
+			cwd: await emptyProject(),
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui: { notify: vi.fn(), setWidget: vi.fn() },
+		};
+		try {
+			await handlers.get("session_start")?.({ reason: "startup" }, context);
+			// pi-tui's Text wraps to the viewport width.
+			const wrapped = call()?.render(12) ?? [];
+			expect(wrapped.length).toBeGreaterThan(1);
+			expect(wrapped.every((line) => line.length <= 12)).toBe(true);
+			expect(wrapped.join("").replace(/\s+/g, "")).toBe(
+				"workflow_runsrunning,failed·children",
+			);
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	});
+
 	it("starts the service lazily from tool context and drains on shutdown", async () => {
 		const { tools, handlers } = capture();
 		const cwd = await emptyProject();

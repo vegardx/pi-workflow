@@ -59,6 +59,8 @@ try {
 		"dist/ui/format.js",
 		"dist/ui/inspector.d.ts",
 		"dist/ui/inspector.js",
+		"dist/ui/tool-render.d.ts",
+		"dist/ui/tool-render.js",
 		"dist/ui/widget.d.ts",
 		"dist/ui/widget.js",
 		"package.json",
