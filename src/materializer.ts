@@ -35,11 +35,13 @@ import {
 } from "./contracts.js";
 import {
 	type AgentTaskAuthoringRequest,
-	type ArtifactHandle,
+	type AgentTaskHandle,
 	createTaskHandle,
 	type FinalizerKind,
 	type TaskHandle,
+	type TaskInputHandle,
 	validateJsonSchemaDocument,
+	type WorkspaceAuthoringRequest,
 } from "./definition.js";
 import {
 	MAX_WORKFLOW_EVENT_INPUT_BYTES,
@@ -164,14 +166,17 @@ export interface NestedWorkflowDeclaration {
 	readonly request: NestedWorkflowTaskRequest;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
-	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
+	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
 	readonly replay?: ReplayPolicy;
 }
 
-export interface FinalizerDeclaration<TOutputSchema extends TSchema> {
+export interface FinalizerDeclaration<
+	TOutputSchema extends TSchema,
+	TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+> {
 	readonly kind: FinalizerKind;
 	readonly support?: SupportTaskDescriptor<TOutputSchema>;
-	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema>;
+	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>;
 	readonly workflow?: NestedWorkflowDeclaration;
 }
 
@@ -374,18 +379,24 @@ export class WorkflowTaskMaterializer {
 		return selected;
 	}
 
-	agent<TOutputSchema extends TSchema>(
+	agent<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		key: TaskKey,
-		request: AgentTaskAuthoringRequest<TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>> {
+		request: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace> {
 		return this.agentInNamespace(this.namespace, key, request);
 	}
 
-	agentInNamespace<TOutputSchema extends TSchema>(
+	agentInNamespace<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		namespace: readonly TaskKey[],
 		key: TaskKey,
-		request: AgentTaskAuthoringRequest<TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>> {
+		request: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace> {
 		return this.declareAgent(namespace, key, request, "task");
 	}
 
@@ -408,10 +419,13 @@ export class WorkflowTaskMaterializer {
 	 * finalizing. Its kind lowers to the task disposition (required -> required,
 	 * advisory -> optional); everything else follows the ordinary declaration path.
 	 */
-	finalizer<TOutputSchema extends TSchema>(
+	finalizer<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		key: TaskKey,
-		declaration: FinalizerDeclaration<TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>> {
+		declaration: FinalizerDeclaration<TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace> {
 		if (declaration.kind !== "required" && declaration.kind !== "advisory") {
 			throw new WorkflowMaterializationError("invalid finalizer kind");
 		}
@@ -435,7 +449,11 @@ export class WorkflowTaskMaterializer {
 		const disposition: TaskDisposition =
 			declaration.kind === "required" ? "required" : "optional";
 		if (support !== undefined) {
-			return this.declareSupport(key, { ...support, disposition }, "finalizer");
+			return this.declareSupport(
+				key,
+				{ ...support, disposition },
+				"finalizer",
+			) as AgentTaskHandle<TOutputSchema, TWorkspace>;
 		}
 		if (agent !== undefined) {
 			return this.declareAgent(
@@ -452,7 +470,7 @@ export class WorkflowTaskMaterializer {
 			key,
 			{ ...workflow, disposition },
 			"finalizer",
-		);
+		) as AgentTaskHandle<TOutputSchema, TWorkspace>;
 	}
 
 	/** Ordinary tasks may only depend on ordinary tasks; finalizers may depend on either role. */
@@ -470,12 +488,15 @@ export class WorkflowTaskMaterializer {
 		}
 	}
 
-	private declareAgent<TOutputSchema extends TSchema>(
+	private declareAgent<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest,
+	>(
 		namespace: readonly TaskKey[],
 		key: TaskKey,
-		request: AgentTaskAuthoringRequest<TOutputSchema>,
+		request: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
 		role: TaskRole,
-	): TaskHandle<Static<TOutputSchema>> {
+	): AgentTaskHandle<TOutputSchema, TWorkspace> {
 		if (
 			namespace.length > 32 ||
 			namespace.some((entry) => !Value.Check(TaskKeySchema, entry))
@@ -512,6 +533,7 @@ export class WorkflowTaskMaterializer {
 			request.outputSchema,
 			"agent task output schema",
 		);
+		const workspace: WorkspaceAuthoringRequest = request.workspace;
 		const agentRequest: AgentTaskRequest = {
 			agent: request.agent,
 			task: request.task,
@@ -520,7 +542,13 @@ export class WorkflowTaskMaterializer {
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
 			contextScopes: [...request.contextScopes],
-			workspace: request.workspace,
+			workspace,
+			// The policy is workflow-only: persisted for worktree requests
+			// (defaulting to "required"), absent for read-only requests, and
+			// never lowered to pi-subagent.
+			...(workspace.mode === "worktree"
+				? { handoff: request.handoff ?? "required" }
+				: {}),
 			outputSchema: outputSchema as AgentTaskRequest["outputSchema"],
 			limits: request.limits,
 			...(request.retry === undefined
@@ -537,6 +565,22 @@ export class WorkflowTaskMaterializer {
 		};
 		if (!Value.Check(AgentTaskRequestSchema, agentRequest)) {
 			throw new WorkflowMaterializationError("invalid agent task request");
+		}
+		if (
+			request.handoff !== undefined &&
+			agentRequest.workspace.mode !== "worktree"
+		) {
+			throw new WorkflowMaterializationError(
+				"handoff policy requires a worktree workspace",
+			);
+		}
+		if (
+			agentRequest.workspace.mode === "worktree" &&
+			agentRequest.limits.workspaceWriteBytes < 1
+		) {
+			throw new WorkflowMaterializationError(
+				"worktree workspace requires a positive workspaceWriteBytes limit",
+			);
 		}
 		if (
 			agentRequest.retry !== undefined &&
@@ -597,14 +641,24 @@ export class WorkflowTaskMaterializer {
 			throw new WorkflowMaterializationError("invalid materialized agent task");
 		}
 		const selected = this.adopt(task, expected);
-		return createTaskHandle<Static<TOutputSchema>>(
-			{ runId: this.runId, taskId: selected.id },
-			{
-				runId: this.runId,
-				producerTaskId: selected.id,
-				output: "result",
-			},
-		);
+		const taskRef: TaskRef = { runId: this.runId, taskId: selected.id };
+		const outputRef: WorkflowArtifactHandleRef = {
+			runId: this.runId,
+			producerTaskId: selected.id,
+			output: "result",
+		};
+		// The handoff handle follows the materialized spec, not the request
+		// literal: only worktree agent tasks own a handoff artifact.
+		const handle =
+			selected.spec.kind === "agent" &&
+			selected.spec.request.workspace.mode === "worktree"
+				? createTaskHandle<Static<TOutputSchema>>(taskRef, outputRef, {
+						runId: this.runId,
+						producerTaskId: selected.id,
+						output: "handoff",
+					})
+				: createTaskHandle<Static<TOutputSchema>>(taskRef, outputRef);
+		return handle as AgentTaskHandle<TOutputSchema, TWorkspace>;
 	}
 
 	private declareSupport<TOutputSchema extends TSchema>(
@@ -825,20 +879,30 @@ export class WorkflowTaskMaterializer {
 
 	private resolveInputs(
 		after: Map<string, TaskRef>,
-		inputs: Readonly<Record<TaskKey, ArtifactHandle<unknown>>> | undefined,
+		inputs: Readonly<Record<TaskKey, TaskInputHandle>> | undefined,
 	): Record<TaskKey, WorkflowArtifactHandleRef> {
 		return Object.fromEntries(
 			Object.entries(inputs ?? {})
 				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
 				.map(([name, handle]) => {
 					const ref = handle.ref;
+					const producer = this.seen.get(ref.producerTaskId);
 					if (
 						!Value.Check(TaskKeySchema, name) ||
 						ref.runId !== this.runId ||
-						!this.seen.has(ref.producerTaskId)
+						producer === undefined
 					) {
 						throw new WorkflowMaterializationError(
 							"task data dependency is invalid, unknown, or belongs to another run",
+						);
+					}
+					if (
+						ref.output === "handoff" &&
+						(producer.spec.kind !== "agent" ||
+							producer.spec.request.workspace.mode !== "worktree")
+					) {
+						throw new WorkflowMaterializationError(
+							"handoff input producer is not a worktree agent task",
 						);
 					}
 					after.set(ref.producerTaskId, {

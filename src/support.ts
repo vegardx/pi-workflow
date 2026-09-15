@@ -11,7 +11,7 @@ import type {
 	TaskRef,
 } from "./contracts.js";
 import {
-	type ArtifactHandle,
+	type TaskInputHandle,
 	validateJsonSchemaDocument,
 } from "./definition.js";
 import { deriveSupportImplementationIdentitySha256 } from "./execution.js";
@@ -32,7 +32,7 @@ export interface SupportTaskDescriptor<TOutputSchema extends TSchema> {
 	readonly outputSchema: TOutputSchema;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
-	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
+	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
 	readonly replay?: ReplayPolicy;
 }
 
@@ -52,7 +52,7 @@ export interface SupportTaskCall<TParameters> {
 	readonly parameters: TParameters;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
-	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
+	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
 	readonly replay?: ReplayPolicy;
 }
 

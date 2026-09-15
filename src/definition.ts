@@ -12,6 +12,7 @@ import { Value } from "typebox/value";
 import {
 	type AgentRetryClass,
 	DEFAULT_WORKFLOW_CONCURRENCY,
+	type HandoffPolicy,
 	JsonSchemaDocumentSchema,
 	MAX_WORKFLOW_CONCURRENCY,
 	type ReplayPolicy,
@@ -21,6 +22,7 @@ import {
 	type WorkflowArtifactHandleRef,
 	type WorkflowBudget,
 	WorkflowBudgetSchema,
+	type WorkflowHandoffDescriptor,
 	type WorkflowRunId,
 	type WorkflowTaskId,
 	type WorkflowTaskStatus,
@@ -34,6 +36,7 @@ const taskHandleBrand: unique symbol = Symbol("pi-workflow-task-handle");
 const artifactHandleBrand: unique symbol = Symbol(
 	"pi-workflow-artifact-handle",
 );
+const handoffHandleBrand: unique symbol = Symbol("pi-workflow-handoff-handle");
 
 export { type WorkflowBudget, WorkflowBudgetSchema };
 
@@ -76,11 +79,51 @@ export interface ArtifactHandle<T> {
 	readonly [artifactHandleBrand]: T;
 }
 
+/** The handle reference of a worktree task's handoff artifact. */
+export type HandoffHandleRef = WorkflowArtifactHandleRef & {
+	readonly output: "handoff";
+};
+
+/**
+ * Names the workflow-owned handoff artifact of a worktree agent task. It
+ * resolves to a `WorkflowHandoffDescriptor`, never to patch bytes.
+ */
+export interface HandoffHandle {
+	readonly ref: HandoffHandleRef;
+	readonly [handoffHandleBrand]: true;
+}
+
 export interface TaskHandle<T> {
 	readonly ref: TaskRef;
 	readonly output: ArtifactHandle<T>;
+	/** Present only on worktree agent tasks. */
+	readonly handoff?: HandoffHandle;
 	readonly [taskHandleBrand]: T;
 }
+
+export type WorktreeTaskHandle<T> = TaskHandle<T> & {
+	readonly handoff: HandoffHandle;
+};
+
+export type WorkspaceAuthoringRequest =
+	| { readonly mode: "read-only"; readonly cwd: string }
+	| { readonly mode: "worktree"; readonly cwd: string };
+
+/**
+ * The handle an agent declaration returns: a worktree handle when the request
+ * literal names a worktree workspace, otherwise an ordinary task handle. The
+ * runtime always decides from the materialized spec; this only types the
+ * author's view of it.
+ */
+export type AgentTaskHandle<
+	TOutputSchema extends TSchema,
+	TWorkspace extends WorkspaceAuthoringRequest,
+> = TWorkspace extends { readonly mode: "worktree" }
+	? WorktreeTaskHandle<Static<TOutputSchema>>
+	: TaskHandle<Static<TOutputSchema>>;
+
+/** An artifact a task may consume: a result handle or a worktree handoff handle. */
+export type TaskInputHandle = ArtifactHandle<unknown> | HandoffHandle;
 
 export function isTaskHandle(value: unknown): value is TaskHandle<unknown> {
 	return (
@@ -100,17 +143,53 @@ export function isArtifactHandle(
 	);
 }
 
+export function isHandoffHandle(value: unknown): value is HandoffHandle {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Object.hasOwn(value, handoffHandleBrand)
+	);
+}
+
+/** Creates a task handle; `handoff` is present iff `handoffRef` is given. */
 export function createTaskHandle<T>(
 	ref: TaskRef,
 	outputRef: WorkflowArtifactHandleRef,
+): TaskHandle<T>;
+export function createTaskHandle<T>(
+	ref: TaskRef,
+	outputRef: WorkflowArtifactHandleRef,
+	handoffRef: HandoffHandleRef,
+): WorktreeTaskHandle<T>;
+export function createTaskHandle<T>(
+	ref: TaskRef,
+	outputRef: WorkflowArtifactHandleRef,
+	handoffRef?: HandoffHandleRef,
+): TaskHandle<T>;
+export function createTaskHandle<T>(
+	ref: TaskRef,
+	outputRef: WorkflowArtifactHandleRef,
+	handoffRef?: HandoffHandleRef,
 ): TaskHandle<T> {
 	const output = Object.freeze({
 		ref: Object.freeze({ ...outputRef }),
 		[artifactHandleBrand]: undefined as T,
 	});
+	if (handoffRef === undefined) {
+		return Object.freeze({
+			ref: Object.freeze({ ...ref }),
+			output,
+			[taskHandleBrand]: undefined as T,
+		});
+	}
+	const handoff: HandoffHandle = Object.freeze({
+		ref: Object.freeze({ ...handoffRef, output: "handoff" as const }),
+		[handoffHandleBrand]: true as const,
+	});
 	return Object.freeze({
 		ref: Object.freeze({ ...ref }),
 		output,
+		handoff,
 		[taskHandleBrand]: undefined as T,
 	});
 }
@@ -124,7 +203,10 @@ export interface AgentResumePolicyRequest {
 	readonly attempts: number;
 }
 
-export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
+export interface AgentTaskAuthoringRequest<
+	TOutputSchema extends TSchema,
+	TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+> {
 	readonly agent: string;
 	readonly task: DelegatedTask;
 	readonly contextMode: "fresh";
@@ -132,14 +214,19 @@ export interface AgentTaskAuthoringRequest<TOutputSchema extends TSchema> {
 	readonly tools: readonly string[];
 	readonly preloadSkills: readonly string[];
 	readonly contextScopes: readonly ContextScope[];
-	readonly workspace: { readonly mode: "read-only"; readonly cwd: string };
+	readonly workspace: TWorkspace;
+	/**
+	 * Worktree tasks only. "required" (default): a completed child must have
+	 * captured a handoff. Never sent to pi-subagent.
+	 */
+	readonly handoff?: HandoffPolicy;
 	readonly outputSchema: TOutputSchema;
 	readonly limits: RunLimits;
 	readonly retry?: AgentRetryPolicyRequest;
 	readonly resume?: AgentResumePolicyRequest;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
-	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
+	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
 	readonly replay?: ReplayPolicy;
 }
 
@@ -148,16 +235,19 @@ export interface NestedWorkflowRequest<TInput = unknown> {
 	readonly input: TInput;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
-	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown>>>;
+	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
 	readonly replay?: ReplayPolicy;
 }
 
 export type FinalizerKind = "required" | "advisory";
 
-export interface FinalizeRequest<TOutputSchema extends TSchema> {
+export interface FinalizeRequest<
+	TOutputSchema extends TSchema,
+	TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+> {
 	readonly kind: FinalizerKind;
 	readonly support?: SupportTaskDescriptor<TOutputSchema>;
-	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema>;
+	readonly agent?: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>;
 	readonly workflow?: NestedWorkflowRequest;
 }
 
@@ -181,24 +271,38 @@ export type SettledTaskResult<T> =
 			failure?: SettledTaskFailure;
 	  }>;
 
-export interface FanOutOptions<TItem, TOutputSchema extends TSchema> {
+export interface FanOutOptions<
+	TItem,
+	TOutputSchema extends TSchema,
+	TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+> {
 	readonly key: (item: TItem, index: number) => TaskKey;
 	readonly task: (
 		item: TItem,
 		index: number,
-	) => AgentTaskAuthoringRequest<TOutputSchema>;
+	) => AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>;
 }
 
-export interface FanInOptions<TSource, TOutputSchema extends TSchema> {
+export interface FanInOptions<
+	TSource,
+	TOutputSchema extends TSchema,
+	TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+> {
 	readonly inputKey: (source: TaskHandle<TSource>, index: number) => TaskKey;
-	readonly task: Omit<AgentTaskAuthoringRequest<TOutputSchema>, "inputs">;
+	readonly task: Omit<
+		AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
+		"inputs"
+	>;
 }
 
 export interface PipelineStage {
-	agent<TOutputSchema extends TSchema>(
+	agent<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		key: TaskKey,
-		request: AgentTaskAuthoringRequest<TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>>;
+		request: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace>;
 }
 
 export interface WorkflowContext<TInput> {
@@ -208,10 +312,13 @@ export interface WorkflowContext<TInput> {
 	readonly signal: AbortSignal;
 	phase(name: string): void;
 	log(message: string): void;
-	agent<TOutputSchema extends TSchema>(
+	agent<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		key: TaskKey,
-		request: AgentTaskAuthoringRequest<TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>>;
+		request: AgentTaskAuthoringRequest<TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace>;
 	support<TOutputSchema extends TSchema>(
 		key: TaskKey,
 		descriptor: SupportTaskDescriptor<TOutputSchema>,
@@ -220,24 +327,35 @@ export interface WorkflowContext<TInput> {
 		key: TaskKey,
 		request: NestedWorkflowRequest,
 	): TaskHandle<TOutput>;
-	fanOut<TItem, TOutputSchema extends TSchema>(
+	fanOut<
+		TItem,
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		namespace: TaskKey,
 		items: readonly TItem[],
-		options: FanOutOptions<TItem, TOutputSchema>,
-	): readonly TaskHandle<Static<TOutputSchema>>[];
-	fanIn<TSource, TOutputSchema extends TSchema>(
+		options: FanOutOptions<TItem, TOutputSchema, TWorkspace>,
+	): readonly AgentTaskHandle<TOutputSchema, TWorkspace>[];
+	fanIn<
+		TSource,
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		key: TaskKey,
 		sources: readonly TaskHandle<TSource>[],
-		options: FanInOptions<TSource, TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>>;
+		options: FanInOptions<TSource, TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace>;
 	pipeline<T>(
 		namespace: TaskKey,
 		build: (stage: PipelineStage) => TaskHandle<T>,
 	): TaskHandle<T>;
-	finalize<TOutputSchema extends TSchema>(
+	finalize<
+		TOutputSchema extends TSchema,
+		TWorkspace extends WorkspaceAuthoringRequest = WorkspaceAuthoringRequest,
+	>(
 		key: TaskKey,
-		request: FinalizeRequest<TOutputSchema>,
-	): TaskHandle<Static<TOutputSchema>>;
+		request: FinalizeRequest<TOutputSchema, TWorkspace>,
+	): AgentTaskHandle<TOutputSchema, TWorkspace>;
 	result<T>(task: TaskHandle<T>): Promise<T>;
 	results<const T extends readonly TaskHandle<unknown>[]>(
 		tasks: T,
@@ -249,13 +367,22 @@ export interface WorkflowContext<TInput> {
 			? SettledTaskResult<V>
 			: never;
 	}>;
+	/**
+	 * Waits for a worktree task (a persisted "result" barrier) and resolves its
+	 * handoff descriptor, or `undefined` only when the task's handoff policy is
+	 * "optional" and the completed child captured no handoff.
+	 */
+	handoff<T>(
+		task: WorktreeTaskHandle<T>,
+	): Promise<WorkflowHandoffDescriptor | undefined>;
 }
 
 export type WorkflowReturn<T> =
 	| T
 	| TaskHandle<T>
 	| ArtifactHandle<T>
-	| Promise<T | TaskHandle<T> | ArtifactHandle<T>>;
+	| HandoffHandle
+	| Promise<T | TaskHandle<T> | ArtifactHandle<T> | HandoffHandle>;
 
 export interface WorkflowDefinition<TInput = unknown, TOutput = unknown> {
 	readonly schema: "pi-workflow-definition";
