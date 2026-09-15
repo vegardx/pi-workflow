@@ -14,11 +14,15 @@ import {
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
 	type WorkflowRunStatus,
+	type WorkflowTaskId,
+	WorkflowTaskIdSchema,
+	type WorkflowTaskStatus,
 } from "./contracts.js";
 import {
 	validateJsonSchemaDocument,
 	type WorkflowBudget,
 } from "./definition.js";
+import type { WorkflowStateProjection } from "./events.js";
 import {
 	WorkflowNestedRunError,
 	type WorkflowNestedRunLaunch,
@@ -32,7 +36,12 @@ import {
 	type WorkflowRunLease,
 	WorkflowRunLeaseUnavailableError,
 } from "./persistence/run-lease.js";
-import { reduceWorkflowEvents } from "./reducer.js";
+import {
+	invalidationClosure,
+	reduceWorkflowEvents,
+	WorkflowEventReductionError,
+	type WorkflowInvalidationClosure,
+} from "./reducer.js";
 import type { DiscoveredWorkflow, WorkflowRoot } from "./registry.js";
 import { discoverWorkflows } from "./registry.js";
 import {
@@ -85,6 +94,18 @@ export type WorkflowServiceRunReceipt = {
 	readonly status: WorkflowRunStatus;
 };
 
+export type WorkflowServiceTaskView = {
+	readonly id: WorkflowTaskId;
+	readonly namespace: readonly string[];
+	readonly key: string;
+	readonly kind: "agent" | "support" | "workflow";
+	readonly status: WorkflowTaskStatus;
+	/** Generation of the task's current execution; 0 when it has none. */
+	readonly generation: number;
+	/** Declared in an abandoned epoch and not readopted by the current path. */
+	readonly abandoned?: true;
+};
+
 export type WorkflowServiceRunView = WorkflowServiceRunReceipt & {
 	readonly definitionName: string;
 	readonly createdAt: string;
@@ -96,6 +117,8 @@ export type WorkflowServiceRunView = WorkflowServiceRunReceipt & {
 	};
 	readonly output?: unknown;
 	readonly outputArtifactId?: string;
+	/** Every declared task in materialization order; absent until events exist. */
+	readonly tasks?: readonly WorkflowServiceTaskView[];
 };
 
 export interface WorkflowService {
@@ -106,6 +129,16 @@ export interface WorkflowService {
 	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	wait(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	stop(runId: WorkflowRunId, reason: string): Promise<WorkflowServiceRunView>;
+	/**
+	 * Invalidates a settled task and its transitive dependents on a durably
+	 * failed or interrupted run, then restarts the drive so the invalidated
+	 * work re-executes as new generations.
+	 */
+	invalidate(
+		runId: WorkflowRunId,
+		causeTaskId: string,
+		reason: string,
+	): Promise<WorkflowServiceRunView>;
 	reconcile(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	shutdown(): Promise<void>;
 }
@@ -220,6 +253,74 @@ function isTerminalStatus(status: WorkflowRunStatus): boolean {
 
 function runId(): WorkflowRunId {
 	return `workflow_${randomUUID().replaceAll("-", "")}`;
+}
+
+/**
+ * A durably failed or interrupted run whose on-path work was invalidated is
+ * not final: the next drive performs the explicit recovery.
+ */
+function awaitsRecovery(view: WorkflowServiceRunView): boolean {
+	return (
+		(view.status === "failed" || view.status === "interrupted") &&
+		(view.tasks ?? []).some(
+			(task) => task.status === "invalidated" && task.abandoned !== true,
+		)
+	);
+}
+
+function admitsInvalidation(status: WorkflowRunStatus): boolean {
+	return status === "failed" || status === "interrupted";
+}
+
+function taskViews(
+	state: WorkflowStateProjection,
+): readonly WorkflowServiceTaskView[] {
+	return Object.freeze(
+		Object.values(state.tasks)
+			.sort(
+				(left, right) =>
+					left.task.materializationSequence -
+					right.task.materializationSequence,
+			)
+			.map((task) => {
+				const generation = Object.values(state.executions).reduce(
+					(highest, execution) =>
+						execution.execution.taskId === task.task.id
+							? Math.max(highest, execution.execution.generation)
+							: highest,
+					0,
+				);
+				return Object.freeze({
+					id: task.task.id,
+					namespace: Object.freeze([...task.task.namespace]),
+					key: task.task.spec.key,
+					kind: task.task.spec.kind,
+					status: task.status,
+					generation,
+					...(task.abandoned === true ? { abandoned: true as const } : {}),
+				});
+			}),
+	);
+}
+
+/**
+ * Surfaces a reducer or closure failure as a validation error carrying the
+ * reducer's own message. The journal wraps reducer failures as the cause of an
+ * invariant error, so that wrapper is unwrapped first.
+ */
+function invalidationRejection(error: unknown): WorkflowServiceError {
+	const cause =
+		error instanceof Error && error.cause instanceof WorkflowEventReductionError
+			? error.cause
+			: error;
+	if (cause instanceof Error) {
+		return new WorkflowServiceError("validation", cause.message, { cause });
+	}
+	return new WorkflowServiceError(
+		"validation",
+		"Workflow invalidation was rejected.",
+		{ cause },
+	);
 }
 
 export async function createWorkflowService(
@@ -661,6 +762,7 @@ export async function createWorkflowService(
 				? { outputArtifactId: state.outputArtifactId }
 				: {}),
 			...(output === undefined ? {} : { output }),
+			tasks: taskViews(state),
 		});
 	}
 
@@ -1094,7 +1196,9 @@ export async function createWorkflowService(
 			let run = owned.get(runIdValue);
 			if (!run) {
 				const current = await statusCurrent(runIdValue);
-				if (isTerminalStatus(current.status)) return current;
+				if (isTerminalStatus(current.status) && !awaitsRecovery(current)) {
+					return current;
+				}
 				run = await resume(runIdValue);
 			}
 			if (!run.settled) await run.drive;
@@ -1116,6 +1220,116 @@ export async function createWorkflowService(
 			await run.scheduler.stop(reason);
 			await run.drive;
 			return statusCurrent(runIdValue);
+		},
+		invalidate(runIdValue: WorkflowRunId, causeTaskId: string, reason: string) {
+			return exclusive(async () => {
+				assertOpen();
+				if (!Value.Check(WorkflowRunIdSchema, runIdValue)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid workflow run ID.",
+					);
+				}
+				if (!Value.Check(WorkflowTaskIdSchema, causeTaskId)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid workflow task ID.",
+					);
+				}
+				if (
+					typeof reason !== "string" ||
+					reason.length < 1 ||
+					reason.length > 4096
+				) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid workflow invalidation reason.",
+					);
+				}
+				const current = await statusCurrent(runIdValue);
+				const active = owned.get(runIdValue);
+				if (active && !active.settled) {
+					throw new WorkflowServiceError(
+						"conflict",
+						"Workflow run is still being driven.",
+					);
+				}
+				if (!admitsInvalidation(current.status)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow run status does not admit invalidation.",
+					);
+				}
+				if (current.parent) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Nested workflow runs are invalidated through their parent run.",
+					);
+				}
+				if (awaitsRecovery(current)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow run already awaits recovery of invalidated work.",
+					);
+				}
+				// A settled owned run still holds its lease, so it is reused rather
+				// than resumed; an inactive run is composed, and its initial drive of
+				// a failed or interrupted run settles before anything is appended.
+				const run = active ?? (await resume(runIdValue));
+				await run.drive;
+				if (Date.parse(run.record.deadlineAt) <= Date.now()) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow run deadline has passed.",
+					);
+				}
+				const state = reduceWorkflowEvents(await run.journal.readEvents());
+				if (!admitsInvalidation(state.status)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow run status does not admit invalidation.",
+					);
+				}
+				let closure: WorkflowInvalidationClosure;
+				try {
+					closure = invalidationClosure(state, causeTaskId);
+				} catch (error) {
+					throw invalidationRejection(error);
+				}
+				try {
+					await run.journal.appendEvent({
+						type: "task-invalidated",
+						data: {
+							causeTaskId,
+							taskIds: closure.taskIds,
+							abandonedEpochs: closure.abandonedEpochs,
+							reason,
+						},
+					});
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.cause instanceof WorkflowEventReductionError
+					) {
+						throw invalidationRejection(error);
+					}
+					throw error;
+				}
+				// The recovery transition is appended here so the returned view is
+				// already running; a crash before it is repaired by the runtime,
+				// which performs the same transition when it finds invalidated work.
+				await run.journal.appendEvent({
+					type: "run-status-changed",
+					data: {
+						from: state.status,
+						to: "running",
+						reason: "Explicit invalidation re-executes invalidated tasks.",
+					},
+				});
+				// The restarted drive is not awaited here; wait() observes it.
+				void run.restart();
+				return statusCurrent(runIdValue);
+			});
 		},
 		async reconcile(runIdValue: WorkflowRunId) {
 			assertOpen();
@@ -1165,7 +1379,9 @@ export async function createWorkflowService(
 			if (view.status === "cleanup-blocked") {
 				const state = reduceWorkflowEvents(await run.journal.readEvents());
 				const task = Object.values(state.tasks).find(
-					(candidate) => candidate.status === "cleanup-blocked",
+					(candidate) =>
+						candidate.abandoned !== true &&
+						candidate.status === "cleanup-blocked",
 				);
 				if (!task) {
 					throw new WorkflowServiceError(
