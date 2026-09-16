@@ -9,7 +9,7 @@ import {
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowRunId } from "../src/contracts.js";
 import type {
 	TaskExecutionProjection,
@@ -797,6 +797,10 @@ async function blockedNestedRun(name: string) {
 		storeRoot,
 	};
 }
+
+afterEach(() => {
+	vi.useRealTimers();
+});
 
 describe("nested workflow execution", () => {
 	it("injects a sibling child's verified output as an artifact input", async () => {
@@ -1812,6 +1816,16 @@ describe("nested workflow execution", () => {
 			projectTrusted: () => true,
 			subagents: provider([], []),
 		});
+		// Only the wall clock is faked, and frozen before the run starts: the
+		// child is launched with the parent's full 3 s remaining however slowly
+		// the parent drives, so the launch is always observed. With a real
+		// clock under full-suite load (run 35099072360, and PR #44) the 3 s
+		// could shrink below the child's minimum before the launch, so the
+		// launch never came and the test hung. Both deadline races re-read
+		// `Date.now()` when their real timers fire, so moving the clock past
+		// the deadline makes the parent's timer stop the run and cascade into
+		// the child.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		const receipt = await service.run("deadline-parent", { value: "yes" });
 		const { childRunId } = await childOf(fx.storeRoot, receipt.runId);
 		await untilChildLaunched(service, fx.storeRoot, receipt.runId, childRunId);
@@ -1823,6 +1837,7 @@ describe("nested workflow execution", () => {
 			expect(Date.parse(childRecord.deadlineAt)).toBeLessThanOrEqual(
 				Date.parse(parentRecord.deadlineAt),
 			);
+			vi.setSystemTime(Date.parse(parentRecord.deadlineAt) + 1);
 			await expect(
 				bounded(service.wait(receipt.runId), "parent wait"),
 			).resolves.toMatchObject({ status: "cancelled" });
