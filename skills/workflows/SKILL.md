@@ -28,6 +28,32 @@ runtime source (`src/tools.ts`, `src/service-views.ts`, `src/run-actions.ts`,
 Do not start a workflow to look busy. If you cannot name the definition and
 state a concrete task, ask one question instead of guessing.
 
+## The builtin workflows
+
+The package ships these under its own `builtin` root, so they are listed and
+runnable in any project without project trust. `workflow_list` is still the
+source of truth; a project may ship more.
+
+| Ref | In | Out |
+| --- | --- | --- |
+| `plan-to-ship` | `{plan, planDigest, effort}` | `{approved, shipped, deliverables[], reviews[], receipt}` — parks on the `approve-plan` and `ship` checkpoints, and never pushes, merges, or applies anything |
+| `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
+| `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict, findings, notes?}` — the blind plan reviewer, one read-only agent, no gate |
+
+A host embedding this package may start an allowlisted builtin **headlessly**,
+without a model turn, through the service provider's `runBuiltin`. The
+allowlist is the package's own frozen `BUILTIN_HEADLESS_WORKFLOWS` and today
+holds `plan-review` alone, because it declares no checkpoint, no worktree, and
+no handoff — a run nobody can be asked to decide. That is the host's path, not
+yours: you start a workflow with `workflow_run`.
+
+**Workflows may be run from plan mode.** A workflow never mutates the working
+tree or the host: writers run in an isolated pi-subagent worktree and produce
+a handoff descriptor, which the runtime never applies, and the run's own state
+lives under `.pi/workflow/`. Starting, waiting on, and inspecting a run is
+therefore legal while planning; applying a handoff is not, and neither is
+deciding a checkpoint on the human's behalf.
+
 ## The operating loop
 
 ```text
