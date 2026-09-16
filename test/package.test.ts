@@ -95,6 +95,13 @@ describe("package contract", () => {
 				types: "./dist/runtime/index.d.ts",
 				import: "./dist/runtime/index.js",
 			},
+			// W0-COMP-A: the component library, additive under the freeze.
+			// A third entry beside the two pinned ones; the root and runtime
+			// fixtures above are untouched by it.
+			"./components": {
+				types: "./dist/components/index.d.ts",
+				import: "./dist/components/index.js",
+			},
 			"./package.json": "./package.json",
 		});
 	});
@@ -183,6 +190,7 @@ describe("compatibility matrix", () => {
 					".": "frozen",
 					"./extension": "frozen",
 					"./runtime": "unfrozen",
+					"./components": "unfrozen",
 				},
 				exportList: "test/fixtures/public-api/root-exports.json",
 			},
@@ -298,6 +306,7 @@ describe("compatibility matrix 1.0", () => {
 				".": "frozen",
 				"./extension": "frozen",
 				"./runtime": "unfrozen",
+				"./components": "unfrozen",
 			},
 			exportList: "test/fixtures/public-api/root-exports.json",
 		});
@@ -345,6 +354,7 @@ describe("compatibility matrix 1.0", () => {
 		expect(doc).toContain(
 			"| Entry points | `.` frozen, `./extension` frozen, `./runtime` unfrozen",
 		);
+		expect(doc).toContain("`./components` unfrozen");
 		expect(doc).toContain(
 			`| Pinned export lists | \`.\`: ${rootExports.length} value exports, \`./runtime\`: ${runtimeExports.length} value exports;`,
 		);
