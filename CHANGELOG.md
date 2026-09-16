@@ -19,8 +19,8 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
 
 - **`@vegardx/pi-workflow/components`.** A fourth entry point exporting the
   component library: `gate`, `envelope`, `forEach`, `reviewFanOut` and
-  `verifyAndFix`, with their error and finding types and the compiled-stage
-  document `plan-to-ship` produces (`CompiledStageDocumentSchema`). Adding an entry point and its exports is a
+  `verifyAndFix`, with their error and finding types and the compiled stage
+  document below. Adding an entry point and its exports is a
   minor release under the stability policy. The entry is **unfrozen** — its
   exports may change in any minor release — and it is recorded as such in
   `compatibility.json` `piWorkflow.api.entryPoints` and
@@ -166,12 +166,22 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
     component's deterministic rail and reach the output. A dead lens now
     degrades the run instead of blocking the ship gate: the gate names only a
     synthesis that ran.
-  - `compileStages(plan, policy)` is exported from the definition and returns
-    `{ deliverables: [{ id, stages }], effort, gates }` — every task key the run
-    will declare, before it declares one. Every rule it enforces is refused
-    there, including `use: "dynamic"` ("dynamic stages are not compiled yet"),
-    `use: "sub-workflow"` ("sub-workflows are not part of this slice"), and a
-    non-empty `reads` between deliverables, which was silently dropped before.
+  - The compilation is available as data in two views from one derivation, so
+    they cannot drift. `compileStageDocument(plan, policy)` returns the
+    plan-facing `CompiledStageDocument` — the stages each deliverable got, in
+    the plan's own vocabulary, which is what `plan-review` validates its
+    `compiled` input against and what pi-maestro derives for itself; the
+    default stage list it fills in is `defaultStagesFor`'s, field for field,
+    and the one translation is `maxRounds`, which a compiled document records
+    in VERIFY rounds. `compileStages(plan, policy)` returns the LOWERING
+    (`StageLowering`, declared in the definition and deliberately not part of
+    the component library): every task key the run will declare, in order, with
+    each stage's origin and the gate keys it parks on.
+  - Every rule is refused in that one compilation, before the first task is
+    declared, including `use: "dynamic"` ("dynamic stages are not compiled
+    yet"), `use: "sub-workflow"` ("sub-workflows are not part of this slice"),
+    and a non-empty `reads` between deliverables, which was silently dropped
+    before.
   - The run output gains `deliverables[].verifyRounds`, `reviews[].deliverable`
     and a merged `findings` array. `meta.version` becomes 2.
 

@@ -145,7 +145,8 @@ sha256 digest and an effort dial, and returns a receipt naming each durable
 handoff ref plus the approved digest; it never pushes, merges, or applies
 anything. Read it as the worked example of compiling a document into a graph:
 checkpoints, worktree handoffs, a bounded loop, fan-out and finalizers in one
-definition, with `compileStages` showing the whole graph as data first. It names the
+definition, with `compileStageDocument` and `compileStages` showing the whole
+graph as data — the plan's view and the runtime's — before a task is declared. It names the
 agents `planner`, `implementer`, and `reviewer`, which a person must copy from
 `workflows/agents/*.md` into `<agentDir>/agents` or a trusted project's
 `.pi/agents` first: a definition can name an agent but never install one, and a

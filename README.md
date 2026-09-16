@@ -416,13 +416,17 @@ walk part-way the implementers are declared up front and run concurrently; a
 plan with a mid-run gate is walked strictly deliverable by deliverable, because
 work nobody approved must not already be running when a person says stop.
 
-**The compiled document.** `compileStages(plan, policy)` is exported from the
-definition and returns exactly what the run will declare —
-`{ deliverables: [{ id, stages }], effort, gates }`, typed by
-`CompiledStageDocumentSchema` on `@vegardx/pi-workflow/components`. A host shows
-it to a person before starting and hands the same bytes to a blind reviewer; it
-names every task key, so a finding can point at `verify-d0-fix-1` rather than at
-a paragraph.
+**The compiled stage document, and the lowering.** One compilation, two views,
+so they cannot drift. `compileStageDocument(plan, policy)` returns the
+plan-facing `CompiledStageDocument` typed by `CompiledStageDocumentSchema` on
+`@vegardx/pi-workflow/components` — the stages each deliverable got, in the
+plan's own vocabulary — which is what a host shows a person before starting,
+what `plan-review` validates its `compiled` input against, and what pi-maestro
+derives from the stored plan for itself. `compileStages(plan, policy)` returns
+the lowering: every task key the run will declare, in order, with each stage's
+origin and the gate keys it parks on, so a finding can point at
+`verify-d0-fix-1` rather than at a paragraph. Both are exported from the
+definition; only the first is a shared contract.
 
 **What "ship" means.** Nothing is pushed, merged, published, or turned into a
 pull request — the runtime never applies a handoff, and `policy.publish` travels
