@@ -8,6 +8,8 @@ surfaces described in
 
 ## 1.1.0
 
+- Fix: a worktree handoff above `MAX_WORKFLOW_HANDOFF_BYTES` (or refused by pi-subagent's export bound) now terminalizes the execution as `failed` at stage `handoff-import` with `Workflow handoff exceeds the import bound.` instead of leaving the run `cleanup-blocked` with an unsatisfiable `reconcile`; the child's worktree stays unreleased and protected on the pi-subagent side, and a run already wedged in the old shape converges to `failed` on its next `reconcile`. No persisted schema changed; the reducer admits one new terminal shape, so a journal written after such a failure is rejected by pre-1.1 readers of revision 18.
+
 Guided checkpoint prompts. A parked run now asks the person instead of
 handing them a task id and a JSON grammar. Everything is additive under the
 1.0 freeze: no frozen name changed, no tool was added, and
