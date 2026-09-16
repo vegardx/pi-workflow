@@ -14,6 +14,7 @@ import type {
 	WorkflowServiceTaskView,
 } from "./service-views.js";
 import { createWorkflowSubagentProvider } from "./subagent-provider.js";
+import { supportTaskRegistrations } from "./support-registry.js";
 import { WORKFLOW_TOOL_DECLARATIONS, workflowToolText } from "./tools.js";
 import {
 	type CheckpointDecisionOutcome,
@@ -228,6 +229,11 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			projectTrusted: () => ctx.isProjectTrusted(),
 			subagents: createWorkflowSubagentProvider(pi.events, ctx),
 			registeredRoots: builtinRoots(ctx.cwd, agentDir),
+			// Host-process support implementations, the constructor form the
+			// contract's `supportTaskExecution` feature promises. Package and
+			// builtin code only (`support-registry.ts`): each registration also
+			// admits its module specifier to the definition import gate.
+			supportTasks: supportTaskRegistrations(),
 		});
 		return service;
 	}
