@@ -186,10 +186,28 @@ export function deriveWorkflowFailureSha256(
 		| "nested-launch"
 		| "nested-import"
 		| "nested-input"
-		| "handoff-import",
+		| "handoff-import"
+		| "checkpoint-expired"
+		| "checkpoint-input",
 	message: string,
 ): string {
 	return sha256({ message, stage });
+}
+
+/**
+ * The effect identity a checkpoint decision binds to: the task identity (which
+ * already carries the definition identity) plus the exact input artifacts shown
+ * to the approver.
+ */
+export function deriveCheckpointEffectSha256(value: {
+	readonly taskIdentitySha256: string;
+	readonly inputsSha256: string;
+}): string {
+	return deriveJsonValueSha256({
+		inputsSha256: value.inputsSha256,
+		kind: "checkpoint-effect",
+		taskIdentitySha256: value.taskIdentitySha256,
+	});
 }
 
 /** The handoff-import projection fields the descriptor is derived from. */

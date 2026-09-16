@@ -9,6 +9,10 @@ import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import type {
+	CheckpointHeadlessPolicy,
+	WorkflowHandoffDescriptor,
+} from "./contracts.js";
 import {
 	type AgentRetryClass,
 	DEFAULT_WORKFLOW_CONCURRENCY,
@@ -22,11 +26,10 @@ import {
 	type WorkflowArtifactHandleRef,
 	type WorkflowBudget,
 	WorkflowBudgetSchema,
-	type WorkflowHandoffDescriptor,
 	type WorkflowRunId,
 	type WorkflowTaskId,
 	type WorkflowTaskStatus,
-} from "./contracts.js";
+} from "./contracts-core.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
