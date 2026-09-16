@@ -64,7 +64,7 @@ const WorkflowMetaInputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const WorkflowMetaSchema = Type.Object(
+export const WorkflowMetaSchema = Type.Object(
 	{
 		...WorkflowMetaInputSchema.properties,
 		concurrency: Type.Integer({
