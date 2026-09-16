@@ -1801,7 +1801,13 @@ ambiguous prefix; task keys are `[...namespace, key].join("/")` (a leading
 tasks are never actionable. The widget lists depth-0 runs in the nonterminal
 and attention statuses, shows at most two lines, hides when both are empty,
 refreshes from `subscribe`, and polls (unref'd, 5 s) only while a listed run
-is nonterminal or awaits recovery. Widget and inspector recover from durable
+is nonterminal or awaits recovery. While a listed run this session owns waits
+for a decision it may record (`status: "waiting"`, `ownership: "owned"`,
+`pendingCheckpointCount > 0`, `decide` in `availableActions`), the first line
+becomes `waiting for you: <prompt>` cut to `WORKFLOW_WIDGET_WIDTH` (80)
+columns and the ongoing and attention counts collapse into the second; the
+prompt is read from one lease-free `inspect(runId, { include: ["tasks"] })`
+per parked (run, execution) and cached, so polling never re-inspects. Widget and inspector recover from durable
 state after reload; they own no lifecycle authority.
 
 ### Task view
@@ -1819,7 +1825,9 @@ for every checkpoint task, `checkpoint` (see
 [Checkpoint views](#checkpoint-views)). Every run view that carries `tasks`
 also carries `pendingCheckpoints`: the on-path checkpoints awaiting a decision
 in materialization order, each `{ taskId, namespace, key, executionId,
-requestedAt, expiresAt? }`, empty unless a checkpoint waits.
+requestedAt, expiresAt?, taskKey?, prompt?, promptTruncated?, schemaSummary?,
+inputsSummary?, instruction? }` (see
+[Checkpoint views](#checkpoint-views)), empty unless a checkpoint waits.
 `inspect` adds `dependsOn` and `inputs`.
 
 ### Dynamic run view
@@ -2608,24 +2616,58 @@ artifact metadata is missing.". The lease-free `inspect` and `listRuns` omit
 `MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH` (256) characters, marking them
 `promptTruncated: true`. Log entries never carry the value or the approver.
 
+Each `pendingCheckpoints` entry carries, besides its identity fields
+(`taskId`, `namespace`, `key`, `executionId`, `requestedAt`, `expiresAt?`),
+six optional fields that say what answering it takes: `taskKey`
+(`[...namespace, key].join("/")`, the token `/workflow decide` accepts),
+`prompt` with `promptTruncated: true` when it was cut (the same rule as the
+checkpoint task view: whole on the artifact-backed views, cut at
+`MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH` on `inspect` and `listRuns`),
+`schemaSummary` (`checkpointSchemaSummary`: the one-line answer shape),
+`inputsSummary` (`renderCheckpointInputs` of the verified inputs;
+artifact-backed views only, and omitted when a run parks on so many
+checkpoints that each share of `MAX_CHECKPOINT_RENDER_BYTES` would be
+unreadable), and `instruction` (`CHECKPOINT_DECIDE_INSTRUCTION`: a person
+answers the checkpoint, a model surfaces it and stops). They are optional and
+additive: nothing reads them to decide legality.
+
 ### Operator surface
 
 `decide` is a service method, and checkpoint decisions are human-only. There
 is no model-callable decide tool, by design: a model must never decide a
 checkpoint, and `WORKFLOW_TOOL_DECLARATIONS` declares none. The extension
-command `/workflow decide <run-prefix> <task-key> <json> [reason…]`
+command `/workflow decide <run-prefix> <task-key> [json] [reason…]`
 (`src/ui/commands.ts`) is the pass-through to `decide(runId, taskId,
 { decision, approver, reason })`: it is offered only while `availableActions`
-lists `decide`, parses `<json>` as one (optionally quoted) token and refuses
-invalid JSON ("Checkpoint decision is not valid JSON.") before reaching the
-service, requires an interactive session ("Checkpoint decisions require an
-interactive Pi session.") and an explicit confirm that shows the checkpoint
-prompt and the parsed decision, and records `approver` as the Pi session
-identity (`"pi-session"`; the pinned extension API exposes no user name),
-never an argument. Embedders without Pi call the service directly. A parked run is
-surfaced to the operator, never polled by a model: `wait` returns immediately
-with `parked: true` and `pendingCheckpoints`, and the `/workflow` widget and
-inspector show the pending checkpoints.
+lists `decide`, parses `<json>`, when given, as one (optionally quoted) token
+and refuses invalid JSON ("Checkpoint decision is not valid JSON.") before
+reaching the service, requires an interactive session ("Checkpoint decisions
+require an interactive Pi session.") and an explicit confirm that shows the
+checkpoint prompt and the parsed decision, and records `approver` as the Pi
+session identity (`"pi-session"`; the pinned extension API exposes no user
+name), never an argument. Embedders without Pi call the service directly.
+
+The operator does not have to type JSON. When a run this session owns parks in
+a session with dialog-capable UI, the extension asks the session user itself,
+once per checkpoint execution: a guided form (`src/ui/checkpoint-form.ts`,
+driven by `src/ui/parked-observer.ts`) shows the prompt, the run, the expiry,
+the declared inputs, and the answer shape, then asks the decision field by
+field from the decision schema (a boolean, an enum, a string, a number, or a
+small flat object) and falls back to one JSON editor for anything larger. The
+service is the only validator: a refusal it raises re-opens the last dialog
+with the service's message. Dismissing any dialog, or declining the final
+confirm, records nothing and leaves the run parked; answering records exactly
+one decision with `approver: "pi-session"`. The same form backs `/workflow
+decide` without `<json>` and the inspector's `Decide a checkpoint` palette
+entry, which the palette offers only while `availableActions` lists `decide`.
+Nothing here is a new authority: every path ends in the one human-only
+`decide` call.
+
+A parked run is surfaced to the operator, never polled by a model: `wait`
+returns immediately with `parked: true` and `pendingCheckpoints` (prompt, task
+key, answer shape, inputs summary, and the fixed decide instruction), the
+`/workflow` widget shows `waiting for you: <prompt>` on its first line, and
+the inspector shows the pending checkpoints.
 
 ### Reducer rules
 

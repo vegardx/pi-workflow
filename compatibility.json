@@ -2,14 +2,14 @@
 	"schema": "pi-workflow-compatibility",
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
-		"version": "1.0.0",
+		"version": "1.1.0",
 		"contractRevision": 18,
 		"features": {
 			"checkpoints": true,
 			"dynamicWorkflows": true
 		},
 		"api": {
-			"version": "1.0.0",
+			"version": "1.1.0",
 			"frozenSurfaces": ["authoring", "service", "contract", "extension"],
 			"entryPoints": {
 				".": "frozen",

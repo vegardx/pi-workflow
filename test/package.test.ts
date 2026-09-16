@@ -63,7 +63,7 @@ describe("package contract", () => {
 	it("ships the frozen root, extension, and runtime entries", async () => {
 		const packageJson = await readJson<PackageJson>("../package.json");
 		expect(packageJson.name).toBe("@vegardx/pi-workflow");
-		expect(packageJson.version).toBe("1.0.0");
+		expect(packageJson.version).toBe("1.1.0");
 		expect(packageJson.private).not.toBe(true);
 		expect(packageJson.main).toBe("./dist/index.js");
 		expect(packageJson.types).toBe("./dist/index.d.ts");
@@ -157,7 +157,7 @@ describe("compatibility matrix", () => {
 				dynamicWorkflows: WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows,
 			},
 			api: {
-				version: "1.0.0",
+				version: "1.1.0",
 				frozenSurfaces: ["authoring", "service", "contract", "extension"],
 				entryPoints: {
 					".": "frozen",
@@ -167,7 +167,7 @@ describe("compatibility matrix", () => {
 				exportList: "test/fixtures/public-api/root-exports.json",
 			},
 		});
-		expect(compatibility.piWorkflow.version).toBe("1.0.0");
+		expect(compatibility.piWorkflow.version).toBe("1.1.0");
 		expect(compatibility.piWorkflow.api.version).toBe(packageJson.version);
 		await expect(
 			access(
@@ -270,9 +270,9 @@ describe("compatibility matrix 1.0", () => {
 			"../compatibility.json",
 		);
 		const packageJson = await readJson<PackageJson>("../package.json");
-		expect(compatibility.piWorkflow.version).toBe("1.0.0");
+		expect(compatibility.piWorkflow.version).toBe("1.1.0");
 		expect(compatibility.piWorkflow.api).toEqual({
-			version: "1.0.0",
+			version: "1.1.0",
 			frozenSurfaces: ["authoring", "service", "contract", "extension"],
 			entryPoints: {
 				".": "frozen",
@@ -301,7 +301,7 @@ describe("compatibility matrix 1.0", () => {
 		).toContain("docs/qualification.md");
 	});
 
-	it("states the 1.0.0 rows in docs/compatibility.md", async () => {
+	it("states the 1.1.0 rows in docs/compatibility.md", async () => {
 		const compatibility = await readJson<CompatibilityApi>(
 			"../compatibility.json",
 		);
@@ -315,7 +315,7 @@ describe("compatibility matrix 1.0", () => {
 			new URL("../docs/compatibility.md", import.meta.url),
 			"utf8",
 		);
-		expect(doc).toContain("| `@vegardx/pi-workflow` | 1.0.0 |");
+		expect(doc).toContain("| `@vegardx/pi-workflow` | 1.1.0 |");
 		expect(doc).toContain(
 			`| API version | ${compatibility.piWorkflow.api?.version} |`,
 		);
@@ -333,10 +333,10 @@ describe("compatibility matrix 1.0", () => {
 		);
 		expect(doc).toContain("no `typesVersions`");
 		expect(doc).toContain(
-			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); unchanged by 1.0.0`,
+			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); unchanged by 1.0.0 and 1.1.0`,
 		);
 		expect(doc).toContain(
-			"| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0) |",
+			"| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0 and 1.1.0) |",
 		);
 		expect(doc).toContain("[`docs/qualification.md`](qualification.md)");
 	});

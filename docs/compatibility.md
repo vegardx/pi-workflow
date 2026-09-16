@@ -14,16 +14,16 @@ disagree.
 
 | Component | Value | Source |
 | --- | --- | --- |
-| `@vegardx/pi-workflow` | 1.0.0 | `package.json` `version` |
-| API version | 1.0.0 | `compatibility.json` `piWorkflow.api.version` |
+| `@vegardx/pi-workflow` | 1.1.0 | `package.json` `version` |
+| API version | 1.1.0 | `compatibility.json` `piWorkflow.api.version` |
 | Frozen surfaces | authoring, service, contract, extension | [`docs/contracts.md` "Public API and stability"](contracts.md#public-api-and-stability); `compatibility.json` `piWorkflow.api.frozenSurfaces` |
 | Entry points | `.` frozen, `./extension` frozen, `./runtime` unfrozen (engine internals; may change in any minor release); `./package.json` is the manifest, not an API surface | `package.json` `exports`; `compatibility.json` `piWorkflow.api.entryPoints` |
 | Pinned export lists | `.`: 182 value exports, `./runtime`: 127 value exports; the two sets are disjoint and deep `dist/` paths are not importable | `test/fixtures/public-api/root-exports.json`, `runtime-exports.json` (`test/public-api.test.ts`, `scripts/check-pack.mjs`) |
 | TypeScript module resolution | `node16`, `nodenext`, or `bundler` (types are resolved through the `exports` map; no `typesVersions`; the package itself compiles with `module`/`moduleResolution` `NodeNext`, and `engines.node >=23.6.0` excludes toolchains that need `node10` fallbacks) | `package.json` `exports`, `tsconfig.json` |
-| `WORKFLOW_CONTRACT_REVISION` | 18 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`); unchanged by 1.0.0: the freeze changes no schema, event, identity, or handshake |
+| `WORKFLOW_CONTRACT_REVISION` | 18 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`); unchanged by 1.0.0 and 1.1.0: neither changes a schema, event, identity, or handshake (1.1.0 adds optional view fields only) |
 | `WORKFLOW_RUNTIME_CONTRACT.features.checkpoints` | `true` | `src/contracts.ts` |
 | `WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows` | `true` (proposed `dynamic:<sha256>` sources run only after a human approval bound to their digest, manifest, host API, and import policy) | `src/contracts.ts` |
-| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0) | `package.json` `peerDependencies` |
+| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0 and 1.1.0) | `package.json` `peerDependencies` |
 | Required pi-subagent contract revision | 6 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
 | pi-subagent commit built in CI | `172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf` | `.github/workflows/ci.yml` |
 | Pi (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-server`, `@earendil-works/pi-tui`) | `>=0.85.0 <0.86` | `package.json` `peerDependencies` |

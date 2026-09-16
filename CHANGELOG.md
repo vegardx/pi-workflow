@@ -6,6 +6,57 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 1.1.0
+
+Guided checkpoint prompts. A parked run now asks the person instead of
+handing them a task id and a JSON grammar. Everything is additive under the
+1.0 freeze: no frozen name changed, no tool was added, and
+`WORKFLOW_CONTRACT_REVISION` stays 18 with the required pi-subagent contract
+at revision 6 (`0.10.0`).
+
+### Added
+
+- **Pi asks the session user.** When a run this session owns parks at a
+  checkpoint in a session with dialog-capable UI, the extension opens a
+  guided form once per checkpoint execution: the prompt in full, the run, the
+  expiry countdown, the declared `inputs`, and the answer shape, then one
+  dialog per decision field (boolean, enum, string, number, or a small flat
+  object; a JSON editor for anything larger). The service remains the only
+  validator, dismissing records nothing and leaves the run parked, and an
+  answer records exactly one decision with `approver: "pi-session"`. There is
+  still no model-callable decide tool.
+- **`/workflow decide <run> <task> [json] [reason…]`.** The `<json>` argument
+  is now optional: without it, the command opens the guided form. With it,
+  the existing path and its confirmation are unchanged.
+- **Inspector decide entry.** The `alt+w` inspector's palette gains "Decide a
+  checkpoint", offered only while `availableActions` lists `decide`; it opens
+  the same form.
+- **Widget line.** While a run this session owns waits for a decision, the
+  `pi-workflow` widget's first line becomes `waiting for you: <prompt>` (cut
+  to the widget width) and the ongoing and attention counts collapse into the
+  second. The widget still shows at most two lines and still takes no lease:
+  the prompt comes from one cached, lease-free `inspect` per parked run.
+- **Pending-checkpoint view fields.** Every `pendingCheckpoints` entry of
+  every run view gains six optional fields: `taskKey`, `prompt` with
+  `promptTruncated`, `schemaSummary`, `inputsSummary` (artifact-backed views
+  only), and `instruction`. Adding optional view fields is a minor release
+  under the 1.0 policy; existing readers are unaffected.
+- **Model guideline.** `workflow_wait` and `workflow_status` now state, in
+  their descriptions and `promptGuidelines`, that a parked result carries the
+  checkpoint prompt and its inputs summary, that a person answers it in the
+  session, and that the model surfaces the question and stops instead of
+  deciding or polling. Their collapsed result line for a parked run reads
+  `waiting for you: <prompt>`.
+
+### Documentation
+
+- `docs/contracts.md` (checkpoint views, operator surface, widget),
+  `README.md`, `docs/acceptance.md`, `docs/qualification.md` (the rewritten
+  "Checkpoint decide" item), and the `workflow-authoring` skill, which now
+  tells authors to write prompts as answerable questions, declare `inputs`
+  for everything the decider must read, and keep decision schemas small and
+  flat.
+
 ## 1.0.0
 
 First stable release. No runtime behaviour, schema, event, identity, or

@@ -431,7 +431,7 @@ describe("package entry points", () => {
 			"../compatibility.json",
 		);
 		const api = compatibility.piWorkflow.api;
-		expect(api.version).toBe("1.0.0");
+		expect(api.version).toBe("1.1.0");
 		expect(majorOf(api.version)).toBe(majorOf(packageJson.version));
 		expect(api.frozenSurfaces).toEqual([
 			"authoring",
