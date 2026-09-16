@@ -19,6 +19,10 @@ import {
 } from "./artifact-store.js";
 import { currentSubagentAttemptId } from "./attempts.js";
 import {
+	CHECKPOINT_RUN_ENDING_REASON,
+	cancelOpenWorkflowCheckpoints,
+} from "./checkpoint-executor.js";
+import {
 	HandoffRefSchema,
 	MAX_WORKFLOW_HANDOFF_BYTES,
 	type SubagentHandoffEvidence,
@@ -41,7 +45,7 @@ import {
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
+import { hasOpenCheckpoint, reduceWorkflowEvents } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -685,6 +689,21 @@ export function createWorkflowTaskFinalizer(
 		return selected(await state(), taskId);
 	}
 
+	/**
+	 * A run may not fail, interrupt, or block while a checkpoint is open: the
+	 * reducer rejects the transition, so every failure path cancels first.
+	 * Without an open checkpoint nothing is awaited, so the `from` status read
+	 * a moment ago stays current against concurrently driving lanes; after a
+	 * cancel the status is re-read for the same reason.
+	 */
+	async function cancelOpenCheckpoints(
+		current: WorkflowStateProjection,
+	): Promise<WorkflowRunStatus> {
+		if (!hasOpenCheckpoint(current)) return current.status;
+		await cancelOpenWorkflowCheckpoints(journal, CHECKPOINT_RUN_ENDING_REASON);
+		return (await state()).status;
+	}
+
 	async function updateRunAfterTask(
 		task: WorkflowTaskProjection,
 		terminalOutcome: TaskExecutionOutcome,
@@ -698,6 +717,9 @@ export function createWorkflowTaskFinalizer(
 					: terminalOutcome === "interrupted"
 						? "interrupted"
 						: "failed";
+			if (recoveredStatus !== "running") {
+				await cancelOpenCheckpoints(current);
+			}
 			await append({
 				type: "run-status-changed",
 				data: {
@@ -718,10 +740,11 @@ export function createWorkflowTaskFinalizer(
 			return;
 		}
 		if (terminalOutcome === "cleanup-blocked") {
+			const from = await cancelOpenCheckpoints(current);
 			await append({
 				type: "run-status-changed",
 				data: {
-					from: current.status,
+					from,
 					to: "cleanup-blocked",
 					reason: "Child cleanup requires reconciliation.",
 				},
@@ -733,10 +756,11 @@ export function createWorkflowTaskFinalizer(
 			(terminalOutcome === "failed" || terminalOutcome === "cancelled") &&
 			current.status !== "stopping"
 		) {
+			const from = await cancelOpenCheckpoints(current);
 			await append({
 				type: "run-status-changed",
 				data: {
-					from: current.status,
+					from,
 					to: "failed",
 					reason: "A required workflow task did not complete.",
 				},
@@ -748,10 +772,11 @@ export function createWorkflowTaskFinalizer(
 			terminalOutcome === "interrupted" &&
 			current.status !== "stopping"
 		) {
+			const from = await cancelOpenCheckpoints(current);
 			await append({
 				type: "run-status-changed",
 				data: {
-					from: current.status,
+					from,
 					to: "interrupted",
 					reason: "A required workflow task was interrupted.",
 				},

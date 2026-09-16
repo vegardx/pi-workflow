@@ -469,6 +469,10 @@ export {
 } from "./service-views.js";
 export {
 	createStaticWorkflowRuntime,
+	isStaticWorkflowParked,
+	type StaticWorkflowDriveResult,
+	type StaticWorkflowParkedResult,
+	type StaticWorkflowPendingCheckpoint,
 	type StaticWorkflowRunResult,
 	type StaticWorkflowRuntime,
 	StaticWorkflowRuntimeError,
