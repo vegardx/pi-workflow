@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -317,5 +317,106 @@ describe("workflow authoring skill", () => {
 		).rejects.toThrow(
 			"workflow import node:fs is not identity-bound by contract revision 19",
 		);
+	});
+});
+
+/**
+ * The Patterns section is the primary artifact and the component library is
+ * its executable form (spec §2.3), so the two are pinned to each other here:
+ * every pattern pointer in a component resolves to a heading that exists, and
+ * every builtin definition the package ships is named in the skills that tell
+ * a reader which workflows exist. A drift in either direction fails here
+ * rather than in a session.
+ */
+
+const COMPONENT_DIR = new URL("../src/components/", import.meta.url);
+const BUILTIN_DIR = new URL("../workflows/", import.meta.url);
+
+/**
+ * The modules that encode a pattern. A module that adds a schema or a helper
+ * without encoding one (for example the compiled stage document) is not
+ * listed, but any pointer it does carry is still resolved below.
+ */
+const PATTERN_MODULES = [
+	"envelope.ts",
+	"finding.ts",
+	"for-each.ts",
+	"gate.ts",
+	"index.ts",
+	"review-fan-out.ts",
+	"verify-and-fix.ts",
+] as const;
+
+/** `SKILL.md` § "…", with the doc comment's line prefixes folded away. */
+function patternPointers(source: string): string[] {
+	const flattened = source.replace(/\n\s*\*\s?/g, " ").replace(/\s+/g, " ");
+	return [
+		...flattened.matchAll(/workflow-authoring\/SKILL\.md` § "([^"]+)"/g),
+	].map((match) => match[1] ?? "");
+}
+
+/** The `meta.name` a shipped definition declares. */
+function definitionName(source: string): string {
+	const name = source.match(
+		/meta:\s*\{[\s\S]*?name:\s*"([a-z][a-z0-9-]*)"/,
+	)?.[1];
+	if (!name) throw new Error("no meta.name in a builtin definition");
+	return name;
+}
+
+describe("workflow authoring skill patterns", () => {
+	it("resolves every component's pattern pointer to a heading", async () => {
+		const skill = await readFile(skillUrl, "utf8");
+		expect(skill).toContain("\n## Patterns\n");
+		const files = (await readdir(COMPONENT_DIR))
+			.filter((file) => file.endsWith(".ts"))
+			.sort();
+		expect(files.length).toBeGreaterThanOrEqual(PATTERN_MODULES.length);
+		const carried: string[] = [];
+		for (const file of files) {
+			const source = await readFile(new URL(file, COMPONENT_DIR), "utf8");
+			const pointers = patternPointers(source);
+			if (PATTERN_MODULES.includes(file as (typeof PATTERN_MODULES)[number])) {
+				expect(pointers, `${file} names no pattern`).not.toHaveLength(0);
+				carried.push(file);
+			}
+			for (const heading of pointers) {
+				expect(
+					skill.includes(`\n### ${heading}\n`) ||
+						skill.includes(`\n## ${heading}\n`),
+					`${file} points at the missing heading "${heading}"`,
+				).toBe(true);
+			}
+		}
+		expect(carried).toEqual([...PATTERN_MODULES]);
+	});
+
+	it("names every shipped builtin in both skills' tables", async () => {
+		const authoring = await readFile(skillUrl, "utf8");
+		const operating = await readFile(
+			new URL("../skills/workflows/SKILL.md", import.meta.url),
+			"utf8",
+		);
+		expect(authoring).toContain("\n## Builtin workflows\n");
+		expect(operating).toContain("\n## The builtin workflows\n");
+		const definitions = (await readdir(BUILTIN_DIR)).filter((file) =>
+			file.endsWith(".workflow.ts"),
+		);
+		expect(definitions.length).toBeGreaterThan(0);
+		for (const file of definitions) {
+			const name = definitionName(
+				await readFile(new URL(file, BUILTIN_DIR), "utf8"),
+			);
+			// The row form both tables use; a mention in prose is not enough,
+			// because the table is what states the input and the output.
+			expect(
+				authoring,
+				`${name} is not a row of the authoring table`,
+			).toContain(`| \`${name}\` |`);
+			expect(
+				operating,
+				`${name} is not a row of the operating table`,
+			).toContain(`| \`${name}\` |`);
+		}
 	});
 });
