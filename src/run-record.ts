@@ -22,6 +22,36 @@ import type { WorkflowRunJournal } from "./persistence/journal.js";
 
 const MAX_RUN_RECORD_BYTES = 1024 * 1024;
 
+/**
+ * Routing provenance for a run: which router answered its `modelRole`
+ * declarations, recorded once when the run record is created.
+ *
+ * The resolutions themselves are not here. A resolved role becomes an exact
+ * `{ provider, id, thinking }` inside the materialized `AgentTaskSpec.request`
+ * BEFORE hashing, and that persisted request IS the evidence — it is what
+ * `inspect` reads and what the materializer re-uses verbatim on replay rather
+ * than re-resolving (re-rolling a host-dependent resolution would change task
+ * identity mid-run). What the request cannot say is WHO decided, so a run
+ * routed through a host's real router reads identically to one whose models
+ * were written by hand. This field is that distinction.
+ *
+ * **Persisted schema field, additive.** `WorkflowRunRecordSchema` is
+ * `additionalProperties: false`, so an optional field is additive under the
+ * revision-19 policy: every record written before this exists still validates,
+ * and a reader that does not know the field ignores it. `hasValidLimits` does
+ * not constrain it, and nothing derives identity from it.
+ */
+export const WorkflowRunModelRoutingSchema = Type.Object(
+	{
+		/** The routing port's own id, e.g. `"static-table"`. */
+		router: Type.String({ minLength: 1, maxLength: 128 }),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowRunModelRouting = Static<
+	typeof WorkflowRunModelRoutingSchema
+>;
+
 export const WorkflowRunRecordSchema = Type.Object(
 	{
 		schema: Type.Literal("pi-workflow-run"),
@@ -70,6 +100,8 @@ export const WorkflowRunRecordSchema = Type.Object(
 		deadlineAt: Type.String({ format: "date-time" }),
 		cwd: Type.String({ minLength: 1, maxLength: 4096 }),
 		input: Type.Unknown(),
+		/** Revision 19, additive: see {@link WorkflowRunModelRoutingSchema}. */
+		modelRouting: Type.Optional(WorkflowRunModelRoutingSchema),
 		createdAt: Type.String({ format: "date-time" }),
 	},
 	{ additionalProperties: false },

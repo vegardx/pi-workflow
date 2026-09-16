@@ -30,6 +30,7 @@ import {
 	type WorkflowTaskId,
 	type WorkflowTaskStatus,
 } from "./contracts-core.js";
+import type { ModelRoleRequest } from "./runtime/model-routing.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -214,6 +215,24 @@ export interface AgentTaskAuthoringRequest<
 	readonly task: DelegatedTask;
 	readonly contextMode: "fresh";
 	readonly model?: ExactModelRequest;
+	/**
+	 * Ask the host's router for a model instead of naming one. Mutually
+	 * exclusive with `model`: declaring both fails materialization with
+	 * {@link MODEL_ROLE_EXCLUSIVE_MESSAGE}.
+	 *
+	 * The materializer resolves this to an exact `{ provider, id, thinking }`
+	 * **before hashing**, so the materialized `AgentTaskRequestSchema` — and
+	 * therefore task identity and pi-subagent's contract — is unchanged: two
+	 * definitions differing only in how they asked for a model, but resolving
+	 * alike, produce the same task identity. The resolution is persisted with
+	 * the task and re-used on every replay (only re-authorized), because
+	 * resolution is host-dependent and re-rolling it would change identity
+	 * mid-run.
+	 *
+	 * With no `WorkflowServiceOptions.modelRouting` installed this fails with
+	 * {@link MODEL_ROUTING_MISSING_MESSAGE}: the runtime never guesses a model.
+	 */
+	readonly modelRole?: ModelRoleRequest;
 	readonly tools: readonly string[];
 	readonly preloadSkills: readonly string[];
 	readonly contextScopes: readonly ContextScope[];

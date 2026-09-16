@@ -63,6 +63,8 @@
 	"MAX_WORKFLOW_TASK_CONTEXT_BYTES",
 	"MAX_WORKFLOW_TASK_INPUTS",
 	"MAX_WORKFLOW_WAIT_TIMEOUT_MS",
+	"MODEL_ROLE_THINKING_LEVELS",
+	"MODEL_ROLE_TIERS",
 	"MaterializedAgentTaskSchema",
 	"MaterializedCheckpointTaskSchema",
 	"MaterializedNestedWorkflowTaskSchema",

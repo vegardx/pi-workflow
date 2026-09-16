@@ -207,11 +207,24 @@ export {
 	type WorkflowRunCursor,
 } from "../run-projection.js";
 export {
+	type WorkflowRunModelRouting,
+	WorkflowRunModelRoutingSchema,
 	type WorkflowRunRecord,
 	WorkflowRunRecordError,
 	WorkflowRunRecordSchema,
 	WorkflowRunRecordStore,
 } from "../run-record.js";
+export {
+	type ExactModel,
+	exactModelRequest,
+	exactThinkingLevel,
+	isModelResolution,
+	MODEL_ROLE_EXCLUSIVE_MESSAGE,
+	MODEL_ROUTING_MISSING_MESSAGE,
+	ModelRoutingError,
+	type StaticModelRoutingTable,
+	staticModelRouting,
+} from "../runtime/model-routing.js";
 export {
 	createWorkflowSequentialScheduler,
 	WorkflowSchedulerError,
