@@ -78,6 +78,7 @@ try {
 		"workflows/plan-to-ship.workflow.ts",
 		"workflows/deep-review.workflow.ts",
 		"workflows/plan-review.workflow.ts",
+		"workflows/deep-research.workflow.ts",
 		// W3: the three agent definitions plan-to-ship names. pi-subagent
 		// discovers agents only from `<agentDir>/agents` and a trusted
 		// `<cwd>/.pi/agents`, so a builtin workflow cannot ship them into place;
@@ -88,6 +89,7 @@ try {
 		"workflows/agents/reviewer.md",
 		"workflows/agents/lens-reviewer.md",
 		"workflows/agents/plan-reviewer.md",
+		"workflows/agents/researcher.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
 		"dist/checkpoint-executor.d.ts",
@@ -189,7 +191,7 @@ try {
 	// and CHANGELOG.md: 145 entries and 2009 KiB unpacked (revision 18 before
 	// the freeze: 125 entries and 1762 KiB; before that 100 entries and
 	// 1536 KiB).
-	// Bounds: 208 entries and 2688 KiB. Measured 156 entries / 2182 KiB at 1.1.0
+	// Bounds: 208 entries and 2816 KiB. Measured 156 entries / 2182 KiB at 1.1.0
 	// (builtin workflow, three agent templates and two skills added since the
 	// 145 / 2009 KiB freeze measurement); 160 entries left four spare, so the
 	// entry bound was raised deliberately. amaro is a dependency and is not
@@ -202,13 +204,23 @@ try {
 	// entries and 2688 KiB (22 entries and 111 KiB spare). The next thing this
 	// package ships records its own measurement here rather than nudging
 	// them silently.
-	if (workflow.entryCount > 208 || workflow.unpackedSize > 2688 * 1024) {
+	// W3-RESEARCH is that next thing, and does exactly that. Unreleased with
+	// deep-research and its researcher template: measured 188 entries and
+	// 2620 KiB unpacked - two entries and 43 KiB over the row above (the
+	// definition, the researcher template, and the README, CHANGELOG,
+	// contracts and two skill-table edits). Those 43 KiB would leave under
+	// 70 KiB of the 111 KiB above, which is below the 74 KiB that the
+	// W2-PLANREVIEW row already called the point to raise at, so the SIZE
+	// bound is raised deliberately to 2816 KiB and this measurement keeps
+	// 196 KiB spare. The ENTRY bound stays at 208: 20 spare entries is still
+	// ample, and two slices in a row have added prose rather than files.
+	if (workflow.entryCount > 208 || workflow.unpackedSize > 2816 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
 		);
 	}
 	process.stdout.write(
-		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 2688 KiB)\n`,
+		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 2816 KiB)\n`,
 	);
 	const rootExports = await readExportList(rootExportList);
 	const runtimeExports = await readExportList(runtimeExportList);
@@ -462,7 +474,7 @@ try {
 	if (!builtin || builtin.scope !== "builtin" || builtin.source !== "package" || path.dirname(builtin.path) !== builtinRoot) {
 		throw new Error("packed workflow_list did not discover the builtin root: " + JSON.stringify(listed));
 	}
-	for (const ref of ["plan-to-ship", "deep-review", "plan-review"]) {
+	for (const ref of ["plan-to-ship", "deep-review", "plan-review", "deep-research"]) {
 		const validated = await callTool("workflow_validate", { ref });
 		if (validated.valid !== true || validated.workflow?.scope !== "builtin") {
 			throw new Error("packed workflow_validate refused the builtin definition " + ref + ": " + JSON.stringify(validated));
@@ -479,7 +491,7 @@ try {
 const packedAgents = await subagent.discoverAgents([
 	{ scope: "package", directory: path.resolve("node_modules/@vegardx/pi-workflow/workflows/agents"), trusted: true },
 ]);
-for (const required of ["implementer", "lens-reviewer", "plan-reviewer", "planner", "reviewer"]) {
+for (const required of ["implementer", "lens-reviewer", "plan-reviewer", "planner", "researcher", "reviewer"]) {
 	const agent = packedAgents.get(required);
 	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
 	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {
