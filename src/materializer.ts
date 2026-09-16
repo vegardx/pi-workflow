@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { MemoryBytesSchema } from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
@@ -578,6 +579,11 @@ export class WorkflowTaskMaterializer {
 			preloadSkills: [...request.preloadSkills],
 			contextScopes: [...request.contextScopes],
 			workspace,
+			// Lowered unchanged to pi-subagent; absent means "the agent
+			// definition's ceiling", which only pi-subagent can resolve.
+			...(request.memoryBytes === undefined
+				? {}
+				: { memoryBytes: request.memoryBytes }),
 			// The policy is workflow-only: persisted for worktree requests
 			// (defaulting to "required"), absent for read-only requests, and
 			// never lowered to pi-subagent.
@@ -598,6 +604,16 @@ export class WorkflowTaskMaterializer {
 				? {}
 				: { resume: { attempts: request.resume.attempts } }),
 		};
+		// Before the whole-request check: a malformed grant is worth naming, and
+		// the generic "invalid agent task request" would swallow it.
+		if (
+			request.memoryBytes !== undefined &&
+			!Value.Check(MemoryBytesSchema, request.memoryBytes)
+		) {
+			throw new WorkflowMaterializationError(
+				"agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB",
+			);
+		}
 		if (!Value.Check(AgentTaskRequestSchema, agentRequest)) {
 			throw new WorkflowMaterializationError("invalid agent task request");
 		}

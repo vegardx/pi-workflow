@@ -6,6 +6,7 @@ import {
 	HANDOFF_EXPORT_MEDIA_TYPE,
 	type HandoffRef,
 	HandoffRefSchema,
+	MemoryBytesSchema,
 	RunLimitsSchema,
 	ArtifactRefSchema as SubagentArtifactRefSchema,
 	AttemptIdSchema as SubagentAttemptIdSchema,
@@ -59,7 +60,7 @@ export const WORKFLOW_HANDOFF_FORMAT = Object.freeze({
 	format: "git-format-patch",
 	mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
 	/** pi-subagent contract revision that defines the rendering. */
-	revision: 6,
+	revision: 7,
 });
 export const WORKFLOW_HANDOFF_FORMAT_SHA256 = canonicalSha256(
 	WORKFLOW_HANDOFF_FORMAT,
@@ -83,6 +84,13 @@ export const AgentTaskRequestSchema = Type.Object(
 			uniqueItems: true,
 		}),
 		workspace: AgentWorkspaceRequestSchema,
+		/**
+		 * Guest VM memory grant, lowered unchanged to pi-subagent. Optional and
+		 * additive under revision 19: when absent the agent definition's own
+		 * ceiling applies. A value above that ceiling is refused by pi-subagent
+		 * preflight, not here; the workflow cannot read agent frontmatter.
+		 */
+		memoryBytes: Type.Optional(MemoryBytesSchema),
 		/** Worktree tasks only; normalized to "required" by the materializer when omitted. */
 		handoff: Type.Optional(HandoffPolicySchema),
 		outputSchema: JsonSchemaDocumentSchema,
@@ -621,7 +629,7 @@ export type WorkflowRuntimeContract = Static<
 
 const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 	schema: "pi-subagent-runtime",
-	contractRevision: 6,
+	contractRevision: 7,
 	features: Object.freeze({
 		nativeSessionBackend: true,
 		gondolinSandbox: true,
@@ -640,6 +648,8 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		deepReconciliation: true,
 		worktrees: true,
 		handoffExport: true,
+		vmMemoryCeiling: true,
+		workspaceBudgetRefusal: true,
 		publicNetworkEgress: true,
 		explicitResources: true,
 		ambientExtensionsControl: true,
