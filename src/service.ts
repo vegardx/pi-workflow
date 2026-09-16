@@ -1034,13 +1034,20 @@ export async function createWorkflowService(
 	}
 
 	async function resolve(ref: string): Promise<DiscoveredWorkflow> {
+		return resolveAmong(await discover(), ref);
+	}
+
+	/** `ref` (a workflow name or definition path) among one discovery's result. */
+	function resolveAmong(
+		workflows: readonly DiscoveredWorkflow[],
+		ref: string,
+	): DiscoveredWorkflow {
 		if (!ref || ref.length > 4096) {
 			throw new WorkflowServiceError(
 				"validation",
 				"Invalid workflow reference.",
 			);
 		}
-		const workflows = await discover();
 		const matches = workflows.filter(
 			(workflow) =>
 				workflow.definition.meta.name === ref || workflow.path === ref,
@@ -1089,11 +1096,17 @@ export async function createWorkflowService(
 		};
 	}
 
+	/**
+	 * `discovered` is the discovery that resolved `workflow` (or, for a dynamic
+	 * run, the one made for it): nested runs resolve their definitions by name
+	 * from it, so one `run`, `resume`, or nested launch discovers once.
+	 */
 	async function compose(
 		record: WorkflowRunRecord,
 		workflow: DiscoveredWorkflow,
 		lease: WorkflowRunLease,
 		binding: WorkflowSubagentBinding,
+		discovered: readonly DiscoveredWorkflow[],
 	): Promise<OwnedRun> {
 		const journal = await WorkflowRunJournal.open(
 			storeRoot,
@@ -1103,7 +1116,6 @@ export async function createWorkflowService(
 		);
 		const artifacts = await WorkflowArtifactStore.open({ journal });
 		const decisions = await WorkflowDecisionRecordStore.open({ journal });
-		const discovered = await discover();
 		const byName = new Map(
 			discovered.map((candidate) => [
 				candidate.definition.meta.name,
@@ -1319,7 +1331,7 @@ export async function createWorkflowService(
 		delete run.watchdog;
 		await run.scheduler.stop(reason);
 		delete run.view;
-		const state = reduceWorkflowEvents(await run.journal.readEvents());
+		const state = await run.journal.readState();
 		if (!isTerminalWorkflowRunStatus(state.status)) {
 			await run.restart();
 			return;
@@ -1331,6 +1343,7 @@ export async function createWorkflowService(
 	async function workflowForRecord(
 		record: WorkflowRunRecord,
 		journal: WorkflowRunJournal,
+		discovered: readonly DiscoveredWorkflow[],
 	): Promise<DiscoveredWorkflow> {
 		if (record.definitionKind === "dynamic") {
 			// The run directory copy is the only evidence consulted; the proposal
@@ -1367,7 +1380,7 @@ export async function createWorkflowService(
 				throw dynamicFailure(error);
 			}
 		}
-		const workflow = await resolve(record.definitionPath);
+		const workflow = resolveAmong(discovered, record.definitionPath);
 		if (
 			workflow.definition.meta.name !== record.definitionName ||
 			workflow.identity.identitySha256 !== record.definitionIdentitySha256 ||
@@ -1447,17 +1460,23 @@ export async function createWorkflowService(
 		}
 	}
 
+	/**
+	 * The durable state of a run, `undefined` before its first event. The
+	 * journal file is read and verified on every call; the projection resumes
+	 * from the journal's last reduction instead of replaying every event.
+	 */
+	async function stateFrom(
+		journal: WorkflowRunJournal,
+	): Promise<WorkflowStateProjection | undefined> {
+		return (await journal.readProjected()).state;
+	}
+
 	async function viewFrom(
 		record: WorkflowRunRecord,
 		journal: WorkflowRunJournal,
 		artifacts?: WorkflowArtifactStore,
 	): Promise<WorkflowServiceRunView> {
-		const events = await journal.readEvents();
-		return viewFromState(
-			record,
-			events.length === 0 ? undefined : reduceWorkflowEvents(events),
-			artifacts,
-		);
+		return viewFromState(record, await stateFrom(journal), artifacts);
 	}
 
 	async function viewFromState(
@@ -1593,9 +1612,7 @@ export async function createWorkflowService(
 		artifacts: WorkflowArtifactStore,
 		taskId: string,
 	): Promise<WorkflowServiceHandoffExport> {
-		const events = await journal.readEvents();
-		const state =
-			events.length === 0 ? undefined : reduceWorkflowEvents(events);
+		const state = await stateFrom(journal);
 		const task = state?.tasks[taskId];
 		if (!state || !task) {
 			throw new WorkflowServiceError(
@@ -1699,7 +1716,7 @@ export async function createWorkflowService(
 		record: WorkflowRunRecord,
 		journal: WorkflowRunJournal,
 	): Promise<WorkflowNestedRunSettlement | undefined> {
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		if (
 			state.status !== "completed" &&
 			state.status !== "completed-degraded" &&
@@ -1880,7 +1897,7 @@ export async function createWorkflowService(
 					},
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);
-				const run = await compose(record, workflow, lease, binding);
+				const run = await compose(record, workflow, lease, binding, discovered);
 				owned.set(request.childRunId, run);
 			} catch (error) {
 				await lease.release();
@@ -1917,7 +1934,7 @@ export async function createWorkflowService(
 		async readOutput(childRunId: WorkflowRunId, artifactId: string) {
 			const current = owned.get(childRunId);
 			if (current) {
-				const state = reduceWorkflowEvents(await current.journal.readEvents());
+				const state = await current.journal.readState();
 				const artifact = state.artifacts[artifactId];
 				if (!artifact || state.outputArtifactId !== artifactId) {
 					throw new WorkflowNestedRunError(
@@ -1932,7 +1949,7 @@ export async function createWorkflowService(
 				const artifacts = await WorkflowArtifactStore.open({
 					journal: opened.journal,
 				});
-				const state = reduceWorkflowEvents(await opened.journal.readEvents());
+				const state = await opened.journal.readState();
 				const artifact = state.artifacts[artifactId];
 				if (!artifact || state.outputArtifactId !== artifactId) {
 					throw new WorkflowNestedRunError(
@@ -1978,9 +1995,7 @@ export async function createWorkflowService(
 		assertRunId(runIdValue);
 		const current = owned.get(runIdValue);
 		if (current) {
-			const events = await current.journal.readEvents();
-			const state =
-				events.length === 0 ? undefined : reduceWorkflowEvents(events);
+			const state = await stateFrom(current.journal);
 			const view =
 				current.settled && current.view
 					? current.view
@@ -1992,9 +2007,7 @@ export async function createWorkflowService(
 			const artifacts = await WorkflowArtifactStore.open({
 				journal: opened.journal,
 			});
-			const events = await opened.journal.readEvents();
-			const state =
-				events.length === 0 ? undefined : reduceWorkflowEvents(events);
+			const state = await stateFrom(opened.journal);
 			return {
 				view: await viewFromState(opened.record, state, artifacts),
 				state,
@@ -2009,9 +2022,20 @@ export async function createWorkflowService(
 		if (existing && !existing.settled) return existing;
 		const opened = await openInactive(runIdValue);
 		try {
-			const workflow = await workflowForRecord(opened.record, opened.journal);
+			const discovered = await discover();
+			const workflow = await workflowForRecord(
+				opened.record,
+				opened.journal,
+				discovered,
+			);
 			const binding = await options.subagents.bind(runIdValue);
-			const run = await compose(opened.record, workflow, opened.lease, binding);
+			const run = await compose(
+				opened.record,
+				workflow,
+				opened.lease,
+				binding,
+				discovered,
+			);
 			owned.set(runIdValue, run);
 			return run;
 		} catch (error) {
@@ -2065,9 +2089,10 @@ export async function createWorkflowService(
 				const dynamic = isDynamicRef(ref)
 					? await dynamicRunnable(ref)
 					: undefined;
+				const discovered = await discover();
 				const workflow = dynamic
 					? dynamicWorkflow(dynamic.proposal, createdAt.toISOString())
-					: await resolve(ref);
+					: resolveAmong(discovered, ref);
 				validateInput(workflow, input);
 				const id = runId();
 				const binding = await options.subagents.bind(id);
@@ -2127,7 +2152,13 @@ export async function createWorkflowService(
 						createdAt: createdAt.toISOString(),
 					};
 					await WorkflowRunRecordStore.open(journal).create(record);
-					const run = await compose(record, workflow, lease, binding);
+					const run = await compose(
+						record,
+						workflow,
+						lease,
+						binding,
+						discovered,
+					);
 					owned.set(id, run);
 					return { runId: id, status: "created" as const };
 				} catch (error) {
@@ -2435,7 +2466,7 @@ export async function createWorkflowService(
 				}
 				const run = active ?? (await resume(runIdValue));
 				await run.drive;
-				const state = reduceWorkflowEvents(await run.journal.readEvents());
+				const state = await run.journal.readState();
 				if (state.status !== "interrupted") throw refuseStatus();
 				let taskId: WorkflowTaskId;
 				if (options.taskId === undefined) {
@@ -3049,9 +3080,9 @@ export async function createWorkflowService(
 	}> {
 		const current = owned.get(runIdValue);
 		if (current) {
-			let events: readonly WorkflowJournalEvent[];
+			let read: Awaited<ReturnType<WorkflowRunJournal["readProjected"]>>;
 			try {
-				events = await current.journal.readEvents();
+				read = await current.journal.readProjected();
 			} catch (error) {
 				if (error instanceof WorkflowPersistenceCorruptionError) {
 					throw new WorkflowServiceError(
@@ -3064,8 +3095,8 @@ export async function createWorkflowService(
 			}
 			return {
 				record: current.record,
-				events,
-				state: events.length > 0 ? reduceWorkflowEvents(events) : undefined,
+				events: read.events,
+				state: read.state,
 				ownership: "owned",
 				driving: !current.settled,
 			};
@@ -3181,7 +3212,7 @@ export async function createWorkflowService(
 		// a failed or interrupted run settles before anything is appended.
 		const run = active ?? (await resume(runIdValue));
 		await run.drive;
-		const state = reduceWorkflowEvents(await run.journal.readEvents());
+		const state = await run.journal.readState();
 		if (!admitsInvalidation(state.status)) {
 			throw new WorkflowServiceError(
 				"validation",
@@ -3294,7 +3325,7 @@ export async function createWorkflowService(
 		const bound = (view.tasks ?? []).length;
 		for (let round = 0; round < bound; round++) {
 			if (view.status !== "cleanup-blocked") break;
-			const state = reduceWorkflowEvents(await run.journal.readEvents());
+			const state = await run.journal.readState();
 			const task = Object.values(state.tasks)
 				.filter(
 					(candidate) =>
@@ -3350,7 +3381,7 @@ export async function createWorkflowService(
 			}
 			// The settled drive cached its view before these appends.
 			delete run.view;
-			const afterState = reduceWorkflowEvents(await run.journal.readEvents());
+			const afterState = await run.journal.readState();
 			const afterExecution =
 				afterState.executions[execution.execution.id] ?? execution;
 			reconciled.push(
