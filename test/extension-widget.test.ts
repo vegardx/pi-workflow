@@ -80,16 +80,17 @@ describe("widget controller lifecycle across overlapping session starts", () => 
 		opening.resolve(service);
 		await Promise.all([first, second]);
 
-		// Only the reload installed a controller: one subscription, one refresh.
-		expect(service.subscribe).toHaveBeenCalledTimes(1);
-		expect(service.listRuns).toHaveBeenCalledTimes(1);
+		// Only the reload installed a controller: one widget subscription and
+		// one parked-run observer subscription, one refresh each.
+		expect(service.subscribe).toHaveBeenCalledTimes(2);
+		expect(service.listRuns).toHaveBeenCalledTimes(2);
 		expect(unsubscribe).not.toHaveBeenCalled();
 		expect(setWidget).toHaveBeenCalledWith("pi-workflow", undefined, {
 			placement: "belowEditor",
 		});
 
 		await shutdown({ reason: "quit" }, context);
-		expect(unsubscribe).toHaveBeenCalledTimes(1);
+		expect(unsubscribe).toHaveBeenCalledTimes(2);
 		expect(service.shutdown).toHaveBeenCalledTimes(1);
 		expect(setWidget.mock.calls.at(-1)).toEqual(["pi-workflow", undefined]);
 	});
@@ -126,11 +127,13 @@ describe("widget controller lifecycle across overlapping session starts", () => 
 		} as never);
 		await Promise.all([first, second]);
 
-		expect(service.subscribe).toHaveBeenCalledTimes(2);
+		// The superseded start installed no observer: two widget controllers
+		// and the surviving one's observer.
+		expect(service.subscribe).toHaveBeenCalledTimes(3);
 		expect(unsubscribe).toHaveBeenCalledTimes(1);
 
 		await shutdown({ reason: "quit" }, context);
-		expect(unsubscribe).toHaveBeenCalledTimes(2);
+		expect(unsubscribe).toHaveBeenCalledTimes(3);
 	});
 
 	it("installs nothing when shutdown arrives while a start is still opening the service", async () => {

@@ -25,9 +25,13 @@ import type {
 import {
 	ACTION_LABELS,
 	actionUnavailableMessage,
+	CHECKPOINT_DECISION_CANCELLED_MESSAGE,
 	CHECKPOINT_DECISION_INVALID_JSON_MESSAGE,
+	CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE,
 	CONFIRMED_ACTIONS,
+	checkpointDecisionMode,
 	collectLogTail,
+	DECIDE_USAGE_MESSAGE,
 	DEFAULT_DECIDE_APPROVER,
 	DEFAULT_INVALIDATE_REASON,
 	DEFAULT_RESUME_REASON,
@@ -284,14 +288,11 @@ describe("/workflow grammar", () => {
 			decision: "text",
 			reason: "by vegard",
 		});
-		const usage =
-			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]";
 		expect(() => parseWorkflowCommand("decide")).toThrow(
 			"Run prefix required for decide.",
 		);
-		expect(() => parseWorkflowCommand("decide workflow_ab")).toThrow(usage);
-		expect(() => parseWorkflowCommand("decide workflow_ab approve")).toThrow(
-			usage,
+		expect(() => parseWorkflowCommand("decide workflow_ab")).toThrow(
+			DECIDE_USAGE_MESSAGE,
 		);
 		expect(() =>
 			parseWorkflowCommand("decide workflow_ab approve {not json}"),
@@ -299,6 +300,62 @@ describe("/workflow grammar", () => {
 		expect(() =>
 			parseWorkflowCommand("decide workflow_ab approve {a: 1} reason"),
 		).toThrow(CHECKPOINT_DECISION_INVALID_JSON_MESSAGE);
+	});
+
+	it("parses decide without a decision so the guided form can ask for it", () => {
+		// Widening an accepted input: the 16 subcommands are unchanged and
+		// every decide that parsed before still parses the same way.
+		expect(WORKFLOW_SUBCOMMANDS).toHaveLength(16);
+		expect(DECIDE_USAGE_MESSAGE).toBe(
+			"Usage: /workflow decide <run-prefix> <task-key> [json] [reason]",
+		);
+		const bare = parseWorkflowCommand("decide workflow_ab approve");
+		expect(bare).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "approve",
+		});
+		// The absent property, not an undefined one: the dispatcher reads it.
+		expect("decision" in bare).toBe(false);
+		expect(parseWorkflowCommand("decide workflow_ab review/approve")).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "review/approve",
+		});
+		expect(parseWorkflowCommand("decide workflow_ab /review/approve")).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "/review/approve",
+		});
+		// A reason still requires a decision: the token after the task key is
+		// read as the JSON decision, so a bare reason is a JSON error.
+		expect(() =>
+			parseWorkflowCommand("decide workflow_ab approve looks good"),
+		).toThrow(CHECKPOINT_DECISION_INVALID_JSON_MESSAGE);
+	});
+
+	it("routes decide to the form or the confirm and refuses a session without dialogs", () => {
+		const parseDecide = (args: string) => {
+			const parsed = parseWorkflowCommand(args);
+			if (parsed.kind !== "decide") throw new Error(`not decide: ${args}`);
+			return parsed;
+		};
+		const withJson = parseDecide("decide workflow_ab approve true");
+		const withoutJson = parseDecide("decide workflow_ab approve");
+		expect(checkpointDecisionMode(withJson, true)).toBe("confirm");
+		expect(checkpointDecisionMode(withoutJson, true)).toBe("form");
+		// A decision is a human act; without dialogs nothing is recorded.
+		for (const parsed of [withJson, withoutJson]) {
+			expect(() => checkpointDecisionMode(parsed, false)).toThrow(
+				CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE,
+			);
+			expect(() => checkpointDecisionMode(parsed, false)).toThrow(
+				WorkflowCommandError,
+			);
+		}
+		expect(CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE).toBe(
+			"Checkpoint decisions require an interactive Pi session.",
+		);
 	});
 
 	it("parses approve and reject with a dynamic ref and an optional reason", () => {
@@ -476,7 +533,7 @@ describe("/workflow grammar", () => {
 			expect(resume).toThrow(/^Unknown workflow command: resume\./);
 		}
 		expect(() => parseWorkflowCommand("decide workflow_ab")).toThrow(
-			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
+			DECIDE_USAGE_MESSAGE,
 		);
 	});
 
@@ -1080,18 +1137,15 @@ describe("checkpoint decide dispatch", () => {
 		});
 		await expect(
 			performRunAction(service, { action: "decide", run }),
-		).rejects.toThrow(
-			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
-		);
+		).rejects.toThrow(DECIDE_USAGE_MESSAGE);
+		// A missing decision with no form to collect one records nothing.
 		await expect(
 			performRunAction(service, {
 				action: "decide",
 				run,
 				taskId: "task_approve",
 			}),
-		).rejects.toThrow(
-			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
-		);
+		).rejects.toThrow(DECIDE_USAGE_MESSAGE);
 		expect(decide).not.toHaveBeenCalled();
 		await expect(
 			performRunAction(service, {
@@ -1142,6 +1196,90 @@ describe("checkpoint decide dispatch", () => {
 				decision: 1,
 			}),
 		).rejects.toThrow("Checkpoint decision does not match its schema.");
+	});
+
+	it("hands a decide without a decision to the injected guided form", async () => {
+		const decide = vi.fn(async () => view("running"));
+		const service = fakeService({ decide });
+		const run = summary("waiting", {
+			availableActions: ["stop", "wait", "decide"],
+			pendingCheckpointCount: 1,
+		});
+		const request = {
+			action: "decide",
+			run,
+			taskId: "task_approve",
+			taskKey: "review/approve",
+		} as const;
+		// The form asks the session user and records the decision itself, so
+		// the dispatcher never calls `decide` a second time.
+		const collectDecision = vi.fn(
+			async () => ({ view: { status: "running" } }) as const,
+		);
+		await expect(
+			performRunAction(service, request, { collectDecision }),
+		).resolves.toEqual({
+			message:
+				"decide accepted for workflow_abcdef0123: review/approve decided; run is running.",
+			level: "info",
+		});
+		expect(collectDecision).toHaveBeenCalledTimes(1);
+		expect(decide).not.toHaveBeenCalled();
+		// A dismissed dialog or a declined confirm records nothing.
+		const dismissed = vi.fn(async () => undefined);
+		await expect(
+			performRunAction(service, request, { collectDecision: dismissed }),
+		).resolves.toEqual({
+			message: CHECKPOINT_DECISION_CANCELLED_MESSAGE,
+			level: "info",
+		});
+		expect(CHECKPOINT_DECISION_CANCELLED_MESSAGE).toBe("No decision recorded.");
+		expect(decide).not.toHaveBeenCalled();
+		// Legality is still read from availableActions, before the form opens.
+		await expect(
+			performRunAction(
+				service,
+				{ ...request, run: summary("waiting", { availableActions: ["wait"] }) },
+				{ collectDecision },
+			),
+		).rejects.toThrow("decide is unavailable while the run is waiting.");
+		expect(collectDecision).toHaveBeenCalledTimes(1);
+		// With `<json>` the path is unchanged: the form is never consulted.
+		await expect(
+			performRunAction(
+				service,
+				{ ...request, decision: { proceed: true } },
+				{ collectDecision },
+			),
+		).resolves.toEqual({
+			message:
+				"decide accepted for workflow_abcdef0123: review/approve decided; run is running.",
+			level: "info",
+		});
+		expect(collectDecision).toHaveBeenCalledTimes(1);
+		expect(decide).toHaveBeenLastCalledWith(
+			"workflow_abcdef0123",
+			"task_approve",
+			{
+				decision: { proceed: true },
+				approver: DEFAULT_DECIDE_APPROVER,
+			},
+		);
+		// An explicitly undefined decision is no decision: no JSON document
+		// produces one, so the form answers that too.
+		await expect(
+			performRunAction(
+				service,
+				{ ...request, decision: undefined },
+				{ collectDecision },
+			),
+		).resolves.toEqual({
+			message:
+				"decide accepted for workflow_abcdef0123: review/approve decided; run is running.",
+			level: "info",
+		});
+		expect(collectDecision).toHaveBeenCalledTimes(2);
+		expect(decide).toHaveBeenCalledTimes(1);
 	});
 });
 

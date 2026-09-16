@@ -19,6 +19,7 @@ import type {
 	WorkflowLogEntry,
 	WorkflowLogPage,
 	WorkflowRunSummary,
+	WorkflowServiceRunView,
 	WorkflowServiceTaskView,
 } from "../service-views.js";
 import { normalizeTaskKey, taskPath } from "./format.js";
@@ -98,6 +99,15 @@ export const SOURCE_DECISION_REQUIRES_UI_MESSAGE =
 	"Dynamic workflow approval requires an interactive Pi session.";
 export const CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE =
 	"Checkpoint decisions require an interactive Pi session.";
+/** A dismissed guided form, exactly like a declined confirm: nothing recorded. */
+export const CHECKPOINT_DECISION_CANCELLED_MESSAGE = "No decision recorded.";
+/**
+ * `<json>` is optional: omitted, the guided form asks the session user. A
+ * `[reason]` can only follow a decision, because the tokens after the task key
+ * are read as `<json> [reason]`.
+ */
+export const DECIDE_USAGE_MESSAGE =
+	"Usage: /workflow decide <run-prefix> <task-key> [json] [reason]";
 export const SOURCE_DECISION_CANCELLED_MESSAGE = "No decision recorded.";
 
 export type ParsedWorkflowCommand =
@@ -118,7 +128,8 @@ export type ParsedWorkflowCommand =
 			kind: "decide";
 			runPrefix: string;
 			taskKey: string;
-			decision: unknown;
+			/** Absent when the guided form collects the decision instead. */
+			decision?: unknown;
 			reason?: string;
 	  }
 	| { kind: SourceDecisionKind; ref: string; reason?: string };
@@ -362,11 +373,10 @@ export function parseWorkflowCommand(args: string): ParsedWorkflowCommand {
 			// Re-tokenised with quoting so the JSON decision is one token; the
 			// decision is parsed here, before any run is resolved.
 			const [, , taskKey, json, ...reason] = splitQuoted(trimmed);
-			if (!taskKey || !json) {
-				usage(
-					"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
-				);
-			}
+			if (!taskKey) usage(DECIDE_USAGE_MESSAGE);
+			// Without `<json>` the decision comes from the guided form, which
+			// needs a dialog; the caller refuses a session without one.
+			if (json === undefined) return { kind: "decide", runPrefix, taskKey };
 			const decision = parseCheckpointDecision(json);
 			return reason.length > 0
 				? {
@@ -589,6 +599,33 @@ export function actionUnavailableMessage(
 		: `${action} is unavailable while the run is ${run.status}.`;
 }
 
+/** The `CheckpointDecisionOutcome` of `./checkpoint-form.js`, structurally. */
+export interface CollectedCheckpointDecision {
+	/** The run view `service.decide` returned; the form recorded it. */
+	readonly view: Pick<WorkflowServiceRunView, "status">;
+}
+
+/**
+ * The guided checkpoint form, already bound to the session context, the run
+ * and the resolved checkpoint task by the caller: `collectCheckpointDecision`
+ * from `./checkpoint-form.js` as `src/extension.ts` closes over it. It asks
+ * the session user field by field, records the decision through
+ * `service.decide` itself, and resolves with what it recorded - or with
+ * `undefined` when the user dismissed a dialog, declined the final confirm, or
+ * the service refused in a way the form cannot fix. Nothing is recorded then.
+ *
+ * Declared structurally so this module keeps its promise never to touch an
+ * extension context, and so a test can pass a fake in one line.
+ */
+export type CollectCheckpointDecision = () => Promise<
+	CollectedCheckpointDecision | undefined
+>;
+
+export interface PerformRunActionOptions {
+	/** Answers a `decide` whose `<json>` was omitted; see the type above. */
+	readonly collectDecision?: CollectCheckpointDecision;
+}
+
 export interface ActionRequest {
 	readonly action: OperatorAction;
 	readonly run: WorkflowRunSummary;
@@ -599,7 +636,11 @@ export interface ActionRequest {
 	readonly timeoutMs?: number;
 	/** Closure already fetched for the confirmation dialog. */
 	readonly preview?: WorkflowInvalidationPreview;
-	/** The parsed checkpoint decision (`decide`). */
+	/**
+	 * The parsed checkpoint decision (`decide`). Absent - or explicitly
+	 * `undefined`, which no JSON document can produce - when the guided form
+	 * collects it instead.
+	 */
 	readonly decision?: unknown;
 	/** The session identity recording a decision; never an argument. */
 	readonly approver?: string;
@@ -608,6 +649,36 @@ export interface ActionRequest {
 export interface ActionOutcome {
 	readonly message: string;
 	readonly level: "info" | "warning";
+}
+
+/**
+ * Whether the request carries a decision to record. `undefined` is not a JSON
+ * value, so an explicitly `undefined` `decision` means "ask the form", exactly
+ * like an absent property.
+ */
+function hasDecision(request: ActionRequest): boolean {
+	return "decision" in request && request.decision !== undefined;
+}
+
+/**
+ * How a parsed `/workflow decide` is answered. With `<json>` the caller shows
+ * the fixed confirmation and records the parsed decision (`"confirm"`);
+ * without it the guided form asks the session user field by field and
+ * confirms for itself (`"form"`), so the caller must not confirm an undecided
+ * value first. Either way a checkpoint decision is a human act and needs
+ * dialogs: a session without a UI is refused before any run is resolved,
+ * exactly as it was when `<json>` was mandatory.
+ */
+export function checkpointDecisionMode(
+	parsed: Extract<ParsedWorkflowCommand, { kind: "decide" }>,
+	hasUI: boolean,
+): "confirm" | "form" {
+	if (!hasUI) {
+		throw new WorkflowCommandError(CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE);
+	}
+	return "decision" in parsed && parsed.decision !== undefined
+		? "confirm"
+		: "form";
 }
 
 /** A service method that a build may not ship, looked up at call time. */
@@ -623,6 +694,7 @@ function implemented(service: object, name: string): boolean {
 export async function performRunAction(
 	service: WorkflowService,
 	request: ActionRequest,
+	options: PerformRunActionOptions = {},
 ): Promise<ActionOutcome> {
 	const { action, run } = request;
 	const { runId } = run;
@@ -718,10 +790,21 @@ export async function performRunAction(
 			};
 		}
 		case "decide": {
-			if (!request.taskId || !("decision" in request)) {
-				usage(
-					"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
-				);
+			if (!request.taskId) usage(DECIDE_USAGE_MESSAGE);
+			const decided = `decide accepted for ${runId}: ${request.taskKey ?? request.taskId} decided`;
+			if (!hasDecision(request)) {
+				// `/workflow decide` without `<json>`, and the inspector's decide
+				// entry: the guided form asks the session user and records the
+				// decision itself, so nothing is re-validated or re-recorded here.
+				const { collectDecision } = options;
+				if (!collectDecision) usage(DECIDE_USAGE_MESSAGE);
+				const collected = await collectDecision();
+				return collected
+					? {
+							message: `${decided}; run is ${collected.view.status}.`,
+							level: "info",
+						}
+					: { message: CHECKPOINT_DECISION_CANCELLED_MESSAGE, level: "info" };
 			}
 			// The service validates the decision against the checkpoint schema
 			// and refuses a task that is not awaiting one; nothing is re-derived.
@@ -730,10 +813,7 @@ export async function performRunAction(
 				approver: request.approver ?? DEFAULT_DECIDE_APPROVER,
 				...(request.reason ? { reason: request.reason } : {}),
 			});
-			return {
-				message: `decide accepted for ${runId}: ${request.taskKey ?? request.taskId} decided; run is ${view.status}.`,
-				level: "info",
-			};
+			return { message: `${decided}; run is ${view.status}.`, level: "info" };
 		}
 	}
 }

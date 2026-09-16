@@ -20,6 +20,7 @@ import {
 	detailBody,
 	formatRunDetail,
 	formatRunList,
+	INSPECTOR_ACTION_LABELS,
 	type InspectorData,
 	type InspectorEffect,
 	type InspectorKey,
@@ -276,7 +277,7 @@ function doneIntent(effects: readonly InspectorEffect[]) {
 }
 
 describe("inspector action palette", () => {
-	it("mirrors availableActions minus wait and decide, never re-deriving legality", () => {
+	it("mirrors availableActions minus wait, never re-deriving legality", () => {
 		expect(
 			paletteActions(
 				summary("failed", {
@@ -284,6 +285,15 @@ describe("inspector action palette", () => {
 				}),
 			),
 		).toEqual(["stop", "reconcile", "invalidate"]);
+		// `decide` is offered exactly while the service offers it.
+		expect(
+			paletteActions(
+				summary("waiting", {
+					availableActions: ["wait", "stop", "decide"],
+					pendingCheckpointCount: 1,
+				}),
+			),
+		).toEqual(["stop", "decide"]);
 		expect(paletteActions(summary("failed"))).toEqual([]);
 		expect(
 			paletteActions(
@@ -667,6 +677,252 @@ describe("inspector state machine", () => {
 		const lines = detailBody(state, ui, current, 80, PLAIN_LINE_THEME, NOW);
 		expect(lines).toContain("Leased by another Pi process · read-only");
 		expect(lines.join("\n")).toContain("leased elsewhere (no actions)");
+	});
+});
+
+describe("checkpoint decide entry", () => {
+	const decidedAt = "2026-09-15T12:04:30.000Z";
+	const checkpointTask = (
+		overrides: Partial<WorkflowServiceTaskView["checkpoint"]> = {},
+	): WorkflowServiceTaskView =>
+		task({
+			id: "task_approve",
+			namespace: ["review"],
+			key: "approve",
+			kind: "checkpoint",
+			status: "waiting",
+			executionId: "execution_approve1",
+			checkpoint: {
+				prompt: "Approve the release plan?",
+				schema: {
+					type: "object",
+					properties: {
+						proceed: { type: "boolean" },
+						note: { type: "string" },
+					},
+					required: ["proceed"],
+				},
+				headless: "block",
+				requestedAt: "2026-09-15T12:03:00.000Z",
+				expiresAt: "2026-09-15T12:30:00.000Z",
+				inputs: { plan: "Ship v2 on Friday.", risk: { level: "low" } },
+				...overrides,
+			},
+		});
+
+	/** A parked run: the checkpoint task is the last of six. */
+	const parked = (
+		checkpoint: WorkflowServiceTaskView = checkpointTask(),
+		actions: WorkflowRunSummary["availableActions"] = [
+			"wait",
+			"stop",
+			"decide",
+		],
+	) =>
+		inspection({
+			run: summary("waiting", {
+				availableActions: actions,
+				pendingCheckpointCount: 1,
+			}),
+			tasks: [...TASKS, checkpoint],
+		});
+
+	it("offers the decide entry only while availableActions carries decide", () => {
+		expect(INSPECTOR_ACTION_LABELS.decide).toBe("Decide a checkpoint");
+		const state = detailState();
+		const ui = initialInspectorUiState(state);
+		const current = data({ inspection: parked() });
+		const palette = drive(state, ui, current, ["space"]);
+		expect(currentActions(palette.state, palette.ui, current)).toEqual([
+			"stop",
+			"decide",
+		]);
+		expect(
+			actionsBody(palette.state, palette.ui, current, PLAIN_LINE_THEME),
+		).toEqual(["› Stop run", "  Decide a checkpoint"]);
+		// The same run once the service stops offering it.
+		const running = data({
+			inspection: parked(checkpointTask(), ["wait", "stop"]),
+		});
+		const without = drive(state, ui, running, ["space"]);
+		expect(currentActions(without.state, without.ui, running)).toEqual([
+			"stop",
+		]);
+		// Task scope: only the checkpoint still awaiting a decision offers it.
+		const run = parked().run;
+		expect(taskActions(run, checkpointTask())).toEqual(["decide"]);
+		expect(taskActions(run, task())).toEqual([]);
+		expect(
+			taskActions(
+				run,
+				checkpointTask({
+					decision: {
+						source: "operator",
+						decidedBy: "pi-session",
+						decidedAt,
+						sha256: "a".repeat(64),
+						value: { proceed: true },
+					},
+				}),
+			),
+		).toEqual([]);
+		// A checkpoint whose request is not durable yet is not answerable.
+		expect(
+			taskActions(run, {
+				checkpoint: {
+					prompt: "Approve the release plan?",
+					schema: { type: "boolean" },
+					headless: "block",
+				},
+			}),
+		).toEqual([]);
+	});
+
+	it("picks the waiting checkpoint and resolves a decide intent for the caller", () => {
+		const state = detailState();
+		const ui = initialInspectorUiState(state);
+		const current = data({ inspection: parked() });
+		const run = current.inspection?.run;
+		// decide is the second entry; it needs a task, so the picker opens
+		// even though the form - not the inspector - confirms the decision.
+		const picker = drive(state, ui, current, ["space", "down", "enter"]);
+		expect(picker.ui).toMatchObject({
+			screen: "task-picker",
+			pendingAction: "decide",
+			selectedTask: 5,
+		});
+		expect(doneIntent(picker.effects)).toBeUndefined();
+		expect(
+			taskPickerBody(
+				picker.state,
+				picker.ui,
+				current,
+				100,
+				PLAIN_LINE_THEME,
+			)[0],
+		).toContain("only a checkpoint awaiting a decision can be selected");
+		// A task with no pending checkpoint is visible but never selectable.
+		const other = drive(picker.state, picker.ui, current, ["up", "enter"]);
+		expect(other.ui.screen).toBe("task-picker");
+		expect(other.ui.pendingTaskId).toBeUndefined();
+		expect(doneIntent(other.effects)).toBeUndefined();
+		const chosen = drive(picker.state, picker.ui, current, ["enter"]);
+		expect(doneIntent(chosen.effects)).toEqual({
+			type: "decide",
+			state: chosen.state,
+			run,
+			taskId: "task_approve",
+			request: { action: "decide", run, taskId: "task_approve" },
+		});
+		// No confirm screen: the guided form carries its own.
+		expect(chosen.ui.screen).toBe("task-picker");
+		expect(
+			chosen.effects.some((effect) => effect.type === "load-preview"),
+		).toBe(false);
+	});
+
+	it("resolves the decide intent directly from the task tab scope", () => {
+		const state = detailState();
+		const ui = initialInspectorUiState(state);
+		const current = data({ inspection: parked() });
+		const scoped = drive(state, ui, current, [
+			"right",
+			"down",
+			"down",
+			"down",
+			"down",
+			"down",
+			"enter",
+			"space",
+		]);
+		expect(scoped.ui).toMatchObject({
+			paletteScope: "task",
+			pendingTaskId: "task_approve",
+		});
+		expect(currentActions(scoped.state, scoped.ui, current)).toEqual([
+			"decide",
+		]);
+		const emitted = drive(scoped.state, scoped.ui, current, ["enter"]);
+		expect(doneIntent(emitted.effects)).toMatchObject({
+			type: "decide",
+			run: { runId: PARENT },
+			taskId: "task_approve",
+			request: { action: "decide", taskId: "task_approve" },
+		});
+	});
+
+	it("renders the pending checkpoint in the run and task detail, bounded", () => {
+		const current = data({ inspection: parked() });
+		const overview = detailBody(
+			detailState(),
+			initialInspectorUiState(detailState()),
+			current,
+			100,
+			PLAIN_LINE_THEME,
+			NOW,
+		);
+		const text = overview.join("\n");
+		expect(text).toContain("Checkpoint");
+		expect(text).toMatch(/Task key\s+review\/approve/);
+		expect(text).toContain("Approve the release plan?");
+		expect(text).toMatch(/Answer\s+\{ proceed: boolean, note\?: string \}/);
+		expect(text).toContain("plan:");
+		expect(text).toContain("  Ship v2 on Friday.");
+		expect(text).toContain('  "level": "low"');
+		for (const line of overview) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(100);
+		}
+		// A run with nothing pending says nothing about checkpoints.
+		expect(
+			detailBody(
+				detailState(),
+				initialInspectorUiState(detailState()),
+				data({ inspection: inspection() }),
+				100,
+				PLAIN_LINE_THEME,
+				NOW,
+			).join("\n"),
+		).not.toContain("Checkpoint");
+		const detail = detailBody(
+			detailState({ tab: "task", selectedTaskId: "task_approve" }),
+			initialInspectorUiState(detailState()),
+			current,
+			100,
+			PLAIN_LINE_THEME,
+			NOW,
+		).join("\n");
+		expect(detail).toContain("Approve the release plan?");
+		expect(detail).toMatch(/Answer\s+\{ proceed: boolean, note\?: string \}/);
+		expect(detail).toMatch(/Decision\s+awaiting a person · space to decide/);
+		expect(detail).toContain("Decide a checkpoint");
+		// A long prompt and large inputs are cut, never unbounded.
+		const wordy = data({
+			inspection: parked(
+				checkpointTask({
+					prompt: Array.from(
+						{ length: 40 },
+						(_, index) => `line ${index}`,
+					).join("\n"),
+					inputs: { draft: "x".repeat(8_000) },
+				}),
+			),
+		});
+		const cut = detailBody(
+			detailState({ tab: "task", selectedTaskId: "task_approve" }),
+			initialInspectorUiState(detailState()),
+			wordy,
+			100,
+			PLAIN_LINE_THEME,
+			NOW,
+		);
+		expect(cut.join("\n")).toContain("line 7");
+		expect(cut.join("\n")).not.toContain("line 8");
+		expect(cut.join("\n")).toContain("line(s) · /workflow show");
+		expect(cut.join("\n")).toContain("input cut at 2048 bytes");
+		for (const line of cut) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(100);
+		}
+		expect(cut.length).toBeLessThan(60);
 	});
 });
 
