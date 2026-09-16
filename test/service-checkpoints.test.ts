@@ -5,7 +5,10 @@ import type { SubagentClient } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkflowArtifactStore } from "../src/artifact-store.js";
+import {
+	canonicalArtifactJson,
+	WorkflowArtifactStore,
+} from "../src/artifact-store.js";
 import { CHECKPOINT_DECIDE_INSTRUCTION } from "../src/checkpoint-render.js";
 import {
 	WORKFLOW_CONTRACT_REVISION,
@@ -795,6 +798,104 @@ describe("checkpoint decisions", () => {
 			});
 		} finally {
 			await bounded(service.shutdown(), "shutdown");
+		}
+	});
+
+	it("shows the decided value on the lease-free inspection, from the decision record", async () => {
+		const fx = await fixture("inspect-decision", {
+			"inspect-decision": definition(
+				"inspect-decision",
+				decideBody(checkpointSource()),
+			),
+		});
+		const service = await serviceFor(fx);
+		let runId = "";
+		try {
+			const parkedRun = await parked(service, "inspect-decision");
+			runId = parkedRun.runId;
+			// Before the decision the inspection carries none.
+			const undecided = await service.inspect(runId, { include: ["tasks"] });
+			expect(
+				undecided.tasks?.find((task) => task.kind === "checkpoint")?.checkpoint,
+			).not.toHaveProperty("decision");
+
+			await service.decide(runId, checkpointView(parkedRun.view).id, {
+				decision: APPROVE,
+				approver: "vegard",
+				reason: "Reviewed the plan.",
+			});
+			const final = await bounded(service.wait(runId), "wait");
+			expect(final.status).toBe("completed");
+
+			const inspection = await service.inspect(runId, { include: ["tasks"] });
+			const inspected = inspection.tasks?.find(
+				(task) => task.kind === "checkpoint",
+			);
+			expect(inspected?.checkpoint?.decision).toEqual({
+				source: "operator",
+				decidedBy: "vegard",
+				reason: "Reviewed the plan.",
+				decidedAt: expect.any(String),
+				sha256: deriveJsonValueSha256(APPROVE),
+				value: APPROVE,
+			});
+			// The value came from the decision record, not from an artifact:
+			// the lease-free inspection still reads no verified inputs.
+			expect(inspected?.checkpoint?.inputs).toBeUndefined();
+			// The artifact-backed path is unchanged and agrees.
+			expect(checkpointView(final).checkpoint?.decision).toEqual(
+				inspected?.checkpoint?.decision,
+			);
+		} finally {
+			await bounded(service.shutdown(), "shutdown");
+		}
+
+		// The same run read lease-free by a service that never owned it.
+		const reader = await serviceFor(fx);
+		try {
+			const inspection = await reader.inspect(runId, { include: ["tasks"] });
+			expect(inspection.run.ownership).toBe("inactive");
+			expect(
+				inspection.tasks?.find((task) => task.kind === "checkpoint")?.checkpoint
+					?.decision?.value,
+			).toEqual(APPROVE);
+		} finally {
+			await bounded(reader.shutdown(), "reader shutdown");
+		}
+
+		// The journal stays authoritative: a record that disagrees with the
+		// journalled decision digest is refused, never shown.
+		const state = await stateOf(fx.storeRoot, runId);
+		const decisionBinding = bindingOf(state, runId);
+		const tampered = {
+			...(await readRecord(fx.storeRoot, runId, decisionBinding)),
+			value: { proceed: false },
+			valueSha256: deriveJsonValueSha256({ proceed: false }),
+		};
+		await writeFile(
+			path.join(
+				fx.storeRoot,
+				"runs",
+				runId,
+				"decisions",
+				`${deriveDecisionBindingSha256(decisionBinding)}.json`,
+			),
+			canonicalArtifactJson(tampered),
+		);
+		const refusing = await serviceFor(fx);
+		try {
+			await expect(
+				refusing.inspect(runId, { include: ["tasks"] }),
+			).rejects.toMatchObject({
+				code: "persistence",
+				message: "Checkpoint decision could not be read and verified.",
+			});
+			// Sections that do not project tasks still read.
+			await expect(
+				refusing.inspect(runId, { include: ["run"] }),
+			).resolves.toMatchObject({ run: { status: "completed" } });
+		} finally {
+			await bounded(refusing.shutdown(), "refusing shutdown");
 		}
 	});
 

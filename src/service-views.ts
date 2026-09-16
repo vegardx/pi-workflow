@@ -165,6 +165,15 @@ export const WorkflowRunSummarySchema = Type.Object(
 		/** On-path checkpoints awaiting a decision; `decide` is offered while it is positive. */
 		pendingCheckpointCount: CountSchema,
 		outputArtifactId: Type.Optional(WorkflowArtifactIdSchema),
+		/**
+		 * The run's committed output value, read and digest-verified from the
+		 * output artifact. Present only on an inspection whose `include`
+		 * carries `"output"`, and only once the run is terminal and has
+		 * committed one; `listRuns` never carries it. Bounded by the artifact
+		 * bound `MAX_WORKFLOW_ARTIFACT_BYTES` (16 MiB), which the store
+		 * enforces on the write and re-checks on the read.
+		 */
+		output: Type.Optional(Type.Unknown()),
 	},
 	{ additionalProperties: false },
 );
@@ -260,7 +269,13 @@ export const WorkflowCheckpointDecisionViewSchema = Type.Object(
 		reason: Type.Optional(FixedStringSchema),
 		/** Canonical digest of the decision value (the result artifact's `sha256`). */
 		sha256: Sha256Schema,
-		/** The verified decision value; artifact-backed views only. */
+		/**
+		 * The verified decision value. Artifact-backed views (status, wait,
+		 * decide) read it from the decision result artifact; the lease-free
+		 * inspection reads it from the durable decision record and shows it
+		 * only when the record's `valueSha256` equals the journalled
+		 * `sha256`, so the journal stays authoritative either way.
+		 */
 		value: Type.Optional(Type.Unknown()),
 	},
 	{ additionalProperties: false },
@@ -549,6 +564,8 @@ export const WorkflowInspectSectionSchema = Type.Union([
 	Type.Literal("effects"),
 	Type.Literal("barriers"),
 	Type.Literal("artifacts"),
+	/** The completed run's output value, on `run.output`. */
+	Type.Literal("output"),
 ]);
 export type WorkflowInspectSection = Static<
 	typeof WorkflowInspectSectionSchema
@@ -559,7 +576,7 @@ export const WorkflowInspectOptionsSchema = Type.Object(
 		include: Type.Optional(
 			Type.Array(WorkflowInspectSectionSchema, {
 				minItems: 1,
-				maxItems: 7,
+				maxItems: 8,
 				uniqueItems: true,
 			}),
 		),

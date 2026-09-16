@@ -186,6 +186,66 @@ async function fanOutService(): Promise<WorkflowService> {
 	return service;
 }
 
+/**
+ * The smallest shape pi-maestro publishes from: one `ship` gate and a receipt
+ * naming the plan digest it was approved against.
+ */
+const PLAN_DIGEST = "9".repeat(64);
+const SHIP_DEFINITION = `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "ship-example", description: "One ship gate and a receipt.", version: 1, budget: { cost: 10, childRuntimeMs: 600000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { receipt: { type: "object", properties: { planDigest: { type: "string" } }, required: ["planDigest"], additionalProperties: false } }, required: ["receipt"], additionalProperties: false },
+  async run(ctx) {
+    const gate = ctx.checkpoint("ship", {
+      schema: { type: "object", properties: { ship: { type: "boolean" } }, required: ["ship"], additionalProperties: false },
+      prompt: "Ship the approved plan?",
+      headless: "block",
+      timeoutMs: 600000,
+    });
+    const decision = await ctx.result(gate);
+    if (!decision.ship) throw new Error("not shipped");
+    return { receipt: { planDigest: ${JSON.stringify(PLAN_DIGEST)} } };
+  },
+};
+`;
+
+/** A service over a project root carrying `SHIP_DEFINITION`. */
+async function shipService(): Promise<WorkflowService> {
+	const base = await mkdtemp(path.join(os.tmpdir(), "pi-workflow-ship-"));
+	bases.push(base);
+	const cwd = path.join(base, "project");
+	await mkdir(path.join(cwd, "workflows"), { recursive: true });
+	await writeFile(
+		path.join(cwd, "workflows", "ship.workflow.ts"),
+		SHIP_DEFINITION,
+	);
+	const service = await createWorkflowService({
+		cwd,
+		agentDir: path.join(base, "agent"),
+		storeRoot: path.join(cwd, ".pi", "workflow"),
+		projectTrusted: () => true,
+		subagents: {
+			// A checkpoint workflow launches nothing, so a binding whose every
+			// call throws proves no agent task was ever reached.
+			bind: async (runId) => ({
+				workflowRunId: runId,
+				ownerId: `pi-workflow:${runId}`,
+				client: new Proxy(
+					{},
+					{
+						get: () => () => {
+							throw new Error("unexpected subagent call");
+						},
+					},
+				) as never,
+			}),
+		},
+	});
+	services.push(service);
+	return service;
+}
+
 function plan(deliverables: number, lenses: readonly string[] = ["contracts"]) {
 	return {
 		slug: "sample-plan",
@@ -754,6 +814,59 @@ describe("the headless allowlist's structural safety property", () => {
 		await expect(
 			headlessBuiltinViolations(definition, planInput()),
 		).resolves.toEqual(["checkpoint", "worktree", "handoff"]);
+	});
+});
+
+describe("inspect through the read client", () => {
+	// What pi-maestro's publication reader needs from a settled run, end to
+	// end through the real service: the receipt at `run.output`, and the
+	// `ship` gate's decided value, with no lease and without `decide`.
+	it("reads a settled run's output and a checkpoint's decided value", async () => {
+		const service = await shipService();
+		const { client } = await acquire(service);
+		const receipt = await service.run("ship-example", {});
+		const parked = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		expect(parked).toMatchObject({ status: "waiting", parked: true });
+
+		// Before the decision the client sees the gate pending and no output.
+		const pending = await client.inspect(receipt.runId, {
+			include: ["run", "tasks", "output"],
+		});
+		expect(pending.run).not.toHaveProperty("output");
+		const gate = pending.tasks?.find((task) => task.kind === "checkpoint");
+		expect(gate?.checkpoint).not.toHaveProperty("decision");
+
+		// Deciding stays the operator's own call; the client never gets one.
+		expect(client).not.toHaveProperty("decide");
+		await service.decide(receipt.runId, gate?.id ?? "", {
+			decision: { ship: true },
+			approver: "human:vegard",
+		});
+		await expect(
+			service.wait(receipt.runId, { timeoutMs: 30_000 }),
+		).resolves.toMatchObject({ status: "completed" });
+
+		const inspection = await client.inspect(receipt.runId, {
+			include: ["run", "tasks", "output"],
+		});
+		expect(inspection.run.status).toBe("completed");
+		expect(inspection.run.output).toEqual({
+			receipt: { planDigest: PLAN_DIGEST },
+		});
+		const decided = inspection.tasks?.find(
+			(task) => task.kind === "checkpoint",
+		);
+		expect(decided?.checkpoint?.decision).toMatchObject({
+			source: "operator",
+			decidedBy: "human:vegard",
+			value: { ship: true },
+		});
+
+		// Asking for neither section leaves both out, so the default read is
+		// unchanged for every consumer that does not want them.
+		const lean = await client.inspect(receipt.runId, { include: ["run"] });
+		expect(lean.run).not.toHaveProperty("output");
+		expect(lean).not.toHaveProperty("tasks");
 	});
 });
 

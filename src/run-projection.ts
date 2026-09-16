@@ -126,6 +126,12 @@ export interface TaskViewOptions {
 	 * `MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH`, artifact-backed views omit it.
 	 */
 	readonly promptLimit?: number;
+	/**
+	 * Decided checkpoint values by task id, already read and verified against
+	 * the journalled decision digest by the caller. A projection reads no
+	 * file, so a caller that passes none leaves `decision.value` absent.
+	 */
+	readonly decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
 }
 
 /** A frozen deep copy of a persisted JSON value for a view. */
@@ -136,13 +142,15 @@ function frozenJson<T>(value: T): T {
 /**
  * The checkpoint facts of a checkpoint task: its request from the persisted
  * spec, and its durable request and decision from the current execution's
- * projection (C12 timestamps). Verified inputs and the decision value are
- * artifact-backed and added by the service; the decision store is never read.
+ * projection (C12 timestamps). Verified inputs are artifact-backed and added
+ * by the service; a decided value is whatever the caller already read and
+ * verified, because a projection opens no store of its own.
  */
 function checkpointTaskView(
 	state: WorkflowStateProjection,
 	task: WorkflowTaskProjection,
 	promptLimit: number | undefined,
+	decisionValues: ReadonlyMap<WorkflowTaskId, unknown> | undefined,
 ): WorkflowCheckpointTaskView | undefined {
 	const spec = task.task.spec;
 	if (spec.kind !== "checkpoint") return undefined;
@@ -180,6 +188,9 @@ function checkpointTaskView(
 							? {}
 							: { reason: decision.reason }),
 						sha256: decision.decisionSha256,
+						...(decisionValues?.has(task.task.id)
+							? { value: frozenJson(decisionValues.get(task.task.id)) }
+							: {}),
 					}),
 				}
 			: {}),
@@ -336,7 +347,12 @@ export function taskViews(
 			const outcome: TaskExecutionOutcome | undefined =
 				execution?.terminal?.outcome;
 			const handoff = taskHandoffView(state, task);
-			const checkpoint = checkpointTaskView(state, task, options.promptLimit);
+			const checkpoint = checkpointTaskView(
+				state,
+				task,
+				options.promptLimit,
+				options.decisionValues,
+			);
 			return Object.freeze({
 				id: task.task.id,
 				namespace: Object.freeze([...task.task.namespace]),
@@ -680,6 +696,15 @@ export interface RunInspectionOptions {
 	readonly include?: readonly WorkflowInspectSection[];
 	/** Restricts tasks, executions, and artifacts to one task. */
 	readonly taskId?: WorkflowTaskId;
+	/**
+	 * The run's committed output, already read and digest-verified from the
+	 * output artifact by the caller. It becomes `run.output` when `include`
+	 * carries `"output"`; a projection reads no artifact, so a caller that
+	 * passes none leaves `run.output` absent.
+	 */
+	readonly output?: unknown;
+	/** Decided checkpoint values by task id; see {@link TaskViewOptions}. */
+	readonly decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
 }
 
 export function runInspection(
@@ -712,12 +737,21 @@ export function runInspection(
 		run: runSummary(record, state, events, ownership, driving, now),
 		truncated,
 	};
+	if (include.has("output") && options.output !== undefined) {
+		inspection.run = Object.freeze({
+			...inspection.run,
+			output: frozenJson(options.output),
+		});
+	}
 	if (include.has("budget")) inspection.budget = budgetView(record, state);
 	if (include.has("tasks")) {
 		const views = state
 			? taskViews(state, {
 					graph: true,
 					promptLimit: MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
+					...(options.decisionValues
+						? { decisionValues: options.decisionValues }
+						: {}),
 				})
 			: [];
 		inspection.tasks = Object.freeze(

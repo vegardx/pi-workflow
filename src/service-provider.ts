@@ -61,11 +61,16 @@ export type {
 } from "./service.js";
 export type {
 	WorkflowBudgetProjection,
+	WorkflowCheckpointDecisionView,
+	WorkflowCheckpointTaskView,
 	WorkflowInspectOptions,
+	WorkflowInspectSection,
 	WorkflowRunInspection,
 	WorkflowRunObservation,
 	WorkflowRunPage,
 	WorkflowRunQuery,
+	WorkflowRunSummary,
+	WorkflowServiceTaskView,
 	WorkflowServiceWaitView,
 	WorkflowWaitOptions,
 } from "./service-views.js";
@@ -117,7 +122,14 @@ export interface WorkflowReadClient {
 	validate(ref: string, input?: unknown): Promise<WorkflowValidationResult>;
 	/** Lease-free budget projection (spec 2.4); static refs only. */
 	project(ref: string, input: unknown): Promise<WorkflowBudgetProjection>;
-	/** Lease-free bounded projection of one run. */
+	/**
+	 * Lease-free bounded projection of one run. `include: ["output"]` adds a
+	 * terminal run's committed output at `run.output`, and every projected
+	 * checkpoint task carries its decided value at
+	 * `tasks[].checkpoint.decision.value` once the decision is durable - so a
+	 * consumer can read a run's result and prove a decision without a lease
+	 * and without `decide`.
+	 */
 	inspect(
 		runId: WorkflowRunId,
 		options?: WorkflowInspectOptions,
