@@ -38,7 +38,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 18 as const,
+			contractRevision: 19 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -65,7 +65,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const root = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 18 as const,
+			contractRevision: 19 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -122,7 +122,7 @@ describe("workflow run record", () => {
 			}),
 		).rejects.toThrow("invalid workflow run record");
 		await expect(
-			store.create({ ...root, contractRevision: 17 as unknown as 18 }),
+			store.create({ ...root, contractRevision: 18 as unknown as 19 }),
 		).rejects.toThrow("invalid workflow run record");
 		const nested = { ...root, depth: 1, parent };
 		await store.create(nested);
@@ -140,7 +140,7 @@ describe("workflow run record", () => {
 		};
 		const nested = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 18 as const,
+			contractRevision: 19 as const,
 			runId: "workflow_record" as const,
 			depth: 1,
 			parent,
@@ -217,7 +217,7 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 18,
+				contractRevision: 19,
 				runId: "workflow_record",
 				depth: 0,
 				definitionName: "example",
@@ -242,7 +242,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const base = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 18 as const,
+			contractRevision: 19 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -335,7 +335,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const persisted = {
 			schema: "pi-workflow-run",
-			contractRevision: 18,
+			contractRevision: 19,
 			runId: "workflow_record",
 			depth: 0,
 			definitionName: "example",

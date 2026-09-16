@@ -184,7 +184,7 @@ export function attemptProvider(script: Script) {
 				mountPolicySha256: SHA,
 				networkPolicySha256: SHA,
 				capacityPolicySha256: SHA,
-				memoryBytes: 536870912,
+				memoryBytes: request.memoryBytes ?? 536_870_912,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: 0,
 			},

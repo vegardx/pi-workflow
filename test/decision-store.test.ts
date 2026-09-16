@@ -109,7 +109,7 @@ describe("workflow decision record schema", () => {
 		expect(WorkflowDecisionRecordSchema.properties.contractRevision.const).toBe(
 			WORKFLOW_CONTRACT_REVISION,
 		);
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(18);
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(19);
 		expect(WorkflowDecisionRecordSchema.properties.schema.const).toBe(
 			"pi-workflow-decision",
 		);
@@ -247,7 +247,7 @@ describe("workflow decision record store", () => {
 		const { store } = await openStore();
 		const invalid = "invalid workflow decision record";
 		await expect(
-			store.put(recordWith({ contractRevision: 17 })),
+			store.put(recordWith({ contractRevision: 18 })),
 		).rejects.toThrow(invalid);
 		await expect(
 			store.put(recordWith({ schema: "pi-workflow-run" })),
@@ -371,7 +371,7 @@ describe("workflow decision record store", () => {
 		);
 		await writeFile(
 			target,
-			canonicalArtifactJson({ ...record, contractRevision: 17 }),
+			canonicalArtifactJson({ ...record, contractRevision: 18 }),
 		);
 		await expect(store.read(binding)).rejects.toThrow(
 			"invalid workflow decision record",
@@ -478,7 +478,7 @@ describe("workflow decision record store", () => {
 	it("names its errors", async () => {
 		const { store } = await openStore();
 		const error = await store
-			.put(recordWith({ contractRevision: 17 }))
+			.put(recordWith({ contractRevision: 18 }))
 			.catch((caught: unknown) => caught);
 		expect(error).toBeInstanceOf(WorkflowDecisionRecordError);
 		expect((error as Error).name).toBe("WorkflowDecisionRecordError");

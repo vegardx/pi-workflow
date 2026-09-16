@@ -431,10 +431,10 @@ describe("package entry points", () => {
 			"../compatibility.json",
 		);
 		const api = compatibility.piWorkflow.api;
-		// 1.1.0: additive only (the optional checkpoint prompt view fields, the
-		// optional registeredRoots option, and the package's builtin workflow
-		// root); the major, and every frozen shape below, is unchanged.
-		expect(api.version).toBe("1.1.0");
+		// 2.0.0: the revision-19 bump refuses revision-18 persisted state, which
+		// the stability policy makes a major. Every frozen shape below is
+		// unchanged; `AgentTaskRequestSchema` only gained optional `memoryBytes`.
+		expect(api.version).toBe("2.0.0");
 		expect(majorOf(api.version)).toBe(majorOf(packageJson.version));
 		expect(api.frozenSurfaces).toEqual([
 			"authoring",

@@ -178,7 +178,7 @@ function childIds(nonce: string, launch: number): FakeChild {
 function worktreeRecord(child: FakeChild, captured: boolean): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 6,
+		contractRevision: 7,
 		runId: child.runId,
 		attemptId: child.attemptId,
 		repositoryRoot: PRIVATE_REPO,
@@ -318,7 +318,7 @@ function worktreeProvider(options: WorktreeProviderOptions) {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
-				memoryBytes: 536870912,
+				memoryBytes: request.memoryBytes ?? 536_870_912,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: request.limits.workspaceWriteBytes,
 			},

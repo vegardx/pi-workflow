@@ -125,7 +125,7 @@ function launchPlan(
 			mountPolicySha256: hash,
 			networkPolicySha256: hash,
 			capacityPolicySha256: hash,
-			memoryBytes: 512 * 1024 * 1024,
+			memoryBytes: request.memoryBytes ?? 536_870_912,
 			guestDiskBytes: 1024,
 			workspaceWriteBytes: request.limits.workspaceWriteBytes,
 		},
@@ -234,7 +234,43 @@ function worktreeDeclaration(event: WorkflowEventInput): WorkflowEventInput {
 	};
 }
 
-async function readyJournal(workspace: "read-only" | "worktree" = "read-only") {
+/** Re-declares the agent task with a `memoryBytes` grant, identity included. */
+function memoryDeclaration(
+	event: WorkflowEventInput,
+	memoryBytes: number,
+): WorkflowEventInput {
+	if (event.type !== "task-declared" || !isAgentDeclaration(event.data.task)) {
+		return event;
+	}
+	const task: MaterializedAgentTask = event.data.task;
+	const { identitySha256: _identity, ...spec } = task.spec;
+	const withGrant: Omit<AgentTaskSpec, "identitySha256"> = {
+		...spec,
+		request: { ...structuredClone(spec.request), memoryBytes },
+	};
+	return {
+		type: "task-declared",
+		data: {
+			task: {
+				...task,
+				spec: {
+					...withGrant,
+					identitySha256: deriveAgentTaskIdentity({
+						definitionIdentitySha256,
+						inputSha256,
+						namespace: task.namespace,
+						spec: withGrant,
+					}),
+				},
+			},
+		},
+	};
+}
+
+async function readyJournal(
+	workspace: "read-only" | "worktree" = "read-only",
+	memoryBytes?: number,
+) {
 	const root = path.resolve(".pi", "test-task-launcher", `run-${randomUUID()}`);
 	const lease = await acquireWorkflowRunLease({
 		storeRoot: root,
@@ -258,8 +294,12 @@ async function readyJournal(workspace: "read-only" | "worktree" = "read-only") {
 	});
 	const task = materializer.agent("answer", request());
 	for (const event of materializer.closeEpoch("final", [task]).events) {
+		const declared =
+			workspace === "worktree" ? worktreeDeclaration(event) : event;
 		await journal.appendEvent(
-			workspace === "worktree" ? worktreeDeclaration(event) : event,
+			memoryBytes === undefined
+				? declared
+				: memoryDeclaration(declared, memoryBytes),
 		);
 	}
 	await journal.append("run-status-changed", {
@@ -680,6 +720,114 @@ describe("workflow task launcher", () => {
 			workspaceMode: "worktree",
 			workspaceBaselineSha256: baselineSha256,
 		});
+	});
+
+	const launchReceipt = async (): Promise<RunReceipt> => ({
+		runId: "run_launcher",
+		attemptId: "attempt_launcher",
+		status: "active",
+	});
+
+	// Revision 19: the guest memory grant.
+	it("lowers a declared memoryBytes and omits the key when none was declared", async () => {
+		const granted = await readyJournal("read-only", 2 * 1024 * 1024 * 1024);
+		const grantedPreflight = vi.fn(async (input: SubagentRequest) =>
+			preflight(input, "pi-workflow:workflow_launcher"),
+		);
+		await createWorkflowTaskLauncher({
+			journal: granted.journal,
+			binding: binding(
+				client({ preflight: grantedPreflight, launch: launchReceipt }),
+			),
+		}).launch(granted.taskId);
+		expect(grantedPreflight.mock.calls[0]?.[0]?.memoryBytes).toBe(
+			2 * 1024 * 1024 * 1024,
+		);
+
+		const plain = await readyJournal();
+		const plainPreflight = vi.fn(async (input: SubagentRequest) =>
+			preflight(input, "pi-workflow:workflow_launcher"),
+		);
+		await createWorkflowTaskLauncher({
+			journal: plain.journal,
+			binding: binding(
+				client({ preflight: plainPreflight, launch: launchReceipt }),
+			),
+		}).launch(plain.taskId);
+		const lowered = plainPreflight.mock.calls[0]?.[0];
+		if (!lowered) throw new Error("missing lowered request");
+		// Absent, not undefined: an omitted grant means "the agent's ceiling",
+		// which only pi-subagent can resolve.
+		expect("memoryBytes" in lowered).toBe(false);
+	});
+
+	it("rejects a plan whose resolved memory differs from the requested grant", async () => {
+		const { journal, taskId } = await readyJournal(
+			"read-only",
+			2 * 1024 * 1024 * 1024,
+		);
+		const launch = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					// A plan that quietly resolved a different grant than the one the
+					// request named is not the plan this task asked for.
+					preflight: async (input) =>
+						preflight(
+							{ ...input, memoryBytes: 4 * 1024 * 1024 * 1024 },
+							"pi-workflow:workflow_launcher",
+						),
+					launch,
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "preflight",
+			// A mismatch the launcher detects locally keeps the bare prefix.
+			message: "Subagent preflight failed before launch.",
+		});
+		expect(launch).not.toHaveBeenCalled();
+	});
+
+	it("relays a pi-subagent preflight refusal unchanged", async () => {
+		const { journal, taskId } = await readyJournal(
+			"read-only",
+			4 * 1024 * 1024 * 1024,
+		);
+		const refusal = "memory request exceeds agent ceiling";
+		const launch = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					preflight: async () => {
+						throw new Error(refusal);
+					},
+					launch,
+				}),
+			),
+		});
+
+		const expected = `Subagent preflight failed before launch. ${refusal}`;
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "preflight",
+			message: expected,
+		});
+		expect(launch).not.toHaveBeenCalled();
+		const state = await projection(journal);
+		const execution = Object.values(state.executions)[0];
+		// The refusal reaches both the durable evidence and the operator-facing
+		// task failure reason, verbatim.
+		expect(execution?.terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { kind: "workflow", stage: "preflight", message: expected },
+		});
+		expect(execution?.terminal?.evidence).toMatchObject({
+			message: expect.stringContaining(refusal),
+		});
+		expect(state.tasks[taskId]?.status).toBe("failed");
 	});
 
 	it("rejects a preflight whose workspace baseline digest is malformed", async () => {

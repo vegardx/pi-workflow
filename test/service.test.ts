@@ -180,7 +180,7 @@ function taskProvider() {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
-				memoryBytes: 536870912,
+				memoryBytes: request.memoryBytes ?? 536_870_912,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: 0,
 			},
@@ -581,7 +581,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 18,
+			contractRevision: 19,
 			runId,
 			depth: 0,
 			definitionName: "pending",
@@ -1618,7 +1618,7 @@ function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
 function worktreeRecord(handoffCommit?: string): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 6,
+		contractRevision: 7,
 		runId: "run_servicechild",
 		attemptId: "attempt_servicechild",
 		repositoryRoot: "/private/repo",
