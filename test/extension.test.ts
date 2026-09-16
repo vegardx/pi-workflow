@@ -80,6 +80,7 @@ describe("workflow Pi extension", () => {
 			"workflow_invalidate",
 			"workflow_retry",
 			"workflow_resume",
+			"workflow_propose",
 		]);
 		for (const tool of tools) {
 			const declaration = WORKFLOW_TOOL_DECLARATIONS.find(

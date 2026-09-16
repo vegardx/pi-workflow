@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
 	MaterializedAgentTask,
+	MaterializedCheckpointTask,
 	MaterializedSupportTask,
 	MaterializedWorkflowTask,
 	SubagentTerminalEvidence,
@@ -27,6 +28,7 @@ import {
 	isNestedRun,
 	isReopenedTask,
 	isTerminalWorkflowRunStatus,
+	pendingCheckpoints,
 	requiresAttention,
 	resumableTasks,
 	resumeRefusal,
@@ -143,6 +145,128 @@ function supportTask(key: string, sequence: number): MaterializedSupportTask {
 		materializationSequence: sequence,
 		materializationEpoch: 1,
 		epochPosition: sequence,
+	};
+}
+
+function checkpointTask(
+	key: string,
+	sequence: number,
+	options: { timeoutMs?: number } = {},
+): MaterializedCheckpointTask {
+	return {
+		id: `task_${key}`,
+		runId: RUN_ID,
+		namespace: [],
+		spec: {
+			key,
+			kind: "checkpoint",
+			role: "task",
+			disposition: "required",
+			after: [],
+			inputs: {},
+			replay: "read-only",
+			request: {
+				schema: { type: "object" },
+				prompt: "Approve?",
+				headless: "block",
+				...(options.timeoutMs === undefined
+					? {}
+					: { timeoutMs: options.timeoutMs }),
+			},
+			identitySha256: SHA,
+		},
+		definitionIdentitySha256: SHA,
+		materializationSequence: sequence,
+		materializationEpoch: 1,
+		epochPosition: sequence,
+	};
+}
+
+type CheckpointShape =
+	| "created"
+	| "requested"
+	| "decided"
+	| "completed"
+	| "expired"
+	| "cancelled";
+
+/** A checkpoint execution at each phase of the checkpoint ladder. */
+function checkpointExecution(
+	task: MaterializedWorkflowTask,
+	generation: number,
+	shape: CheckpointShape,
+): TaskExecutionProjection {
+	const id = deriveTaskExecutionId(RUN_ID, task.id, generation);
+	const base: TaskExecutionProjection = {
+		execution: {
+			kind: "checkpoint",
+			id,
+			runId: RUN_ID,
+			taskId: task.id,
+			generation,
+			taskIdentitySha256: SHA,
+		},
+		phase: "created",
+		createdSequence: 10 * generation,
+	};
+	if (shape === "created") return base;
+	const requested: TaskExecutionProjection = {
+		...base,
+		phase: "checkpoint-requested",
+		checkpointRequest: {
+			inputsSha256: SHA,
+			expiresAt: "2099-01-01T01:00:00.000Z",
+			requestedAt: "2026-09-15T12:00:00.000Z",
+			sequence: 10 * generation + 1,
+		},
+	};
+	if (shape === "requested") return requested;
+	if (shape === "expired" || shape === "cancelled") {
+		return {
+			...requested,
+			phase: "terminal",
+			terminal: {
+				outcome: shape === "expired" ? "failed" : "cancelled",
+				evidence: {
+					kind: "workflow",
+					stage: shape === "expired" ? "checkpoint-expired" : "stop",
+					failureSha256: SHA,
+					message:
+						shape === "expired"
+							? "Checkpoint expired without a decision."
+							: "Workflow stop requested.",
+				},
+				sequence: 10 * generation + 2,
+			},
+		};
+	}
+	const decided: TaskExecutionProjection = {
+		...requested,
+		phase: "checkpoint-decided",
+		checkpointDecision: {
+			artifactId: `artifact_${SHA}`,
+			decisionSha256: SHA,
+			source: "operator",
+			decidedBy: "vegard",
+			decidedAt: "2026-09-15T12:01:00.000Z",
+			sequence: 10 * generation + 2,
+		},
+	};
+	if (shape === "decided") return decided;
+	return {
+		...decided,
+		phase: "terminal",
+		terminal: {
+			outcome: "completed",
+			evidence: {
+				kind: "checkpoint",
+				artifactId: `artifact_${SHA}`,
+				decisionSha256: SHA,
+				source: "operator",
+				decidedBy: "vegard",
+			},
+			sequence: 10 * generation + 3,
+		},
 	};
 }
 
@@ -322,6 +446,7 @@ function facts(
 		hasCleanupBlockedTask: false,
 		retryableTaskCount: 0,
 		resumableTaskCount: 0,
+		pendingCheckpointCount: 0,
 		...overrides,
 	};
 }
@@ -357,6 +482,7 @@ describe("run action predicates", () => {
 		]);
 		expect(Object.isFrozen(WORKFLOW_RUN_ACTIONS)).toBe(true);
 		expect([...IMPLEMENTED_WORKFLOW_RUN_ACTIONS].sort()).toEqual([
+			"decide",
 			"invalidate",
 			"reconcile",
 			"resume",
@@ -704,6 +830,97 @@ describe("retryable and resumable task sets", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Pending checkpoints
+// ---------------------------------------------------------------------------
+
+describe("pendingCheckpoints", () => {
+	it("selects on-path waiting checkpoints whose request is durable and undecided", () => {
+		const created = checkpointTask("created", 1);
+		const requested = checkpointTask("requested", 2);
+		const readyRequested = checkpointTask("ready-requested", 3);
+		const decided = checkpointTask("decided", 4);
+		const completed = checkpointTask("completed", 5);
+		const expired = checkpointTask("expired", 6);
+		const cancelled = checkpointTask("cancelled", 7);
+		const abandoned = checkpointTask("abandoned", 8);
+		const fresh = checkpointTask("fresh", 9);
+		const queued = agentTask("queued", 10);
+		const later = checkpointTask("later", 11);
+		const state = stateOf("waiting", [
+			{
+				task: created,
+				status: "ready",
+				execution: checkpointExecution(created, 1, "created"),
+			},
+			{
+				task: requested,
+				status: "waiting",
+				execution: checkpointExecution(requested, 1, "requested"),
+			},
+			// Crash between the request event and `ready -> waiting`: the sweep repairs it.
+			{
+				task: readyRequested,
+				status: "ready",
+				execution: checkpointExecution(readyRequested, 1, "requested"),
+			},
+			{
+				task: decided,
+				status: "waiting",
+				execution: checkpointExecution(decided, 1, "decided"),
+			},
+			{
+				task: completed,
+				status: "completed",
+				execution: checkpointExecution(completed, 2, "completed"),
+			},
+			{
+				task: expired,
+				status: "failed",
+				execution: checkpointExecution(expired, 1, "expired"),
+			},
+			{
+				task: cancelled,
+				status: "cancelled",
+				execution: checkpointExecution(cancelled, 1, "cancelled"),
+			},
+			{
+				task: abandoned,
+				status: "waiting",
+				abandoned: true,
+				execution: checkpointExecution(abandoned, 1, "requested"),
+			},
+			{ task: fresh, status: "pending" },
+			// A queued agent task is `waiting` too, but it is no checkpoint.
+			{ task: queued, status: "waiting", execution: agentExecution(queued, 1) },
+			{
+				task: later,
+				status: "waiting",
+				execution: checkpointExecution(later, 3, "requested"),
+			},
+		]);
+		expect(pendingCheckpoints(state)).toEqual([requested.id, later.id]);
+		expect(Object.isFrozen(pendingCheckpoints(state))).toBe(true);
+		expect(
+			runActionFacts({
+				record: rootRecord,
+				state,
+				ownership: "inactive",
+				driving: false,
+				now: Date.parse("2026-09-15T12:00:00.000Z"),
+			}).pendingCheckpointCount,
+		).toBe(2);
+	});
+
+	it("counts nothing for a run without checkpoints", () => {
+		const task = agentTask("plain", 1);
+		const state = stateOf("running", [
+			{ task, status: "running", execution: agentExecution(task, 1) },
+		]);
+		expect(pendingCheckpoints(state)).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Facts
 // ---------------------------------------------------------------------------
 
@@ -729,6 +946,7 @@ describe("runActionFacts", () => {
 			hasCleanupBlockedTask: false,
 			retryableTaskCount: 0,
 			resumableTaskCount: 0,
+			pendingCheckpointCount: 0,
 		});
 	});
 
@@ -767,6 +985,7 @@ describe("runActionFacts", () => {
 			hasCleanupBlockedTask: true,
 			retryableTaskCount: 1,
 			resumableTaskCount: 0,
+			pendingCheckpointCount: 0,
 		});
 	});
 
@@ -872,7 +1091,7 @@ describe("availableWorkflowRunActions", () => {
 		).toEqual(["invalidate"]);
 	});
 
-	it("never emits decide", () => {
+	it("emits retry, resume, and decide once their preconditions pass", () => {
 		const emitted = new Set<WorkflowRunAction>();
 		for (const status of RUN_STATUSES) {
 			for (const ownership of ["owned", "inactive"] as const) {
@@ -882,6 +1101,7 @@ describe("availableWorkflowRunActions", () => {
 						ownership,
 						retryableTaskCount: 3,
 						resumableTaskCount: 3,
+						pendingCheckpointCount: 3,
 					}),
 				)) {
 					emitted.add(action);
@@ -890,7 +1110,173 @@ describe("availableWorkflowRunActions", () => {
 		}
 		expect(emitted.has("retry")).toBe(true);
 		expect(emitted.has("resume")).toBe(true);
-		expect(emitted.has("decide")).toBe(false);
+		expect(emitted.has("decide")).toBe(true);
+	});
+
+	describe("decide", () => {
+		it("is offered only while a running or waiting root run has a pending checkpoint", () => {
+			for (const status of RUN_STATUSES) {
+				for (const ownership of ["owned", "inactive"] as const) {
+					const offered = availableWorkflowRunActions(
+						facts({ status, ownership, pendingCheckpointCount: 1 }),
+					).includes("decide");
+					expect(offered, `${status}/${ownership}`).toBe(
+						status === "running" || status === "waiting",
+					);
+				}
+			}
+		});
+
+		it("follows the pending checkpoint count, not the waiting status alone", () => {
+			expect(availableWorkflowRunActions(facts({ status: "waiting" }))).toEqual(
+				["stop", "wait", "reconcile"],
+			);
+			expect(
+				availableWorkflowRunActions(
+					facts({ status: "waiting", pendingCheckpointCount: 1 }),
+				),
+			).toEqual(["stop", "wait", "reconcile", "decide"]);
+			expect(
+				availableWorkflowRunActions(
+					facts({ status: "waiting", pendingCheckpointCount: 300 }),
+				),
+			).toContain("decide");
+		});
+
+		it("stays available against a live drive but never while leased elsewhere", () => {
+			for (const driving of [false, true]) {
+				expect(
+					availableWorkflowRunActions(
+						facts({
+							status: "running",
+							ownership: "owned",
+							driving,
+							pendingCheckpointCount: 1,
+						}),
+					),
+					`driving=${driving}`,
+				).toEqual(["stop", "wait", "decide"]);
+			}
+			expect(
+				availableWorkflowRunActions(
+					facts({
+						status: "waiting",
+						ownership: "leased-elsewhere",
+						pendingCheckpointCount: 1,
+					}),
+				),
+			).toEqual([]);
+		});
+
+		it("is withheld from nested runs and once the deadline has passed", () => {
+			expect(
+				availableWorkflowRunActions(
+					facts({ status: "waiting", nested: true, pendingCheckpointCount: 1 }),
+				),
+			).toEqual(["stop", "wait", "reconcile"]);
+			expect(
+				availableWorkflowRunActions(
+					facts({
+						status: "waiting",
+						deadlinePassed: true,
+						pendingCheckpointCount: 1,
+					}),
+				),
+			).toEqual(["stop", "wait", "reconcile"]);
+		});
+
+		it("keeps stop while waiting and never unlocks retry, resume, or invalidate there", () => {
+			const offered = availableWorkflowRunActions(
+				facts({
+					status: "waiting",
+					pendingCheckpointCount: 1,
+					retryableTaskCount: 1,
+					resumableTaskCount: 1,
+				}),
+			);
+			expect(offered).toContain("stop");
+			expect(offered).not.toContain("invalidate");
+			expect(offered).not.toContain("retry");
+			expect(offered).not.toContain("resume");
+		});
+
+		it("is derived from durable state: a parked run offers decide, its recovery states do not", () => {
+			const approve = checkpointTask("approve", 1, { timeoutMs: 60_000 });
+			const now = Date.parse("2026-09-15T12:00:00.000Z");
+			const parked = stateOf("waiting", [
+				{
+					task: approve,
+					status: "waiting",
+					execution: checkpointExecution(approve, 1, "requested"),
+				},
+			]);
+			const parkedFacts = runActionFacts({
+				record: rootRecord,
+				state: parked,
+				ownership: "inactive",
+				driving: false,
+				now,
+			});
+			expect(parkedFacts.pendingCheckpointCount).toBe(1);
+			expect(availableWorkflowRunActions(parkedFacts)).toEqual([
+				"stop",
+				"wait",
+				"reconcile",
+				"decide",
+			]);
+			expect(requiresAttention(parkedFacts)).toBe(true);
+			expect(
+				availableWorkflowRunActions(
+					runActionFacts({
+						record: nestedRecord,
+						state: parked,
+						ownership: "inactive",
+						driving: false,
+						now,
+					}),
+				),
+			).toEqual(["stop", "wait", "reconcile"]);
+			// Every failure transition cancels open checkpoints first (C1), so an
+			// operator resume intent never coexists with a pending checkpoint;
+			// the interrupted status alone withholds decide.
+			const resumed = agentTask("resumed", 2);
+			const intent: TaskExecutionProjection = {
+				...agentExecution(resumed, 1, {
+					outcome: "interrupted",
+					failureRetry: "resume",
+				}),
+				phase: "attempt-intended",
+				attempts: [
+					{
+						kind: "resume",
+						ordinal: 2,
+						previousAttemptId: "attempt_child1",
+						origin: "operator",
+						intentSequence: 50,
+					},
+				],
+			};
+			delete (intent as { terminal?: unknown }).terminal;
+			const recovering = stateOf("interrupted", [
+				{
+					task: approve,
+					status: "cancelled",
+					execution: checkpointExecution(approve, 1, "cancelled"),
+				},
+				{ task: resumed, status: "interrupted", execution: intent },
+			]);
+			const recoveringFacts = runActionFacts({
+				record: rootRecord,
+				state: recovering,
+				ownership: "inactive",
+				driving: false,
+				now,
+			});
+			expect(recoveringFacts.pendingCheckpointCount).toBe(0);
+			expect(availableWorkflowRunActions(recoveringFacts)).not.toContain(
+				"decide",
+			);
+		});
 	});
 
 	it("offers only reconcile for a cleanup-blocked run regardless of ownership", () => {
@@ -1025,6 +1411,24 @@ describe("requiresAttention", () => {
 			expect(requiresAttention(facts({ status })), status).toBe(false);
 		}
 	});
+
+	it("flags a run with a checkpoint awaiting a decision regardless of ownership", () => {
+		for (const ownership of [
+			"owned",
+			"inactive",
+			"leased-elsewhere",
+		] as const satisfies readonly WorkflowRunOwnership[]) {
+			for (const status of ["running", "waiting"] as const) {
+				expect(
+					requiresAttention(
+						facts({ status, ownership, pendingCheckpointCount: 1 }),
+					),
+					`${status}/${ownership}`,
+				).toBe(true);
+			}
+		}
+		expect(requiresAttention(facts({ status: "waiting" }))).toBe(false);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1457,29 @@ function invalidateRefusal(state: WorkflowRunActionFacts): string | undefined {
 		return "Workflow run already awaits recovery.";
 	}
 	if (state.deadlinePassed) return "Workflow run deadline has passed.";
+	return undefined;
+}
+
+/**
+ * The service's `decide` precondition block (spec 2.11): a leasable run whose
+ * status admits a checkpoint decision, a root run, before the deadline, with
+ * a checkpoint awaiting a decision. Driving does not matter: a live drive
+ * accepts decisions too.
+ */
+function decideRefusal(state: WorkflowRunActionFacts): string | undefined {
+	if (state.ownership === "leased-elsewhere") {
+		return "Workflow run is owned by another live service.";
+	}
+	if (state.status !== "running" && state.status !== "waiting") {
+		return "Workflow run status does not admit a checkpoint decision.";
+	}
+	if (state.nested) {
+		return "Nested workflow runs are decided through their parent run.";
+	}
+	if (state.deadlinePassed) return "Workflow run deadline has passed.";
+	if (state.pendingCheckpointCount === 0) {
+		return "Checkpoint is not awaiting a decision.";
+	}
 	return undefined;
 }
 
@@ -1135,17 +1562,20 @@ function* enumerateFacts(): Generator<WorkflowRunActionFacts> {
 						for (const recovery of recoveries) {
 							for (const retryable of [0, 1]) {
 								for (const resumable of [0, 1]) {
-									yield facts({
-										status,
-										ownership,
-										driving,
-										nested,
-										deadlinePassed: deadline,
-										awaitsRecovery: recovery,
-										hasCleanupBlockedTask: status === "cleanup-blocked",
-										retryableTaskCount: retryable,
-										resumableTaskCount: resumable,
-									});
+									for (const pending of [0, 1]) {
+										yield facts({
+											status,
+											ownership,
+											driving,
+											nested,
+											deadlinePassed: deadline,
+											awaitsRecovery: recovery,
+											hasCleanupBlockedTask: status === "cleanup-blocked",
+											retryableTaskCount: retryable,
+											resumableTaskCount: resumable,
+											pendingCheckpointCount: pending,
+										});
+									}
 								}
 							}
 						}
@@ -1193,6 +1623,18 @@ describe("legality and service preconditions agree", () => {
 				resumeRefusalOf(candidate) === undefined,
 			);
 		}
+	});
+
+	it("offers decide exactly when the decide precondition block passes", () => {
+		let offeredCount = 0;
+		for (const candidate of enumerateFacts()) {
+			const offered = availableWorkflowRunActions(candidate).includes("decide");
+			if (offered) offeredCount += 1;
+			expect(offered, JSON.stringify(candidate)).toBe(
+				decideRefusal(candidate) === undefined,
+			);
+		}
+		expect(offeredCount).toBeGreaterThan(0);
 	});
 
 	it("never offers an action outside the implemented gate", () => {

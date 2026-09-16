@@ -15,17 +15,23 @@ import {
 	WorkflowArtifactStoreError,
 } from "../src/artifact-store.js";
 import {
+	CHECKPOINT_RUN_ENDING_REASON,
+	createWorkflowCheckpointTaskExecutor,
+} from "../src/checkpoint-executor.js";
+import {
 	type HandoffPolicy,
 	MAX_WORKFLOW_HANDOFF_BYTES,
 	type SubagentTerminalEvidence,
 	WORKFLOW_HANDOFF_FORMAT_SHA256,
 } from "../src/contracts.js";
+import { WorkflowDecisionRecordStore } from "../src/decision-store.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import {
 	deriveJsonValueSha256,
 	deriveSubagentOperationId,
 	deriveSubagentResultSha256,
 	deriveTaskExecutionId,
+	deriveWorkflowFailureSha256,
 } from "../src/execution.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import { WorkflowRunJournal } from "../src/persistence/journal.js";
@@ -262,7 +268,11 @@ function binding(ownerClient: SubagentClient): WorkflowSubagentBinding {
 
 async function fixture(
 	result: RunResult,
-	options: RequestOptions & { handoff?: WorktreeRecord } = {},
+	options: RequestOptions & {
+		handoff?: WorktreeRecord;
+		/** Also park a required checkpoint beside the agent task. */
+		checkpoint?: boolean;
+	} = {},
 ) {
 	const root = path.resolve(".pi", "test-finalizer", `run-${randomUUID()}`);
 	const lease = await acquireWorkflowRunLease({
@@ -285,8 +295,21 @@ async function fixture(
 		definitionIdentitySha256: hash,
 		inputSha256: hash,
 	});
+	const approve = options.checkpoint
+		? materializer.checkpoint("approve", {
+				schema: Type.Object(
+					{ proceed: Type.Boolean() },
+					{ additionalProperties: false },
+				),
+				prompt: "Approve the answer?",
+				headless: "block",
+			})
+		: undefined;
 	const handle = materializer.agent("answer", request(options));
-	for (const event of materializer.closeEpoch("final", [handle]).events) {
+	for (const event of materializer.closeEpoch("final", [
+		...(approve ? [approve] : []),
+		handle,
+	]).events) {
 		await journal.appendEvent(event);
 	}
 	await journal.append("run-status-changed", {
@@ -356,7 +379,33 @@ async function fixture(
 		evidence: evidence(result, options.handoff),
 	});
 	const artifacts = await WorkflowArtifactStore.open({ journal });
-	return { journal, artifacts, taskId: handle.ref.taskId, executionId };
+	let checkpointId = "";
+	let checkpointExecutionId = "";
+	if (approve) {
+		await journal.append("task-status-changed", {
+			taskId: approve.ref.taskId,
+			from: "pending",
+			to: "ready",
+		});
+		const executor = createWorkflowCheckpointTaskExecutor({
+			journal,
+			artifacts,
+			decisions: await WorkflowDecisionRecordStore.open({ journal }),
+			signal: () => new AbortController().signal,
+		});
+		const requested = await executor.request(approve.ref.taskId);
+		expect(requested.state).toBe("requested");
+		checkpointId = approve.ref.taskId;
+		checkpointExecutionId = requested.executionId;
+	}
+	return {
+		journal,
+		artifacts,
+		taskId: handle.ref.taskId,
+		executionId,
+		checkpointId,
+		checkpointExecutionId,
+	};
 }
 
 async function eventTypes(journal: WorkflowRunJournal) {
@@ -1324,5 +1373,209 @@ describe("worktree handoff import", () => {
 		expect(types).not.toContain("task-execution-handoff-imported");
 		expect(types).not.toContain("task-execution-handoff-absent");
 		expect(exportHandoff).not.toHaveBeenCalled();
+	});
+});
+
+describe("checkpoint cancellation before run failure", () => {
+	/**
+	 * The failure ladder: the open checkpoint's execution is terminalized as
+	 * cancelled and its status follows, both before the run leaves running.
+	 */
+	async function expectCheckpointCancelledFirst(
+		journal: WorkflowRunJournal,
+		checkpointId: string,
+		checkpointExecutionId: string,
+		runStatus: "failed" | "interrupted" | "cleanup-blocked",
+	) {
+		const events = await journal.readEvents();
+		const terminal = events.findIndex(
+			(event) =>
+				event.type === "task-execution-terminal" &&
+				(event.data as { executionId: string }).executionId ===
+					checkpointExecutionId,
+		);
+		const cancelled = events.findIndex(
+			(event) =>
+				event.type === "task-status-changed" &&
+				(event.data as { taskId: string }).taskId === checkpointId &&
+				(event.data as { to: string }).to === "cancelled",
+		);
+		const ended = events.findIndex(
+			(event) =>
+				event.type === "run-status-changed" &&
+				(event.data as { to: string }).to === runStatus,
+		);
+		expect(terminal).toBeGreaterThan(-1);
+		expect(cancelled).toBeGreaterThan(terminal);
+		expect(ended).toBeGreaterThan(cancelled);
+		expect(events[terminal]?.data).toEqual({
+			executionId: checkpointExecutionId,
+			outcome: "cancelled",
+			evidence: {
+				kind: "workflow",
+				stage: "stop",
+				failureSha256: deriveWorkflowFailureSha256(
+					"stop",
+					CHECKPOINT_RUN_ENDING_REASON,
+				),
+				message: CHECKPOINT_RUN_ENDING_REASON,
+			},
+		});
+		expect(events[cancelled]?.data).toEqual({
+			taskId: checkpointId,
+			from: "waiting",
+			to: "cancelled",
+			reason: CHECKPOINT_RUN_ENDING_REASON,
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe(runStatus);
+		expect(state.tasks[checkpointId]?.status).toBe("cancelled");
+		expect(state.executions[checkpointExecutionId]?.terminal?.outcome).toBe(
+			"cancelled",
+		);
+	}
+
+	it("cancels the open checkpoint before a required failure fails the run", async () => {
+		const fx = await fixture(runResult("failed"), { checkpoint: true });
+		expect((await projection(fx.journal)).tasks[fx.checkpointId]?.status).toBe(
+			"waiting",
+		);
+		const finalizer = createWorkflowTaskFinalizer({
+			journal: fx.journal,
+			artifacts: fx.artifacts,
+			binding: binding(
+				client({
+					release: vi.fn(async () => ({
+						runId: "run_finalizer",
+						attemptId: "attempt_finalizer",
+						status: "failed" as const,
+					})),
+				}),
+			),
+		});
+
+		await expect(finalizer.finalize(fx.taskId)).resolves.toMatchObject({
+			outcome: "failed",
+			runStatus: "failed",
+		});
+		await expectCheckpointCancelledFirst(
+			fx.journal,
+			fx.checkpointId,
+			fx.checkpointExecutionId,
+			"failed",
+		);
+		const runChanges = (await fx.journal.readEvents())
+			.filter((event) => event.type === "run-status-changed")
+			.map((event) => event.data);
+		expect(runChanges.at(-1)).toEqual({
+			from: "running",
+			to: "failed",
+			reason: "A required workflow task did not complete.",
+		});
+	});
+
+	it("cancels the open checkpoint before an interrupted child interrupts the run", async () => {
+		const interrupted = {
+			...runResult("failed"),
+			status: "interrupted",
+			failure: {
+				code: "seat-interruption",
+				origin: "provider",
+				retry: "resume",
+				message: "seat lost",
+				guidance: "Resume when a seat is available.",
+			},
+		} as RunResult;
+		const fx = await fixture(interrupted, { checkpoint: true });
+		const finalizer = createWorkflowTaskFinalizer({
+			journal: fx.journal,
+			artifacts: fx.artifacts,
+			binding: binding(client({})),
+		});
+
+		await expect(finalizer.finalize(fx.taskId)).resolves.toMatchObject({
+			outcome: "interrupted",
+			runStatus: "interrupted",
+		});
+		await expectCheckpointCancelledFirst(
+			fx.journal,
+			fx.checkpointId,
+			fx.checkpointExecutionId,
+			"interrupted",
+		);
+		expect((await projection(fx.journal)).tasks[fx.taskId]?.status).toBe(
+			"interrupted",
+		);
+	});
+
+	it("cancels the open checkpoint before a cleanup-blocked child blocks the run", async () => {
+		const fx = await fixture(runResult("cleanup-blocked"), {
+			checkpoint: true,
+		});
+		const finalizer = createWorkflowTaskFinalizer({
+			journal: fx.journal,
+			artifacts: fx.artifacts,
+			binding: binding(
+				client({
+					release: vi.fn(async () => ({
+						runId: "run_finalizer",
+						attemptId: "attempt_finalizer",
+						status: "cleanup-blocked" as const,
+					})),
+				}),
+			),
+		});
+
+		await expect(finalizer.finalize(fx.taskId)).resolves.toMatchObject({
+			outcome: "cleanup-blocked",
+			runStatus: "cleanup-blocked",
+		});
+		await expectCheckpointCancelledFirst(
+			fx.journal,
+			fx.checkpointId,
+			fx.checkpointExecutionId,
+			"cleanup-blocked",
+		);
+		expect((await projection(fx.journal)).tasks[fx.taskId]?.status).toBe(
+			"cleanup-blocked",
+		);
+	});
+
+	it("leaves a run without open checkpoints on its ordinary failure ladder", async () => {
+		const fx = await fixture(runResult("failed"));
+		const before = (await fx.journal.readEvents()).length;
+		const finalizer = createWorkflowTaskFinalizer({
+			journal: fx.journal,
+			artifacts: fx.artifacts,
+			binding: binding(
+				client({
+					release: vi.fn(async () => ({
+						runId: "run_finalizer",
+						attemptId: "attempt_finalizer",
+						status: "failed" as const,
+					})),
+				}),
+			),
+		});
+
+		await expect(finalizer.finalize(fx.taskId)).resolves.toMatchObject({
+			outcome: "failed",
+			runStatus: "failed",
+		});
+		const appended = (await fx.journal.readEvents()).slice(before);
+		expect(appended.map((event) => event.type)).toEqual([
+			"task-execution-release-intended",
+			"task-execution-released",
+			"task-execution-terminal",
+			"task-status-changed",
+			"run-status-changed",
+		]);
+		expect(
+			appended.some(
+				(event) =>
+					event.type === "task-status-changed" &&
+					(event.data as { to: string }).to === "cancelled",
+			),
+		).toBe(false);
 	});
 });

@@ -8,6 +8,7 @@ import {
 	type WorkflowRunLease,
 } from "../src/persistence/run-lease.js";
 import {
+	type WorkflowRunRecord,
 	WorkflowRunRecordError,
 	WorkflowRunRecordStore,
 } from "../src/run-record.js";
@@ -37,13 +38,14 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 17 as const,
+			contractRevision: 18 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
 			definitionPath: "/repo/workflows/example.workflow.ts",
 			definitionIdentitySha256: hash,
 			definitionSourceSha256: hash,
+			definitionKind: "static" as const,
 			concurrency: 4,
 			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
 			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
@@ -63,13 +65,14 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const root = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 17 as const,
+			contractRevision: 18 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
 			definitionPath: "/repo/workflows/example.workflow.ts",
 			definitionIdentitySha256: hash,
 			definitionSourceSha256: hash,
+			definitionKind: "static" as const,
 			concurrency: 4,
 			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
 			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
@@ -119,7 +122,7 @@ describe("workflow run record", () => {
 			}),
 		).rejects.toThrow("invalid workflow run record");
 		await expect(
-			store.create({ ...root, contractRevision: 16 as unknown as 17 }),
+			store.create({ ...root, contractRevision: 17 as unknown as 18 }),
 		).rejects.toThrow("invalid workflow run record");
 		const nested = { ...root, depth: 1, parent };
 		await store.create(nested);
@@ -137,7 +140,7 @@ describe("workflow run record", () => {
 		};
 		const nested = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 17 as const,
+			contractRevision: 18 as const,
 			runId: "workflow_record" as const,
 			depth: 1,
 			parent,
@@ -145,6 +148,7 @@ describe("workflow run record", () => {
 			definitionPath: "/repo/workflows/example.workflow.ts",
 			definitionIdentitySha256: hash,
 			definitionSourceSha256: hash,
+			definitionKind: "static" as const,
 			concurrency: 4,
 			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
 			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
@@ -213,13 +217,14 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 17,
+				contractRevision: 18,
 				runId: "workflow_record",
 				depth: 0,
 				definitionName: "example",
 				definitionPath: "/repo/example.workflow.ts",
 				definitionIdentitySha256: hash,
 				definitionSourceSha256: hash,
+				definitionKind: "static" as const,
 				concurrency: 4,
 				declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
 				effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
@@ -231,5 +236,149 @@ describe("workflow run record", () => {
 				createdAt: "2026-09-01T00:00:00.000Z",
 			}),
 		).rejects.toThrow();
+	});
+
+	it("requires the dynamic digests exactly when the definition is dynamic", async () => {
+		const { store } = await fixture();
+		const base = {
+			schema: "pi-workflow-run" as const,
+			contractRevision: 18 as const,
+			runId: "workflow_record" as const,
+			depth: 0,
+			definitionName: "example",
+			definitionPath: "/repo/.pi/workflow/dynamic/abc/source.workflow.ts",
+			definitionIdentitySha256: hash,
+			definitionSourceSha256: hash,
+			concurrency: 4,
+			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			declaredTimeoutMs: 3600000,
+			effectiveTimeoutMs: 3600000,
+			deadlineAt: "2026-09-01T01:00:00.000Z",
+			cwd: "/repo",
+			input: { question: "why" },
+			createdAt: "2026-09-01T00:00:00.000Z",
+		};
+		const approvalSha256 = "b".repeat(64);
+		const hostApiSha256 = "c".repeat(64);
+		const parent = {
+			runId: "workflow_parent",
+			taskId: `task_${"b".repeat(64)}`,
+			executionId: `execution_${"c".repeat(64)}`,
+			ancestorDefinitionIdentities: ["d".repeat(64)],
+			inputArtifacts: {},
+		};
+		const invalid: WorkflowRunRecord[] = [
+			// dynamic without digests
+			{ ...base, definitionKind: "dynamic" },
+			// dynamic with only one digest
+			{ ...base, definitionKind: "dynamic", approvalSha256 },
+			{ ...base, definitionKind: "dynamic", hostApiSha256 },
+			// static with digests
+			{ ...base, definitionKind: "static", approvalSha256, hostApiSha256 },
+			{ ...base, definitionKind: "static", approvalSha256 },
+			{ ...base, definitionKind: "static", hostApiSha256 },
+			// dynamic nested child
+			{
+				...base,
+				definitionKind: "dynamic",
+				approvalSha256,
+				hostApiSha256,
+				depth: 1,
+				parent,
+			},
+		];
+		for (const record of invalid) {
+			await expect(store.create(record)).rejects.toThrow(
+				"invalid workflow run record",
+			);
+		}
+		// unknown kinds and malformed digests fail the closed schema
+		await expect(
+			store.create({ ...base, definitionKind: "vm" as unknown as "static" }),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({
+				...base,
+				definitionKind: "dynamic",
+				approvalSha256: "B".repeat(64),
+				hostApiSha256,
+			}),
+		).rejects.toThrow("invalid workflow run record");
+		await expect(
+			store.create({
+				...base,
+				definitionKind: "static",
+				extra: true,
+			} as unknown as WorkflowRunRecord),
+		).rejects.toThrow("invalid workflow run record");
+
+		const dynamic: WorkflowRunRecord = {
+			...base,
+			definitionKind: "dynamic",
+			approvalSha256,
+			hostApiSha256,
+		};
+		await store.create(dynamic);
+		const read = await store.read();
+		expect(read).toEqual(dynamic);
+		expect(Object.isFrozen(read)).toBe(true);
+		expect(
+			await WorkflowRunRecordStore.readFrom(
+				store.journal.directory,
+				"workflow_record",
+			),
+		).toEqual(dynamic);
+	});
+
+	it("rejects persisted records whose kind and digests disagree", async () => {
+		const { store } = await fixture();
+		const persisted = {
+			schema: "pi-workflow-run",
+			contractRevision: 18,
+			runId: "workflow_record",
+			depth: 0,
+			definitionName: "example",
+			definitionPath: "/repo/workflows/example.workflow.ts",
+			definitionIdentitySha256: hash,
+			definitionSourceSha256: hash,
+			definitionKind: "dynamic",
+			concurrency: 4,
+			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			declaredTimeoutMs: 3600000,
+			effectiveTimeoutMs: 3600000,
+			deadlineAt: "2026-09-01T01:00:00.000Z",
+			cwd: "/repo",
+			input: { question: "why" },
+			createdAt: "2026-09-01T00:00:00.000Z",
+		};
+		await writeFile(store.path, `${JSON.stringify(persisted)}\n`);
+		await expect(store.read()).rejects.toThrow(
+			"invalid workflow run record schema",
+		);
+		const { definitionKind: _dynamic, ...withoutKind } = persisted;
+		await writeFile(store.path, `${JSON.stringify(withoutKind)}\n`);
+		await expect(store.read()).rejects.toThrow(
+			"invalid workflow run record schema",
+		);
+		await writeFile(
+			store.path,
+			`${JSON.stringify({
+				...persisted,
+				definitionKind: "static",
+				hostApiSha256: "c".repeat(64),
+			})}\n`,
+		);
+		await expect(store.read()).rejects.toThrow(
+			"invalid workflow run record schema",
+		);
+		await writeFile(
+			store.path,
+			`${JSON.stringify({ ...persisted, definitionKind: "static" })}\n`,
+		);
+		await expect(store.read()).resolves.toMatchObject({
+			definitionKind: "static",
+		});
 	});
 });

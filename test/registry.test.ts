@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
+	type DiscoveredWorkflow,
 	discoverWorkflows,
 	WorkflowDefinitionLoadError,
 	WorkflowDefinitionTrustError,
+	type WorkflowRootScope,
 } from "../src/registry.js";
 
 function fixture(name: string): string {
@@ -167,5 +169,41 @@ describe("workflow registry", () => {
 		expect(second[0]?.identity.identitySha256).not.toBe(
 			first[0]?.identity.identitySha256,
 		);
+	});
+
+	it("names the dynamic scope without discovering it", async () => {
+		expectTypeOf<"dynamic">().toMatchTypeOf<WorkflowRootScope>();
+		expectTypeOf<DiscoveredWorkflow["scope"]>().toEqualTypeOf<
+			"project" | "global" | "package" | "builtin" | "dynamic"
+		>();
+		const root = fixture("dynamic-scope");
+		const cwd = path.join(root, "project");
+		const dynamicRoot = path.join(root, "dynamic");
+		await mkdir(cwd, { recursive: true });
+		await mkdir(dynamicRoot, { recursive: true });
+		await writeFile(
+			path.join(dynamicRoot, "proposed.workflow.ts"),
+			moduleSource("proposed"),
+		);
+		await expect(
+			discoverWorkflows({
+				cwd,
+				agentDir: path.join(root, "agent"),
+				projectTrusted: true,
+				registeredRoots: [
+					{ path: dynamicRoot, scope: "dynamic", source: "proposal" },
+				],
+			}),
+		).rejects.toMatchObject({
+			name: "WorkflowDefinitionLoadError",
+			message: "registered workflow roots must use package or builtin scope",
+			definitionPath: dynamicRoot,
+		});
+		const workflows = await discoverWorkflows({
+			cwd,
+			agentDir: path.join(root, "agent"),
+			projectTrusted: true,
+		});
+		expect(workflows.some((entry) => entry.scope === "dynamic")).toBe(false);
 	});
 });

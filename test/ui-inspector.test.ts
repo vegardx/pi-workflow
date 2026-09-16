@@ -85,6 +85,7 @@ function summary(
 		taskCounts: counts({ completed: 2, failed: 1, abandoned: 1, total: 5 }),
 		ownership: "inactive",
 		leasedElsewhere: false,
+		pendingCheckpointCount: 0,
 		requiresAttention: status === "failed" || status === "interrupted",
 		...overrides,
 		availableActions: overrides.availableActions ?? [],

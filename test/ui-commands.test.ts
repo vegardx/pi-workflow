@@ -63,6 +63,7 @@ function summary(
 		},
 		ownership: "inactive",
 		leasedElsewhere: false,
+		pendingCheckpointCount: 0,
 		requiresAttention: false,
 		...overrides,
 		// Legality is always stated explicitly by the test.

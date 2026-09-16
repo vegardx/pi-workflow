@@ -105,7 +105,7 @@ function records(
 	];
 	return all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 17,
+		contractRevision: 18,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-08-20T00:00:00.000Z",
@@ -983,6 +983,9 @@ function generationSchedulerFor(
 		},
 		async reconcile() {
 			throw new Error("fake workflow has no cleanup-blocked task");
+		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
 		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;

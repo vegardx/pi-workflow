@@ -1,11 +1,20 @@
+import vm from "node:vm";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import type { NestedWorkflowTaskRequest } from "../src/contracts.js";
-import { createTaskHandle, isHandoffHandle } from "../src/definition.js";
+import type {
+	CheckpointTaskSpec,
+	NestedWorkflowTaskRequest,
+} from "../src/contracts.js";
+import {
+	type CheckpointRequest,
+	createTaskHandle,
+	isHandoffHandle,
+} from "../src/definition.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import { deriveJsonValueSha256 } from "../src/execution.js";
 import {
 	deriveAgentTaskIdentity,
+	deriveCheckpointTaskIdentity,
 	deriveNestedWorkflowTaskIdentity,
 	deriveWorkflowTaskId,
 	WorkflowMaterializationError,
@@ -106,7 +115,7 @@ function records(
 	];
 	return all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 17,
+		contractRevision: 18,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-08-20T00:00:00.000Z",
@@ -153,6 +162,60 @@ describe("workflow task materializer", () => {
 			output: "result",
 		});
 		expect(Object.isFrozen(commit.events)).toBe(true);
+	});
+
+	it("accepts declarations whose values were created in another realm", () => {
+		// Dynamic sources run in a `vm` context: their objects have foreign
+		// prototypes but must be accepted like same-realm plain JSON.
+		const foreign = vm.runInNewContext(
+			`(${JSON.stringify({
+				agent: request("Answer from the sandbox"),
+				parameters: { strict: true },
+				fallback: { proceed: false },
+				input: { value: "yes" },
+			})})`,
+		) as {
+			agent: ReturnType<typeof request>;
+			parameters: { strict: boolean };
+			fallback: { proceed: boolean };
+			input: { value: string };
+		};
+		expect(Object.getPrototypeOf(foreign.agent)).not.toBe(Object.prototype);
+		const runtime = materializer();
+		const first = runtime.agent("first", foreign.agent);
+		const parse = runtime.support(
+			"parse",
+			supportHelper({ parameters: foreign.parameters }),
+		);
+		const approve = runtime.checkpoint("approve", {
+			schema: Type.Object({ proceed: Type.Boolean() }),
+			prompt: "Approve?",
+			headless: "use-explicit-default",
+			default: foreign.fallback,
+		});
+		const child = runtime.workflow("child", {
+			request: nestedRequest(foreign.input),
+		});
+		const commit = runtime.closeEpoch("final", [first, parse, approve, child]);
+		const specs = commit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task.spec] : [],
+		);
+		expect(specs.map((spec) => spec.kind)).toEqual([
+			"agent",
+			"support",
+			"checkpoint",
+			"workflow",
+		]);
+		expect(specs[0]).toMatchObject({
+			request: { task: { goal: "Answer from the sandbox" } },
+		});
+		expect(specs[1]).toMatchObject({
+			request: { parameters: { strict: true } },
+		});
+		expect(specs[2]).toMatchObject({
+			request: { default: { proceed: false } },
+		});
+		expect(specs[3]).toMatchObject({ request: { input: { value: "yes" } } });
 	});
 
 	it("adds result-barrier control dependencies to the next epoch", () => {
@@ -991,5 +1054,536 @@ describe("worktree agent task materialization", () => {
 		expect(plainDeclaration.data.task.spec.identitySha256).not.toBe(
 			reviewerTask.spec.identitySha256,
 		);
+	});
+});
+
+describe("checkpoint task materialization", () => {
+	const decisionSchema = Type.Object(
+		{ proceed: Type.Boolean(), note: Type.Optional(Type.String()) },
+		{ additionalProperties: false },
+	);
+	const decisionSchemaJson = JSON.parse(JSON.stringify(decisionSchema));
+	const MAX_WORKFLOW_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
+
+	function checkpointRequest(
+		overrides: Record<string, unknown> = {},
+	): CheckpointRequest<typeof decisionSchema> {
+		return {
+			schema: decisionSchema,
+			prompt: "Approve the plan?",
+			headless: "block",
+			...overrides,
+		} as CheckpointRequest<typeof decisionSchema>;
+	}
+
+	function declared(events: readonly WorkflowEventInput[]) {
+		return events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		);
+	}
+
+	function identity(spec: Omit<CheckpointTaskSpec, "identitySha256">) {
+		return deriveCheckpointTaskIdentity({
+			definitionIdentitySha256,
+			inputSha256,
+			namespace: [],
+			spec,
+		});
+	}
+
+	it("declares a checkpoint with a stable id, a lowered request, and a result-only handle", () => {
+		const runtime = materializer();
+		const plan = runtime.agent("plan", request("Plan"));
+		const approve = runtime.checkpoint("approve", {
+			schema: decisionSchema,
+			prompt: "Approve the plan?",
+			headless: "use-explicit-default",
+			default: { proceed: false },
+			timeoutMs: 3_600_000,
+			inputs: { plan: plan.output },
+		});
+		expect(approve.ref).toEqual({
+			runId: "workflow_materializer",
+			taskId: deriveWorkflowTaskId("workflow_materializer", [], "approve"),
+		});
+		expect(approve.output.ref).toEqual({
+			runId: "workflow_materializer",
+			producerTaskId: approve.ref.taskId,
+			output: "result",
+		});
+		expect(Object.hasOwn(approve, "handoff")).toBe(false);
+		expect(isHandoffHandle(approve.output)).toBe(false);
+		expect(Object.isFrozen(approve)).toBe(true);
+		const commit = runtime.closeEpoch("result", [approve]);
+		expect(commit.events.map((event) => event.type)).toEqual([
+			"task-declared",
+			"task-declared",
+			"barrier-reached",
+		]);
+		const [, task] = declared(commit.events);
+		if (task?.spec.kind !== "checkpoint") {
+			throw new Error("missing checkpoint declaration");
+		}
+		expect(task.id).toBe(approve.ref.taskId);
+		expect(task.runId).toBe("workflow_materializer");
+		expect(task.namespace).toEqual([]);
+		expect(task.materializationEpoch).toBe(1);
+		expect(task.epochPosition).toBe(2);
+		expect(task.materializationSequence).toBe(2);
+		const { identitySha256, ...specWithoutIdentity } = task.spec;
+		expect(specWithoutIdentity).toEqual({
+			key: "approve",
+			kind: "checkpoint",
+			role: "task",
+			disposition: "required",
+			after: [plan.ref],
+			inputs: { plan: plan.output.ref },
+			replay: "read-only",
+			request: {
+				schema: decisionSchemaJson,
+				prompt: "Approve the plan?",
+				headless: "use-explicit-default",
+				default: { proceed: false },
+				timeoutMs: 3_600_000,
+			},
+		});
+		expect(identitySha256).toBe(identity(specWithoutIdentity));
+		expect(Object.isFrozen(task.spec.request.schema)).toBe(true);
+		expect(Object.isFrozen(task.spec.request.default)).toBe(true);
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[task.id]?.task).toEqual(task);
+		expect(projected.tasks[task.id]?.status).toBe("pending");
+	});
+
+	it("omits absent default and timeout from the lowered request", () => {
+		const runtime = materializer();
+		const approve = runtime.checkpoint("approve", checkpointRequest());
+		const [task] = declared(runtime.closeEpoch("final", [approve]).events);
+		if (task?.spec.kind !== "checkpoint") {
+			throw new Error("missing checkpoint declaration");
+		}
+		expect(task.spec.request).toEqual({
+			schema: decisionSchemaJson,
+			prompt: "Approve the plan?",
+			headless: "block",
+		});
+		expect(Object.hasOwn(task.spec.request, "default")).toBe(false);
+		expect(Object.hasOwn(task.spec.request, "timeoutMs")).toBe(false);
+		expect(task.spec.after).toEqual([]);
+		expect(task.spec.inputs).toEqual({});
+		expect(task.spec.disposition).toBe("required");
+		expect(task.spec.replay).toBe("read-only");
+	});
+
+	it("binds identity to prompt, schema, default, headless policy, timeout, role, and disposition", () => {
+		const runtime = materializer();
+		const approve = runtime.checkpoint(
+			"approve",
+			checkpointRequest({ default: { proceed: true }, timeoutMs: 60_000 }),
+		);
+		const commit = runtime.closeEpoch("final", [approve]);
+		const [task] = declared(commit.events);
+		if (task?.spec.kind !== "checkpoint") {
+			throw new Error("missing checkpoint declaration");
+		}
+		const { identitySha256, ...base } = task.spec;
+		expect(identity(base)).toBe(identitySha256);
+		const variants = [
+			{ ...base, request: { ...base.request, prompt: "Approve the plan!" } },
+			{
+				...base,
+				request: {
+					...base.request,
+					schema: JSON.parse(
+						JSON.stringify(Type.Object({ proceed: Type.Boolean() })),
+					),
+				},
+			},
+			{ ...base, request: { ...base.request, default: { proceed: false } } },
+			{
+				...base,
+				request: { ...base.request, headless: "use-explicit-default" as const },
+			},
+			{ ...base, request: { ...base.request, timeoutMs: 60_001 } },
+			{ ...base, role: "finalizer" as const },
+			{ ...base, disposition: "optional" as const },
+			{ ...base, replay: "off" as const },
+		];
+		const identities = variants.map((variant) => identity(variant));
+		for (const candidate of identities) {
+			expect(candidate).not.toBe(identitySha256);
+		}
+		expect(new Set(identities).size).toBe(variants.length);
+		const { default: _omitted, ...withoutDefault } = base.request;
+		expect(identity({ ...base, request: withoutDefault })).not.toBe(
+			identitySha256,
+		);
+		const same = materializer();
+		const repeated = same.checkpoint("approve", {
+			schema: JSON.parse(JSON.stringify(decisionSchema)),
+			prompt: "Approve the plan?",
+			headless: "block",
+			default: { proceed: true },
+			timeoutMs: 60_000,
+		});
+		expect(same.closeEpoch("final", [repeated]).events).toEqual(commit.events);
+	});
+
+	it("replays an exact checkpoint epoch without events and rejects prefix drift", () => {
+		const initial = materializer();
+		const approve = initial.checkpoint(
+			"approve",
+			checkpointRequest({ timeoutMs: 60_000 }),
+		);
+		const commit = initial.closeEpoch("result", [approve]);
+		const previousState = reduceWorkflowEvents(records(commit.events));
+		const replay = materializer(previousState);
+		const replayed = replay.checkpoint(
+			"approve",
+			checkpointRequest({ timeoutMs: 60_000 }),
+		);
+		expect(replayed.ref).toEqual(approve.ref);
+		expect(replayed.output.ref).toEqual(approve.output.ref);
+		expect(replay.closeEpoch("result", [replayed]).events).toEqual([]);
+		for (const drift of [
+			{ prompt: "Approve now?" },
+			{ timeoutMs: 60_001 },
+			{ headless: "use-explicit-default", default: { proceed: true } },
+			{ default: { proceed: true } },
+			{ schema: Type.Object({ proceed: Type.Boolean() }) },
+			{ disposition: "optional" },
+		]) {
+			const drifted = materializer(previousState);
+			expect(() =>
+				drifted.checkpoint(
+					"approve",
+					checkpointRequest({ timeoutMs: 60_000, ...drift }),
+				),
+			).toThrow("task declaration does not match the persisted ordered prefix");
+		}
+		const changedKind = materializer(previousState);
+		expect(() => changedKind.agent("approve", request())).toThrow(
+			"task declaration does not match the persisted ordered prefix",
+		);
+	});
+
+	it("rejects the fixed checkpoint request errors in order", () => {
+		const runtime = materializer();
+		expect(() =>
+			runtime.checkpoint("bad", checkpointRequest({ schema: () => true })),
+		).toThrow(
+			"checkpoint decision schema must be a bounded JSON-serializable schema",
+		);
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ schema: { type: "not-a-schema-type" } }),
+			),
+		).toThrow("checkpoint decision schema is not a valid JSON Schema");
+		for (const prompt of ["", "x".repeat(4097), 12, undefined]) {
+			expect(() =>
+				runtime.checkpoint("bad", checkpointRequest({ prompt })),
+			).toThrow("invalid checkpoint prompt");
+		}
+		expect(() =>
+			runtime.checkpoint(
+				"ok-prompt",
+				checkpointRequest({ prompt: "x".repeat(4096) }),
+			),
+		).not.toThrow();
+		for (const headless of ["sometimes", undefined, true]) {
+			expect(() =>
+				runtime.checkpoint("bad", checkpointRequest({ headless })),
+			).toThrow("invalid checkpoint headless policy");
+		}
+		for (const timeoutMs of [
+			999,
+			1_000.5,
+			MAX_WORKFLOW_DURATION_MS + 1,
+			Number.NaN,
+			"60000",
+		]) {
+			expect(() =>
+				runtime.checkpoint("bad", checkpointRequest({ timeoutMs })),
+			).toThrow("invalid checkpoint timeout");
+		}
+		expect(() =>
+			runtime.checkpoint("ok-timeout", checkpointRequest({ timeoutMs: 1_000 })),
+		).not.toThrow();
+		expect(() =>
+			runtime.checkpoint("bad", checkpointRequest({ default: () => true })),
+		).toThrow("checkpoint default is not JSON");
+		expect(() =>
+			runtime.checkpoint("bad", checkpointRequest({ default: 1n })),
+		).toThrow("checkpoint default is not JSON");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ default: { proceed: "yes" } }),
+			),
+		).toThrow("checkpoint default does not match its schema");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ default: { proceed: true, extra: 1 } }),
+			),
+		).toThrow("checkpoint default does not match its schema");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ headless: "use-explicit-default" }),
+			),
+		).toThrow("checkpoint headless default requires an explicit default");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({
+					headless: "use-explicit-default",
+					default: undefined,
+				}),
+			),
+		).toThrow("checkpoint headless default requires an explicit default");
+		// The schema is validated before the prompt, the prompt before the
+		// policy, the policy before the timeout, and the timeout before the
+		// default.
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ schema: { type: "nope" }, prompt: "" }),
+			),
+		).toThrow("checkpoint decision schema is not a valid JSON Schema");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ prompt: "", headless: "sometimes" }),
+			),
+		).toThrow("invalid checkpoint prompt");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ headless: "sometimes", timeoutMs: 1 }),
+			),
+		).toThrow("invalid checkpoint headless policy");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({ timeoutMs: 1, default: { proceed: "yes" } }),
+			),
+		).toThrow("invalid checkpoint timeout");
+		expect(() =>
+			runtime.checkpoint(
+				"bad",
+				checkpointRequest({
+					headless: "use-explicit-default",
+					default: { proceed: "yes" },
+				}),
+			),
+		).toThrow("checkpoint default does not match its schema");
+		// Nothing above was declared.
+		expect(() => runtime.checkpoint("bad", checkpointRequest())).not.toThrow();
+		expect(() => runtime.checkpoint("bad", checkpointRequest())).toThrow(
+			"duplicate task key in namespace",
+		);
+		expect(() => runtime.checkpoint("Bad Key", checkpointRequest())).toThrow(
+			"invalid task key",
+		);
+		expect(() =>
+			runtime.checkpoint(
+				"unknown-after",
+				checkpointRequest({
+					after: [
+						{
+							runId: "workflow_materializer",
+							taskId: `task_${"e".repeat(64)}`,
+						},
+					],
+				}),
+			),
+		).toThrow("task order dependency is unknown or belongs to another run");
+		const foreign = createTaskHandle<unknown>(
+			{ runId: "workflow_other", taskId: `task_${"e".repeat(64)}` },
+			{
+				runId: "workflow_other",
+				producerTaskId: `task_${"e".repeat(64)}`,
+				output: "result",
+			},
+		);
+		expect(() =>
+			runtime.checkpoint(
+				"foreign-input",
+				checkpointRequest({ inputs: { other: foreign.output } }),
+			),
+		).toThrow(
+			"task data dependency is invalid, unknown, or belongs to another run",
+		);
+	});
+
+	it("rejects a materialized checkpoint that exceeds the spec bounds", () => {
+		const runtime = materializer();
+		const plan = runtime.agent("plan", request("Plan"));
+		const inputs = Object.fromEntries(
+			Array.from({ length: 65 }, (_, index) => [`input-${index}`, plan.output]),
+		);
+		expect(() =>
+			runtime.checkpoint("approve", checkpointRequest({ inputs })),
+		).toThrow("invalid materialized checkpoint task");
+		const bounded = Object.fromEntries(
+			Array.from({ length: 64 }, (_, index) => [`input-${index}`, plan.output]),
+		);
+		expect(() =>
+			runtime.checkpoint("approve", checkpointRequest({ inputs: bounded })),
+		).not.toThrow();
+	});
+
+	it("cannot be declared as a finalizer", () => {
+		const runtime = materializer();
+		expect(() =>
+			runtime.finalizer("approve", {
+				kind: "required",
+				checkpoint: checkpointRequest(),
+			} as never),
+		).toThrow("finalizer requires exactly one of support, agent, or workflow");
+		const internal = runtime as unknown as {
+			declareCheckpoint(
+				key: string,
+				request: CheckpointRequest<typeof decisionSchema>,
+				role: "task" | "finalizer",
+			): unknown;
+		};
+		expect(() =>
+			internal.declareCheckpoint("approve", checkpointRequest(), "finalizer"),
+		).toThrow("a checkpoint cannot be a finalizer");
+		// The role check precedes request validation.
+		expect(() =>
+			internal.declareCheckpoint(
+				"approve",
+				checkpointRequest({ schema: { type: "nope" } }),
+				"finalizer",
+			),
+		).toThrow("a checkpoint cannot be a finalizer");
+		expect(() =>
+			internal.declareCheckpoint("approve", checkpointRequest(), "task"),
+		).not.toThrow();
+		const [task] = declared(runtime.closeEpoch("final", []).events);
+		expect(task?.spec.role).toBe("task");
+	});
+
+	it("is a legal barrier target and finalizer dependency", () => {
+		for (const kind of ["result", "results", "settled"] as const) {
+			const runtime = materializer();
+			const approve = runtime.checkpoint("approve", checkpointRequest());
+			const commit = runtime.closeEpoch(kind, [approve]);
+			expect(commit.events.at(-1)).toEqual({
+				type: "barrier-reached",
+				data: { epoch: 1, kind, taskIds: [approve.ref.taskId] },
+			});
+			const follower = runtime.agent("follower", request("Follow"));
+			const [followerTask] = declared(
+				runtime.closeEpoch("final", [follower]).events,
+			);
+			expect(followerTask?.spec.after).toEqual([approve.ref]);
+		}
+		const runtime = materializer();
+		const approve = runtime.checkpoint("approve", checkpointRequest());
+		const writer = runtime.agent("writer", {
+			...worktreeRequest(),
+			after: [approve.ref],
+		});
+		const finalizer = runtime.finalizer("cleanup", {
+			kind: "required",
+			support: supportHelper({
+				parameters: { strict: true },
+				after: [approve.ref],
+				inputs: { decision: approve.output },
+			}),
+		});
+		expect(() =>
+			runtime.checkpoint("late", checkpointRequest({ after: [finalizer.ref] })),
+		).toThrow("ordinary task may not depend on a finalizer");
+		expect(() => runtime.closeEpoch("final", [finalizer])).toThrow(
+			"a finalizer cannot be a barrier target",
+		);
+		const commit = runtime.closeEpoch("final", [writer, approve]);
+		const [, writerTask, finalizerTask] = declared(commit.events);
+		expect(writerTask?.spec.after).toEqual([approve.ref]);
+		if (finalizerTask?.spec.kind !== "support") {
+			throw new Error("missing finalizer declaration");
+		}
+		expect(finalizerTask.spec.role).toBe("finalizer");
+		expect(finalizerTask.spec.after).toEqual([approve.ref]);
+		expect(finalizerTask.spec.inputs).toEqual({ decision: approve.output.ref });
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[finalizerTask.id]?.task).toEqual(finalizerTask);
+	});
+
+	it("accepts handoff inputs from worktree producers and refuses others", () => {
+		const runtime = materializer();
+		const writer = runtime.agent("writer", worktreeRequest());
+		const reader = runtime.agent("reader", request());
+		const review = runtime.checkpoint("review", {
+			schema: decisionSchema,
+			prompt: "Accept the handoff?",
+			headless: "block",
+			inputs: {
+				patch: writer.handoff,
+				answer: writer.output,
+				reader: reader.output,
+			},
+		});
+		const commit = runtime.closeEpoch("final", [review]);
+		const [, , reviewTask] = declared(commit.events);
+		if (reviewTask?.spec.kind !== "checkpoint") {
+			throw new Error("missing checkpoint declaration");
+		}
+		expect(reviewTask.spec.inputs).toEqual({
+			answer: writer.output.ref,
+			patch: writer.handoff.ref,
+			reader: reader.output.ref,
+		});
+		expect(Object.keys(reviewTask.spec.inputs)).toEqual([
+			"answer",
+			"patch",
+			"reader",
+		]);
+		expect(reviewTask.spec.after).toEqual(
+			[reader.ref, writer.ref].sort((left, right) =>
+				left.taskId < right.taskId ? -1 : 1,
+			),
+		);
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[reviewTask.id]?.task).toEqual(reviewTask);
+		const plain = materializer();
+		const plainReader = plain.agent("reader", request());
+		const forged = createTaskHandle<unknown>(
+			plainReader.ref,
+			plainReader.output.ref,
+			{
+				runId: "workflow_materializer",
+				producerTaskId: plainReader.ref.taskId,
+				output: "handoff",
+			},
+		);
+		expect(() =>
+			plain.checkpoint(
+				"review",
+				checkpointRequest({ inputs: { patch: forged.handoff } }),
+			),
+		).toThrow("handoff input producer is not a worktree agent task");
+		const gated = materializer();
+		const approve = gated.checkpoint("approve", checkpointRequest());
+		expect(() =>
+			gated.checkpoint(
+				"second",
+				checkpointRequest({
+					inputs: {
+						patch: createTaskHandle<unknown>(approve.ref, approve.output.ref, {
+							runId: "workflow_materializer",
+							producerTaskId: approve.ref.taskId,
+							output: "handoff",
+						}).handoff,
+					},
+				}),
+			),
+		).toThrow("handoff input producer is not a worktree agent task");
 	});
 });

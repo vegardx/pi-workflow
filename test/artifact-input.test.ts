@@ -386,7 +386,7 @@ async function handoffFixture(options: { padding?: number } = {}) {
 async function fixture(
 	value: unknown = { answer: "verified" },
 	schemaSha256?: string,
-	producerKind: "agent" | "support" = "agent",
+	producerKind: "agent" | "support" | "checkpoint" = "agent",
 ) {
 	const root = path.resolve(
 		".pi",
@@ -412,7 +412,13 @@ async function fixture(
 	const producer =
 		producerKind === "agent"
 			? materializer.agent("producer", request("Produce data"))
-			: materializer.support("producer", supportProducer({ parameters: {} }));
+			: producerKind === "support"
+				? materializer.support("producer", supportProducer({ parameters: {} }))
+				: materializer.checkpoint("producer", {
+						schema: Type.Object({ answer: Type.String() }),
+						prompt: "Produce data?",
+						headless: "block",
+					});
 	const consumer = materializer.agent("consumer", {
 		...request("Consume data"),
 		inputs: { zeta: producer.output, alpha: producer.output },
@@ -442,7 +448,9 @@ async function fixture(
 			deriveJsonValueSha256(
 				producerSpec.kind === "support"
 					? producerSpec.request.implementation.outputSchema
-					: producerSpec.request.outputSchema,
+					: producerSpec.kind === "checkpoint"
+						? producerSpec.request.schema
+						: producerSpec.request.outputSchema,
 			),
 	});
 	producerProjection.status = "completed";
@@ -672,6 +680,46 @@ describe("workflow artifact input reading", () => {
 		await expectBothReject(
 			options(drift),
 			"schema identity does not match its producer",
+		);
+	});
+
+	it("validates checkpoint decision artifacts against the request schema on both paths", async () => {
+		const setup = await fixture(
+			{ answer: "approved" },
+			undefined,
+			"checkpoint",
+		);
+		const producer = setup.state.tasks[setup.producerId];
+		if (producer?.task.spec.kind !== "checkpoint") {
+			throw new Error("missing checkpoint producer");
+		}
+		expect(setup.artifact.schemaSha256).toBe(
+			deriveJsonValueSha256(producer.task.spec.request.schema),
+		);
+		const inputs = await readWorkflowArtifactInputs(options(setup));
+		expect(inputs).toEqual({
+			alpha: { answer: "approved" },
+			zeta: { answer: "approved" },
+		});
+		const entries = await projectWorkflowArtifactInputs(options(setup));
+		expect(entries.map((entry) => JSON.parse(entry).sha256)).toEqual([
+			setup.artifact.sha256,
+			setup.artifact.sha256,
+		]);
+
+		const drift = await fixture(
+			{ answer: "approved" },
+			"c".repeat(64),
+			"checkpoint",
+		);
+		await expectBothReject(
+			options(drift),
+			"schema identity does not match its producer",
+		);
+		const mismatch = await fixture({ answer: 1 }, undefined, "checkpoint");
+		await expectBothReject(
+			options(mismatch),
+			"does not match its producer output schema",
 		);
 	});
 

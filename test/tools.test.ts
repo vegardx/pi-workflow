@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
+import { MAX_DYNAMIC_SOURCE_BYTES } from "../src/dynamic/constants.js";
+import { DynamicWorkflowProposerSchema } from "../src/dynamic/contracts.js";
+import { deriveDynamicSourceSha256 } from "../src/dynamic/source.js";
 import { encodeWorkflowRunCursor } from "../src/run-projection.js";
-import { createWorkflowService } from "../src/service.js";
 import {
+	createWorkflowService,
+	type WorkflowService,
+	WorkflowServiceError,
+} from "../src/service.js";
+import {
+	DynamicWorkflowProposalViewSchema,
 	type WorkflowLogPage,
 	type WorkflowRunInspection,
 	type WorkflowRunPage,
@@ -93,6 +101,26 @@ async function fixture() {
   }
 };\n`,
 	);
+	// Parks at its checkpoint until a human decides: exercises the parked
+	// workflow_wait view. No tool decides a checkpoint; the service does.
+	await writeFile(
+		path.join(cwd, "workflows", "gated.workflow.ts"),
+		`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "gated", description: "Gated workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  async run(ctx) {
+    const approve = ctx.checkpoint("approve", {
+      schema: { type: "object", properties: { proceed: { type: "boolean" } }, required: ["proceed"], additionalProperties: false },
+      prompt: "Approve the plan?",
+      headless: "block"
+    });
+    const decision = await ctx.result(approve);
+    return { answer: decision.proceed ? "approved" : "declined" };
+  }
+};\n`,
+	);
 	return { cwd, agentDir, storeRoot };
 }
 
@@ -155,6 +183,16 @@ async function operatorResults() {
 		await service.shutdown();
 	}
 }
+/** A valid dynamic source: what a model would hand to workflow_propose. */
+const DYNAMIC_SOURCE = `import { defineWorkflow } from "@vegardx/pi-workflow";
+export default defineWorkflow({
+	meta: { name: "proposed", description: "Proposed workflow", version: 1, budget: { cost: 1, childRuntimeMs: 60000 }, timeoutMs: 60000 },
+	inputSchema: { type: "object", properties: {}, additionalProperties: false },
+	outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+	async run() { return { ok: true }; },
+});
+`;
+const DYNAMIC_REF = `dynamic:${deriveDynamicSourceSha256(DYNAMIC_SOURCE)}`;
 
 function declaration(name: WorkflowToolName) {
 	const found = WORKFLOW_TOOL_DECLARATIONS.find(
@@ -178,10 +216,11 @@ const TOOL_NAMES: readonly WorkflowToolName[] = [
 	"workflow_invalidate",
 	"workflow_retry",
 	"workflow_resume",
+	"workflow_propose",
 ];
 
 describe("workflow tool declarations", () => {
-	it("declares thirteen uniquely named frozen tools with closed parameter schemas", () => {
+	it("declares fourteen uniquely named frozen tools with closed parameter schemas", () => {
 		const names = WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name);
 		expect(names).toEqual(TOOL_NAMES);
 		expect(new Set(names).size).toBe(names.length);
@@ -270,6 +309,37 @@ describe("workflow tool declarations", () => {
 		expect(
 			resume.summarizeCall({ runId, reason: "why", taskId: "task_abcdef" }),
 		).toBe(`${runId} · task_abcdef`);
+		const propose = declaration("workflow_propose").parameters;
+		expect(propose).toEqual({
+			type: "object",
+			properties: {
+				source: {
+					type: "string",
+					minLength: 1,
+					maxLength: MAX_DYNAMIC_SOURCE_BYTES,
+				},
+			},
+			required: ["source"],
+			additionalProperties: false,
+		});
+		expect(Value.Check(propose, { source: "x" })).toBe(true);
+		expect(
+			Value.Check(propose, { source: "x".repeat(MAX_DYNAMIC_SOURCE_BYTES) }),
+		).toBe(true);
+		expect(Value.Check(propose, { source: "" })).toBe(false);
+		expect(
+			Value.Check(propose, {
+				source: "x".repeat(MAX_DYNAMIC_SOURCE_BYTES + 1),
+			}),
+		).toBe(false);
+		expect(Value.Check(propose, {})).toBe(false);
+		expect(Value.Check(propose, { source: 1 })).toBe(false);
+		expect(
+			Value.Check(propose, {
+				source: "x",
+				proposer: { kind: "tool", via: "workflow_propose" },
+			}),
+		).toBe(false);
 	});
 
 	it("validates every real service result against its declared output schema", async () => {
@@ -277,6 +347,8 @@ describe("workflow tool declarations", () => {
 			...(await fixture()),
 			projectTrusted: () => true,
 			subagents: provider(),
+			// Source-mode workers boot slowly under full-suite load.
+			dynamic: { bootTimeoutMs: 60_000 },
 		});
 		try {
 			const receipt = await declaration("workflow_run").execute(service, {
@@ -309,6 +381,34 @@ describe("workflow tool declarations", () => {
 			);
 			await service.wait(delegatingRunId);
 			const operator = await operatorResults();
+			const gated = await declaration("workflow_run").execute(service, {
+				ref: "gated",
+				input: {},
+			});
+			const gatedRunId = (gated as { runId: string }).runId;
+			const parked = await declaration("workflow_wait").execute(service, {
+				runId: gatedRunId,
+			});
+			expect(parked).toMatchObject({ status: "waiting", parked: true });
+			const pending = (parked as { pendingCheckpoints?: { taskId: string }[] })
+				.pendingCheckpoints;
+			const checkpointTaskId = pending?.[0]?.taskId;
+			if (!checkpointTaskId) throw new Error("gated run has no checkpoint");
+			expect(pending).toHaveLength(1);
+			// The parked view is a legal wait result; the decision itself is
+			// human-only and reaches the service through the operator surface.
+			expect([
+				...Value.Errors(declaration("workflow_wait").output, parked),
+			]).toEqual([]);
+			await service.decide(gatedRunId, checkpointTaskId, {
+				decision: { proceed: true },
+				approver: "vegard",
+				reason: "tool schema test",
+			});
+			await expect(service.wait(gatedRunId)).resolves.toMatchObject({
+				status: "completed",
+				output: { answer: "approved" },
+			});
 			const results: Record<WorkflowToolName, unknown> = {
 				workflow_list: await declaration("workflow_list").execute(service, {}),
 				workflow_validate: await declaration("workflow_validate").execute(
@@ -357,6 +457,10 @@ describe("workflow tool declarations", () => {
 				workflow_invalidate: invalidated,
 				workflow_retry: operator.workflow_retry,
 				workflow_resume: operator.workflow_resume,
+				workflow_propose: await declaration("workflow_propose").execute(
+					service,
+					{ source: DYNAMIC_SOURCE },
+				),
 			};
 			for (const tool of WORKFLOW_TOOL_DECLARATIONS) {
 				const value = results[tool.name];
@@ -373,6 +477,7 @@ describe("workflow tool declarations", () => {
 			expect(results.workflow_list).toMatchObject([
 				{ name: "delegating", scope: "project" },
 				{ name: "example", scope: "project" },
+				{ name: "gated", scope: "project" },
 				{ name: "stoppable", scope: "project" },
 			]);
 			expect(results.workflow_validate).toMatchObject({
@@ -394,7 +499,7 @@ describe("workflow tool declarations", () => {
 				reconciled: [],
 			});
 			const page = results.workflow_runs as WorkflowRunPage;
-			expect(page.total).toBe(3);
+			expect(page.total).toBe(4);
 			expect(page.runs.map((run) => run.runId)).toContain(runId);
 			expect(page.issues).toEqual([]);
 			const inspection = results.workflow_inspect as WorkflowRunInspection;
@@ -426,9 +531,193 @@ describe("workflow tool declarations", () => {
 			expect(results.workflow_resume).not.toMatchObject({
 				status: "interrupted",
 			});
+			// The proposal is pending and not runnable: proposing never approves.
+			expect(results.workflow_propose).toMatchObject({
+				ref: DYNAMIC_REF,
+				sourceBytes: Buffer.byteLength(DYNAMIC_SOURCE, "utf8"),
+				manifest: { meta: { name: "proposed" } },
+				proposer: { kind: "tool", via: "workflow_propose" },
+				runnable: false,
+			});
+			expect(results.workflow_propose).not.toHaveProperty("decision");
+			expect((await service.proposals()).map((entry) => entry.ref)).toEqual([
+				DYNAMIC_REF,
+			]);
+			await expect(service.validate(DYNAMIC_REF)).rejects.toMatchObject({
+				code: "validation",
+				message:
+					"Dynamic workflow source is not approved for the current host API.",
+			});
+			expect(results.workflow_list).not.toContainEqual(
+				expect.objectContaining({ scope: "dynamic" }),
+			);
 		} finally {
 			await service.shutdown();
 		}
+	});
+
+	describe("workflow_propose", () => {
+		const tool = declaration("workflow_propose");
+
+		it("carries the spec's description, guidelines, and output schema", () => {
+			expect(tool.label).toBe("Propose Dynamic Workflow");
+			expect(tool.description).toBe(
+				"Propose dynamic workflow TypeScript source for human approval. Returns the proposal as dynamic:<sha256>; a human must approve it with /workflow approve before workflow_run or workflow_validate accept that reference. The model cannot approve.",
+			);
+			expect(tool.promptGuidelines).toEqual([
+				"Author the source exactly like a static *.workflow.ts definition (workflow-authoring skill): default-export one defineWorkflow call; import only @vegardx/pi-workflow, typebox, and registered support modules.",
+				"Never state or assume a proposal is approved; approval is a human decision outside the tool surface.",
+			]);
+			expect(tool.promptSnippet).toBeUndefined();
+			expect(tool.output).toBe(DynamicWorkflowProposalViewSchema);
+			expect(tool.output).toMatchObject({
+				type: "object",
+				additionalProperties: false,
+			});
+			expect(
+				(tool.output as { properties: { ref: { pattern: string } } }).properties
+					.ref.pattern,
+			).toBe("^dynamic:[a-f0-9]{64}$");
+			expect((tool.output as { required: string[] }).required.sort()).toEqual(
+				[
+					"definitionIdentitySha256",
+					"hostApiSha256",
+					"importPolicySha256",
+					"manifest",
+					"manifestSha256",
+					"path",
+					"proposedAt",
+					"proposer",
+					"ref",
+					"runnable",
+					"sourceBytes",
+					"sourceSha256",
+					"transformer",
+				].sort(),
+			);
+			for (const tool of WORKFLOW_TOOL_DECLARATIONS) {
+				if (tool.name === "workflow_validate" || tool.name === "workflow_run") {
+					expect(tool.description).toMatch(
+						/ Accepts dynamic:<sha256> for an approved dynamic workflow proposal\.$/,
+					);
+				} else {
+					expect(tool.description).not.toContain("dynamic:<sha256> for");
+				}
+			}
+		});
+
+		it("proposes as the tool and never decides", async () => {
+			const propose = vi.fn(async () => {
+				throw new WorkflowServiceError(
+					"conflict",
+					"Dynamic workflow proposal store is full.",
+				);
+			});
+			const decideSource = vi.fn();
+			const service = { propose, decideSource } as unknown as WorkflowService;
+			await expect(
+				tool.execute(service, { source: DYNAMIC_SOURCE }),
+			).rejects.toMatchObject({
+				name: "WorkflowServiceError",
+				code: "conflict",
+				message: "Dynamic workflow proposal store is full.",
+			});
+			expect(propose).toHaveBeenCalledTimes(1);
+			expect(propose).toHaveBeenCalledWith(DYNAMIC_SOURCE, {
+				proposer: { kind: "tool", via: "workflow_propose" },
+			});
+			const [, options] = propose.mock.calls[0] as unknown as [
+				string,
+				{ proposer: unknown },
+			];
+			expect(Value.Check(DynamicWorkflowProposerSchema, options.proposer)).toBe(
+				true,
+			);
+			expect(
+				Value.Check(DynamicWorkflowProposerSchema, {
+					kind: "model",
+					via: "workflow_propose",
+				}),
+			).toBe(false);
+			expect(decideSource).not.toHaveBeenCalled();
+			// No tool declaration reaches the human decision surface at all.
+			const module = await readFile(
+				new URL("../src/tools.ts", import.meta.url),
+				"utf8",
+			);
+			expect(module).not.toContain("decideSource");
+			expect(module).not.toContain("inspectProposal");
+			expect(module).not.toMatch(/workflow_(approve|reject|proposals)/);
+			expect(WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name)).not.toContain(
+				expect.stringMatching(/approve|reject|proposals/),
+			);
+		});
+
+		it("surfaces the service's validation refusals unchanged", async () => {
+			const untrusted = await createWorkflowService({
+				...(await fixture()),
+				projectTrusted: () => false,
+				subagents: provider(),
+			});
+			try {
+				await expect(
+					tool.execute(untrusted, { source: DYNAMIC_SOURCE }),
+				).rejects.toMatchObject({
+					name: "WorkflowServiceError",
+					code: "validation",
+					message: "Dynamic workflows require project trust.",
+				});
+			} finally {
+				await untrusted.shutdown();
+			}
+			const service = await createWorkflowService({
+				...(await fixture()),
+				projectTrusted: () => true,
+				subagents: provider(),
+				// Source-mode workers boot slowly under full-suite load.
+				dynamic: { bootTimeoutMs: 60_000 },
+			});
+			try {
+				await expect(
+					tool.execute(service, {
+						source: `export const leak = 1;\n${DYNAMIC_SOURCE}`,
+					}),
+				).rejects.toMatchObject({
+					name: "WorkflowServiceError",
+					code: "validation",
+					message:
+						"dynamic workflow source must have exactly one default export and no named exports",
+				});
+				await expect(
+					tool.execute(service, {
+						source: `import fs from "node:fs";\n${DYNAMIC_SOURCE}`,
+					}),
+				).rejects.toMatchObject({
+					name: "WorkflowServiceError",
+					code: "validation",
+					message: expect.stringContaining("node:fs"),
+				});
+				await expect(
+					tool.execute(service, { source: "export default 1;\n" }),
+				).rejects.toMatchObject({
+					name: "WorkflowServiceError",
+					code: "validation",
+					message: expect.stringMatching(
+						/^Dynamic workflow manifest extraction failed: /,
+					),
+				});
+				await expect(service.proposals()).resolves.toEqual([]);
+				// Idempotent: the same source proposed twice is one proposal.
+				const first = await tool.execute(service, { source: DYNAMIC_SOURCE });
+				const second = await tool.execute(service, { source: DYNAMIC_SOURCE });
+				expect(second).toEqual(first);
+				expect(JSON.parse(workflowToolText(tool, first))).toEqual(
+					JSON.parse(JSON.stringify(first)),
+				);
+			} finally {
+				await service.shutdown();
+			}
+		});
 	});
 
 	it("rejects run views that leave the declared shape", () => {
@@ -520,6 +809,7 @@ describe("workflow tool declarations", () => {
 				leasedElsewhere: false,
 				availableActions: [],
 				requiresAttention: false,
+				pendingCheckpointCount: 0,
 			};
 		}
 

@@ -581,13 +581,14 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 17,
+			contractRevision: 18,
 			runId,
 			depth: 0,
 			definitionName: "pending",
 			definitionPath: workflow.path,
 			definitionIdentitySha256: workflow.identity.identitySha256,
 			definitionSourceSha256: workflow.identity.sourceSha256,
+			definitionKind: "static",
 			concurrency: 4,
 			declaredBudget: { cost: 1_000, childRuntimeMs: 3_600_000 },
 			effectiveBudget: { cost: 1_000, childRuntimeMs: 3_600_000 },

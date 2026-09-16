@@ -1,7 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import {
 	HANDOFF_EXPORT_MEDIA_TYPE,
 	SUBAGENT_RUNTIME_CONTRACT,
 } from "@vegardx/pi-subagent";
+import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
@@ -12,6 +14,7 @@ import {
 	HandoffPolicySchema,
 	isCompatibleSubagentContract,
 	isWorkflowRuntimeContract,
+	JsonSchemaDocumentSchema,
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_NESTED_WORKFLOW_TASKS,
 	MAX_TASK_ATTEMPTS,
@@ -140,9 +143,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 17 and rejects revision 16 durable records", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(17);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(17);
+	it("publishes revision 18 and rejects revision 17", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(18);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(18);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -152,9 +155,12 @@ describe("workflow contracts", () => {
 		);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.finalizers).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.checkpoints).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 17,
+			contractRevision: 18,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -169,12 +175,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 16,
+				contractRevision: 17,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 17,
+			contractRevision: 18,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -198,7 +204,7 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 16,
+				contractRevision: 17,
 			}),
 		).toBe(false);
 	});
@@ -214,6 +220,7 @@ describe("workflow contracts", () => {
 			"transactionalInvalidation",
 			"finalizers",
 			"operatorAttempts",
+			"checkpoints",
 		] as const) {
 			expect(
 				isWorkflowRuntimeContract({
@@ -802,5 +809,47 @@ describe("workflow contracts", () => {
 				request: { ...spec.request, outputSchema: () => undefined },
 			}),
 		).toBe(false);
+	});
+});
+
+describe("JSON schema document contract", () => {
+	it("equals the schema composed through the TypeBox constructors", () => {
+		// `contracts-core.ts` binds each nesting level to the shared level
+		// below instead of composing 16 levels through `Type.Union` (which
+		// walks its arguments as a tree, 2^16 traversals). The result must be
+		// the composed schema exactly: same keys, same order, same depth.
+		const primitive = Type.Union([
+			Type.Null(),
+			Type.Boolean(),
+			Type.Number(),
+			Type.String(),
+		]);
+		let value: TSchema = primitive;
+		for (let depth = 0; depth < 16; depth++) {
+			value = Type.Union([
+				primitive,
+				Type.Array(value),
+				Type.Record(Type.String(), value),
+			]);
+		}
+		const composed = Type.Record(Type.String(), value, {
+			additionalProperties: false,
+		});
+		expect(isDeepStrictEqual(JsonSchemaDocumentSchema, composed)).toBe(true);
+		expect(Object.keys(JsonSchemaDocumentSchema)).toEqual(
+			Object.keys(composed),
+		);
+	});
+
+	it("accepts JSON nested to the contract depth and refuses deeper values", () => {
+		const nest = (depth: number): unknown => {
+			let value: unknown = 1;
+			for (let level = 0; level < depth; level++) value = [value];
+			return value;
+		};
+		expect(Value.Check(JsonSchemaDocumentSchema, { a: nest(16) })).toBe(true);
+		expect(Value.Check(JsonSchemaDocumentSchema, { a: nest(17) })).toBe(false);
+		expect(Value.Check(JsonSchemaDocumentSchema, { a: () => 1 })).toBe(false);
+		expect(Value.Check(JsonSchemaDocumentSchema, [])).toBe(false);
 	});
 });

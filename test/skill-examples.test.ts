@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { extractDynamicWorkflowManifest } from "../src/dynamic/vm-host.js";
 import { discoverWorkflows } from "../src/registry.js";
 
 const skillUrl = new URL(
@@ -27,6 +28,8 @@ const EXPECTED_EXAMPLE_NAMES = [
 	"resilient-draft",
 	"worktree-implement",
 	"finalized-report",
+	"approved-implement",
+	"dynamic-triage",
 ];
 
 function fencedTypeScript(markdown: string): string[] {
@@ -68,29 +71,69 @@ async function projectWithExamples(examples: readonly string[]) {
 	return { cwd, agentDir };
 }
 
+/** `items` mapped in order with at most `limit` calls in flight. */
+async function mapWithConcurrency<T, R>(
+	items: readonly T[],
+	limit: number,
+	map: (item: T) => Promise<R>,
+): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let next = 0;
+	async function lane(): Promise<void> {
+		for (let index = next++; index < items.length; index = next++) {
+			results[index] = await map(items[index] as T);
+		}
+	}
+	await Promise.all(
+		Array.from({ length: Math.min(limit, items.length) }, () => lane()),
+	);
+	return results;
+}
+
 describe("workflow authoring skill", () => {
 	it("declares a model-invoked skill with the required frontmatter", async () => {
 		const skill = await readFile(skillUrl, "utf8");
 		const frontmatter = skill.match(/^---\n([\s\S]*?)\n---\n/);
 		expect(frontmatter?.[1]).toContain("name: workflow-authoring");
 		expect(frontmatter?.[1]).toContain(
-			"description: Use when creating, modifying, validating, or debugging a static pi-workflow *.workflow.ts definition; not for operating runs.",
+			"description: Use when creating, modifying, validating, or debugging a pi-workflow *.workflow.ts definition, static or proposed as a dynamic workflow through workflow_propose; not for operating runs.",
 		);
 		expect(skill).toContain("references/examples.md");
 		const unavailable = skill
 			.match(
-				/Not available in revision 17:([\s\S]*?)\. Do not author against/,
+				/Not available in revision 18:([\s\S]*?)\. Do not author against/,
 			)?.[1]
 			?.replace(/\s+/g, " ");
 		if (!unavailable) throw new Error("no unavailable-API statement");
 		for (const api of [
-			"`ctx.checkpoint`",
 			"`ctx.artifact`",
-			"dynamic workflows",
 			"a Pi tool for handoff export",
+			"approve, reject, or proposals tool",
 		]) {
 			expect(unavailable).toContain(api);
 		}
+		// Dynamic workflows are available since revision 18 (dynamic half).
+		expect(unavailable).not.toContain("dynamic workflows");
+		expect(skill).toContain("## Dynamic workflows");
+		expect(skill).toContain("`workflow_propose { source }`");
+		for (const message of [
+			"dynamic workflow source may not use import.meta",
+			"dynamic workflow source must have exactly one default export and no named exports",
+			"Dynamic workflow source is not approved for the current host API.",
+			"Dynamic workflow source was rejected.",
+			"Dynamic workflow source is already approved.",
+			"Dynamic workflow proposal predates the current host API; propose the source again.",
+			"Dynamic workflow import policy changed since approval.",
+			"Dynamic workflow source execution failed:",
+			"Dynamic workflow source may not register support implementations.",
+			"Workflow request contains a function.",
+		]) {
+			expect(skill).toContain(message);
+		}
+		expect(skill).toContain(
+			"a determinism and API boundary, not an OS security boundary",
+		);
+		expect(skill).toContain("never state or assume a proposal is approved");
 		// Invalidation, retry, and resume have Pi tools and writer (worktree)
 		// agent tasks are available since revision 17.
 		expect(unavailable).not.toContain("invalidation");
@@ -98,6 +141,35 @@ describe("workflow authoring skill", () => {
 		expect(unavailable).not.toContain("worktree");
 		expect(unavailable).not.toContain("retry");
 		expect(unavailable).not.toContain("resume");
+		// Checkpoints are available since revision 18.
+		expect(unavailable).not.toContain("ctx.checkpoint");
+		expect(skill).toContain("## Checkpoints");
+		expect(skill).toContain(
+			"`ctx.checkpoint(key, { schema, prompt, default?, headless, timeoutMs?, disposition?, after?, inputs?, replay? })`",
+		);
+		for (const message of [
+			"a checkpoint cannot be a finalizer",
+			"invalid checkpoint prompt",
+			"invalid checkpoint headless policy",
+			"invalid checkpoint timeout",
+			"checkpoint default is not JSON",
+			"checkpoint default does not match its schema",
+			"checkpoint headless default requires an explicit default",
+			"Workflow checkpoint request is invalid.",
+			"Checkpoint awaits a decision.",
+			"Checkpoint decided.",
+			"Checkpoint expired without a decision.",
+			"Workflow run ended before the checkpoint was decided.",
+			"Checkpoint is already decided.",
+			"Checkpoint has expired.",
+			"Checkpoint decision does not match its schema.",
+		]) {
+			expect(skill).toContain(message);
+		}
+		expect(skill).toContain("Do not poll; wait returns immediately when");
+		expect(skill).toContain("`parked: true`");
+		expect(skill).toContain("a model must never decide a checkpoint");
+		expect(unavailable).toContain("model-callable checkpoint decide tool");
 		expect(skill).toContain("`workflow_invalidate { runId, taskId, reason }`");
 		expect(skill).toContain("`workflow_retry { runId, taskId, reason }`");
 		expect(skill).toContain("`workflow_resume { runId, reason, taskId? }`");
@@ -144,6 +216,7 @@ describe("workflow authoring skill", () => {
 			"workflow_invalidate",
 			"workflow_retry",
 			"workflow_resume",
+			"workflow_propose",
 		]) {
 			expect(skill).toContain(tool);
 		}
@@ -156,13 +229,22 @@ describe("workflow authoring skill", () => {
 			expect(example).toContain('from "@vegardx/pi-workflow"');
 			expect(example).toContain("export default defineWorkflow({");
 		}
-		const worktree = examples.at(-2);
+		const dynamic = examples.at(-1);
+		expect(dynamic).toContain('name: "dynamic-triage"');
+		expect(dynamic).toContain("await ctx.result(triage)");
+		const worktree = examples.at(-4);
 		expect(worktree).toContain('workspace: { mode: "worktree", cwd: ctx.cwd }');
 		expect(worktree).toContain('handoff: "required"');
 		expect(worktree).toContain("await ctx.handoff(implement)");
 		expect(worktree).toContain("handoff: implement.handoff");
-		expect(examples.at(-1)).toContain('ctx.finalize("record", {');
-		expect(examples.at(-1)).toContain('ctx.finalize("announce", {');
+		expect(examples.at(-3)).toContain('ctx.finalize("record", {');
+		expect(examples.at(-3)).toContain('ctx.finalize("announce", {');
+		const checkpoint = examples.at(-2);
+		expect(checkpoint).toContain('ctx.checkpoint("approve", {');
+		expect(checkpoint).toContain('headless: "block"');
+		expect(checkpoint).toContain('headless: "use-explicit-default"');
+		expect(checkpoint).toContain("await ctx.result(approve)");
+		expect(checkpoint).toContain("after: [approve.ref]");
 		const project = await projectWithExamples(examples);
 		const workflows = await discoverWorkflows({
 			...project,
@@ -186,6 +268,37 @@ describe("workflow authoring skill", () => {
 		});
 	});
 
+	it("yields the loader's manifest for every example through the dynamic manifest VM", async () => {
+		const examples = fencedTypeScript(await readFile(examplesUrl, "utf8"));
+		const project = await projectWithExamples(examples);
+		const workflows = await discoverWorkflows({
+			...project,
+			projectTrusted: true,
+		});
+		expect(workflows).toHaveLength(examples.length);
+		// Each extraction boots one worker under its own watchdog. The boots
+		// share nothing, so a few run at a time: enough to overlap the
+		// per-worker module load, few enough that a loaded 4 vCPU CI runner
+		// still boots every worker well inside the lengthened watchdog (the
+		// production 5 s manifest watchdog assumes an idle host).
+		const manifests = await mapWithConcurrency(examples, 4, (source) =>
+			extractDynamicWorkflowManifest({
+				source,
+				supportHelpers: [],
+				overrides: { bootTimeoutMs: 60_000 },
+			}),
+		);
+		for (const [index, manifest] of manifests.entries()) {
+			const loaded = workflows[index];
+			if (!loaded) throw new Error(`no loaded example ${index}`);
+			expect(manifest).toEqual({
+				meta: loaded.definition.meta,
+				inputSchema: loaded.definition.inputSchema,
+				outputSchema: loaded.definition.outputSchema,
+			});
+		}
+	});
+
 	it("refuses an example that imports outside the allow-list", async () => {
 		const [example] = fencedTypeScript(await readFile(examplesUrl, "utf8"));
 		if (!example) throw new Error("no examples");
@@ -195,7 +308,7 @@ describe("workflow authoring skill", () => {
 		await expect(
 			discoverWorkflows({ ...project, projectTrusted: true }),
 		).rejects.toThrow(
-			"workflow import node:fs is not identity-bound by contract revision 17",
+			"workflow import node:fs is not identity-bound by contract revision 18",
 		);
 	});
 });

@@ -20,6 +20,7 @@ import {
 	WorkflowArtifactStore,
 } from "../src/artifact-store.js";
 import { settledAgentUsage } from "../src/attempts.js";
+import { CHECKPOINT_RUN_ENDING_REASON } from "../src/checkpoint-executor.js";
 import type {
 	NestedWorkflowTaskRequest,
 	NestedWorkflowUsage,
@@ -27,6 +28,7 @@ import type {
 	WorkflowArtifactRef,
 	WorkflowBudget,
 } from "../src/contracts.js";
+import { WorkflowDecisionRecordStore } from "../src/decision-store.js";
 import type { TaskHandle } from "../src/definition.js";
 import {
 	deriveJsonValueSha256,
@@ -34,6 +36,7 @@ import {
 	deriveSubagentOperationId,
 	deriveTaskExecutionId,
 	deriveWorkflowArtifactId,
+	deriveWorkflowFailureSha256,
 } from "../src/execution.js";
 import {
 	type NestedWorkflowDeclaration,
@@ -3986,5 +3989,823 @@ describe("worktree handoff settlement", () => {
 		expect(
 			types.filter((type) => type === "task-execution-child-settled"),
 		).toHaveLength(1);
+	});
+});
+
+const decisionSchema = Type.Object(
+	{ proceed: Type.Boolean() },
+	{ additionalProperties: false },
+);
+const APPROVE = { proceed: true };
+const CHECKPOINT_NOT_CONFIGURED =
+	"Checkpoint execution is not configured for this workflow run.";
+
+function checkpoint(
+	overrides: {
+		disposition?: "required" | "optional";
+		headless?: "block" | "use-explicit-default";
+		default?: { proceed: boolean };
+		timeoutMs?: number;
+		after?: readonly TaskRef[];
+	} = {},
+) {
+	return {
+		schema: decisionSchema,
+		prompt: "Approve the plan?",
+		headless: overrides.headless ?? ("block" as const),
+		...(overrides.default ? { default: overrides.default } : {}),
+		...(overrides.timeoutMs ? { timeoutMs: overrides.timeoutMs } : {}),
+		...(overrides.disposition ? { disposition: overrides.disposition } : {}),
+		...(overrides.after ? { after: overrides.after } : {}),
+	};
+}
+
+function releasingClient(
+	overrides: Partial<SubagentClient> = {},
+	status: "completed" | "failed" = "completed",
+): SubagentClient {
+	return client({
+		release: vi.fn(async () => ({
+			runId: "run_scheduler",
+			attemptId: "attempt_scheduler",
+			status,
+		})),
+		...overrides,
+	});
+}
+
+/** A scheduler with the real checkpoint executor built from both stores. */
+async function checkpointScheduler(
+	journal: WorkflowRunJournal,
+	options: {
+		ownerClient?: SubagentClient;
+		concurrency?: number;
+		budget?: WorkflowBudget;
+		finalize?: boolean;
+		supportTasks?: ReadonlyMap<string, SupportTaskRegistration>;
+		nestedRuns?: WorkflowNestedRunProvider;
+		headless?: boolean;
+		decisions?: boolean;
+	} = {},
+) {
+	const ownerClient = options.ownerClient ?? supportOnlyClient();
+	const ownerBinding = binding(ownerClient);
+	const artifacts = await WorkflowArtifactStore.open({ journal });
+	const decisions = await WorkflowDecisionRecordStore.open({ journal });
+	const scheduler = createWorkflowSequentialScheduler({
+		journal,
+		binding: ownerBinding,
+		artifacts,
+		...(options.decisions === false ? {} : { decisions }),
+		...(options.finalize
+			? {
+					finalizer: createWorkflowTaskFinalizer({
+						journal,
+						artifacts,
+						binding: ownerBinding,
+					}),
+				}
+			: {}),
+		...(options.concurrency ? { concurrency: options.concurrency } : {}),
+		...(options.budget ? { budget: options.budget } : {}),
+		...(options.supportTasks ? { supportTasks: options.supportTasks } : {}),
+		...(options.nestedRuns ? { nestedRuns: options.nestedRuns, nesting } : {}),
+		...(options.headless === undefined
+			? {}
+			: { checkpoints: { headless: options.headless } }),
+	});
+	return { scheduler, artifacts, decisions, ownerClient };
+}
+
+function executionOf(
+	state: Awaited<ReturnType<typeof projection>>,
+	taskId: string,
+) {
+	return state.executions[state.tasks[taskId]?.currentExecutionId ?? ""];
+}
+
+/**
+ * Journal facts about the failure ladder: the open checkpoint is cancelled
+ * (terminal, then status) before the run leaves running.
+ */
+function cancellationOrder(
+	events: readonly { type: string; data: unknown }[],
+	checkpointExecutionId: string,
+) {
+	const index = (
+		predicate: (event: { type: string; data: unknown }) => boolean,
+	) => events.findIndex(predicate);
+	const terminal = index(
+		(event) =>
+			event.type === "task-execution-terminal" &&
+			(event.data as { executionId: string }).executionId ===
+				checkpointExecutionId,
+	);
+	const cancelled = index(
+		(event) =>
+			event.type === "task-status-changed" &&
+			(event.data as { to: string }).to === "cancelled",
+	);
+	const runEnded = index(
+		(event) =>
+			event.type === "run-status-changed" &&
+			["failed", "interrupted", "cleanup-blocked"].includes(
+				(event.data as { to: string }).to,
+			),
+	);
+	return {
+		terminal,
+		cancelled,
+		runEnded,
+		terminalEvent: events[terminal]?.data,
+		cancelledEvent: events[cancelled]?.data,
+	};
+}
+
+function expectCancelledBeforeRunEnded(
+	events: readonly { type: string; data: unknown }[],
+	checkpointTaskId: string,
+	checkpointExecutionId: string,
+) {
+	const order = cancellationOrder(events, checkpointExecutionId);
+	expect(order.terminal).toBeGreaterThan(-1);
+	expect(order.cancelled).toBeGreaterThan(order.terminal);
+	expect(order.runEnded).toBeGreaterThan(order.cancelled);
+	expect(order.terminalEvent).toEqual({
+		executionId: checkpointExecutionId,
+		outcome: "cancelled",
+		evidence: {
+			kind: "workflow",
+			stage: "stop",
+			failureSha256: deriveWorkflowFailureSha256(
+				"stop",
+				CHECKPOINT_RUN_ENDING_REASON,
+			),
+			message: CHECKPOINT_RUN_ENDING_REASON,
+		},
+	});
+	expect(order.cancelledEvent).toEqual({
+		taskId: checkpointTaskId,
+		from: "waiting",
+		to: "cancelled",
+		reason: CHECKPOINT_RUN_ENDING_REASON,
+	});
+}
+
+describe("checkpoint scheduling", () => {
+	it("parks a ready checkpoint and reports awaiting-decision", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint({ timeoutMs: 60_000 })),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler, ownerClient } = await checkpointScheduler(journal);
+		const before = (await journal.readEvents()).length;
+
+		const outcome = await scheduler.drive();
+		const state = await projection(journal);
+		const execution = executionOf(state, taskId);
+		const expiresAt = execution?.checkpointRequest?.expiresAt;
+		expect(expiresAt).toBeDefined();
+		expect(outcome).toEqual({
+			state: "awaiting-decision",
+			runStatus: "waiting",
+			pendingCheckpoints: [
+				{ taskId, executionId: execution?.execution.id, expiresAt },
+			],
+		});
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[taskId]?.status).toBe("waiting");
+		expect(execution?.phase).toBe("checkpoint-requested");
+		const events = (await journal.readEvents()).slice(before);
+		expect(events.map((event) => event.type)).toEqual([
+			"run-status-changed",
+			"task-status-changed",
+			"task-execution-created",
+			"task-execution-checkpoint-requested",
+			"task-status-changed",
+			"run-status-changed",
+		]);
+		expect(events.at(-2)?.data).toEqual({
+			taskId,
+			from: "ready",
+			to: "waiting",
+			reason: "Checkpoint awaits a decision.",
+		});
+		expect(events.at(-1)?.data).toEqual({
+			from: "running",
+			to: "waiting",
+			reason: "Workflow run awaits a checkpoint decision.",
+		});
+
+		// Quiescence (C3): another drive has nothing to do and reports the same
+		// parked checkpoint without asking again.
+		const parked = (await journal.readEvents()).length;
+		await expect(scheduler.drive()).resolves.toEqual(outcome);
+		const again = (await journal.readEvents()).slice(parked);
+		expect(again.every((event) => event.type === "run-status-changed")).toBe(
+			true,
+		);
+		expect((await projection(journal)).status).toBe("waiting");
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("holds no lane and reserves no budget while parked", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.agent("answer", request()),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const agentId = tasks[1]?.ref.taskId ?? "";
+		const ownerClient = releasingClient();
+		// The agent's declared cost maximum equals the whole budget: any
+		// reservation held by the parked checkpoint would defer it.
+		const { scheduler } = await checkpointScheduler(journal, {
+			ownerClient,
+			concurrency: 1,
+			budget: { cost: 100, childRuntimeMs: 300_000 },
+			finalize: true,
+		});
+
+		const first = await scheduler.drive();
+		expect(first).toMatchObject({ state: "awaiting-decision" });
+		if (first.state !== "awaiting-decision") throw new Error("not parked");
+		expect(first.pendingCheckpoints).toEqual([
+			{
+				taskId: checkpointId,
+				executionId: executionOf(await projection(journal), checkpointId)
+					?.execution.id,
+			},
+		]);
+
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+			runStatus: "waiting",
+		});
+		expect(ownerClient.launch).toHaveBeenCalledOnce();
+		const state = await projection(journal);
+		expect(state.tasks[agentId]?.status).toBe("completed");
+		expect(state.tasks[checkpointId]?.status).toBe("waiting");
+		expect(state.status).toBe("waiting");
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").some(
+				(change) => change.to === "blocked",
+			),
+		).toBe(false);
+	});
+
+	it("expires a required block checkpoint on the next sweep and fails the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint({ timeoutMs: 1_000 })),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler } = await checkpointScheduler(journal);
+		const first = await scheduler.drive();
+		if (first.state !== "awaiting-decision") throw new Error("not parked");
+		const expiresAt = first.pendingCheckpoints[0]?.expiresAt ?? "";
+		await new Promise((resolve) =>
+			setTimeout(resolve, Math.max(0, Date.parse(expiresAt) - Date.now()) + 50),
+		);
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("failed");
+		expect(executionOf(state, taskId)).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "checkpoint-expired",
+					message: "Checkpoint expired without a decision.",
+				},
+			},
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
+		).toMatchObject({
+			to: "failed",
+			reason: "A required workflow task did not complete.",
+		});
+	});
+
+	it("expires an optional use-explicit-default checkpoint to its default and continues", async () => {
+		const { journal, tasks } = await fixture((materializer) => {
+			const approve = materializer.checkpoint(
+				"approve",
+				checkpoint({
+					disposition: "optional",
+					headless: "use-explicit-default",
+					default: { proceed: false },
+					timeoutMs: 1_000,
+				}),
+			);
+			return [
+				approve,
+				materializer.support(
+					"after",
+					echo({ parameters: { value: "x" }, after: [approve.ref] }),
+				),
+			];
+		});
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const supportId = tasks[1]?.ref.taskId ?? "";
+		const { scheduler } = await checkpointScheduler(journal, {
+			supportTasks: echoRegistry(({ parameters }) => ({
+				answer: parameters.value,
+			})),
+		});
+		const first = await scheduler.drive();
+		if (first.state !== "awaiting-decision") throw new Error("not parked");
+		const expiresAt = first.pendingCheckpoints[0]?.expiresAt ?? "";
+		await new Promise((resolve) =>
+			setTimeout(resolve, Math.max(0, Date.parse(expiresAt) - Date.now()) + 50),
+		);
+
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[checkpointId]?.status).toBe("completed");
+		expect(state.tasks[supportId]?.status).toBe("completed");
+		expect(executionOf(state, checkpointId)?.checkpointDecision).toMatchObject({
+			source: "default",
+		});
+	});
+
+	it("decides a use-explicit-default checkpoint immediately in headless mode", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint(
+				"approve",
+				checkpoint({
+					headless: "use-explicit-default",
+					default: { proceed: false },
+				}),
+			),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler } = await checkpointScheduler(journal, {
+			headless: true,
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[taskId]?.status).toBe("completed");
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").some(
+				(change) => change.to === "waiting",
+			),
+		).toBe(false);
+		expect(
+			statusChanges(await journal.readEvents(), "run-status-changed").some(
+				(change) =>
+					change.reason === "Workflow run awaits a checkpoint decision.",
+			),
+		).toBe(false);
+	});
+
+	it("records a decision under the scheduler lock and continues on the next drive", async () => {
+		const { journal, tasks } = await fixture((materializer) => {
+			const approve = materializer.checkpoint("approve", checkpoint());
+			return [
+				approve,
+				materializer.agent("answer", request({ after: [approve.ref] })),
+			];
+		});
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const agentId = tasks[1]?.ref.taskId ?? "";
+		const ownerClient = releasingClient();
+		const { scheduler } = await checkpointScheduler(journal, {
+			ownerClient,
+			finalize: true,
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+
+		await expect(
+			scheduler.decide(checkpointId, { value: APPROVE, decidedBy: "vegard" }),
+		).resolves.toMatchObject({
+			taskId: checkpointId,
+			outcome: "completed",
+			runStatus: "waiting",
+		});
+		const decidedState = await projection(journal);
+		expect(decidedState.tasks[checkpointId]?.status).toBe("completed");
+		expect(executionOf(decidedState, checkpointId)).toMatchObject({
+			phase: "terminal",
+			checkpointDecision: { source: "operator", decidedBy: "vegard" },
+			terminal: { outcome: "completed", evidence: { kind: "checkpoint" } },
+		});
+		expect(
+			statusChanges(await journal.readEvents(), "task-status-changed").at(-1),
+		).toEqual({
+			taskId: checkpointId,
+			from: "waiting",
+			to: "completed",
+			reason: "Checkpoint decided.",
+		});
+
+		await expect(driveToRest(scheduler)).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[agentId]?.status).toBe("completed");
+		expect(ownerClient.launch).toHaveBeenCalledOnce();
+	});
+
+	it("queues a decision behind the lane holding the scheduler lock", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.agent("answer", request()),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const launch = deferred<{
+			runId: string;
+			attemptId: string;
+			status: "active";
+		}>();
+		const ownerClient = releasingClient({
+			launch: vi.fn(async () => launch.promise),
+		});
+		const { scheduler } = await checkpointScheduler(journal, {
+			ownerClient,
+			concurrency: 2,
+			finalize: true,
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+
+		// The second lane holds the lock inside `prepare` until launch returns.
+		const second = scheduler.drive();
+		while (vi.mocked(ownerClient.launch).mock.calls.length === 0) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		let decided = false;
+		const decision = scheduler
+			.decide(checkpointId, { value: APPROVE, decidedBy: "vegard" })
+			.then((outcome) => {
+				decided = true;
+				return outcome;
+			});
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(decided).toBe(false);
+		expect((await projection(journal)).tasks[checkpointId]?.status).toBe(
+			"waiting",
+		);
+
+		launch.resolve({
+			runId: "run_scheduler",
+			attemptId: "attempt_scheduler",
+			status: "active",
+		});
+		await expect(decision).resolves.toMatchObject({
+			taskId: checkpointId,
+			outcome: "completed",
+		});
+		await expect(second).resolves.toMatchObject({ state: "idle" });
+		const state = await projection(journal);
+		expect(state.tasks[checkpointId]?.status).toBe("completed");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("completed");
+	});
+
+	it("refuses a decision without a checkpoint executor", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+		]);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+		});
+		await expect(
+			scheduler.decide(tasks[0]?.ref.taskId ?? "", {
+				value: APPROVE,
+				decidedBy: "vegard",
+			}),
+		).rejects.toMatchObject({
+			name: "WorkflowSchedulerError",
+			stage: "validation",
+			message: CHECKPOINT_NOT_CONFIGURED,
+		});
+	});
+
+	it("blocks a required checkpoint and fails the run without an executor", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+			artifacts: await WorkflowArtifactStore.open({ journal }),
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("blocked");
+		expect(state.tasks[taskId]?.currentExecutionId).toBe(undefined);
+		const events = await journal.readEvents();
+		expect(statusChanges(events, "task-status-changed").at(-1)).toEqual({
+			taskId,
+			from: "ready",
+			to: "blocked",
+			reason: CHECKPOINT_NOT_CONFIGURED,
+		});
+		expect(statusChanges(events, "run-status-changed").at(-1)).toEqual({
+			from: "running",
+			to: "failed",
+			reason: CHECKPOINT_NOT_CONFIGURED,
+		});
+	});
+
+	it("blocks an optional checkpoint and proceeds without an executor", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint(
+				"approve",
+				checkpoint({ disposition: "optional" }),
+			),
+		]);
+		const scheduler = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+		});
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "idle",
+			runStatus: "waiting",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("waiting");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("blocked");
+	});
+
+	it("stops a parked checkpoint and cancels the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+		]);
+		const taskId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler, ownerClient } = await checkpointScheduler(journal);
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const parked = (await journal.readEvents()).length;
+		const executionId =
+			executionOf(await projection(journal), taskId)?.execution.id ?? "";
+
+		await expect(scheduler.stop("Operator requested stop.")).resolves.toEqual({
+			state: "terminal",
+			runStatus: "cancelled",
+		});
+		const events = (await journal.readEvents()).slice(parked);
+		expect(
+			events.map((event) => ({ type: event.type, data: event.data })),
+		).toEqual([
+			{
+				type: "run-status-changed",
+				data: {
+					from: "waiting",
+					to: "stopping",
+					reason: "Operator requested stop.",
+				},
+			},
+			{
+				type: "task-execution-terminal",
+				data: {
+					executionId,
+					outcome: "cancelled",
+					evidence: {
+						kind: "workflow",
+						stage: "stop",
+						failureSha256: deriveWorkflowFailureSha256(
+							"stop",
+							"Operator requested stop.",
+						),
+						message: "Operator requested stop.",
+					},
+				},
+			},
+			{
+				type: "task-status-changed",
+				data: {
+					taskId,
+					from: "waiting",
+					to: "cancelled",
+					reason: "Operator requested stop.",
+				},
+			},
+			{
+				type: "run-status-changed",
+				data: {
+					from: "stopping",
+					to: "cancelled",
+					reason: "Operator requested stop.",
+				},
+			},
+		]);
+		expect(scheduler.stopSignal.aborted).toBe(true);
+		expect(subagentCallCount(ownerClient)).toBe(0);
+	});
+
+	it("refuses to stop a parked checkpoint without an executor", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+		]);
+		const { scheduler } = await checkpointScheduler(journal);
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const bare = createWorkflowSequentialScheduler({
+			journal,
+			binding: binding(supportOnlyClient()),
+		});
+
+		await expect(bare.stop("Operator requested stop.")).rejects.toMatchObject({
+			name: "WorkflowSchedulerError",
+			stage: "stop",
+			message: "Open checkpoint task has no executor to cancel it.",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("stopping");
+		expect(state.tasks[tasks[0]?.ref.taskId ?? ""]?.status).toBe("waiting");
+	});
+
+	it("cancels the open checkpoint before a required support failure fails the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.support("prepare", echo({ parameters: { value: "x" } })),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler } = await checkpointScheduler(journal, {
+			concurrency: 2,
+			supportTasks: echoRegistry(async () => {
+				throw new Error("boom");
+			}),
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const executionId =
+			executionOf(await projection(journal), checkpointId)?.execution.id ?? "";
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[checkpointId]?.status).toBe("cancelled");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("failed");
+		const events = await journal.readEvents();
+		expectCancelledBeforeRunEnded(events, checkpointId, executionId);
+		expect(statusChanges(events, "run-status-changed").at(-1)).toMatchObject({
+			to: "failed",
+			reason: "A required workflow task did not complete.",
+		});
+	});
+
+	it("cancels the open checkpoint before a required nested failure fails the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.workflow("child", nested()),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const { provider, ended } = nestedProvider();
+		provider.wait.mockResolvedValue(ended("failed"));
+		const { scheduler } = await checkpointScheduler(journal, {
+			concurrency: 2,
+			nestedRuns: provider,
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const executionId =
+			executionOf(await projection(journal), checkpointId)?.execution.id ?? "";
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.tasks[checkpointId]?.status).toBe("cancelled");
+		expectCancelledBeforeRunEnded(
+			await journal.readEvents(),
+			checkpointId,
+			executionId,
+		);
+	});
+
+	it("cancels the open checkpoint before a required nested interruption interrupts the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.workflow("child", nested()),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const { provider, ended } = nestedProvider();
+		provider.wait.mockResolvedValue(ended("interrupted"));
+		const { scheduler } = await checkpointScheduler(journal, {
+			concurrency: 2,
+			nestedRuns: provider,
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const executionId =
+			executionOf(await projection(journal), checkpointId)?.execution.id ?? "";
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "interrupted",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("interrupted");
+		expect(state.tasks[checkpointId]?.status).toBe("cancelled");
+		expectCancelledBeforeRunEnded(
+			await journal.readEvents(),
+			checkpointId,
+			executionId,
+		);
+	});
+
+	it("cancels the open checkpoint before a budget overage fails the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.agent("optional", request({ disposition: "optional" })),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const overage = result("failed");
+		overage.usage.cost = 101;
+		const ownerClient = releasingClient(
+			{ wait: vi.fn(async () => executionResult(overage)) },
+			"failed",
+		);
+		const { scheduler } = await checkpointScheduler(journal, {
+			ownerClient,
+			finalize: true,
+			budget: { cost: 100, childRuntimeMs: 300_000 },
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const executionId =
+			executionOf(await projection(journal), checkpointId)?.execution.id ?? "";
+
+		await expect(scheduler.drive()).resolves.toEqual({
+			state: "terminal",
+			runStatus: "failed",
+		});
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[checkpointId]?.status).toBe("cancelled");
+		const events = await journal.readEvents();
+		expectCancelledBeforeRunEnded(events, checkpointId, executionId);
+		expect(statusChanges(events, "run-status-changed").at(-1)).toMatchObject({
+			to: "failed",
+			reason: "Workflow cost budget was exceeded.",
+		});
+	});
+
+	it("cancels the open checkpoint before a launch failure fails the run", async () => {
+		const { journal, tasks } = await fixture((materializer) => [
+			materializer.checkpoint("approve", checkpoint()),
+			materializer.agent("answer", request()),
+		]);
+		const checkpointId = tasks[0]?.ref.taskId ?? "";
+		const { scheduler } = await checkpointScheduler(journal, {
+			ownerClient: client({
+				preflight: vi.fn(async () => {
+					throw new Error("agent unavailable");
+				}),
+			}),
+			concurrency: 2,
+		});
+		await expect(scheduler.drive()).resolves.toMatchObject({
+			state: "awaiting-decision",
+		});
+		const executionId =
+			executionOf(await projection(journal), checkpointId)?.execution.id ?? "";
+
+		await expect(scheduler.drive()).rejects.toThrow("preflight");
+		const state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[checkpointId]?.status).toBe("cancelled");
+		expect(state.tasks[tasks[1]?.ref.taskId ?? ""]?.status).toBe("failed");
+		expectCancelledBeforeRunEnded(
+			await journal.readEvents(),
+			checkpointId,
+			executionId,
+		);
 	});
 });

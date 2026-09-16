@@ -38,12 +38,28 @@ import type {
 } from "../src/scheduler.js";
 import {
 	createStaticWorkflowRuntime,
+	isStaticWorkflowParked,
+	isStaticWorkflowParkSignal,
+	type StaticWorkflowDriveResult,
+	type StaticWorkflowRunResult,
 	StaticWorkflowRuntimeError,
 	type StaticWorkflowRuntimeOptions,
+	type WorkflowHostBridge,
+	workflowHostBridge,
 } from "../src/static-runtime.js";
 import { defineSupportTask } from "../src/support.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
+
+/** Narrows a drive result to the finished shape; a park here is a test failure. */
+function completed<T>(
+	result: StaticWorkflowDriveResult<T>,
+): StaticWorkflowRunResult<T> {
+	if (isStaticWorkflowParked(result)) {
+		throw new Error("workflow run parked unexpectedly");
+	}
+	return result;
+}
 const planIdentitySha256 = "b".repeat(64);
 const leases = new Set<WorkflowRunLease>();
 const nestedRoot = path.resolve(
@@ -284,6 +300,9 @@ function nestedSchedulerFor(
 		async reconcile() {
 			throw new Error("fake nested workflow has no cleanup-blocked task");
 		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
+		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;
 		},
@@ -323,6 +342,9 @@ function mixedSchedulerFor(
 		},
 		async reconcile() {
 			throw new Error("fake mixed workflow has no cleanup-blocked task");
+		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
 		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;
@@ -594,6 +616,9 @@ function schedulerFor(
 		},
 		async reconcile() {
 			throw new Error("fake workflow has no cleanup-blocked task");
+		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
 		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;
@@ -885,6 +910,9 @@ describe("static workflow runtime nested workflows", () => {
 				async reconcile() {
 					throw sentinel;
 				},
+				async decide() {
+					throw new Error("fake scheduler records no decisions");
+				},
 				async stop() {
 					return { state: "terminal", runStatus: "cancelled" } as const;
 				},
@@ -1090,7 +1118,7 @@ describe("static workflow runtime nested workflows", () => {
 			),
 			nesting: await nesting(),
 		});
-		const result = await runtime.drive();
+		const result = completed(await runtime.drive());
 		expect(result.status).toBe("completed-degraded");
 		expect(result.value).toEqual({
 			status: "rejected",
@@ -1134,7 +1162,7 @@ describe("static workflow runtime", () => {
 			artifacts,
 			scheduler,
 		});
-		const first = await runtime.drive();
+		const first = completed(await runtime.drive());
 		const replay = await runtime.drive();
 		expect(first).toMatchObject({
 			status: "completed",
@@ -1569,6 +1597,9 @@ describe("static workflow runtime", () => {
 			},
 			async reconcile() {
 				throw new Error("not cleanup-blocked");
+			},
+			async decide() {
+				throw new Error("fake scheduler records no decisions");
 			},
 			async stop() {
 				return { state: "terminal" as const, runStatus: "cancelled" as const };
@@ -2216,6 +2247,9 @@ function worktreeSchedulerFor(
 		async reconcile() {
 			throw new Error("fake worktree workflow has no cleanup-blocked task");
 		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
+		},
 		async stop() {
 			return { state: "terminal", runStatus: "cancelled" } as const;
 		},
@@ -2382,7 +2416,7 @@ describe("static workflow runtime worktree handoffs", () => {
 			artifacts,
 			scheduler,
 		});
-		const result = await runtime.drive();
+		const result = completed(await runtime.drive());
 		expect(result.status).toBe("completed");
 		const state = reduceWorkflowEvents(await journal.readEvents());
 		const taskId = writerTaskId(state);
@@ -2687,5 +2721,1271 @@ describe("static workflow runtime worktree handoffs", () => {
 			value: { commit: handoffCommitFor(2), answer: "second" },
 		});
 		expect(scheduler.calls).toBe(2);
+	});
+});
+
+// --- Revision 18 checkpoints (spec 2.8, C2, C3) ---------------------------------
+
+const CHECKPOINT_AWAITS_REASON = "Checkpoint awaits a decision.";
+const CHECKPOINT_DECIDED_REASON = "Checkpoint decided.";
+const RUN_AWAITS_REASON = "Workflow run awaits a checkpoint decision.";
+const RUN_ENDING_REASON =
+	"Workflow run ended before the checkpoint was decided.";
+const PARK_MESSAGE = "Workflow run is parked at a checkpoint.";
+const decisionSchema = Type.Object({ proceed: Type.Boolean() });
+
+function checkpointRequest(overrides: { timeoutMs?: number } = {}) {
+	return {
+		schema: decisionSchema,
+		prompt: "Proceed with the plan?",
+		headless: "block" as const,
+		...overrides,
+	};
+}
+
+function checkpointMeta(name: string) {
+	return {
+		name,
+		description: "Checkpoint",
+		version: 1,
+		budget: { cost: 1000, childRuntimeMs: 3600000 },
+		timeoutMs: 3600000,
+	};
+}
+
+/**
+ * A fake scheduler that starts the run and blocks its single required agent
+ * task the way the real scheduler does for a failed dependency, without ending
+ * the run itself: the runtime's final-graph backstop must fail it durably.
+ */
+function blockingScheduler(
+	journal: WorkflowRunJournal,
+): WorkflowSequentialScheduler & { calls: number } {
+	const scheduler: WorkflowSequentialScheduler & { calls: number } = {
+		concurrency: 1,
+		stopSignal: new AbortController().signal,
+		calls: 0,
+		async drive(): Promise<WorkflowSchedulerOutcome> {
+			scheduler.calls += 1;
+			let current = reduceWorkflowEvents(await journal.readEvents());
+			if (current.status === "created") {
+				await journal.append("run-status-changed", {
+					from: "created",
+					to: "running",
+				});
+				current = reduceWorkflowEvents(await journal.readEvents());
+			}
+			const work = Object.values(current.tasks).find(
+				(task) => task.task.spec.kind === "agent",
+			);
+			if (!work) throw new Error("task not declared");
+			if (work.status === "pending") {
+				await journal.append("task-status-changed", {
+					taskId: work.task.id,
+					from: "pending",
+					to: "blocked",
+					reason: "A workflow task dependency did not complete successfully.",
+				});
+			}
+			return { state: "idle", runStatus: "running" };
+		},
+		async reconcile() {
+			throw new Error("fake workflow has no cleanup-blocked task");
+		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
+		},
+		async stop() {
+			return { state: "terminal", runStatus: "cancelled" } as const;
+		},
+	};
+	return scheduler;
+}
+
+interface CheckpointFakeOptions {
+	/** Decisions by checkpoint key; a missing key leaves the checkpoint parked. */
+	readonly decisions?: Map<string, unknown>;
+	/** Thrown right after the request ladder, leaving the checkpoint open. */
+	readonly throwAfterRequest?: Error;
+}
+
+/**
+ * A fake scheduler that requests checkpoints (spec 2.7 request ladder), parks
+ * with `awaiting-decision`, decides them from `decisions` on a later drive
+ * (spec 2.7 decide ladder), and delegates agent tasks to `schedulerFor`.
+ */
+function checkpointSchedulerFor(
+	journal: WorkflowRunJournal,
+	artifacts: WorkflowArtifactStore,
+	outputs: ReadonlyMap<string, unknown>,
+	options: CheckpointFakeOptions = {},
+): WorkflowSequentialScheduler & {
+	calls: number;
+	readonly decisions: Map<string, unknown>;
+} {
+	const inner = schedulerFor(journal, artifacts, outputs);
+	const decisions = options.decisions ?? new Map<string, unknown>();
+	const scheduler = {
+		concurrency: 1,
+		stopSignal: new AbortController().signal,
+		calls: 0,
+		decisions,
+		async drive(): Promise<WorkflowSchedulerOutcome> {
+			scheduler.calls += 1;
+			let current = reduceWorkflowEvents(await journal.readEvents());
+			if (current.status === "created" || current.status === "waiting") {
+				await journal.append("run-status-changed", {
+					from: current.status,
+					to: "running",
+				});
+				current = reduceWorkflowEvents(await journal.readEvents());
+			}
+			const task = Object.values(current.tasks)
+				.filter((candidate) => candidate.committed)
+				.sort(
+					(left, right) =>
+						left.task.materializationSequence -
+						right.task.materializationSequence,
+				)
+				.find((candidate) => candidate.status !== "completed");
+			if (!task) return { state: "idle", runStatus: current.status };
+			const spec = task.task.spec;
+			if (spec.kind !== "checkpoint") return inner.drive();
+			const taskId = task.task.id;
+			const executionId = deriveTaskExecutionId(current.runId, taskId, 1);
+			if (task.status === "pending") {
+				await journal.append("task-status-changed", {
+					taskId,
+					from: "pending",
+					to: "ready",
+				});
+			}
+			if (task.status === "pending" || task.status === "ready") {
+				if (!current.executions[executionId]) {
+					await journal.append("task-execution-created", {
+						execution: {
+							kind: "checkpoint",
+							id: executionId,
+							runId: current.runId,
+							taskId,
+							generation: 1,
+							taskIdentitySha256: spec.identitySha256,
+						},
+					});
+				}
+				const inputs: Record<string, string> = {};
+				for (const [name, input] of Object.entries(spec.inputs)) {
+					const artifact = Object.values(current.artifacts).find(
+						(candidate) =>
+							candidate.producerTaskId === input.producerTaskId &&
+							candidate.output === input.output,
+					);
+					if (!artifact) throw new Error("missing checkpoint input artifact");
+					inputs[name] = artifact.sha256;
+				}
+				const timeoutMs = spec.request.timeoutMs;
+				await journal.append("task-execution-checkpoint-requested", {
+					executionId,
+					inputsSha256: deriveJsonValueSha256(inputs),
+					...(timeoutMs === undefined
+						? {}
+						: { expiresAt: new Date(Date.now() + timeoutMs).toISOString() }),
+				});
+				await journal.append("task-status-changed", {
+					taskId,
+					from: "ready",
+					to: "waiting",
+					reason: CHECKPOINT_AWAITS_REASON,
+				});
+				if (options.throwAfterRequest) throw options.throwAfterRequest;
+				current = reduceWorkflowEvents(await journal.readEvents());
+			}
+			const decision = decisions.get(spec.key);
+			if (decision === undefined) {
+				if (current.status === "running") {
+					await journal.append("run-status-changed", {
+						from: "running",
+						to: "waiting",
+						reason: RUN_AWAITS_REASON,
+					});
+				}
+				const expiresAt =
+					current.executions[executionId]?.checkpointRequest?.expiresAt;
+				return {
+					state: "awaiting-decision",
+					runStatus: "waiting",
+					pendingCheckpoints: [
+						{
+							taskId,
+							executionId,
+							...(expiresAt === undefined ? {} : { expiresAt }),
+						},
+					],
+				};
+			}
+			const artifact = await artifacts.putJson(decision, {
+				runId: current.runId,
+				producerTaskId: taskId,
+				producerExecutionId: executionId,
+				output: "result",
+				schemaSha256: deriveJsonValueSha256(spec.request.schema),
+			});
+			if (!current.artifacts[artifact.id]) {
+				await journal.append("artifact-declared", { artifact });
+			}
+			await journal.append("task-execution-checkpoint-decided", {
+				executionId,
+				artifactId: artifact.id,
+				decisionSha256: artifact.sha256,
+				source: "operator",
+				decidedAt: new Date().toISOString(),
+				decidedBy: "tester",
+			});
+			await journal.append("task-execution-terminal", {
+				executionId,
+				outcome: "completed",
+				evidence: {
+					kind: "checkpoint",
+					artifactId: artifact.id,
+					decisionSha256: artifact.sha256,
+					source: "operator",
+					decidedBy: "tester",
+				},
+			});
+			await journal.append("task-status-changed", {
+				taskId,
+				from: "waiting",
+				to: "completed",
+				reason: CHECKPOINT_DECIDED_REASON,
+			});
+			scheduler.calls -= 1;
+			return scheduler.drive();
+		},
+		async reconcile() {
+			throw new Error("fake workflow has no cleanup-blocked task");
+		},
+		async decide() {
+			throw new Error("fake scheduler records no decisions");
+		},
+		async stop() {
+			return { state: "terminal", runStatus: "cancelled" } as const;
+		},
+	};
+	return scheduler;
+}
+
+function runStatusChanges(
+	events: readonly { readonly type: string; readonly data: unknown }[],
+): readonly { from: string; to: string; reason?: string }[] {
+	return events
+		.filter((event) => event.type === "run-status-changed")
+		.map(
+			(event) => event.data as { from: string; to: string; reason?: string },
+		);
+}
+
+describe("static workflow runtime checkpoints", () => {
+	it("parks at a result barrier with the pending checkpoint and no failure", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("park-result"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			async run(ctx) {
+				const approve = ctx.checkpoint(
+					"approve",
+					checkpointRequest({ timeoutMs: 60_000 }),
+				);
+				const decision = await ctx.result(approve);
+				return { proceed: decision.proceed };
+			},
+		});
+		const scheduler = checkpointSchedulerFor(journal, artifacts, new Map());
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const result = await runtime.drive();
+		expect(isStaticWorkflowParked(result)).toBe(true);
+		const events = await journal.readEvents();
+		const state = reduceWorkflowEvents(events);
+		const [task] = Object.values(state.tasks);
+		if (!task) throw new Error("checkpoint task not declared");
+		const executionId = deriveTaskExecutionId(journal.runId, task.task.id, 1);
+		const expiresAt =
+			state.executions[executionId]?.checkpointRequest?.expiresAt;
+		expect(typeof expiresAt).toBe("string");
+		expect(result).toEqual({
+			runId: journal.runId,
+			status: "waiting",
+			parked: true,
+			pendingCheckpoints: [{ taskId: task.task.id, executionId, expiresAt }],
+		});
+		expect(task.task.spec).toMatchObject({
+			kind: "checkpoint",
+			request: {
+				prompt: "Proceed with the plan?",
+				headless: "block",
+				timeoutMs: 60_000,
+			},
+		});
+		expect(task.status).toBe("waiting");
+		expect(state.status).toBe("waiting");
+		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["result"]);
+		expect(runStatusChanges(events)).toEqual([
+			{ from: "created", to: "running" },
+			{ from: "running", to: "waiting", reason: RUN_AWAITS_REASON },
+		]);
+		expect(events.at(-1)?.type).toBe("run-status-changed");
+		expect(scheduler.calls).toBe(1);
+	});
+
+	it("re-drives after a decision, replays the decision through its artifact, and validates it against the request schema", async () => {
+		const { journal, artifacts } = await fixture();
+		let sourceRuns = 0;
+		const definition = defineWorkflow({
+			meta: checkpointMeta("re-drive"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			async run(ctx) {
+				sourceRuns += 1;
+				const approve = ctx.checkpoint("approve", checkpointRequest());
+				const decision = await ctx.result(approve);
+				if (!decision.proceed) return { answer: "stopped" };
+				return ctx.agent("write", {
+					...request("Write"),
+					after: [approve.ref],
+				});
+			},
+		});
+		const scheduler = checkpointSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["write", { answer: "written" }]]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const parked = await runtime.drive();
+		expect(isStaticWorkflowParked(parked)).toBe(true);
+		expect(scheduler.calls).toBe(1);
+		const parkedState = reduceWorkflowEvents(await journal.readEvents());
+		expect(Object.values(parkedState.tasks).map((task) => task.status)).toEqual(
+			["waiting"],
+		);
+
+		scheduler.decisions.set("approve", { proceed: true });
+		const finished = await runtime.drive();
+		expect(isStaticWorkflowParked(finished)).toBe(false);
+		expect(finished).toMatchObject({
+			status: "completed",
+			value: { answer: "written" },
+		});
+		expect(sourceRuns).toBe(2);
+		const events = await journal.readEvents();
+		const state = reduceWorkflowEvents(events);
+		expect(state.status).toBe("completed");
+		const tasks = Object.values(state.tasks);
+		expect(tasks.map((task) => [task.task.spec.kind, task.status])).toEqual([
+			["checkpoint", "completed"],
+			["agent", "completed"],
+		]);
+		expect(tasks[0]?.task.id).toBe(Object.keys(parkedState.tasks)[0]);
+		expect(runStatusChanges(events).map((change) => change.to)).toEqual([
+			"running",
+			"waiting",
+			"running",
+			"finalizing",
+			"completed",
+		]);
+		expect(
+			events
+				.filter((event) => event.type === "task-status-changed")
+				.map((event) => (event.data as { to: string; reason?: string }).reason),
+		).toContain(CHECKPOINT_DECIDED_REASON);
+		// The decided checkpoint replays from its artifact; the writer replays too.
+		const callsBeforeReplay = scheduler.calls;
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { answer: "written" },
+		});
+		expect(scheduler.calls).toBe(callsBeforeReplay);
+		expect(sourceRuns).toBe(3);
+	});
+
+	it("rejects a replayed decision that no longer matches the request schema", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("schema"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", checkpointRequest());
+				return { proceed: (await ctx.result(approve)).proceed };
+			},
+		});
+		const scheduler = checkpointSchedulerFor(journal, artifacts, new Map(), {
+			decisions: new Map([["approve", { proceed: "yes" }]]),
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const error: unknown = await runtime.drive().catch((cause) => cause);
+		expect(error).toMatchObject({
+			stage: "execution",
+			message: "Static workflow source execution failed.",
+		});
+		expect((error as Error).cause).toMatchObject({
+			stage: "result",
+			message: "Workflow task artifact no longer matches its output schema.",
+		});
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.status).toBe("failed");
+		expect(Object.values(state.tasks)[0]?.status).toBe("completed");
+	});
+
+	it("keeps the run parked when trusted source swallows the park signal", async () => {
+		const { journal, artifacts } = await fixture();
+		const observed: { name: string; message: string }[] = [];
+		const definition = defineWorkflow({
+			meta: checkpointMeta("swallow"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", checkpointRequest());
+				try {
+					await ctx.result(approve);
+				} catch (error) {
+					const failure = error as Error;
+					observed.push({ name: failure.name, message: failure.message });
+				}
+				const other = ctx.agent("other", request("Other"));
+				try {
+					await ctx.result(other);
+				} catch (error) {
+					const failure = error as Error;
+					observed.push({ name: failure.name, message: failure.message });
+				}
+				ctx.log("Source continued past the park.");
+				return { proceed: false };
+			},
+		});
+		const scheduler = checkpointSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["other", { answer: "never" }]]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const result = await runtime.drive();
+		expect(isStaticWorkflowParked(result)).toBe(true);
+		expect(observed).toEqual([
+			{ name: "StaticWorkflowParkSignal", message: PARK_MESSAGE },
+			{ name: "StaticWorkflowParkSignal", message: PARK_MESSAGE },
+		]);
+		expect(scheduler.calls).toBe(1);
+		const events = await journal.readEvents();
+		const state = reduceWorkflowEvents(events);
+		expect(state.status).toBe("waiting");
+		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["result"]);
+		expect(runStatusChanges(events).map((change) => change.to)).toEqual([
+			"running",
+			"waiting",
+		]);
+		expect(state.outputArtifactId).toBeUndefined();
+	});
+
+	it("parks at a settled barrier", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("park-settled"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ status: Type.String() }),
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", {
+					...checkpointRequest(),
+					disposition: "optional",
+				});
+				const [outcome] = await ctx.settled([approve] as const);
+				return { status: outcome.status };
+			},
+		});
+		const scheduler = checkpointSchedulerFor(journal, artifacts, new Map());
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const parked = await runtime.drive();
+		expect(parked).toMatchObject({ parked: true, status: "waiting" });
+		expect(
+			isStaticWorkflowParked(parked) && parked.pendingCheckpoints,
+		).toHaveLength(1);
+		const state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.status).toBe("waiting");
+		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["settled"]);
+
+		scheduler.decisions.set("approve", { proceed: false });
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { status: "fulfilled" },
+		});
+	});
+
+	it("parks while settling the final graph and completes once decided", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("park-final"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			run(ctx) {
+				return ctx.checkpoint("approve", checkpointRequest());
+			},
+		});
+		const scheduler = checkpointSchedulerFor(journal, artifacts, new Map());
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const parked = await runtime.drive();
+		expect(isStaticWorkflowParked(parked)).toBe(true);
+		let state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.status).toBe("waiting");
+		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["final"]);
+		expect(state.outputArtifactId).toBeUndefined();
+
+		scheduler.decisions.set("approve", { proceed: true });
+		const finished = await runtime.drive();
+		expect(finished).toMatchObject({
+			status: "completed",
+			value: { proceed: true },
+		});
+		state = reduceWorkflowEvents(await journal.readEvents());
+		expect(state.status).toBe("completed");
+		expect(await artifacts.readJson(completed(finished).artifact)).toEqual({
+			proceed: true,
+		});
+	});
+
+	it("cancels an open checkpoint before persisting source failure", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("fail-open"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", checkpointRequest());
+				return { proceed: (await ctx.result(approve)).proceed };
+			},
+		});
+		const scheduler = checkpointSchedulerFor(journal, artifacts, new Map(), {
+			throwAfterRequest: new Error("scheduler lane failed"),
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).rejects.toMatchObject({
+			stage: "execution",
+			message: "Static workflow source execution failed.",
+		});
+		const events = await journal.readEvents();
+		const state = reduceWorkflowEvents(events);
+		expect(state.status).toBe("failed");
+		const [task] = Object.values(state.tasks);
+		if (!task) throw new Error("checkpoint task not declared");
+		expect(task.status).toBe("cancelled");
+		const executionId = deriveTaskExecutionId(journal.runId, task.task.id, 1);
+		expect(state.executions[executionId]?.terminal).toMatchObject({
+			outcome: "cancelled",
+			evidence: {
+				kind: "workflow",
+				stage: "stop",
+				message: RUN_ENDING_REASON,
+				failureSha256: deriveWorkflowFailureSha256("stop", RUN_ENDING_REASON),
+			},
+		});
+		const types = events.map((event) => event.type);
+		const cancelledAt = events.findIndex(
+			(event) =>
+				event.type === "task-status-changed" &&
+				(event.data as { to: string }).to === "cancelled",
+		);
+		const failedAt = events.findIndex(
+			(event) =>
+				event.type === "run-status-changed" &&
+				(event.data as { to: string }).to === "failed",
+		);
+		expect(cancelledAt).toBeGreaterThan(-1);
+		expect(failedAt).toBeGreaterThan(cancelledAt);
+		expect(types.indexOf("task-execution-terminal")).toBeLessThan(cancelledAt);
+		expect(
+			events[cancelledAt]?.data as { from: string; reason?: string },
+		).toMatchObject({ from: "waiting", reason: RUN_ENDING_REASON });
+		expect(runStatusChanges(events).map((change) => change.to)).toEqual([
+			"running",
+			"failed",
+		]);
+	});
+
+	it("fails the run durably when a required task cannot complete in the final graph, cancelling an open checkpoint first", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("final-graph-failure"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				ctx.checkpoint("approve", checkpointRequest());
+				return ctx.agent("work", request());
+			},
+		});
+		// Requests the checkpoint (leaving it open), then blocks the required
+		// agent task the way the real scheduler does for a failed dependency,
+		// without ending the run itself: the runtime must fail it durably.
+		const scheduler: WorkflowSequentialScheduler & { calls: number } = {
+			concurrency: 1,
+			stopSignal: new AbortController().signal,
+			calls: 0,
+			async drive(): Promise<WorkflowSchedulerOutcome> {
+				scheduler.calls += 1;
+				let current = reduceWorkflowEvents(await journal.readEvents());
+				if (current.status === "created" || current.status === "waiting") {
+					await journal.append("run-status-changed", {
+						from: current.status,
+						to: "running",
+					});
+					current = reduceWorkflowEvents(await journal.readEvents());
+				}
+				const tasks = Object.values(current.tasks);
+				const approve = tasks.find(
+					(task) => task.task.spec.kind === "checkpoint",
+				);
+				const work = tasks.find((task) => task.task.spec.kind === "agent");
+				if (!approve || !work) throw new Error("tasks not declared");
+				if (approve.status === "pending") {
+					const executionId = deriveTaskExecutionId(
+						current.runId,
+						approve.task.id,
+						1,
+					);
+					await journal.append("task-status-changed", {
+						taskId: approve.task.id,
+						from: "pending",
+						to: "ready",
+					});
+					await journal.append("task-execution-created", {
+						execution: {
+							kind: "checkpoint",
+							id: executionId,
+							runId: current.runId,
+							taskId: approve.task.id,
+							generation: 1,
+							taskIdentitySha256: approve.task.spec.identitySha256,
+						},
+					});
+					await journal.append("task-execution-checkpoint-requested", {
+						executionId,
+						inputsSha256: deriveJsonValueSha256({}),
+					});
+					await journal.append("task-status-changed", {
+						taskId: approve.task.id,
+						from: "ready",
+						to: "waiting",
+						reason: CHECKPOINT_AWAITS_REASON,
+					});
+				}
+				if (work.status === "pending") {
+					await journal.append("task-status-changed", {
+						taskId: work.task.id,
+						from: "pending",
+						to: "blocked",
+						reason: "A workflow task dependency did not complete successfully.",
+					});
+				}
+				return { state: "idle", runStatus: "running" };
+			},
+			async reconcile() {
+				throw new Error("fake workflow has no cleanup-blocked task");
+			},
+			async decide() {
+				throw new Error("fake scheduler records no decisions");
+			},
+			async stop() {
+				return { state: "terminal", runStatus: "cancelled" } as const;
+			},
+		};
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const message = "Required workflow task did not complete: blocked.";
+		await expect(runtime.drive()).rejects.toMatchObject({
+			stage: "execution",
+			message,
+		});
+		expect(scheduler.calls).toBe(1);
+		const events = await journal.readEvents();
+		const state = reduceWorkflowEvents(events);
+		expect(state.status).toBe("failed");
+		const approve = Object.values(state.tasks).find(
+			(task) => task.task.spec.kind === "checkpoint",
+		);
+		if (!approve) throw new Error("checkpoint task not declared");
+		expect(approve.status).toBe("cancelled");
+		const executionId = deriveTaskExecutionId(
+			journal.runId,
+			approve.task.id,
+			1,
+		);
+		expect(state.executions[executionId]?.terminal).toMatchObject({
+			outcome: "cancelled",
+			evidence: {
+				kind: "workflow",
+				stage: "stop",
+				message: RUN_ENDING_REASON,
+				failureSha256: deriveWorkflowFailureSha256("stop", RUN_ENDING_REASON),
+			},
+		});
+		const cancelledAt = events.findIndex(
+			(event) =>
+				event.type === "task-status-changed" &&
+				(event.data as { to: string }).to === "cancelled",
+		);
+		const failedAt = events.findIndex(
+			(event) =>
+				event.type === "run-status-changed" &&
+				(event.data as { to: string }).to === "failed",
+		);
+		expect(cancelledAt).toBeGreaterThan(-1);
+		expect(failedAt).toBeGreaterThan(cancelledAt);
+		expect(failedAt).toBe(events.length - 1);
+		expect(runStatusChanges(events)).toEqual([
+			{ from: "created", to: "running" },
+			{ from: "running", to: "failed", reason: message },
+		]);
+	});
+
+	it("lets the original error propagate when a concurrent lane fails the run between the backstop's read and append", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("final-graph-race"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				return ctx.agent("work", request());
+			},
+		});
+		const concurrentReason = "A concurrently driving lane failed the run.";
+		// The fake scheduler blocks the required task without ending the run;
+		// the journal handed to the runtime flips the run to `failed` on behalf
+		// of another lane right before the runtime's own `-> failed` lands.
+		const scheduler = blockingScheduler(journal);
+		let flipped = 0;
+		const racing = new Proxy(journal, {
+			get(target, property, receiver) {
+				if (property !== "append") {
+					return Reflect.get(target, property, receiver);
+				}
+				return async (type: string, data: Record<string, unknown>) => {
+					if (
+						type === "run-status-changed" &&
+						data.to === "failed" &&
+						flipped === 0
+					) {
+						flipped += 1;
+						await target.append("run-status-changed", {
+							from: "running",
+							to: "failed",
+							reason: concurrentReason,
+						});
+					}
+					return target.append(type as never, data as never);
+				};
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal: racing,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).rejects.toMatchObject({
+			stage: "execution",
+			message: "Required workflow task did not complete: blocked.",
+		});
+		expect(flipped).toBe(1);
+		const events = await journal.readEvents();
+		expect(reduceWorkflowEvents(events).status).toBe("failed");
+		expect(runStatusChanges(events)).toEqual([
+			{ from: "created", to: "running" },
+			{ from: "running", to: "failed", reason: concurrentReason },
+		]);
+	});
+
+	it("propagates a rejected backstop append while the run is still failable", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("final-graph-stale-source"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			run(ctx) {
+				return ctx.agent("work", request());
+			},
+		});
+		const scheduler = blockingScheduler(journal);
+		// A stale `from` is rejected while the run keeps running: nothing ended
+		// the run, so the rejection itself must surface rather than be hidden.
+		const stale = new Proxy(journal, {
+			get(target, property, receiver) {
+				if (property !== "append") {
+					return Reflect.get(target, property, receiver);
+				}
+				return async (type: string, data: Record<string, unknown>) =>
+					target.append(
+						type as never,
+						(type === "run-status-changed" && data.to === "failed"
+							? { ...data, from: "created" }
+							: data) as never,
+					);
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal: stale,
+			artifacts,
+			scheduler,
+		});
+		await expect(runtime.drive()).rejects.toThrow(
+			"workflow journal event violates run invariants",
+		);
+		const events = await journal.readEvents();
+		expect(reduceWorkflowEvents(events).status).toBe("running");
+		expect(runStatusChanges(events)).toEqual([
+			{ from: "created", to: "running" },
+		]);
+	});
+
+	it("rejects a non-object checkpoint request with the fixed message", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("invalid-request"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			async run(ctx) {
+				const approve = ctx.checkpoint(
+					"approve",
+					null as unknown as ReturnType<typeof checkpointRequest>,
+				);
+				return { proceed: (await ctx.result(approve)).proceed };
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: checkpointSchedulerFor(journal, artifacts, new Map()),
+		});
+		const error: unknown = await runtime.drive().catch((cause) => cause);
+		expect(error).toBeInstanceOf(StaticWorkflowRuntimeError);
+		expect((error as Error).cause).toMatchObject({
+			stage: "validation",
+			message: "Workflow checkpoint request is invalid.",
+		});
+		expect(reduceWorkflowEvents(await journal.readEvents()).status).toBe(
+			"failed",
+		);
+	});
+
+	it("runs a gated task only after the checkpoint is decided", async () => {
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: checkpointMeta("gated"),
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", checkpointRequest());
+				const writer = ctx.agent("write", {
+					...request("Write"),
+					after: [approve.ref],
+				});
+				await ctx.result(approve);
+				return writer;
+			},
+		});
+		const scheduler = checkpointSchedulerFor(
+			journal,
+			artifacts,
+			new Map([["write", { answer: "written" }]]),
+		);
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const parked = await runtime.drive();
+		expect(isStaticWorkflowParked(parked)).toBe(true);
+		let state = reduceWorkflowEvents(await journal.readEvents());
+		expect(Object.values(state.tasks).map((task) => task.status)).toEqual([
+			"waiting",
+			"pending",
+		]);
+		scheduler.decisions.set("approve", { proceed: true });
+		await expect(runtime.drive()).resolves.toMatchObject({
+			status: "completed",
+			value: { answer: "written" },
+		});
+		state = reduceWorkflowEvents(await journal.readEvents());
+		expect(Object.values(state.tasks).map((task) => task.status)).toEqual([
+			"completed",
+			"completed",
+		]);
+	});
+});
+
+/** Reads the symbol-keyed bridge the way the dynamic definition does. */
+function bridgeOf(
+	ctx: WorkflowContext<unknown>,
+): WorkflowHostBridge | undefined {
+	return (ctx as unknown as Record<symbol, WorkflowHostBridge | undefined>)[
+		workflowHostBridge
+	];
+}
+
+describe("static workflow runtime host bridge", () => {
+	it("exposes agentInNamespace only through the non-enumerable symbol key", async () => {
+		const { journal, artifacts } = await fixture();
+		const observed: Record<string, unknown> = {};
+		const definition = defineWorkflow({
+			meta: {
+				name: "bridge",
+				description: "Bridge",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			async run(ctx) {
+				const bridge = bridgeOf(ctx);
+				if (!bridge) throw new Error("bridge missing");
+				observed.frozenContext = Object.isFrozen(ctx);
+				observed.frozenBridge = Object.isFrozen(bridge);
+				observed.keys = Object.keys(ctx);
+				observed.json = JSON.stringify(ctx);
+				observed.spread = Object.getOwnPropertySymbols({ ...ctx });
+				observed.symbols = Object.getOwnPropertySymbols(ctx);
+				observed.descriptor = Object.getOwnPropertyDescriptor(
+					ctx,
+					workflowHostBridge,
+				);
+				observed.bridgeKeys = Object.keys(bridge);
+				const handle = bridge.agentInNamespace(
+					["batch"],
+					"item",
+					request("Item"),
+				);
+				observed.handleRegistered = handle.ref.runId === ctx.runId;
+				const value = (await ctx.result(handle)) as { answer: string };
+				return { answer: value.answer };
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: schedulerFor(
+				journal,
+				artifacts,
+				new Map([["item", { answer: "bridged" }]]),
+			),
+		});
+		await expect(runtime.drive()).resolves.toMatchObject({
+			value: { answer: "bridged" },
+		});
+		expect(observed.frozenContext).toBe(true);
+		expect(observed.frozenBridge).toBe(true);
+		expect(observed.keys).not.toContain("agentInNamespace");
+		expect(observed.json).not.toContain("agentInNamespace");
+		expect(observed.spread).toEqual([]);
+		expect(observed.symbols).toEqual([workflowHostBridge]);
+		expect(observed.descriptor).toMatchObject({
+			enumerable: false,
+			writable: false,
+			configurable: false,
+		});
+		expect(observed.bridgeKeys).toEqual(["agentInNamespace"]);
+		expect(observed.handleRegistered).toBe(true);
+		expect(workflowHostBridge.description).toBe("pi-workflow-host-bridge");
+		expect(Symbol.for("pi-workflow-host-bridge")).not.toBe(workflowHostBridge);
+
+		// The bridge lowers exactly like `fanOut`: same namespace, same task identity.
+		const bridged = Object.values(
+			reduceWorkflowEvents(await journal.readEvents()).tasks,
+		).map((task) => task.task);
+		const fanned = await fixture();
+		const viaFanOut = createStaticWorkflowRuntime({
+			definition: defineWorkflow({
+				meta: definition.meta,
+				inputSchema: Type.Object({}),
+				outputSchema: Type.Object({ answer: Type.String() }),
+				async run(ctx) {
+					const [handle] = ctx.fanOut("batch", ["only"], {
+						key: () => "item",
+						task: () => request("Item"),
+					});
+					if (!handle) throw new Error("fan-out produced no handle");
+					const value = (await ctx.result(handle)) as { answer: string };
+					return { answer: value.answer };
+				},
+			}),
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal: fanned.journal,
+			artifacts: fanned.artifacts,
+			scheduler: schedulerFor(
+				fanned.journal,
+				fanned.artifacts,
+				new Map([["item", { answer: "bridged" }]]),
+			),
+		});
+		await expect(viaFanOut.drive()).resolves.toMatchObject({
+			value: { answer: "bridged" },
+		});
+		const fannedTasks = Object.values(
+			reduceWorkflowEvents(await fanned.journal.readEvents()).tasks,
+		).map((task) => task.task);
+		expect(bridged.map((task) => task.namespace)).toEqual([["batch"]]);
+		expect(bridged).toEqual(fannedTasks);
+	});
+
+	it("recognises a real park signal and rejects lookalikes", async () => {
+		const { journal, artifacts } = await fixture();
+		const captured: unknown[] = [];
+		const definition = defineWorkflow({
+			meta: checkpointMeta("park-signal"),
+			inputSchema: Type.Object({}),
+			outputSchema: decisionSchema,
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", checkpointRequest());
+				try {
+					await ctx.result(approve);
+				} catch (error) {
+					captured.push(error);
+					throw error;
+				}
+				return { proceed: true };
+			},
+		});
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler: checkpointSchedulerFor(journal, artifacts, new Map()),
+		});
+		const result = await runtime.drive();
+		expect(isStaticWorkflowParked(result)).toBe(true);
+		expect(captured).toHaveLength(1);
+		expect(isStaticWorkflowParkSignal(captured[0])).toBe(true);
+		expect(captured[0]).toMatchObject({
+			name: "StaticWorkflowParkSignal",
+			message: PARK_MESSAGE,
+		});
+		const lookalike = Object.assign(new Error(PARK_MESSAGE), {
+			name: "StaticWorkflowParkSignal",
+			pendingCheckpoints: [],
+		});
+		expect(isStaticWorkflowParkSignal(lookalike)).toBe(false);
+		expect(isStaticWorkflowParkSignal({ ...(captured[0] as object) })).toBe(
+			false,
+		);
+		expect(isStaticWorkflowParkSignal(new Error(PARK_MESSAGE))).toBe(false);
+		expect(
+			isStaticWorkflowParkSignal(
+				new StaticWorkflowRuntimeError("execution", PARK_MESSAGE),
+			),
+		).toBe(false);
+		expect(isStaticWorkflowParkSignal(PARK_MESSAGE)).toBe(false);
+		expect(isStaticWorkflowParkSignal(undefined)).toBe(false);
+		expect(isStaticWorkflowParkSignal(null)).toBe(false);
+	});
+
+	it("persists a dynamic execution error's exact reason and keeps the static reason otherwise", async () => {
+		class DynamicWorkflowExecutionError extends Error {
+			constructor(
+				readonly stage: string,
+				message: string,
+			) {
+				super(message);
+				this.name = "DynamicWorkflowExecutionError";
+			}
+		}
+		const reasons = [
+			"Dynamic workflow VM exceeded its memory limit.",
+			"Dynamic workflow source execution failed: TypeError: boom",
+			"x".repeat(5000),
+		];
+		for (const reason of reasons) {
+			const { journal, artifacts } = await fixture();
+			const definition = defineWorkflow({
+				meta: checkpointMeta("dynamic-failure"),
+				inputSchema: Type.Object({}),
+				outputSchema: decisionSchema,
+				async run(ctx) {
+					const approve = ctx.checkpoint("approve", checkpointRequest());
+					// The bridge rethrows the VM failure from the awaited barrier.
+					try {
+						await ctx.result(approve);
+					} catch {
+						throw new DynamicWorkflowExecutionError("memory", reason);
+					}
+					return { proceed: true };
+				},
+			});
+			const runtime = createStaticWorkflowRuntime({
+				definition,
+				definitionIdentitySha256,
+				input: {},
+				cwd: "/repo",
+				journal,
+				artifacts,
+				scheduler: checkpointSchedulerFor(journal, artifacts, new Map(), {
+					throwAfterRequest: new Error("scheduler lane failed"),
+				}),
+			});
+			const expected = reason.slice(0, 4096);
+			await expect(runtime.drive()).rejects.toMatchObject({
+				name: "StaticWorkflowRuntimeError",
+				stage: "execution",
+				message: expected,
+				cause: { name: "DynamicWorkflowExecutionError", stage: "memory" },
+			});
+			const events = await journal.readEvents();
+			const state = reduceWorkflowEvents(events);
+			expect(state.status).toBe("failed");
+			expect(runStatusChanges(events).at(-1)).toMatchObject({
+				to: "failed",
+				reason: expected,
+			});
+			// The undecided checkpoint is cancelled before `-> failed`.
+			const [task] = Object.values(state.tasks);
+			expect(task?.status).toBe("cancelled");
+			const cancelledAt = events.findIndex(
+				(event) =>
+					event.type === "task-status-changed" &&
+					(event.data as { to: string }).to === "cancelled",
+			);
+			const failedAt = events.findIndex(
+				(event) =>
+					event.type === "run-status-changed" &&
+					(event.data as { to: string }).to === "failed",
+			);
+			expect(cancelledAt).toBeGreaterThan(-1);
+			expect(failedAt).toBeGreaterThan(cancelledAt);
+		}
+
+		// A dynamic-looking error without a message, a plain object, and every
+		// other error keep the fixed static reason.
+		for (const thrown of [
+			Object.assign(new Error(""), { name: "DynamicWorkflowExecutionError" }),
+			{ name: "DynamicWorkflowExecutionError", message: "plain object" },
+			new Error("Dynamic workflow VM exceeded its memory limit."),
+		]) {
+			const { journal, artifacts } = await fixture();
+			const definition = defineWorkflow({
+				meta: {
+					name: "static-failure",
+					description: "Static failure",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
+				inputSchema: Type.Object({}),
+				outputSchema: Type.Object({ answer: Type.String() }),
+				run() {
+					throw thrown;
+				},
+			});
+			const runtime = createStaticWorkflowRuntime({
+				definition,
+				definitionIdentitySha256,
+				input: {},
+				cwd: "/repo",
+				journal,
+				artifacts,
+				scheduler: schedulerFor(journal, artifacts, new Map()),
+			});
+			await expect(runtime.drive()).rejects.toMatchObject({
+				stage: "execution",
+				message: "Static workflow source execution failed.",
+			});
+			const events = await journal.readEvents();
+			expect(runStatusChanges(events).at(-1)).toMatchObject({
+				to: "failed",
+				reason: "Static workflow source execution failed.",
+			});
+			expect(JSON.stringify(events)).not.toContain("plain object");
+		}
 	});
 });

@@ -3,6 +3,7 @@ import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import type {
 	MaterializedAgentTask,
+	MaterializedCheckpointTask,
 	MaterializedNestedWorkflowTask,
 	MaterializedSupportTask,
 	MaterializedWorkflowTask,
@@ -28,6 +29,7 @@ import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
 import { invalidationClosure } from "../src/reducer.js";
 import {
 	invalidationPreview,
+	pendingCheckpointViews,
 	runInspection,
 	runLogs,
 	runSummary,
@@ -35,19 +37,26 @@ import {
 } from "../src/run-projection.js";
 import type { WorkflowRunRecord } from "../src/run-record.js";
 import {
+	MAX_WORKFLOW_INSPECTION_ITEMS,
+	MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
 	MAX_WORKFLOW_LOG_MESSAGE_LENGTH,
 	MAX_WORKFLOW_TASK_KEY_LENGTH,
 	WorkflowArtifactViewSchema,
 	WorkflowBarrierViewSchema,
 	WorkflowBudgetViewSchema,
+	WorkflowCheckpointTaskViewSchema,
+	WorkflowDecideOptionsSchema,
 	WorkflowEffectViewSchema,
 	WorkflowExecutionViewSchema,
 	WorkflowInvalidationPreviewSchema,
 	WorkflowLogEntrySchema,
 	WorkflowLogPageSchema,
+	WorkflowPendingCheckpointViewSchema,
 	WorkflowRunInspectionSchema,
 	WorkflowRunSummarySchema,
+	WorkflowServiceRunViewSchema,
 	WorkflowServiceTaskViewSchema,
+	WorkflowServiceWaitViewSchema,
 } from "../src/service-views.js";
 
 // ---------------------------------------------------------------------------
@@ -70,6 +79,7 @@ const record: WorkflowRunRecord = {
 	contractRevision: WORKFLOW_CONTRACT_REVISION,
 	runId: RUN_ID,
 	depth: 0,
+	definitionKind: "static",
 	definitionName: "projection",
 	definitionPath: "/project/workflows/projection.workflow.ts",
 	definitionIdentitySha256: SHA,
@@ -1020,6 +1030,7 @@ describe("runSummary", () => {
 			leasedElsewhere: false,
 			availableActions: ["stop", "wait", "reconcile"],
 			requiresAttention: false,
+			pendingCheckpointCount: 0,
 		});
 		expect(Value.Check(WorkflowRunSummarySchema, summaryView)).toBe(true);
 	});
@@ -1049,6 +1060,7 @@ describe("runSummary", () => {
 			leasedElsewhere: false,
 			availableActions: [],
 			requiresAttention: false,
+			pendingCheckpointCount: 0,
 			outputArtifactId: answerResult.id,
 		});
 		expect(summaryView).not.toHaveProperty("output");
@@ -1991,5 +2003,840 @@ describe("invalidationPreview", () => {
 		expect(() => invalidationPreview(state, stale.id)).toThrow(
 			"invalidation cause is already invalidated",
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Checkpoints (revision 18)
+// ---------------------------------------------------------------------------
+
+const CHECKPOINT_PROMPT = "Approve the plan before the writer runs?";
+const CHECKPOINT_REASON = "Plan reviewed and accepted.";
+const APPROVER = "vegard";
+const DECISION_SHA = "c".repeat(64);
+const DECISION_ARTIFACT_ID = `artifact_${DECISION_SHA}`;
+const REQUESTED_AT = "2026-09-15T12:03:00.000Z";
+const EXPIRES_AT = "2026-09-15T13:03:00.000Z";
+const DECIDED_AT = "2026-09-15T12:04:00.000Z";
+
+function checkpointTask(
+	key: string,
+	sequence: number,
+	options: {
+		namespace?: readonly string[];
+		prompt?: string;
+		headless?: "block" | "use-explicit-default";
+		default?: unknown;
+		timeoutMs?: number;
+		inputs?: Readonly<Record<string, WorkflowTaskId>>;
+	} = {},
+): MaterializedCheckpointTask {
+	return {
+		id: `task_${key}`,
+		runId: RUN_ID,
+		namespace: [...(options.namespace ?? [])],
+		spec: {
+			key,
+			kind: "checkpoint",
+			role: "task",
+			disposition: "required",
+			after: [],
+			inputs: Object.fromEntries(
+				Object.entries(options.inputs ?? {}).map(([name, producerTaskId]) => [
+					name,
+					{ runId: RUN_ID, producerTaskId, output: "result" as const },
+				]),
+			),
+			replay: "read-only",
+			request: {
+				schema: {
+					type: "object",
+					properties: { proceed: { type: "boolean" } },
+					required: ["proceed"],
+				},
+				prompt: options.prompt ?? CHECKPOINT_PROMPT,
+				headless: options.headless ?? "block",
+				...(options.default === undefined ? {} : { default: options.default }),
+				...(options.timeoutMs === undefined
+					? {}
+					: { timeoutMs: options.timeoutMs }),
+			},
+			identitySha256: SHA,
+		},
+		definitionIdentitySha256: SHA,
+		materializationSequence: sequence,
+		materializationEpoch: 1,
+		epochPosition: sequence,
+	};
+}
+
+function checkpointRecord(task: MaterializedWorkflowTask, generation: number) {
+	return {
+		kind: "checkpoint" as const,
+		id: deriveTaskExecutionId(RUN_ID, task.id, generation),
+		runId: RUN_ID,
+		taskId: task.id,
+		generation,
+		taskIdentitySha256: SHA,
+	};
+}
+
+function requestedExecution(
+	task: MaterializedWorkflowTask,
+	options: { expiresAt?: string; sequence?: number } = {},
+): TaskExecutionProjection {
+	const sequence = options.sequence ?? 50;
+	return {
+		execution: checkpointRecord(task, 1),
+		phase: "checkpoint-requested",
+		createdSequence: sequence,
+		checkpointRequest: {
+			inputsSha256: SHA,
+			...(options.expiresAt === undefined
+				? {}
+				: { expiresAt: options.expiresAt }),
+			requestedAt: REQUESTED_AT,
+			sequence: sequence + 1,
+		},
+	};
+}
+
+function decidedExecution(
+	task: MaterializedWorkflowTask,
+	decision: {
+		source: "operator" | "default";
+		decidedBy?: string;
+		reason?: string;
+	},
+): TaskExecutionProjection {
+	const requested = requestedExecution(task, { expiresAt: EXPIRES_AT });
+	return {
+		...requested,
+		phase: "terminal",
+		checkpointDecision: {
+			artifactId: DECISION_ARTIFACT_ID,
+			decisionSha256: DECISION_SHA,
+			source: decision.source,
+			...(decision.decidedBy === undefined
+				? {}
+				: { decidedBy: decision.decidedBy }),
+			...(decision.reason === undefined ? {} : { reason: decision.reason }),
+			decidedAt: DECIDED_AT,
+			sequence: 52,
+		},
+		terminal: {
+			outcome: "completed",
+			evidence: {
+				kind: "checkpoint",
+				artifactId: DECISION_ARTIFACT_ID,
+				decisionSha256: DECISION_SHA,
+				source: decision.source,
+				...(decision.decidedBy === undefined
+					? {}
+					: { decidedBy: decision.decidedBy }),
+			},
+			sequence: 53,
+		},
+	};
+}
+
+function endedExecution(
+	task: MaterializedWorkflowTask,
+	shape: "expired" | "cancelled",
+): TaskExecutionProjection {
+	const requested = requestedExecution(task, { expiresAt: EXPIRES_AT });
+	return {
+		...requested,
+		phase: "terminal",
+		terminal: {
+			outcome: shape === "expired" ? "failed" : "cancelled",
+			evidence: {
+				kind: "workflow",
+				stage: shape === "expired" ? "checkpoint-expired" : "stop",
+				failureSha256: SHA,
+				message:
+					shape === "expired"
+						? "Checkpoint expired without a decision."
+						: "Workflow run ended before the checkpoint was decided.",
+			},
+			sequence: 54,
+		},
+	};
+}
+
+const approve = checkpointTask("approve", 2, {
+	timeoutMs: 3_600_000,
+	inputs: { plan: answer.id },
+});
+const review = checkpointTask("review", 3, {
+	namespace: ["release"],
+	headless: "use-explicit-default",
+	default: { proceed: false },
+});
+const defaulted = checkpointTask("defaulted", 4, {
+	headless: "use-explicit-default",
+	default: { proceed: true },
+});
+const expired = checkpointTask("expired", 5, { timeoutMs: 60_000 });
+const cancelled = checkpointTask("cancelled", 6);
+const fresh = checkpointTask("fresh", 7);
+const approveExecutionId = deriveTaskExecutionId(RUN_ID, approve.id, 1);
+const reviewExecutionId = deriveTaskExecutionId(RUN_ID, review.id, 1);
+const approveExecution = requestedExecution(approve, { expiresAt: EXPIRES_AT });
+const reviewExecution = decidedExecution(review, {
+	source: "operator",
+	decidedBy: APPROVER,
+	reason: CHECKPOINT_REASON,
+});
+const defaultedExecution = decidedExecution(defaulted, { source: "default" });
+const expiredExecution = endedExecution(expired, "expired");
+const cancelledExecution = endedExecution(cancelled, "cancelled");
+
+const parkedState = stateOf({
+	status: "waiting",
+	entries: [
+		{ task: answer, status: "completed", executions: [answerGen1, answerGen2] },
+		{ task: approve, status: "waiting", executions: [approveExecution] },
+		{ task: review, status: "completed", executions: [reviewExecution] },
+		{ task: defaulted, status: "completed", executions: [defaultedExecution] },
+		{ task: expired, status: "failed", executions: [expiredExecution] },
+		{ task: cancelled, status: "cancelled", executions: [cancelledExecution] },
+		{ task: fresh, status: "pending" },
+	],
+	artifacts: [answerResult],
+});
+
+const checkpointEvents: readonly WorkflowJournalEvent[] = [
+	event(50, {
+		type: "task-execution-created",
+		data: { execution: approveExecution.execution },
+	}),
+	event(51, {
+		type: "task-execution-checkpoint-requested",
+		data: {
+			executionId: approveExecutionId,
+			inputsSha256: SHA,
+			expiresAt: EXPIRES_AT,
+		},
+	}),
+	event(52, {
+		type: "task-status-changed",
+		data: {
+			taskId: approve.id,
+			from: "ready",
+			to: "waiting",
+			reason: "Checkpoint awaits a decision.",
+		},
+	}),
+	event(53, {
+		type: "run-status-changed",
+		data: {
+			from: "running",
+			to: "waiting",
+			reason: "Workflow run awaits a checkpoint decision.",
+		},
+	}),
+	event(54, {
+		type: "task-execution-checkpoint-decided",
+		data: {
+			executionId: reviewExecutionId,
+			artifactId: DECISION_ARTIFACT_ID,
+			decisionSha256: DECISION_SHA,
+			source: "operator",
+			decidedAt: DECIDED_AT,
+			decidedBy: APPROVER,
+			reason: CHECKPOINT_REASON,
+		},
+	}),
+	event(55, {
+		type: "task-execution-checkpoint-decided",
+		data: {
+			executionId: deriveTaskExecutionId(RUN_ID, defaulted.id, 1),
+			artifactId: DECISION_ARTIFACT_ID,
+			decisionSha256: DECISION_SHA,
+			source: "default",
+			decidedAt: DECIDED_AT,
+		},
+	}),
+	event(56, {
+		type: "task-execution-terminal",
+		data: {
+			executionId: deriveTaskExecutionId(RUN_ID, expired.id, 1),
+			outcome: "failed",
+			evidence: {
+				kind: "workflow",
+				stage: "checkpoint-expired",
+				failureSha256: SHA,
+				message: "Checkpoint expired without a decision.",
+			},
+		},
+	}),
+	event(57, {
+		type: "task-execution-terminal",
+		data: {
+			executionId: deriveTaskExecutionId(RUN_ID, cancelled.id, 1),
+			outcome: "cancelled",
+			evidence: {
+				kind: "workflow",
+				stage: "stop",
+				failureSha256: SHA,
+				message: "Workflow run ended before the checkpoint was decided.",
+			},
+		},
+	}),
+	event(58, {
+		type: "task-status-changed",
+		data: {
+			taskId: cancelled.id,
+			from: "waiting",
+			to: "cancelled",
+			reason: "Workflow run ended before the checkpoint was decided.",
+		},
+	}),
+];
+
+describe("checkpoint task views", () => {
+	const views = taskViews(parkedState);
+	const byId = new Map(views.map((view) => [view.id, view]));
+
+	it("projects a requested checkpoint from its spec and durable request", () => {
+		expect(byId.get(approve.id)).toEqual({
+			id: approve.id,
+			namespace: [],
+			key: "approve",
+			kind: "checkpoint",
+			role: "task",
+			disposition: "required",
+			status: "waiting",
+			generation: 1,
+			executionId: approveExecutionId,
+			checkpoint: {
+				prompt: CHECKPOINT_PROMPT,
+				schema: approve.spec.request.schema,
+				headless: "block",
+				timeoutMs: 3_600_000,
+				requestedAt: REQUESTED_AT,
+				expiresAt: EXPIRES_AT,
+			},
+		});
+		expect(byId.get(approve.id)).not.toHaveProperty("attempts");
+		expect(byId.get(approve.id)).not.toHaveProperty("settlement");
+	});
+
+	it("projects an operator decision with its digest, approver, and reason but never its value", () => {
+		expect(byId.get(review.id)).toEqual({
+			id: review.id,
+			namespace: ["release"],
+			key: "review",
+			kind: "checkpoint",
+			role: "task",
+			disposition: "required",
+			status: "completed",
+			generation: 1,
+			executionId: reviewExecutionId,
+			outcome: "completed",
+			checkpoint: {
+				prompt: CHECKPOINT_PROMPT,
+				schema: review.spec.request.schema,
+				headless: "use-explicit-default",
+				default: { proceed: false },
+				requestedAt: REQUESTED_AT,
+				expiresAt: EXPIRES_AT,
+				decision: {
+					source: "operator",
+					decidedBy: APPROVER,
+					decidedAt: DECIDED_AT,
+					reason: CHECKPOINT_REASON,
+					sha256: DECISION_SHA,
+				},
+			},
+		});
+		expect(byId.get(review.id)?.checkpoint?.decision).not.toHaveProperty(
+			"value",
+		);
+	});
+
+	it("projects a default decision without an approver", () => {
+		expect(byId.get(defaulted.id)?.checkpoint).toEqual({
+			prompt: CHECKPOINT_PROMPT,
+			schema: defaulted.spec.request.schema,
+			headless: "use-explicit-default",
+			default: { proceed: true },
+			requestedAt: REQUESTED_AT,
+			expiresAt: EXPIRES_AT,
+			decision: {
+				source: "default",
+				decidedAt: DECIDED_AT,
+				sha256: DECISION_SHA,
+			},
+		});
+	});
+
+	it("keeps the request facts of expired and cancelled checkpoints with their outcomes", () => {
+		expect(byId.get(expired.id)).toMatchObject({
+			status: "failed",
+			outcome: "failed",
+			checkpoint: {
+				timeoutMs: 60_000,
+				requestedAt: REQUESTED_AT,
+				expiresAt: EXPIRES_AT,
+			},
+		});
+		expect(byId.get(expired.id)?.checkpoint).not.toHaveProperty("decision");
+		expect(byId.get(cancelled.id)).toMatchObject({
+			status: "cancelled",
+			outcome: "cancelled",
+			checkpoint: { requestedAt: REQUESTED_AT },
+		});
+	});
+
+	it("describes an unrequested checkpoint from its spec alone", () => {
+		expect(byId.get(fresh.id)).toEqual({
+			id: fresh.id,
+			namespace: [],
+			key: "fresh",
+			kind: "checkpoint",
+			role: "task",
+			disposition: "required",
+			status: "pending",
+			generation: 0,
+			checkpoint: {
+				prompt: CHECKPOINT_PROMPT,
+				schema: fresh.spec.request.schema,
+				headless: "block",
+			},
+		});
+	});
+
+	it("returns frozen copies that do not alias the persisted spec", () => {
+		const view = byId.get(review.id);
+		expect(Object.isFrozen(view?.checkpoint)).toBe(true);
+		expect(Object.isFrozen(view?.checkpoint?.schema)).toBe(true);
+		expect(Object.isFrozen(view?.checkpoint?.default)).toBe(true);
+		expect(view?.checkpoint?.schema).not.toBe(review.spec.request.schema);
+		expect(view?.checkpoint?.default).not.toBe(review.spec.request.default);
+	});
+
+	it("round-trips every checkpoint view through its schema, including the graph fields", () => {
+		for (const view of [...views, ...taskViews(parkedState, { graph: true })]) {
+			expect(Value.Check(WorkflowServiceTaskViewSchema, view)).toBe(true);
+			if (view.kind === "checkpoint") {
+				expect(
+					Value.Check(WorkflowCheckpointTaskViewSchema, view.checkpoint),
+				).toBe(true);
+			} else {
+				expect(view).not.toHaveProperty("checkpoint");
+			}
+		}
+		expect(taskViews(parkedState, { graph: true })[1]).toMatchObject({
+			id: approve.id,
+			dependsOn: [],
+			inputs: { plan: answer.id },
+		});
+		const serialized = JSON.stringify(views);
+		expect(serialized).not.toContain('"value"');
+		expect(serialized).not.toContain(PROMPT_GOAL);
+	});
+
+	it("rejects extra properties and malformed checkpoint fields", () => {
+		const view = byId.get(review.id);
+		if (!view?.checkpoint) throw new Error("missing checkpoint view");
+		expect(
+			Value.Check(WorkflowCheckpointTaskViewSchema, {
+				...view.checkpoint,
+				extra: 1,
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowCheckpointTaskViewSchema, {
+				...view.checkpoint,
+				decision: { ...view.checkpoint.decision, sha256: "nope" },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowCheckpointTaskViewSchema, {
+				...view.checkpoint,
+				prompt: "",
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowCheckpointTaskViewSchema, {
+				...view.checkpoint,
+				headless: "auto",
+			}),
+		).toBe(false);
+		// The service adds verified inputs and the decision value on artifact-backed views.
+		expect(
+			Value.Check(WorkflowCheckpointTaskViewSchema, {
+				...view.checkpoint,
+				inputs: { plan: { title: "x" } },
+				decision: { ...view.checkpoint.decision, value: { proceed: true } },
+			}),
+		).toBe(true);
+	});
+});
+
+describe("pendingCheckpointViews and run views", () => {
+	it("lists only checkpoints awaiting a decision, in materialization order", () => {
+		const pending = pendingCheckpointViews(parkedState);
+		expect(pending).toEqual([
+			{
+				taskId: approve.id,
+				namespace: [],
+				key: "approve",
+				executionId: approveExecutionId,
+				requestedAt: REQUESTED_AT,
+				expiresAt: EXPIRES_AT,
+			},
+		]);
+		expect(Object.isFrozen(pending)).toBe(true);
+		for (const entry of pending) {
+			expect(Value.Check(WorkflowPendingCheckpointViewSchema, entry)).toBe(
+				true,
+			);
+		}
+		expect(pendingCheckpointViews(richState)).toEqual([]);
+	});
+
+	it("omits expiresAt for a checkpoint bounded only by the run deadline", () => {
+		const open = checkpointTask("open", 1);
+		const state = stateOf({
+			status: "running",
+			entries: [
+				{
+					task: open,
+					status: "waiting",
+					executions: [requestedExecution(open)],
+				},
+			],
+		});
+		const [entry] = pendingCheckpointViews(state);
+		expect(entry).toEqual({
+			taskId: open.id,
+			namespace: [],
+			key: "open",
+			executionId: deriveTaskExecutionId(RUN_ID, open.id, 1),
+			requestedAt: REQUESTED_AT,
+		});
+		expect(Value.Check(WorkflowPendingCheckpointViewSchema, entry)).toBe(true);
+	});
+
+	it("validates a run view and a parked wait view carrying pending checkpoints", () => {
+		const runView = {
+			runId: RUN_ID,
+			status: parkedState.status,
+			definitionName: record.definitionName,
+			createdAt: record.createdAt,
+			deadlineAt: record.deadlineAt,
+			depth: record.depth,
+			tasks: taskViews(parkedState),
+			pendingCheckpoints: pendingCheckpointViews(parkedState),
+		};
+		expect(Value.Check(WorkflowServiceRunViewSchema, runView)).toBe(true);
+		expect(
+			Value.Check(WorkflowServiceWaitViewSchema, { ...runView, parked: true }),
+		).toBe(true);
+		expect(
+			Value.Check(WorkflowServiceWaitViewSchema, { ...runView, parked: false }),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowServiceRunViewSchema, {
+				...runView,
+				pendingCheckpoints: [{ taskId: approve.id }],
+			}),
+		).toBe(false);
+	});
+
+	it("summarizes a parked root run with decide, attention, and the pending count", () => {
+		const summaryView = runSummary(
+			record,
+			parkedState,
+			checkpointEvents,
+			"inactive",
+			false,
+			NOW,
+		);
+		expect(summaryView).toMatchObject({
+			status: "waiting",
+			taskCounts: expect.objectContaining({
+				waiting: 1,
+				completed: 3,
+				failed: 1,
+				cancelled: 1,
+				pending: 1,
+				total: 7,
+			}),
+			availableActions: ["stop", "wait", "reconcile", "decide"],
+			requiresAttention: true,
+			pendingCheckpointCount: 1,
+		});
+		expect(Value.Check(WorkflowRunSummarySchema, summaryView)).toBe(true);
+		const nested = runSummary(
+			nestedRecord,
+			parkedState,
+			checkpointEvents,
+			"owned",
+			true,
+			NOW,
+		);
+		expect(nested.availableActions).toEqual(["stop", "wait"]);
+		expect(nested.pendingCheckpointCount).toBe(1);
+		const live = runSummary(
+			record,
+			{ ...parkedState, status: "running" },
+			checkpointEvents,
+			"owned",
+			true,
+			NOW,
+		);
+		expect(live.availableActions).toEqual(["stop", "wait", "decide"]);
+	});
+
+	it("accepts decide options with an approver and optional reason, closed", () => {
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, {
+				decision: { proceed: true },
+				approver: APPROVER,
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, {
+				decision: null,
+				approver: APPROVER,
+				reason: CHECKPOINT_REASON,
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, {
+				decision: true,
+				approver: "",
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, {
+				decision: true,
+				approver: "a".repeat(257),
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, {
+				decision: true,
+				approver: APPROVER,
+				reason: "",
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, {
+				decision: true,
+				approver: APPROVER,
+				decidedBy: APPROVER,
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(WorkflowDecideOptionsSchema, { approver: APPROVER }),
+		).toBe(false);
+	});
+});
+
+describe("checkpoint inspection and logs", () => {
+	const longPrompt = "p".repeat(4096);
+	const verbose = checkpointTask("verbose", 1, { prompt: longPrompt });
+	const verboseState = stateOf({
+		status: "waiting",
+		entries: [
+			{
+				task: verbose,
+				status: "waiting",
+				executions: [requestedExecution(verbose, { expiresAt: EXPIRES_AT })],
+			},
+		],
+	});
+
+	it("bounds checkpoint prompts in the inspection and marks the cut", () => {
+		const inspection = runInspection(
+			record,
+			verboseState,
+			[],
+			"inactive",
+			false,
+			NOW,
+		);
+		const task = inspection.tasks?.[0];
+		expect(task?.checkpoint?.prompt).toBe(
+			"p".repeat(MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH),
+		);
+		expect(task?.checkpoint?.promptTruncated).toBe(true);
+		expect(task?.checkpoint).toMatchObject({
+			requestedAt: REQUESTED_AT,
+			expiresAt: EXPIRES_AT,
+		});
+		expect(inspection.run.pendingCheckpointCount).toBe(1);
+		expect(Value.Check(WorkflowRunInspectionSchema, inspection)).toBe(true);
+		// Artifact-backed views keep the whole contract-bounded prompt.
+		expect(taskViews(verboseState)[0]?.checkpoint?.prompt).toBe(longPrompt);
+		expect(taskViews(verboseState)[0]?.checkpoint).not.toHaveProperty(
+			"promptTruncated",
+		);
+		// A prompt at the limit is not cut.
+		const exact = taskViews(verboseState, {
+			promptLimit: longPrompt.length,
+		})[0]?.checkpoint;
+		expect(exact?.prompt).toBe(longPrompt);
+		expect(exact).not.toHaveProperty("promptTruncated");
+	});
+
+	it("includes decision details in the inspection without the decision value", () => {
+		const inspection = runInspection(
+			record,
+			parkedState,
+			checkpointEvents,
+			"inactive",
+			false,
+			NOW,
+			{ include: ["tasks", "executions"], taskId: review.id },
+		);
+		expect(inspection.tasks?.[0]?.checkpoint?.decision).toEqual({
+			source: "operator",
+			decidedBy: APPROVER,
+			decidedAt: DECIDED_AT,
+			reason: CHECKPOINT_REASON,
+			sha256: DECISION_SHA,
+		});
+		expect(inspection.executions?.[0]).toMatchObject({
+			id: reviewExecutionId,
+			kind: "checkpoint",
+			phase: "terminal",
+			terminal: { outcome: "completed", sequence: 53 },
+		});
+		expect(inspection.executions?.[0]?.terminal).not.toHaveProperty("failure");
+		expect(JSON.stringify(inspection)).not.toContain('"value"');
+		expect(Value.Check(WorkflowRunInspectionSchema, inspection)).toBe(true);
+	});
+
+	it("renders checkpoint lifecycle lines from the journal without the value or approver", () => {
+		const page = runLogs(checkpointEvents, parkedState, {});
+		expect(page.entries.map((entry) => entry.sequence)).toEqual([
+			51, 52, 53, 54, 55, 56, 57, 58,
+		]);
+		expect(page.entries[0]).toEqual({
+			sequence: 51,
+			timestamp: timestampAt(51),
+			kind: "checkpoint",
+			taskId: approve.id,
+			taskKey: "/approve",
+			status: "requested",
+			message: "Checkpoint requested.",
+		});
+		expect(page.entries[1]).toMatchObject({
+			kind: "task",
+			taskId: approve.id,
+			status: "waiting",
+			reason: "Checkpoint awaits a decision.",
+			message: "Task /approve changed from ready to waiting.",
+		});
+		expect(page.entries[2]).toMatchObject({
+			kind: "run",
+			status: "waiting",
+			reason: "Workflow run awaits a checkpoint decision.",
+			message: "Run status changed from running to waiting.",
+		});
+		expect(page.entries[3]).toEqual({
+			sequence: 54,
+			timestamp: timestampAt(54),
+			kind: "checkpoint",
+			taskId: review.id,
+			taskKey: "release/review",
+			status: "decided",
+			reason: CHECKPOINT_REASON,
+			message: "Checkpoint decided by operator.",
+		});
+		expect(page.entries[4]).toEqual({
+			sequence: 55,
+			timestamp: timestampAt(55),
+			kind: "checkpoint",
+			taskId: defaulted.id,
+			taskKey: "/defaulted",
+			status: "decided",
+			message: "Checkpoint decided by default.",
+		});
+		expect(page.entries[5]).toMatchObject({
+			kind: "terminal",
+			taskId: expired.id,
+			status: "failed",
+			failureCode: "checkpoint-expired",
+			message: "Execution generation 1 ended failed.",
+		});
+		expect(page.entries[6]).toMatchObject({
+			kind: "terminal",
+			taskId: cancelled.id,
+			status: "cancelled",
+			failureCode: "stop",
+			message: "Execution generation 1 ended cancelled.",
+		});
+		expect(page.entries[7]).toMatchObject({
+			kind: "task",
+			taskId: cancelled.id,
+			status: "cancelled",
+			reason: "Workflow run ended before the checkpoint was decided.",
+			message: "Task /cancelled changed from waiting to cancelled.",
+		});
+		for (const entry of page.entries) {
+			expect(Value.Check(WorkflowLogEntrySchema, entry)).toBe(true);
+		}
+		expect(Value.Check(WorkflowLogPageSchema, page)).toBe(true);
+		const serialized = JSON.stringify(page);
+		expect(serialized).not.toContain(APPROVER);
+		expect(serialized).not.toContain(DECISION_SHA);
+		expect(serialized).not.toContain("artifact_");
+		expect(serialized).not.toContain(CHECKPOINT_PROMPT);
+		expect(serialized).not.toContain("proceed");
+	});
+});
+
+describe("checkpoint bounds", () => {
+	it("bounds pending checkpoints to the inspection item limit while counting them all", () => {
+		const entries: TaskEntry[] = [];
+		for (let index = 0; index < 300; index += 1) {
+			const task = checkpointTask(`cp${index}`, index + 1, {
+				prompt: "q".repeat(4096),
+				timeoutMs: 60_000,
+			});
+			entries.push({
+				task,
+				status: "waiting",
+				executions: [
+					requestedExecution(task, {
+						expiresAt: EXPIRES_AT,
+						sequence: 100 + index * 2,
+					}),
+				],
+			});
+		}
+		const state = stateOf({ status: "waiting", entries, lastSequence: 800 });
+		const pending = pendingCheckpointViews(state);
+		expect(pending).toHaveLength(MAX_WORKFLOW_INSPECTION_ITEMS);
+		expect(pending[0]?.key).toBe("cp0");
+		expect(pending.at(-1)?.key).toBe(`cp${MAX_WORKFLOW_INSPECTION_ITEMS - 1}`);
+		expect(
+			Value.Check(WorkflowServiceRunViewSchema.properties.pendingCheckpoints, [
+				...pending,
+			]),
+		).toBe(true);
+		const summaryView = runSummary(record, state, [], "inactive", false, NOW);
+		expect(summaryView.pendingCheckpointCount).toBe(300);
+		expect(summaryView.availableActions).toContain("decide");
+		expect(Value.Check(WorkflowRunSummarySchema, summaryView)).toBe(true);
+		const inspected = taskViews(state, {
+			graph: true,
+			promptLimit: MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
+		});
+		expect(inspected).toHaveLength(300);
+		for (const view of inspected) {
+			expect(view.checkpoint?.prompt).toHaveLength(
+				MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
+			);
+			expect(view.checkpoint?.promptTruncated).toBe(true);
+			expect(Value.Check(WorkflowServiceTaskViewSchema, view)).toBe(true);
+		}
 	});
 });
