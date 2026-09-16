@@ -1,4 +1,4 @@
-import { Worker } from "node:worker_threads";
+import { receiveMessageOnPort, Worker } from "node:worker_threads";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTaskHandle } from "../src/definition.js";
@@ -21,6 +21,7 @@ import {
 	DYNAMIC_SYNC_BUFFER_BYTES,
 	DYNAMIC_SYNC_FLAG_ANSWERED,
 	DYNAMIC_SYNC_FLAG_INDEX,
+	DYNAMIC_SYNC_FLAG_PENDING,
 	type DynamicCallMessage,
 	DynamicHostMessageSchema,
 	type DynamicReplyMessage,
@@ -560,53 +561,108 @@ describe("dynamic synchronous bridge", () => {
 				if (code !== 0) reject(new Error(`worker exited ${code}`));
 			});
 			worker.on("message", (message: unknown) => {
-				messages.push(message);
-				const typed = message as { type: string };
-				if (typed.type === "call") {
-					onCall(message as DynamicCallMessage, channel, messages);
-				} else if (typed.type === "outcome") {
-					outcomes.push(message as Outcome);
-				} else if (typed.type === "finished") {
-					resolve({ outcomes, messages });
+				// Nothing may throw out of this listener: it runs outside the
+				// test's promise chain, so a throw would become an unhandled
+				// error that fails the run without failing a test.
+				try {
+					messages.push(message);
+					const typed = message as { type: string };
+					if (typed.type === "call") {
+						onCall(message as DynamicCallMessage, channel, messages);
+					} else if (typed.type === "outcome") {
+						outcomes.push(message as Outcome);
+					} else if (typed.type === "finished") {
+						resolve({ outcomes, messages });
+					}
+				} catch (error) {
+					reject(error);
 				}
 			});
 		});
 	}
 
+	it("posts the reply before it flips the flag for the parked VM", () => {
+		const channel = createDynamicSyncChannel();
+		channels.add(channel);
+		const flag = new Int32Array(channel.syncBuffer);
+		const reply: DynamicReplyMessage = {
+			type: "reply",
+			id: 1,
+			ok: true,
+			value: { echoed: ["plan"] },
+			aborted: false,
+		};
+		expect(Atomics.load(flag, DYNAMIC_SYNC_FLAG_INDEX)).toBe(
+			DYNAMIC_SYNC_FLAG_PENDING,
+		);
+		answerDynamicCallSync(channel, reply);
+		// A woken VM reads the reply off its port after seeing the flag, so the
+		// reply must already be there once the flag says answered.
+		expect(Atomics.load(flag, DYNAMIC_SYNC_FLAG_INDEX)).toBe(
+			DYNAMIC_SYNC_FLAG_ANSWERED,
+		);
+		expect(receiveMessageOnPort(channel.workerPort)?.message).toEqual(reply);
+	});
+
 	it("answers calls synchronously inside the host message handler", async () => {
 		const guard = createDynamicVmMessageGuard();
 		const seen: string[] = [];
+		const acceptedTypes: string[] = [];
+		const parkedOnEntry: number[] = [];
+		const pendingOnEntry: (number | undefined)[] = [];
+		const pendingAfterAnswer: (number | undefined)[] = [];
+		const answeredBeforeAwaiting: boolean[] = [];
 		const { outcomes } = await spawn(
 			[
 				{ id: 1, method: "phase", args: ["plan"] },
 				{ id: 2, method: "agent", args: ["key", { agent: "r" }] },
 			],
 			(message, channel) => {
-				const accepted = guard.accept(message);
-				if (accepted.type !== "call") throw new Error("expected a call");
-				seen.push(accepted.method);
-				// R1: reply, flag, notify, all before this handler returns.
-				answerDynamicCallSync(channel, {
-					type: "reply",
-					id: accepted.id,
-					ok: accepted.method !== "agent",
-					...(accepted.method === "agent"
-						? {
-								error: { name: "WorkflowMaterializationError", message: "dup" },
-							}
-						: { value: { echoed: accepted.args } }),
-					aborted: false,
-				} as DynamicReplyMessage);
-				guard.answered(accepted.id);
-				expect(
+				// Record only; the assertions run in the test body. A microtask
+				// scheduled here cannot run before this handler returns, so
+				// `answeredBeforeAwaiting` proves the answer preceded any await.
+				let microtasksRun = 0;
+				queueMicrotask(() => {
+					microtasksRun += 1;
+				});
+				acceptedTypes.push(guard.accept(message).type);
+				seen.push(message.method);
+				pendingOnEntry.push(guard.pendingCallId);
+				// The VM is parked on the flag until this handler answers. Reading
+				// the flag *after* answering would race the woken VM, which owns it
+				// and resets it to pending for its next call.
+				parkedOnEntry.push(
 					Atomics.load(
 						new Int32Array(channel.syncBuffer),
 						DYNAMIC_SYNC_FLAG_INDEX,
 					),
-				).toBe(DYNAMIC_SYNC_FLAG_ANSWERED);
+				);
+				// R1: reply, flag, notify, all before this handler returns.
+				answerDynamicCallSync(channel, {
+					type: "reply",
+					id: message.id,
+					ok: message.method !== "agent",
+					...(message.method === "agent"
+						? {
+								error: { name: "WorkflowMaterializationError", message: "dup" },
+							}
+						: { value: { echoed: message.args } }),
+					aborted: false,
+				} as DynamicReplyMessage);
+				answeredBeforeAwaiting.push(microtasksRun === 0);
+				guard.answered(message.id);
+				pendingAfterAnswer.push(guard.pendingCallId);
 			},
 		);
+		expect(acceptedTypes).toEqual(["call", "call"]);
 		expect(seen).toEqual(["phase", "agent"]);
+		expect(pendingOnEntry).toEqual([1, 2]);
+		expect(parkedOnEntry).toEqual([
+			DYNAMIC_SYNC_FLAG_PENDING,
+			DYNAMIC_SYNC_FLAG_PENDING,
+		]);
+		expect(answeredBeforeAwaiting).toEqual([true, true]);
+		expect(pendingAfterAnswer).toEqual([undefined, undefined]);
 		expect(outcomes).toEqual([
 			{
 				type: "outcome",
