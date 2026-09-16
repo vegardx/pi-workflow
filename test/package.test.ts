@@ -102,6 +102,12 @@ describe("package contract", () => {
 				types: "./dist/components/index.d.ts",
 				import: "./dist/components/index.js",
 			},
+			// W1-PROVIDER: the service-provider seam, additive under the
+			// freeze and unfrozen until a later minor pins it.
+			"./service-provider": {
+				types: "./dist/service-provider.d.ts",
+				import: "./dist/service-provider.js",
+			},
 			"./package.json": "./package.json",
 		});
 	});
@@ -191,6 +197,7 @@ describe("compatibility matrix", () => {
 					"./extension": "frozen",
 					"./runtime": "unfrozen",
 					"./components": "unfrozen",
+					"./service-provider": "unfrozen",
 				},
 				exportList: "test/fixtures/public-api/root-exports.json",
 			},
@@ -307,6 +314,7 @@ describe("compatibility matrix 1.0", () => {
 				"./extension": "frozen",
 				"./runtime": "unfrozen",
 				"./components": "unfrozen",
+				"./service-provider": "unfrozen",
 			},
 			exportList: "test/fixtures/public-api/root-exports.json",
 		});
@@ -355,6 +363,7 @@ describe("compatibility matrix 1.0", () => {
 			"| Entry points | `.` frozen, `./extension` frozen, `./runtime` unfrozen",
 		);
 		expect(doc).toContain("`./components` unfrozen");
+		expect(doc).toContain("`./service-provider` unfrozen");
 		expect(doc).toContain(
 			`| Pinned export lists | \`.\`: ${rootExports.length} value exports, \`./runtime\`: ${runtimeExports.length} value exports;`,
 		);

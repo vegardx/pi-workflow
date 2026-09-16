@@ -92,6 +92,8 @@ export type ServiceApiPins = [
 			| "maxWorkflowChildRuntimeMs"
 			| "maxWorkflowTimeoutMs"
 			| "supportTasks"
+			// 2.1.0 (additive): the host's model-routing port.
+			| "modelRouting"
 			| "checkpoints"
 			| "dynamic"
 		>
@@ -131,6 +133,7 @@ export type ServiceApiPins = [
 			| "listRuns"
 			| "logs"
 			| "previewInvalidation"
+			| "project"
 			| "proposals"
 			| "propose"
 			| "reconcile"

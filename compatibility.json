@@ -15,7 +15,8 @@
 				".": "frozen",
 				"./extension": "frozen",
 				"./runtime": "unfrozen",
-				"./components": "unfrozen"
+				"./components": "unfrozen",
+				"./service-provider": "unfrozen"
 			},
 			"exportList": "test/fixtures/public-api/root-exports.json"
 		}
