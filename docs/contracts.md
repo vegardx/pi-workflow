@@ -111,9 +111,12 @@ identity derivation and no `AgentTaskRequestSchema` field changes;
 `WorkflowRunRecordSchema` gains the optional `modelRouting`, which is
 revision-19 additive (every record written before it still validates, a reader
 that does not know the field ignores it, and nothing derives identity from it).
-The package ships two more builtin workflows, `deep-review` and `plan-review`,
-from the same `workflows/` builtin root; `plan-review` is the only name on
-`BUILTIN_HEADLESS_WORKFLOWS`, and declares no checkpoint, worktree or handoff.
+The package ships three more builtin workflows, `deep-review`, `plan-review`
+and `deep-research`, from the same `workflows/` builtin root; `plan-review` is
+the only name on `BUILTIN_HEADLESS_WORKFLOWS`, and declares no checkpoint,
+worktree or handoff. `deep-research` declares none of the three either, but is
+not on the allowlist: the structural property and a reason to start without a
+model turn are different things.
 The lease-free `inspect` gains two additive reads: `WorkflowInspectSection`
 gains the member `"output"`, which puts a terminal run's committed output on
 `run.output` (`WorkflowRunSummarySchema` gains the optional `output`, bounded
