@@ -133,6 +133,34 @@ describe("workflow run journal", () => {
 		expect(rewritten).toEqual(reduceWorkflowEvents(await journal.readEvents()));
 	});
 
+	it("reads events and state together and still checks every record after the remembered prefix", async () => {
+		const root = fixtureRoot("projected");
+		const { journal } = await openJournal(root, "workflow_projected");
+		expect(await journal.readProjected()).toEqual({
+			events: [],
+			state: undefined,
+		});
+		await journal.append("run-created", runCreated);
+		await journal.append("run-status-changed", {
+			from: "created",
+			to: "running",
+		});
+		const projected = await journal.readProjected();
+		expect(projected.events).toHaveLength(2);
+		expect(projected.state).toBe(await journal.readState());
+		expect(projected.state).toMatchObject({ status: "running" });
+		// The file stays authoritative after the prefix was verified: a record
+		// appended behind the coordinator's back is parsed and rejected at its
+		// own line, not skipped as part of the remembered prefix.
+		await appendFile(journal.journalPath, "{broken}\n");
+		await expect(journal.readState()).rejects.toThrow(
+			"invalid interior workflow journal record at line 3",
+		);
+		await expect(journal.readProjected()).rejects.toBeInstanceOf(
+			WorkflowPersistenceCorruptionError,
+		);
+	});
+
 	it("repairs one torn tail and rejects interior corruption", async () => {
 		const root = fixtureRoot("torn");
 		const first = await openJournal(root, "workflow_torn");

@@ -106,6 +106,18 @@ type JournalCoordinator = {
 	 * file begins with exactly these events.
 	 */
 	reduction: WorkflowReduction | undefined;
+	/**
+	 * The last journal bytes read and the events they parsed to. A read whose
+	 * file still begins with exactly these bytes parses and validates only the
+	 * records after them; any other content is parsed in full. The file stays
+	 * authoritative: the bytes are compared on every read, never assumed.
+	 */
+	parsed: ParsedJournal | undefined;
+};
+
+type ParsedJournal = {
+	readonly content: Buffer;
+	readonly events: readonly WorkflowJournalEvent[];
 };
 
 const coordinators = new Map<string, JournalCoordinator>();
@@ -208,24 +220,27 @@ async function readBounded(
 				`${label} is not a regular file`,
 			);
 		}
-		const content = Buffer.alloc(maximumBytes + 1);
+		// Sized to the file plus one byte so growth past the limit between stat
+		// and read is still caught, without zero-filling the whole limit per read.
+		const chunks: Buffer[] = [];
 		let bytesRead = 0;
-		while (bytesRead < content.byteLength) {
-			const result = await handle.read(
-				content,
-				bytesRead,
-				content.byteLength - bytesRead,
-				null,
+		let capacity = Math.min(metadata.size, maximumBytes) + 1;
+		while (bytesRead <= maximumBytes) {
+			const chunk = Buffer.allocUnsafe(
+				Math.min(capacity, maximumBytes + 1 - bytesRead),
 			);
+			const result = await handle.read(chunk, 0, chunk.byteLength, null);
 			if (result.bytesRead === 0) break;
+			chunks.push(chunk.subarray(0, result.bytesRead));
 			bytesRead += result.bytesRead;
+			capacity = 64 * 1024;
 		}
 		if (bytesRead > maximumBytes) {
 			throw new WorkflowPersistenceCorruptionError(
 				`${label} exceeds size limit`,
 			);
 		}
-		return content.subarray(0, bytesRead);
+		return Buffer.concat(chunks, bytesRead);
 	} finally {
 		await handle.close();
 	}
@@ -249,9 +264,15 @@ async function repairTornTail(
 	}
 }
 
+/**
+ * Parses and checks the records in `content`. With `preceding` (the already
+ * checked events the content follows), only the new records are returned and
+ * their sequence and fencing are checked against the last preceding event.
+ */
 function parseJournal(
 	content: string,
 	runId: WorkflowRunId,
+	preceding: readonly WorkflowJournalEvent[] = [],
 ): WorkflowJournalEvent[] {
 	if (content.length > 0 && !content.endsWith("\n")) {
 		throw new WorkflowPersistenceCorruptionError(
@@ -261,7 +282,9 @@ function parseJournal(
 	const lines = content.length === 0 ? [] : content.split("\n");
 	lines.pop();
 	const events: WorkflowJournalEvent[] = [];
-	for (const [index, line] of lines.entries()) {
+	let previous = preceding.at(-1);
+	for (const [offset, line] of lines.entries()) {
+		const index = preceding.length + offset;
 		if (!line) {
 			throw new WorkflowPersistenceCorruptionError(
 				`empty interior workflow journal record at line ${index + 1}`,
@@ -304,12 +327,11 @@ function parseJournal(
 			);
 		}
 		const event = value as WorkflowJournalEvent;
-		if (event.runId !== runId || event.sequence !== events.length + 1) {
+		if (event.runId !== runId || event.sequence !== index + 1) {
 			throw new WorkflowPersistenceCorruptionError(
 				`workflow journal identity or sequence mismatch at line ${index + 1}`,
 			);
 		}
-		const previous = events.at(-1);
 		if (
 			previous &&
 			(event.fencingGeneration < previous.fencingGeneration ||
@@ -322,6 +344,7 @@ function parseJournal(
 			);
 		}
 		events.push(event);
+		previous = event;
 	}
 	return events;
 }
@@ -564,6 +587,7 @@ export class WorkflowRunJournal {
 						tail: Promise.resolve(),
 						uncertain: false,
 						reduction: undefined,
+						parsed: undefined,
 					};
 					coordinators.set(key, coordinator);
 				}
@@ -657,11 +681,12 @@ export class WorkflowRunJournal {
 						cause: error,
 					});
 				}
-				const line = `${roundTrip.json}\n`;
-				const lineBytes = Buffer.byteLength(line);
+				const line = Buffer.from(`${roundTrip.json}\n`, "utf8");
+				const lineBytes = line.byteLength;
 				if (lineBytes > MAX_EVENT_BYTES) {
 					throw new Error("workflow journal event exceeds size limit");
 				}
+				let creates = false;
 				try {
 					const current = await stat(this.journalPath);
 					if (current.size + lineBytes > MAX_JOURNAL_BYTES) {
@@ -674,7 +699,9 @@ export class WorkflowRunJournal {
 							"workflow journal disappeared before append",
 						);
 					}
+					creates = true;
 				}
+				const before = this.coordinator.parsed;
 				await this.lease.assertCurrent();
 				let handle: Awaited<ReturnType<typeof open>> | undefined;
 				try {
@@ -686,11 +713,13 @@ export class WorkflowRunJournal {
 							constants.O_NOFOLLOW,
 						0o600,
 					);
-					await handle.writeFile(line, "utf8");
+					await handle.writeFile(line);
 					await handle.sync();
 					await handle.close();
 					handle = undefined;
-					await syncDirectory(this.directory);
+					// The file fsync makes the appended record durable; the directory
+					// entry only needs syncing when this append created the file.
+					if (creates) await syncDirectory(this.directory);
 				} catch (error) {
 					this.coordinator.uncertain = true;
 					await handle?.close().catch(() => {});
@@ -698,6 +727,10 @@ export class WorkflowRunJournal {
 				}
 				this.coordinator.sequence = event.sequence;
 				this.coordinator.reduction = { events, projection: projected };
+				// The next read verifies these bytes against the file before use.
+				this.coordinator.parsed = before
+					? { content: Buffer.concat([before.content, line]), events }
+					: undefined;
 				const onAppended = this.onAppended;
 				if (onAppended) {
 					const notice: WorkflowJournalAppendNotice = Object.freeze({
@@ -734,15 +767,43 @@ export class WorkflowRunJournal {
 				"workflow journal disappeared",
 			);
 		}
-		const events = parseJournal(
-			decodeUtf8(buffer, "workflow journal"),
-			this.runId,
-		);
+		const events = this.parseUncoordinated(buffer);
 		if (events.length !== this.coordinator.sequence) {
 			throw new WorkflowPersistenceCorruptionError(
 				"workflow journal sequence regressed",
 			);
 		}
+		return events;
+	}
+
+	/**
+	 * Parses `buffer`, re-validating only the records after the bytes the
+	 * coordinator last parsed when the file still begins with exactly those
+	 * bytes; a file that differs anywhere in that prefix is parsed in full.
+	 */
+	private parseUncoordinated(buffer: Buffer): WorkflowJournalEvent[] {
+		const cached = this.coordinator.parsed;
+		let events: WorkflowJournalEvent[];
+		if (
+			cached &&
+			buffer.byteLength >= cached.content.byteLength &&
+			buffer.subarray(0, cached.content.byteLength).equals(cached.content)
+		) {
+			events = [
+				...cached.events,
+				...parseJournal(
+					decodeUtf8(
+						buffer.subarray(cached.content.byteLength),
+						"workflow journal",
+					),
+					this.runId,
+					cached.events,
+				),
+			];
+		} else {
+			events = parseJournal(decodeUtf8(buffer, "workflow journal"), this.runId);
+		}
+		this.coordinator.parsed = { content: buffer, events };
 		return events;
 	}
 
@@ -764,6 +825,28 @@ export class WorkflowRunJournal {
 		return this.enqueue(async () => {
 			await this.lease.assertCurrent();
 			return this.reduceUncoordinated(await this.readEventsUncoordinated());
+		});
+	}
+
+	/**
+	 * One coordinated read of the durable events together with their
+	 * projection, `undefined` for a journal without events; the projection
+	 * resumes from the last reduction exactly as `readState` does.
+	 */
+	readProjected(): Promise<{
+		events: WorkflowJournalEvent[];
+		state: WorkflowStateProjection | undefined;
+	}> {
+		return this.enqueue(async () => {
+			await this.lease.assertCurrent();
+			const events = await this.readEventsUncoordinated();
+			return {
+				events,
+				state:
+					events.length === 0
+						? undefined
+						: await this.reduceUncoordinated(events),
+			};
 		});
 	}
 
