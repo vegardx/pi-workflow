@@ -749,6 +749,27 @@ Dynamic acceptance (contract revision 18, `dynamicWorkflows: true`) must prove:
   id when it is accepted; the packed `dist/dynamic/worker.js` resolves from
   the packed host and extracts a manifest;
 - package contents contain compiled ESM, declarations, license, and bounded docs;
+- the root entry exports exactly the pinned frozen list
+  (`test/fixtures/public-api/root-exports.json`) and the runtime entry
+  exactly the pinned runtime list (`runtime-exports.json`), both asserted
+  from the packed tarball by the pack check and from source by
+  `test/public-api.test.ts`, and no name is exported from both entries;
+- deep `dist/` paths (`@vegardx/pi-workflow/dist/index.js`,
+  `@vegardx/pi-workflow/runtime/index.js`) are not importable from the
+  packed tarball (Node's `ERR_PACKAGE_PATH_NOT_EXPORTED`), while `.`,
+  `./extension`, `./runtime`, and `./package.json` load;
+- frozen type shapes (`createWorkflowService`, `WorkflowServiceOptions`,
+  `WorkflowService`, `WorkflowContext`, `defineWorkflow`, `defineSupportTask`,
+  `CheckpointRequest`, the tool-name and run-action unions) type-check
+  against the fixture `test/public-api.types.ts` under `tsc --noEmit`;
+- the `WORKFLOW_TOOL_DECLARATIONS` names, the `/workflow` subcommands, the
+  widget key, the shortcut, and the `WorkflowService` method names are pinned
+  by literal;
+- the compatibility matrix records the API version, the frozen surfaces, and
+  the entry-point status, and its major matches the package major;
+- a qualification note (`docs/qualification.md`) records what was exercised
+  by hand for 1.0.0, what CI exercised, what is unit-tested only, and what
+  was not exercised, claiming nothing that was not run;
 - Ubuntu CI is portability evidence; supported macOS Apple Silicon runtime
   qualification is driven locally;
 - publication, push, pull request, merge, release, and deployment authority are
