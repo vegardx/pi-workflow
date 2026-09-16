@@ -102,6 +102,12 @@ const MAX_DELIVERABLES = 16;
 const MAX_REVIEWS = 32;
 /** W1's floor for an implementer: a real `npm ci` plus build needs the room. */
 const WORKSPACE_WRITE_BYTES = 2 * 1024 * 1024 * 1024;
+/**
+ * The memory an implement stage asks for when its effort row names none. Every
+ * row names one today; the constant keeps the instruction text and the request
+ * from drifting apart if one ever stops.
+ */
+const DEFAULT_IMPLEMENT_MEMORY_BYTES = 1 * 1024 * 1024 * 1024;
 
 type Thinking = "low" | "medium" | "high";
 
@@ -329,6 +335,12 @@ interface StageBudget {
 	readonly totalTokens: number;
 	readonly cost: number;
 	readonly outputBytes: number;
+	/**
+	 * Guest VM memory, worktree stages only. A ceiling the implementer agent
+	 * declares (4 GiB) and this column narrows; pi-subagent refuses anything
+	 * above it at preflight.
+	 */
+	readonly memoryBytes?: number;
 }
 
 interface EffortRow {
@@ -349,11 +361,11 @@ interface EffortRow {
  * readable before any barrier, and replayable. The model ids are the stand-in
  * described above; the budgets are real.
  *
- * | effort   | refine | implement | review         | reviewers     |
- * | -------- | ------ | --------- | -------------- | ------------- |
- * | cheap    | low    | low       | low            | first lens    |
- * | standard | medium | medium    | medium         | plan's lenses |
- * | deep     | high   | high      | high + diverse | lenses x2     |
+ * | effort   | refine | implement | review         | reviewers     | implement memory |
+ * | -------- | ------ | --------- | -------------- | ------------- | ---------------- |
+ * | cheap    | low    | low       | low            | first lens    | 1 GiB            |
+ * | standard | medium | medium    | medium         | plan's lenses | 2 GiB            |
+ * | deep     | high   | high      | high + diverse | lenses x2     | 4 GiB            |
  *
  * Fix rounds are 0 at every effort in milestone 1: stage (f) is deferred, and
  * blocking findings go to the human at the ship gate instead.
@@ -371,17 +383,17 @@ const EFFORT_TABLE = {
 		implement: {
 			// W1 floors: >= 2 GiB of workspace writes, >= 1_500_000 ms per attempt,
 			// >= 1_800_000 ms cumulative. The cheap column sits exactly on them.
-			// FOLLOW-UP (pi-subagent revision 7): that release adds a per-agent
-			// `memoryBytes` ceiling and a per-request `memoryBytes`. The authoring
-			// request is frozen and carries no such field under revision 18, so the
-			// column gains a memory entry (2 GiB standard, 4 GiB deep) only when
-			// pi-workflow adopts revision 7.
+			// Memory is the one dimension the cheap column does not sit on a
+			// floor: 512 MiB (the pi-subagent default when nothing narrows the
+			// ceiling) is what W1 measured killing a real `npm ci`, so the
+			// cheapest column still asks for 1 GiB.
 			thinking: "low",
 			cumulativeRuntimeMs: 1_800_000,
 			attemptTimeoutMs: 1_500_000,
 			totalTokens: 1_000_000,
 			cost: 8,
 			outputBytes: 65_536,
+			memoryBytes: 1 * 1024 * 1024 * 1024,
 		},
 		review: {
 			thinking: "low",
@@ -419,6 +431,7 @@ const EFFORT_TABLE = {
 			totalTokens: 2_000_000,
 			cost: 12,
 			outputBytes: 65_536,
+			memoryBytes: 2 * 1024 * 1024 * 1024,
 		},
 		review: {
 			thinking: "medium",
@@ -456,6 +469,7 @@ const EFFORT_TABLE = {
 			totalTokens: 4_000_000,
 			cost: 20,
 			outputBytes: 65_536,
+			memoryBytes: 4 * 1024 * 1024 * 1024,
 		},
 		review: {
 			thinking: "high",
@@ -478,6 +492,11 @@ const EFFORT_TABLE = {
 		decisionTimeoutMs: 172_800_000,
 	},
 } as const satisfies Record<string, EffortRow>;
+
+/** A stage's memory grant in GiB, for the instruction text the agent reads. */
+function memoryGiB(stage: StageBudget): number {
+	return (stage.memoryBytes ?? DEFAULT_IMPLEMENT_MEMORY_BYTES) / 1024 ** 3;
+}
 
 /** Read-only limits for a stage: a read-only task writes nothing, ever. */
 function readOnlyLimits(stage: StageBudget) {
@@ -707,7 +726,7 @@ export default defineWorkflow({
 						"You are in your own git worktree. Edit the files in place and leave the changes in the working tree; the runtime captures them as a single handoff patch when your attempt ends. Do not commit, branch, push, merge, or open a pull request.",
 						CACHE_INSTRUCTION,
 						`Then attempt the repository's own install and check: \`npm ci\` (or the install this repository documents) followed by its check command — \`npm run check\` when the manifest has one, otherwise the command its README or AGENTS.md names.${repoPath ? ` The plan calls this repository ${repoPath}.` : ""}`,
-						"The sandbox has 512 MiB of memory and one CPU today, so a heavy install, build, or test run may be killed. That is an expected outcome, not a failure of yours, and never something to work around by reporting a result you did not see.",
+						`The sandbox has ${memoryGiB(row.implement)} GiB of memory and one CPU, so a heavy install, build, or test run may still be killed. That is an expected outcome, not a failure of yours, and never something to work around by reporting a result you did not see.`,
 						"Report the check truthfully: `checkCommand` is what you actually attempted, `checkRan` is true only if that command ran to completion, `checkPassed` is true only if it exited zero, and `checkTail` is the last 20 lines of its output (empty when it did not run).",
 						"A check that did not run, or that failed, is NEVER a reason to leave the tree unchanged or to skip the edit. The handoff is required: a worktree with no changes fails this task. Make the change, then report the check as it happened.",
 						"Keep the diff minimal and reviewable, list every file you changed in `files`, and say in `summary` what a reviewer should look at first.",
@@ -719,6 +738,8 @@ export default defineWorkflow({
 				preloadSkills: [],
 				contextScopes: ["project"],
 				workspace: { mode: "worktree", cwd: ctx.cwd },
+				memoryBytes:
+					row.implement.memoryBytes ?? DEFAULT_IMPLEMENT_MEMORY_BYTES,
 				handoff: "required",
 				outputSchema: ImplementationSchema,
 				limits: worktreeLimits(row.implement),

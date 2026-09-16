@@ -9,6 +9,7 @@ tools: [read, grep, find, ls, edit, write, bash]
 preloadSkills: []
 contextScopes: [project]
 workspaceModes: [worktree]
+memoryBytes: 4294967296
 limits:
   cumulativeRuntimeMs: 3600000
   attemptTimeoutMs: 3600000
@@ -33,12 +34,13 @@ workflow task may ask for less, never for more. The 2 GiB
 lower it and the install fails rather than the task, which reads as a model
 failure and is not one.
 
-The guest's memory is 512 MiB, which is what bounds a real install here. The
-frontmatter cannot say otherwise yet: pi-subagent revision 6 closes this
-schema, so a `memoryBytes` key fails discovery. When pi-workflow adopts
-pi-subagent revision 7, raise this agent's `memoryBytes` ceiling to 4 GiB and
-let the workflow's effort table request 2 GiB at `standard` and 4 GiB at
-`deep`.
+`memoryBytes` is the guest VM memory ceiling, 4 GiB here — pi-subagent's
+maximum, and what a real install plus build needs headroom for. It is a
+ceiling, not a grant: `plan-to-ship` asks for 1 GiB at `cheap`, 2 GiB at
+`standard`, and 4 GiB at `deep`, and a task that names nothing gets this
+whole 4 GiB. A task that asks for more than the ceiling is refused at
+preflight with "memory request exceeds agent ceiling". The key needs
+pi-subagent 0.11.0 (contract revision 7); on revision 6 it fails discovery.
 
 How to work:
 
@@ -55,8 +57,9 @@ How to work:
   know. A cache under the workspace becomes part of the handoff patch and
   breaches its 16 MiB bound, which fails the task after the work is finished.
 - Attempt the repository's own install and check command after you change the
-  code. The sandbox is small — 512 MiB of memory and one CPU today — so a heavy
-  install, build, or test run may be killed. That is an expected outcome.
+  code. The sandbox has one CPU and the memory your task was granted (between
+  1 and 4 GiB, named in your instructions), so a heavy install, build, or test
+  run may still be killed. That is an expected outcome.
 - **Report the check truthfully.** "It did not run" and "it failed" are useful
   answers that a human acts on. A check you did not run, reported as passing,
   is the one failure this workflow cannot recover from: a person reads your
