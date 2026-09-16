@@ -22,7 +22,8 @@ export type WorkflowRunAction = (typeof WORKFLOW_RUN_ACTIONS)[number];
 
 /**
  * Actions whose service method exists in this build; the emission gate for
- * `availableWorkflowRunActions`. "decide" waits for checkpoints.
+ * `availableWorkflowRunActions`. The operator surface adds "retry" and
+ * "resume"; revision 18 adds "decide" for checkpoints.
  */
 export const IMPLEMENTED_WORKFLOW_RUN_ACTIONS: ReadonlySet<WorkflowRunAction> =
 	new Set<WorkflowRunAction>([
@@ -32,6 +33,7 @@ export const IMPLEMENTED_WORKFLOW_RUN_ACTIONS: ReadonlySet<WorkflowRunAction> =
 		"invalidate",
 		"retry",
 		"resume",
+		"decide",
 	]);
 
 /** Fixed reason of the `interrupted -> running` transition an operator resume appends. */
@@ -251,6 +253,29 @@ export function resumableTasks(
 	);
 }
 
+/**
+ * On-path checkpoint tasks awaiting a decision: status `waiting` with a
+ * durable request (`checkpoint-requested`) and no decision yet. The cause set
+ * for `decide`; the service's `decide` precondition and the run views derive
+ * their pending checkpoints from this one predicate.
+ */
+export function pendingCheckpoints(
+	state: WorkflowStateProjection,
+): readonly WorkflowTaskId[] {
+	return Object.freeze(
+		onPathTasks(state)
+			.filter((task) => {
+				if (task.task.spec.kind !== "checkpoint") return false;
+				if (task.status !== "waiting") return false;
+				const execution = task.currentExecutionId
+					? state.executions[task.currentExecutionId]
+					: undefined;
+				return execution?.phase === "checkpoint-requested";
+			})
+			.map((task) => task.task.id),
+	);
+}
+
 export interface WorkflowRunActionFacts {
 	readonly status: WorkflowRunStatus;
 	readonly ownership: WorkflowRunOwnership;
@@ -262,6 +287,7 @@ export interface WorkflowRunActionFacts {
 	readonly hasCleanupBlockedTask: boolean;
 	readonly retryableTaskCount: number;
 	readonly resumableTaskCount: number;
+	readonly pendingCheckpointCount: number;
 }
 
 export function runActionFacts(input: {
@@ -285,6 +311,7 @@ export function runActionFacts(input: {
 			: false,
 		retryableTaskCount: state ? retryableTasks(state).length : 0,
 		resumableTaskCount: state ? resumableTasks(state).length : 0,
+		pendingCheckpointCount: state ? pendingCheckpoints(state).length : 0,
 	});
 }
 
@@ -324,7 +351,15 @@ function legal(
 				facts.resumableTaskCount > 0
 			);
 		case "decide":
-			return false;
+			// A checkpoint is decided on the root run that parked at it; the
+			// reducer admits a decision only while the run is running or
+			// waiting, and a live drive (another lane busy) accepts one too.
+			return (
+				(facts.status === "running" || facts.status === "waiting") &&
+				!facts.nested &&
+				!facts.deadlinePassed &&
+				facts.pendingCheckpointCount > 0
+			);
 	}
 }
 
@@ -347,6 +382,7 @@ export function requiresAttention(facts: WorkflowRunActionFacts): boolean {
 	return (
 		facts.status === "cleanup-blocked" ||
 		((facts.status === "failed" || facts.status === "interrupted") &&
-			!facts.awaitsRecovery)
+			!facts.awaitsRecovery) ||
+		facts.pendingCheckpointCount > 0
 	);
 }
