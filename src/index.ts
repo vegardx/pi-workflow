@@ -230,6 +230,77 @@ export {
 	type WorktreeTaskHandle,
 } from "./definition.js";
 export {
+	DYNAMIC_ASYNC_METHODS,
+	DYNAMIC_BUILTIN_MODULES,
+	DYNAMIC_CONTEXT_METHODS,
+	DYNAMIC_CONTEXT_PROPERTIES,
+	DYNAMIC_HOST_API_REVISION,
+	DYNAMIC_REF_PATTERN,
+	DYNAMIC_REF_PREFIX,
+	DYNAMIC_RPC_MESSAGE_TYPES,
+	DYNAMIC_SHIM_EXPORTS,
+	DYNAMIC_SYNC_METHODS,
+	DYNAMIC_TRANSFORMER,
+	DYNAMIC_TRANSFORMER_VERSION,
+	DYNAMIC_VM_ABORT_GRACE_MS,
+	DYNAMIC_VM_BOOT_TIMEOUT_MS,
+	DYNAMIC_VM_CODE_GENERATION,
+	DYNAMIC_VM_COMPUTE_TIMEOUT_MS,
+	DYNAMIC_VM_MANIFEST_TIMEOUT_MS,
+	DYNAMIC_VM_RESOURCE_LIMITS,
+	DYNAMIC_VM_SYNC_WAIT_MS,
+	MAX_DYNAMIC_APPROVAL_RENDER_BYTES,
+	MAX_DYNAMIC_HANDLE_REFS,
+	MAX_DYNAMIC_MANIFEST_BYTES,
+	MAX_DYNAMIC_PROPOSAL_RECORD_BYTES,
+	MAX_DYNAMIC_PROPOSALS,
+	MAX_DYNAMIC_RPC_ARGS,
+	MAX_DYNAMIC_RPC_MESSAGE_BYTES,
+	MAX_DYNAMIC_RPC_MESSAGES,
+	MAX_DYNAMIC_SOURCE_BYTES,
+	MAX_DYNAMIC_VM_ERROR_CHARS,
+} from "./dynamic/constants.js";
+export {
+	DYNAMIC_SOURCE_APPROVAL_SCHEMA_SHA256,
+	type DynamicSourceApproval,
+	DynamicSourceApprovalSchema,
+	type DynamicSourceApprover,
+	DynamicSourceApproverSchema,
+	type DynamicSourceDecision,
+	DynamicSourceDecisionSchema,
+	type DynamicSupportHelperSpec,
+	DynamicSupportHelperSpecSchema,
+	type DynamicTransformerIdentity,
+	DynamicTransformerIdentitySchema,
+	type DynamicWorkflowManifest,
+	DynamicWorkflowManifestSchema,
+	type DynamicWorkflowProposalRecord,
+	DynamicWorkflowProposalRecordSchema,
+	type DynamicWorkflowProposer,
+	DynamicWorkflowProposerSchema,
+} from "./dynamic/contracts.js";
+export {
+	createDynamicDiscoveredWorkflow,
+	createDynamicWorkflowDefinition,
+	type DynamicDiscoveredWorkflowOptions,
+	type DynamicWorkflowDefinitionOptions,
+} from "./dynamic/definition.js";
+export {
+	DynamicWorkflowExecutionError,
+	type DynamicWorkflowExecutionStage,
+	isDynamicWorkflowExecutionError,
+} from "./dynamic/execution-error.js";
+export {
+	deriveDynamicDefinitionIdentitySha256,
+	deriveDynamicHostApiSha256,
+	deriveDynamicImportPolicySha256,
+} from "./dynamic/identity.js";
+export { WorkflowDynamicStoreError } from "./dynamic/proposal-store.js";
+export {
+	type ExtractDynamicWorkflowManifestOptions,
+	extractDynamicWorkflowManifest,
+} from "./dynamic/vm-host.js";
+export {
 	type TaskExecutionAttemptProjection,
 	type TaskExecutionCheckpointDecisionProjection,
 	type TaskExecutionCheckpointRequestProjection,
