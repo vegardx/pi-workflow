@@ -30,6 +30,33 @@
  */
 
 export {
+	COMPILED_ID_PATTERN,
+	COMPILED_STAGE_KINDS,
+	type CompiledDeliverable,
+	CompiledDeliverableSchema,
+	CompiledEffortSchema,
+	type CompiledEscalation,
+	CompiledEscalationSchema,
+	CompiledGateStageSchema,
+	CompiledGatesSchema,
+	CompiledImplementStageSchema,
+	CompiledLensSchema,
+	CompiledReviewFanOutStageSchema,
+	type CompiledReviewTier,
+	CompiledReviewTierSchema,
+	type CompiledStage,
+	type CompiledStageDocument,
+	CompiledStageDocumentSchema,
+	type CompiledStageKind,
+	CompiledStageSchema,
+	type CompiledSynthesis,
+	CompiledSynthesisSchema,
+	CompiledVerifyAndFixStageSchema,
+	MAX_COMPILED_DELIVERABLES,
+	MAX_COMPILED_LENSES,
+	MAX_COMPILED_STAGES,
+} from "./compiled-stages.js";
+export {
 	assertBudgetAdmits,
 	type BudgetShare,
 	budgetAdmits,
