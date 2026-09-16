@@ -8,13 +8,11 @@ surfaces described in
 
 ## 1.1.0
 
-- Fix: a worktree handoff above `MAX_WORKFLOW_HANDOFF_BYTES` (or refused by pi-subagent's export bound) now terminalizes the execution as `failed` at stage `handoff-import` with `Workflow handoff exceeds the import bound.` instead of leaving the run `cleanup-blocked` with an unsatisfiable `reconcile`; the child's worktree stays unreleased and protected on the pi-subagent side, and a run already wedged in the old shape converges to `failed` on its next `reconcile`. No persisted schema changed; the reducer admits one new terminal shape, so a journal written after such a failure is rejected by pre-1.1 readers of revision 18.
-
-Guided checkpoint prompts. A parked run now asks the person instead of
-handing them a task id and a JSON grammar. Everything is additive under the
-1.0 freeze: no frozen name changed, no tool was added, and
-`WORKFLOW_CONTRACT_REVISION` stays 18 with the required pi-subagent contract
-at revision 6 (`0.10.0`).
+Additive minor release: guided checkpoint prompts, the package's own builtin
+workflow root with the `plan-to-ship` pipeline, and a handoff-bound fix. No
+frozen export, shape, schema, message, or tool changed;
+`WORKFLOW_CONTRACT_REVISION` stays 18 and the required pi-subagent contract
+stays revision 6 (`0.10.0`).
 
 ### Added
 
@@ -49,6 +47,53 @@ at revision 6 (`0.10.0`).
   session, and that the model surfaces the question and stops instead of
   deciding or polling. Their collapsed result line for a parked run reads
   `waiting for you: <prompt>`.
+- **Service API**: `WorkflowServiceOptions.registeredRoots`, an optional list
+  of `package`/`builtin` definition roots present from the first discovery.
+  It is the constructor form of `registerRoot`, validated the same way, and it
+  does not discover eagerly, so registering a package root never forces a
+  project-trust decision at service creation.
+- **Builtin workflows**: the package ships a `workflows/` directory (in the
+  tarball, declared by `files` and the `pi.workflows` manifest key) and the
+  extension registers it as `{ scope: "builtin", source: "package" }`. Its
+  definitions are trusted package code: `workflow_list`, `workflow_validate`,
+  and `workflow_run` reach them in any project without Pi project trust, and
+  their imports resolve from inside the installed package. When the project
+  being worked in is the pi-workflow checkout itself, the directory is already
+  `<cwd>/workflows` and the extension omits the builtin root.
+- `workflows/plan-to-ship.workflow.ts`: the `plan -> approve -> implement ->
+  ship` pipeline. A read-only `refine` agent, the `approve-plan` checkpoint
+  (`headless: "block"`, and the only approval record), one `implement-<id>`
+  worktree agent per deliverable with `handoff: "required"` that attempts the
+  repository's install and check in its own worktree and reports
+  `checkRan`/`checkPassed`/`checkTail` honestly, optional reviewers over the
+  plan's review tasks fed each handoff's descriptor, the `ship` checkpoint, and
+  a required `receipt` finalizer. Input is a pi-maestro plan by value with its
+  sha256 digest and a `cheap|standard|deep` effort dial; output is a receipt
+  naming each durable handoff ref and the approved `planDigest`. Nothing is
+  pushed, merged, published, or applied: shipping is a cherry-pickable ref plus
+  the imported patch artifact.
+- `workflows/agents/{planner,implementer,reviewer}.md`: the three agent
+  definitions `plan-to-ship` names, shipped as templates a person copies into
+  `<agentDir>/agents` or a trusted project's `.pi/agents`. pi-subagent
+  discovers agents from those two places only, so a builtin workflow cannot
+  install them; a missing one fails its task at pi-subagent preflight.
+- The pack check installs the tarball and asserts that the packed extension's
+  `workflow_list` and `workflow_validate` discover the builtin definition, and
+  that the packed agent templates parse through the packed pi-subagent's own
+  `discoverAgents`.
+
+### Fixed
+
+- **Oversized handoff fails closed.** A worktree handoff above
+  `MAX_WORKFLOW_HANDOFF_BYTES` (or refused by pi-subagent's export bound) now
+  terminalizes the execution as `failed` at stage `handoff-import` with
+  `Workflow handoff exceeds the import bound.` instead of leaving the run
+  `cleanup-blocked` with an unsatisfiable `reconcile`; the child's worktree
+  stays unreleased and protected on the pi-subagent side, and a run already
+  wedged in the old shape converges to `failed` on its next `reconcile`. No
+  persisted schema changed; the reducer admits one new terminal shape, so a
+  journal written after such a failure is rejected by pre-1.1 readers of
+  revision 18.
 
 ### Documentation
 
@@ -58,6 +103,9 @@ at revision 6 (`0.10.0`).
   tells authors to write prompts as answerable questions, declare `inputs`
   for everything the decider must read, and keep decision schemas small and
   flat.
+- The builtin root and `plan-to-ship` in `README.md`, `docs/contracts.md`,
+  `docs/architecture.md`, `docs/authority.md`, `docs/acceptance.md`,
+  `docs/compatibility.md`, and the `workflow-authoring` skill.
 
 ## 1.0.0
 

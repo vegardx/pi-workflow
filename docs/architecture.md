@@ -72,11 +72,14 @@ Name resolution is deterministic and provenance-aware:
 1. `<cwd>/workflows/`
 2. `<cwd>/.pi/workflows/`
 3. `<getAgentDir()>/workflows/`
-4. roots registered by trusted Pi packages
-5. built-in workflows
+4. roots registered by trusted Pi packages (scope `package`)
+5. built-in workflows: the package's own `workflows/` directory, registered by
+   the shipped extension as scope `builtin`
 
-Project roots require Pi project trust. Package roots register through a typed
-workflow API; consumer paths are not hardcoded in the engine.
+Project roots require Pi project trust. Package and builtin roots register
+through a typed workflow API (`createWorkflowService({ registeredRoots })` or
+`service.registerRoot`) and are trusted by their installation source; consumer
+paths are not hardcoded in the engine.
 
 ## Static workflows
 

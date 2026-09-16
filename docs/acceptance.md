@@ -34,7 +34,12 @@ An in-memory-only successful drive does not satisfy the first slice.
 ## Definition and discovery
 
 - uses `getAgentDir()` and project trust correctly;
-- package roots register through the workflow service;
+- package roots register through the workflow service, at construction
+  (`registeredRoots`) or later (`registerRoot`), and only with `package` or
+  `builtin` scope;
+- the package's own shipped `workflows/` root is discovered, listed, and
+  validated from a packed install with the project untrusted, and its
+  definitions resolve their imports from inside the installed package;
 - precedence and name collisions are deterministic;
 - malformed or changed definitions fail with stable diagnostics;
 - static module, helper, input schema, and output schema identities are recorded;

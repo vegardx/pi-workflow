@@ -7,6 +7,8 @@
 - Subagent authority is bounded by the selected agent definition and workflow
   task grant.
 - Project workflows are trusted code only after Pi project trust.
+- Builtin and package workflows are trusted package code: they are trusted by
+  their installation source, not by a project decision.
 - Dynamic workflow code is never trusted merely because it runs in a VM.
 - Support tasks are trusted registered code executed in the host process; they
   are bundle-contained and never sandboxed.
@@ -56,6 +58,15 @@ private stores, or construct a fallback service.
 
 User-global and package workflows are trusted according to their installation
 source. Project workflows load only when Pi marks the project trusted.
+
+The definitions pi-workflow ships in its own `workflows/` directory are
+registered by the shipped extension as a `builtin` root and are trusted
+package code: installing the package is the authorization, so they load with
+no project-trust prompt and run with extension-process authority like any
+other static definition. They are reviewed as part of the package, and a
+builtin definition requests capabilities under exactly the same grant
+intersection and human checkpoints as a project one; being builtin buys
+discovery, never authority.
 
 Static workflow code executes with extension-process authority. The bounded
 `WorkflowContext` reduces coupling but is not a sandbox. Runtime policy and

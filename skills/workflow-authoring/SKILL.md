@@ -121,7 +121,30 @@ Discovery visits these roots in order and loads every
 | `<cwd>/workflows` | `project` | Pi project trust |
 | `<cwd>/.pi/workflows` | `project` | Pi project trust |
 | `<agentDir>/workflows` | `global` | nothing extra |
+| `<pi-workflow>/workflows` (shipped in the package) | `builtin` | nothing extra |
 | roots registered by the embedder | `package` or `builtin` | embedder registration |
+
+The pi-workflow extension registers the package's own `workflows/`
+directory as a `builtin` root, so the definitions the package ships are
+listed and runnable in any project without project trust: they are
+trusted package code, installed with the package, and their imports
+resolve from inside the installed package. Do not add a definition there
+for one project; use a project root for that.
+
+The shipped builtin is `plan-to-ship`: `refine` (read-only agent) ->
+`approve-plan` (checkpoint, `headless: "block"`) -> one `implement-<id>`
+worktree agent per deliverable (`handoff: "required"`, which attempts the
+repository's check in its own worktree and reports `checkRan`/`checkPassed`
+honestly) -> optional read-only reviewers fed each handoff's descriptor ->
+`ship` (checkpoint) -> a required `receipt` finalizer. It takes a pi-maestro
+plan by value with its sha256 digest and an effort dial, and returns a receipt
+naming each durable handoff ref plus the approved digest; it never pushes,
+merges, or applies anything. Read it as the worked example of checkpoints,
+worktree handoffs, fan-out and finalizers in one definition. It names the
+agents `planner`, `implementer`, and `reviewer`, which a person must copy from
+`workflows/agents/*.md` into `<agentDir>/agents` or a trusted project's
+`.pi/agents` first: a definition can name an agent but never install one, and a
+missing one fails the task at pi-subagent preflight.
 
 Project definitions are trusted code. When either project root exists and the
 project is not trusted, discovery throws `WorkflowDefinitionTrustError`

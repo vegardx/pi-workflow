@@ -12,7 +12,7 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 1.0.0; runtime contract revision 18 with the feature flags
+views. Version 1.1.0; runtime contract revision 18 with the feature flags
 `checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
 and it requires pi-subagent contract revision 6 (`handoffExport: true`). The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
@@ -72,7 +72,9 @@ inspector). A breaking change to any of them is a new major version; adding
 an export, an optional option or view field, a tool, or a `/workflow`
 subcommand is a minor version; see
 [Contracts](docs/contracts.md#public-api-and-stability) for the rule and
-[CHANGELOG.md](CHANGELOG.md) for the record.
+[CHANGELOG.md](CHANGELOG.md) for the record. 1.1.0 is such a minor release:
+it adds the optional `WorkflowServiceOptions.registeredRoots` and the
+package's own builtin workflow root, and changes nothing frozen.
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:
@@ -264,6 +266,111 @@ bounds, the run statuses, why a parked run is surfaced to the human instead
 of polled, the human-only approval and decision acts, the `/workflow` command
 grammar, and the `availableActions` legality table — pinned to the runtime in
 both directions by `test/skill-operating.test.ts`.
+
+## Builtin workflows
+
+The package ships its own definitions in `workflows/` (in the tarball, and
+declared by the `pi.workflows` manifest key). The extension registers that
+directory when it creates the service:
+
+```ts
+createWorkflowService({
+	/* … */
+	registeredRoots: [{ path: "<package>/workflows", scope: "builtin", source: "package" }],
+});
+```
+
+Builtin definitions are **trusted package code**: they are trusted by their
+installation source, so they are listed by `workflow_list` with
+`scope: "builtin"`, `source: "package"`, and validate and run in any project
+without Pi project trust — the project trust gate covers `<cwd>/workflows` and
+`<cwd>/.pi/workflows` only. They buy discovery, not authority: a builtin
+definition's task requests pass through the same grant intersection, runtime
+policy, and human checkpoints as a project definition's.
+
+They are loaded from source by the same loader as any other definition, so
+their imports resolve from their own location inside the installed package
+(`@vegardx/pi-workflow` resolves to the package itself, `typebox` to the peer
+the consumer installed). The pack check installs the tarball and asserts that
+`workflow_list` finds them there. An embedder ships its own definitions the
+same way: `registeredRoots` at construction, or `service.registerRoot` later,
+with `scope: "package"` or `"builtin"`. Discovery loads only `*.workflow.*`
+files, so `workflows/agents/*.md` travels in the same directory without being
+mistaken for a definition.
+
+### `plan-to-ship`
+
+`workflows/plan-to-ship.workflow.ts` is the current builtin: **plan ->
+approve -> implement -> ship**, with two human gates and no publication at the
+end. Its input is a pi-maestro plan document by value, the sha256 digest of
+that document's canonical JSON, and an effort dial:
+
+```text
+workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort } }
+```
+
+The stages, in order:
+
+1. **`refine`** — one read-only planner agent turns the authored plan into an
+   executable one: per deliverable a goal, the files it touches, acceptance
+   checks, risks, and the blockers that make the plan unexecutable as written.
+2. **`approve-plan`** — a checkpoint (`headless: "block"`). It is *the*
+   approval record: immutable, binding-addressed, stored in the run's
+   `decisions/`. A person answers
+   `/workflow decide <run> <task> '{"proceed":true}'`; a model never decides a
+   checkpoint. `{"proceed":false}` returns `{ approved: false }` and no
+   worktree task is ever declared, so no tree is touched.
+3. **`implement-<id>`** — one worktree agent per deliverable, `handoff:
+   "required"`, gated on the approval. Each starts from the same baseline:
+   deliverables never build on each other, `after` is honoured as order only,
+   and `reads` is not mapped to inputs.
+4. **verification inside the implementer** — it attempts the repository's own
+   install and check command in its worktree and reports `checkRan`,
+   `checkPassed`, and a bounded `checkTail` truthfully. The guest is small, so
+   a check that could not run is a normal, reportable outcome; the check is
+   evidence, never the gate.
+5. **`review/lens-N`** — read-only reviewers over the plan's review tasks, each
+   given the implementer's summary and its handoff **descriptor** (identity,
+   digest, size — never patch bytes). There is no automatic fix round in
+   milestone 1: blocking findings travel to the ship gate.
+6. **`ship`** — the second checkpoint, shown the implementer summaries, the
+   check results, and the review verdicts as its inputs.
+7. **`receipt`** — a required finalizer that records what shipped, after the
+   output is committed and unable to change it.
+
+**What "ship" means.** Nothing is pushed, merged, published, or turned into a
+pull request — the runtime never applies a handoff. Shipping is a receipt: for
+each deliverable the workflow-owned `git-format-patch` artifact and the durable
+ref `refs/pi-subagent/handoffs/<subagentRunId>/<subagentAttemptId>`, which
+survives the child's release, plus the `planDigest` that was approved. A person
+takes it from there with `git cherry-pick <handoffCommit>`.
+
+**The effort dial.** `effort` is `cheap`, `standard`, or `deep`; a constant
+table in the definition maps it to a per-stage model, thinking level, token,
+cost and runtime budget, how many review lenses run (the first one, all of
+them, or all of them twice), and how long each gate waits. The model ids in
+that table are a marked stand-in until roster/allowance routing lands; a review
+task's `by.tier` and `by.diverse` are honoured through it, and `by.model` pins
+an exact route.
+
+**The three agents.** The definition names `planner`, `implementer`, and
+`reviewer`. pi-subagent discovers agents only from `<agentDir>/agents/*.md` and
+a trusted project's `.pi/agents/*.md`, so a builtin workflow **cannot** install
+them; a run whose host lacks one fails that task at preflight. The package
+ships them as templates:
+
+```sh
+cp node_modules/@vegardx/pi-workflow/workflows/agents/*.md ~/.config/pi/agent/agents/
+# or, for one trusted project only:
+cp node_modules/@vegardx/pi-workflow/workflows/agents/*.md .pi/agents/
+```
+
+Each template is an authority **ceiling** a task may narrow but never widen:
+the implementer is the only one with `edit`/`write`/`bash`, the only one
+allowed `workspaceModes: [worktree]`, and carries a 2 GiB
+`workspaceWriteBytes` ceiling so a real install and build fit. Pinning
+`by.model` to a route outside a template's `allowedModels` fails preflight with
+`model exceeds ceiling`; add the route to the template you copied.
 
 ## Support tasks
 
