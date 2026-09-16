@@ -6,6 +6,77 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 2.0.0
+
+Major release. The only reason it is a major is the stability policy's
+persisted-state rule in
+[docs/contracts.md "Public API and stability"](docs/contracts.md#public-api-and-stability):
+"Runs journaled by revision 18 are readable by every 1.x release; a release
+that cannot read them is a major." `WORKFLOW_CONTRACT_REVISION` becomes 19 and
+revision-19 stores refuse revision-18 leases, journals, snapshots, run
+records, decision records, and dynamic proposal records. No migration is
+offered. A 1.1.0 run directory cannot be read by this release, so 1.2.0 was
+not available; the rule that would have allowed a minor ("a revision bump is a
+minor version when it only adds optional fields, feature flags, or event types
+and every frozen shape still type-checks") is subordinate to the
+persisted-state rule, which this bump breaks.
+
+No frozen export was removed, renamed, or retyped, no returned union widened,
+and no tool name, parameter, or output schema changed. The single schema
+change is additive and explicitly permitted under the freeze ("A frozen schema
+may therefore gain optional fields under a new revision").
+
+### Breaking
+
+- **`WORKFLOW_CONTRACT_REVISION` is 19.** Runs journaled by 1.x are not
+  readable. Finish or abandon in-flight runs before upgrading; there is no
+  migration and none is planned.
+- **Handoff artifact digests changed.** `WORKFLOW_HANDOFF_FORMAT.revision` is
+  7, so `WORKFLOW_HANDOFF_FORMAT_SHA256` — the `schemaSha256` of every handoff
+  artifact — changed with it. A handoff artifact written by 1.x does not
+  verify here.
+- **`@vegardx/pi-subagent` `0.11.0` (exact) is required**, up from `0.10.0`.
+  `REQUIRED_SUBAGENT_CONTRACT` is contract revision 7 and additionally
+  requires `vmMemoryCeiling: true` and `workspaceBudgetRefusal: true`;
+  `isCompatibleSubagentContract` refuses revision 6 and refuses a revision-7
+  contract missing either flag.
+
+### Added
+
+- **Agent task `memoryBytes`.** `AgentTaskAuthoringRequest` and
+  `AgentTaskRequestSchema` gain an optional `memoryBytes`: the guest VM memory
+  grant, validated against pi-subagent's `MemoryBytesSchema` (a positive
+  integer multiple of 64 MiB, at most 4 GiB) and lowered unchanged to
+  pi-subagent. It is a request to narrow, never to widen: the agent definition
+  declares the ceiling, an omitted request takes it, and a request above it is
+  refused at preflight. The materializer refuses a malformed value with
+  "agent memoryBytes must be a positive multiple of 64 MiB and at most
+  4 GiB". `memoryBytes` participates in agent task identity, which the
+  revision bump covers.
+- **The preflight refusal is relayed unchanged.** A refusal raised by
+  pi-subagent itself — "memory request exceeds agent ceiling" among them — now
+  follows the fixed prefix "Subagent preflight failed before launch." in the
+  terminal evidence and the task failure reason, instead of being replaced by
+  that prefix alone. A mismatch the launcher detects locally still records the
+  prefix by itself, so the prefix remains a stable match for callers.
+- **`workspace-budget` is never retried.** pi-subagent classifies an exhausted
+  `workspaceWriteBytes` as `workspace-budget` with `retry: "never"`; the
+  workflow retrier declines it with or without a declared retry policy and
+  journals no retry intent. Covered by a regression test.
+- **Builtin workflow memory dial.** `workflows/agents/implementer.md` raises
+  its `memoryBytes` ceiling to 4 GiB, and `plan-to-ship` requests 1 GiB at
+  `cheap`, 2 GiB at `standard`, and 4 GiB at `deep`. The implementer's
+  instruction now names the memory its own stage was granted instead of a
+  fixed 512 MiB.
+
+### Changed
+
+- The CI pi-subagent pin is `e42cd28f2f970872a1a460079efc1a992c0bd7c9`
+  (0.11.0, contract revision 7) in both checkout steps, and
+  `compatibility.json` records it as `piSubagent.ciCommit` and as the
+  `linux-x64` host's `piSubagentCommit`. The macOS arm64 host still records
+  the commit that actually ran, `55e84bd…`.
+
 ## 1.1.0
 
 Additive minor release: guided checkpoint prompts, the package's own builtin
