@@ -169,18 +169,18 @@ try {
 	// and CHANGELOG.md: 145 entries and 2009 KiB unpacked (revision 18 before
 	// the freeze: 125 entries and 1762 KiB; before that 100 entries and
 	// 1536 KiB).
-	// Bounds: 160 entries and 2560 KiB. The size still has about 17% headroom,
-	// but the entry count is down to 4 spare files after 1.1.0; the next
-	// release that ships more than a handful of new files raises the entry
-	// bound deliberately rather than by reflex. amaro is a dependency and is
-	// not packed.
-	if (workflow.entryCount > 160 || workflow.unpackedSize > 2560 * 1024) {
+	// Bounds: 200 entries and 2560 KiB. Measured 156 entries / 2182 KiB at 1.1.0
+	// (builtin workflow, three agent templates and two skills added since the
+	// 145 / 2009 KiB freeze measurement); 160 entries left four spare, so the
+	// entry bound was raised deliberately. amaro is a dependency and is not
+	// packed.
+	if (workflow.entryCount > 200 || workflow.unpackedSize > 2560 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
 		);
 	}
 	process.stdout.write(
-		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 160 entries, 2560 KiB)\n`,
+		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 200 entries, 2560 KiB)\n`,
 	);
 	const rootExports = await readExportList(rootExportList);
 	const runtimeExports = await readExportList(runtimeExportList);
