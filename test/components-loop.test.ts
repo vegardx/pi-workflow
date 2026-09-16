@@ -375,6 +375,30 @@ describe("verifyAndFix lowering", () => {
 		expect(result.handoff).toBe(impl);
 	});
 
+	it("declares two fix rounds at the cap of three verify rounds", async () => {
+		// `maxFixRounds: 2` (the plan vocabulary's maximum, spec 2.1) compiles to
+		// `maxRounds = 3`: three verifiers, two fixers, and no fix left unchecked.
+		const component = harness([FAILED, FAILED, FAILED]);
+		const impl = implementation(component);
+		const result = await verifyAndFix(
+			component.ctx,
+			"green",
+			options(impl, { maxRounds: MAX_VERIFY_ROUNDS as 3 }),
+		);
+		expect(keys(component.finish([result.handoff]))).toEqual([
+			"implement",
+			"green-verify-1",
+			"green-fix-1",
+			"green-verify-2",
+			"green-fix-2",
+			"green-verify-3",
+		]);
+		expect(result.rounds).toBe(3);
+		expect(result.passed).toBe(false);
+		expect(result.handoff).toBe(result.history[1]?.fix);
+		expect(component.logs.join("\n")).toContain("the cap");
+	});
+
 	it("applies a default disposition and keeps an explicit one", async () => {
 		const component = harness([FAILED, FAILED]);
 		const impl = implementation(component);
@@ -596,14 +620,14 @@ describe("verifyAndFix refusals", () => {
 		);
 	});
 
-	it("refuses maxRounds outside 0..2", async () => {
-		await expect(refusal({ maxRounds: 3 as 0 | 1 | 2 })).rejects.toThrow(
+	it("refuses maxRounds outside 0..3", async () => {
+		await expect(refusal({ maxRounds: 4 as 0 | 1 | 2 | 3 })).rejects.toThrow(
 			new RegExp(`runs 0\\.\\.${MAX_VERIFY_ROUNDS} verify rounds`),
 		);
-		await expect(refusal({ maxRounds: -1 as 0 | 1 | 2 })).rejects.toThrow(
+		await expect(refusal({ maxRounds: -1 as 0 | 1 | 2 | 3 })).rejects.toThrow(
 			/verify rounds/,
 		);
-		await expect(refusal({ maxRounds: 1.5 as 0 | 1 | 2 })).rejects.toThrow(
+		await expect(refusal({ maxRounds: 1.5 as 0 | 1 | 2 | 3 })).rejects.toThrow(
 			/verify rounds/,
 		);
 	});
