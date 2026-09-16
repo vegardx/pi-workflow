@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Value } from "typebox/value";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { MAX_DYNAMIC_SOURCE_BYTES } from "../src/dynamic/constants.js";
 import { DynamicWorkflowProposerSchema } from "../src/dynamic/contracts.js";
 import { deriveDynamicSourceSha256 } from "../src/dynamic/source.js";
@@ -194,6 +194,14 @@ export default defineWorkflow({
 `;
 const DYNAMIC_REF = `dynamic:${deriveDynamicSourceSha256(DYNAMIC_SOURCE)}`;
 
+/** A value an earlier test in the describe produced; a named failure when it did not. */
+function ready<T>(value: T | undefined, label: string): T {
+	if (value === undefined) {
+		throw new Error(`${label} is unavailable: an earlier step failed`);
+	}
+	return value;
+}
+
 function declaration(name: WorkflowToolName) {
 	const found = WORKFLOW_TOOL_DECLARATIONS.find(
 		(candidate) => candidate.name === name,
@@ -342,51 +350,89 @@ describe("workflow tool declarations", () => {
 		).toBe(false);
 	});
 
-	it("validates every real service result against its declared output schema", async () => {
-		const service = await createWorkflowService({
-			...(await fixture()),
-			projectTrusted: () => true,
-			subagents: provider(),
-			// Source-mode workers boot slowly under full-suite load.
-			dynamic: { bootTimeoutMs: 60_000 },
-		});
-		try {
-			const receipt = await declaration("workflow_run").execute(service, {
-				ref: "example",
-				input: { value: "yes" },
+	describe("real service results", () => {
+		// One service, its runs, and its proposal are shared by the three
+		// sweeps below: the same work as one sweep over every tool, but each
+		// test carries a bounded share of it under the per-test budget.
+		let service: WorkflowService | undefined;
+		let runs:
+			| { runId: string; delegatingRunId: string; failedTaskId: string }
+			| undefined;
+		const checkedResults = new Map<WorkflowToolName, unknown>();
+
+		beforeAll(async () => {
+			service = await createWorkflowService({
+				...(await fixture()),
+				projectTrusted: () => true,
+				subagents: provider(),
+				// Source-mode workers boot slowly under full-suite load.
+				dynamic: { bootTimeoutMs: 60_000 },
 			});
+		});
+
+		afterAll(async () => {
+			await service?.shutdown();
+		});
+
+		/** A real result checked against the tool's declared output schema and text block. */
+		function checked<T>(name: WorkflowToolName, value: T): T {
+			const tool = declaration(name);
+			expect(
+				[...Value.Errors(tool.output, value)].map(
+					(error) => `${tool.name} ${error.instancePath}: ${error.message}`,
+				),
+			).toEqual([]);
+			// The text block is the checked value as bounded JSON.
+			expect(JSON.parse(workflowToolText(tool, value))).toEqual(
+				JSON.parse(JSON.stringify(value)),
+			);
+			checkedResults.set(name, value);
+			return value;
+		}
+
+		it("validates lifecycle and operator tool results", async () => {
+			const live = ready(service, "service");
+			const receipt = checked(
+				"workflow_run",
+				await declaration("workflow_run").execute(live, {
+					ref: "example",
+					input: { value: "yes" },
+				}),
+			);
 			const runId = (receipt as { runId: string }).runId;
-			const stoppable = await declaration("workflow_run").execute(service, {
+			const stoppable = await declaration("workflow_run").execute(live, {
 				ref: "stoppable",
 				input: {},
 			});
-			const delegating = await declaration("workflow_run").execute(service, {
+			const delegating = await declaration("workflow_run").execute(live, {
 				ref: "delegating",
 				input: {},
 			});
 			const delegatingRunId = (delegating as { runId: string }).runId;
-			const failed = await declaration("workflow_wait").execute(service, {
+			const failed = await declaration("workflow_wait").execute(live, {
 				runId: delegatingRunId,
 			});
 			expect(failed).toMatchObject({ status: "failed" });
 			const failedTaskId = (failed as { tasks: { id: string }[] }).tasks[0]?.id;
 			if (!failedTaskId) throw new Error("delegating run has no task");
-			const invalidated = await declaration("workflow_invalidate").execute(
-				service,
-				{
+			const invalidated = checked(
+				"workflow_invalidate",
+				await declaration("workflow_invalidate").execute(live, {
 					runId: delegatingRunId,
 					taskId: failedTaskId,
 					reason: "tool schema test",
-				},
+				}),
 			);
-			await service.wait(delegatingRunId);
+			await live.wait(delegatingRunId);
 			const operator = await operatorResults();
-			const gated = await declaration("workflow_run").execute(service, {
+			const retried = checked("workflow_retry", operator.workflow_retry);
+			const resumed = checked("workflow_resume", operator.workflow_resume);
+			const gated = await declaration("workflow_run").execute(live, {
 				ref: "gated",
 				input: {},
 			});
 			const gatedRunId = (gated as { runId: string }).runId;
-			const parked = await declaration("workflow_wait").execute(service, {
+			const parked = await declaration("workflow_wait").execute(live, {
 				runId: gatedRunId,
 			});
 			expect(parked).toMatchObject({ status: "waiting", parked: true });
@@ -400,91 +446,34 @@ describe("workflow tool declarations", () => {
 			expect([
 				...Value.Errors(declaration("workflow_wait").output, parked),
 			]).toEqual([]);
-			await service.decide(gatedRunId, checkpointTaskId, {
+			await live.decide(gatedRunId, checkpointTaskId, {
 				decision: { proceed: true },
 				approver: "vegard",
 				reason: "tool schema test",
 			});
-			await expect(service.wait(gatedRunId)).resolves.toMatchObject({
+			await expect(live.wait(gatedRunId)).resolves.toMatchObject({
 				status: "completed",
 				output: { answer: "approved" },
 			});
-			const results: Record<WorkflowToolName, unknown> = {
-				workflow_list: await declaration("workflow_list").execute(service, {}),
-				workflow_validate: await declaration("workflow_validate").execute(
-					service,
-					{ ref: "example", input: { value: "yes" } },
-				),
-				workflow_run: receipt,
-				workflow_status: await declaration("workflow_status").execute(service, {
-					runId,
-				}),
-				workflow_wait: await declaration("workflow_wait").execute(service, {
+			const waited = checked(
+				"workflow_wait",
+				await declaration("workflow_wait").execute(live, {
 					runId,
 					timeoutMs: 60_000,
 				}),
-				workflow_stop: await declaration("workflow_stop").execute(service, {
+			);
+			const stopped = checked(
+				"workflow_stop",
+				await declaration("workflow_stop").execute(live, {
 					runId: (stoppable as { runId: string }).runId,
 					reason: "tool schema test",
 				}),
-				workflow_reconcile: await declaration("workflow_reconcile").execute(
-					service,
-					{ runId },
-				),
-				workflow_runs: await declaration("workflow_runs").execute(service, {
-					limit: 10,
-				}),
-				workflow_inspect: await declaration("workflow_inspect").execute(
-					service,
-					{
-						runId: delegatingRunId,
-						include: [
-							"run",
-							"budget",
-							"tasks",
-							"executions",
-							"effects",
-							"barriers",
-							"artifacts",
-						],
-					},
-				),
-				workflow_logs: await declaration("workflow_logs").execute(service, {
-					runId: delegatingRunId,
-					afterSequence: 0,
-					limit: 100,
-				}),
-				workflow_invalidate: invalidated,
-				workflow_retry: operator.workflow_retry,
-				workflow_resume: operator.workflow_resume,
-				workflow_propose: await declaration("workflow_propose").execute(
-					service,
-					{ source: DYNAMIC_SOURCE },
-				),
-			};
-			for (const tool of WORKFLOW_TOOL_DECLARATIONS) {
-				const value = results[tool.name];
-				expect(
-					[...Value.Errors(tool.output, value)].map(
-						(error) => `${tool.name} ${error.instancePath}: ${error.message}`,
-					),
-				).toEqual([]);
-				// The text block is the checked value as bounded JSON.
-				expect(JSON.parse(workflowToolText(tool, value))).toEqual(
-					JSON.parse(JSON.stringify(value)),
-				);
-			}
-			expect(results.workflow_list).toMatchObject([
-				{ name: "delegating", scope: "project" },
-				{ name: "example", scope: "project" },
-				{ name: "gated", scope: "project" },
-				{ name: "stoppable", scope: "project" },
-			]);
-			expect(results.workflow_validate).toMatchObject({
-				valid: true,
-				workflow: { name: "example" },
-			});
-			expect(results.workflow_wait).toMatchObject({
+			);
+			const reconciled = checked(
+				"workflow_reconcile",
+				await declaration("workflow_reconcile").execute(live, { runId }),
+			);
+			expect(waited).toMatchObject({
 				runId,
 				status: "completed",
 				definitionName: "example",
@@ -492,17 +481,87 @@ describe("workflow tool declarations", () => {
 				output: { answer: "yes" },
 				tasks: [],
 			});
-			expect(results.workflow_wait).not.toHaveProperty("timedOut");
-			expect(results.workflow_stop).toMatchObject({ status: "cancelled" });
-			expect(results.workflow_reconcile).toMatchObject({
+			expect(waited).not.toHaveProperty("timedOut");
+			expect(stopped).toMatchObject({ status: "cancelled" });
+			expect(reconciled).toMatchObject({
 				status: "completed",
 				reconciled: [],
 			});
-			const page = results.workflow_runs as WorkflowRunPage;
+			expect(invalidated).toMatchObject({ runId: delegatingRunId });
+			expect(retried).toMatchObject({
+				runId: operator.failedRunId,
+				definitionName: "attempts",
+			});
+			expect(retried).not.toMatchObject({ status: "failed" });
+			expect(resumed).toMatchObject({
+				runId: operator.interruptedRunId,
+				definitionName: "attempts",
+			});
+			expect(resumed).not.toMatchObject({ status: "interrupted" });
+			runs = { runId, delegatingRunId, failedTaskId };
+		});
+
+		it("validates read tool results", async () => {
+			const live = ready(service, "service");
+			const { runId, delegatingRunId, failedTaskId } = ready(
+				runs,
+				"lifecycle runs",
+			);
+			const listed = checked(
+				"workflow_list",
+				await declaration("workflow_list").execute(live, {}),
+			);
+			const validated = checked(
+				"workflow_validate",
+				await declaration("workflow_validate").execute(live, {
+					ref: "example",
+					input: { value: "yes" },
+				}),
+			);
+			checked(
+				"workflow_status",
+				await declaration("workflow_status").execute(live, { runId }),
+			);
+			const page = checked(
+				"workflow_runs",
+				await declaration("workflow_runs").execute(live, { limit: 10 }),
+			) as WorkflowRunPage;
+			const inspection = checked(
+				"workflow_inspect",
+				await declaration("workflow_inspect").execute(live, {
+					runId: delegatingRunId,
+					include: [
+						"run",
+						"budget",
+						"tasks",
+						"executions",
+						"effects",
+						"barriers",
+						"artifacts",
+					],
+				}),
+			) as WorkflowRunInspection;
+			const logs = checked(
+				"workflow_logs",
+				await declaration("workflow_logs").execute(live, {
+					runId: delegatingRunId,
+					afterSequence: 0,
+					limit: 100,
+				}),
+			) as WorkflowLogPage;
+			expect(listed).toMatchObject([
+				{ name: "delegating", scope: "project" },
+				{ name: "example", scope: "project" },
+				{ name: "gated", scope: "project" },
+				{ name: "stoppable", scope: "project" },
+			]);
+			expect(validated).toMatchObject({
+				valid: true,
+				workflow: { name: "example" },
+			});
 			expect(page.total).toBe(4);
 			expect(page.runs.map((run) => run.runId)).toContain(runId);
 			expect(page.issues).toEqual([]);
-			const inspection = results.workflow_inspect as WorkflowRunInspection;
 			expect(inspection.run.runId).toBe(delegatingRunId);
 			expect(inspection.tasks?.[0]).toMatchObject({
 				id: failedTaskId,
@@ -511,49 +570,47 @@ describe("workflow tool declarations", () => {
 				generation: 2,
 			});
 			expect(inspection.executions).toHaveLength(2);
-			const logs = results.workflow_logs as WorkflowLogPage;
 			expect(logs.runId).toBe(delegatingRunId);
 			expect(logs.entries.some((entry) => entry.kind === "invalidation")).toBe(
 				true,
 			);
-			expect(results.workflow_invalidate).toMatchObject({
-				runId: delegatingRunId,
-			});
-			expect(results.workflow_retry).toMatchObject({
-				runId: operator.failedRunId,
-				definitionName: "attempts",
-			});
-			expect(results.workflow_retry).not.toMatchObject({ status: "failed" });
-			expect(results.workflow_resume).toMatchObject({
-				runId: operator.interruptedRunId,
-				definitionName: "attempts",
-			});
-			expect(results.workflow_resume).not.toMatchObject({
-				status: "interrupted",
-			});
+		});
+
+		it("validates the dynamic proposal result", async () => {
+			const live = ready(service, "service");
+			const proposed = checked(
+				"workflow_propose",
+				await declaration("workflow_propose").execute(live, {
+					source: DYNAMIC_SOURCE,
+				}),
+			);
 			// The proposal is pending and not runnable: proposing never approves.
-			expect(results.workflow_propose).toMatchObject({
+			expect(proposed).toMatchObject({
 				ref: DYNAMIC_REF,
 				sourceBytes: Buffer.byteLength(DYNAMIC_SOURCE, "utf8"),
 				manifest: { meta: { name: "proposed" } },
 				proposer: { kind: "tool", via: "workflow_propose" },
 				runnable: false,
 			});
-			expect(results.workflow_propose).not.toHaveProperty("decision");
-			expect((await service.proposals()).map((entry) => entry.ref)).toEqual([
+			expect(proposed).not.toHaveProperty("decision");
+			expect((await live.proposals()).map((entry) => entry.ref)).toEqual([
 				DYNAMIC_REF,
 			]);
-			await expect(service.validate(DYNAMIC_REF)).rejects.toMatchObject({
+			await expect(live.validate(DYNAMIC_REF)).rejects.toMatchObject({
 				code: "validation",
 				message:
 					"Dynamic workflow source is not approved for the current host API.",
 			});
-			expect(results.workflow_list).not.toContainEqual(
+			const listed = checked(
+				"workflow_list",
+				await declaration("workflow_list").execute(live, {}),
+			);
+			expect(listed).not.toContainEqual(
 				expect.objectContaining({ scope: "dynamic" }),
 			);
-		} finally {
-			await service.shutdown();
-		}
+			// Across the three sweeps, every declared tool had a real result checked.
+			expect([...checkedResults.keys()].sort()).toEqual([...TOOL_NAMES].sort());
+		});
 	});
 
 	describe("workflow_propose", () => {
