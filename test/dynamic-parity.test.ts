@@ -181,7 +181,14 @@ export default defineWorkflow({
 });
 `;
 
-/** Fixture 2: a registered support helper imported under its `exportName`. */
+/**
+ * Fixture 2: a registered support helper imported under its `exportName`.
+ * Sequential like the spec's fake scheduler: at the default concurrency the
+ * two support tasks execute concurrently and the journal interleaving of
+ * their execution events is timing-dependent (it differed between the two
+ * sides under full-suite load), which is scheduler nondeterminism, not a
+ * definition-kind difference.
+ */
 const SUPPORT_SOURCE = `import { defineWorkflow } from "@vegardx/pi-workflow";
 import { upper } from "@vegardx/parity-tools";
 import { Type } from "typebox";
@@ -189,7 +196,7 @@ import { Type } from "typebox";
 type Shouted = { answer: string };
 
 export default defineWorkflow({
-	meta: ${meta("parity-support", "Parity fixture: support helper")},
+	meta: ${meta("parity-support", "Parity fixture: support helper", 1)},
 	inputSchema: Type.Object({ value: Type.String() }),
 	outputSchema: Type.Object({ shouted: Type.String(), twice: Type.String() }),
 	async run(ctx) {
