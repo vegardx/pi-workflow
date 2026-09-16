@@ -120,8 +120,8 @@ model can complete on its own:
    records nothing that grants execution.
 2. Approval. Approval is a human decision recorded through a Pi command with
    an explicit `ctx.ui.confirm` (`/workflow approve dynamic:<sha256>` and
-   `/workflow reject dynamic:<sha256> [reason…]`, a follow-up on the
-   operator surface), never through a model-callable tool: there is no
+   `/workflow reject dynamic:<sha256> [reason…]`, both refusing outside an
+   interactive session), never through a model-callable tool: there is no
    `workflow_approve`, `workflow_reject`, or `workflow_proposals` tool, and the
    service accepts only an approver whose `kind` is `"human"` ("Invalid dynamic
    workflow approver."). The decision is one immutable definition-level

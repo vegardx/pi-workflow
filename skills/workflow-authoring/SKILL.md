@@ -614,8 +614,8 @@ How a checkpoint runs, for authors:
   the run is stopped, or the deadline passes.
 - Only a human decides. The operator sees the parked run in the `/workflow`
   widget and inspector and answers through `/workflow decide <run> <task>
-  <json> [reason…]` (a follow-up in the `/workflow` command), whose approver
-  is the Pi session user; embedders call `service.decide(runId, taskId,
+  <json> [reason…]` (an explicit confirmation in an interactive Pi session),
+  whose approver is the Pi session identity; embedders call `service.decide(runId, taskId,
   { decision, approver, reason? })`. There is no model-callable decide tool by
   design: a model must never decide a checkpoint, not even its own work.
   Surface the parked run and stop. The decision is
@@ -703,9 +703,8 @@ like a static definition, then:
 2. Stop and surface the `ref`. Approval is a human decision: a person reads
    the source and approves or rejects it with `/workflow approve
    dynamic:<sha256>` or `/workflow reject dynamic:<sha256> [reason…]` (an
-   explicit confirmation in an interactive Pi session; these commands are a
-   follow-up in the `/workflow` command, and until then the embedder calls
-   `service.decideSource`). There is no approve, reject, or proposals tool,
+   explicit confirmation in an interactive Pi session; an embedder without
+   Pi calls `service.decideSource`). There is no approve, reject, or proposals tool,
    by design; never state or assume a proposal is approved. A rejection is
    final ("Dynamic workflow source was rejected."): fix the source and
    propose again, which yields a new digest. A second decision is refused

@@ -872,7 +872,7 @@ The `approve` checkpoint shows the approver the plan and parks the run until a
 person decides (`headless: "block"`, one hour). Only after a `proceed: true`
 decision does the worktree writer run; a rejection returns without writing.
 Only a person decides it: a model must never decide a checkpoint, and the
-operator answers through `/workflow decide` once the operator surface lands.
+operator answers through `/workflow decide` in an interactive Pi session.
 The optional `tone` checkpoint takes its default when nobody answers within
 ten minutes or when the embedder runs the service headless.
 

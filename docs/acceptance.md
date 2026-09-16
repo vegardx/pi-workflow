@@ -738,11 +738,16 @@ Dynamic acceptance (contract revision 18, `dynamicWorkflows: true`) must prove:
 - workflow list, validate, run, status, wait, stop, reconcile, runs,
   inspect, logs, invalidate, retry, and resume work in a fresh
   `PI_CODING_AGENT_DIR` through the tool table and the `/workflow` command;
-- `/workflow approve` and `/workflow reject` (a follow-up on the operator
-  surface) refuse outside an interactive session, record nothing when the
-  confirm is cancelled, and write the decision file with the approver's
-  session id when it is accepted; the packed `dist/dynamic/worker.js`
-  resolves from the packed host and extracts a manifest;
+- `/workflow decide` is offered only while `availableActions` lists
+  `decide`, refuses invalid JSON before reaching the service, refuses outside
+  an interactive session, records nothing when the confirm is cancelled, and
+  records the confirmed decision with the session approver (never an
+  argument) so the parked run completes;
+- `/workflow approve` and `/workflow reject` refuse outside an interactive
+  session, record nothing when the confirm is cancelled, refuse an already
+  decided proposal, and write the decision file with the approver's session
+  id when it is accepted; the packed `dist/dynamic/worker.js` resolves from
+  the packed host and extracts a manifest;
 - package contents contain compiled ESM, declarations, license, and bounded docs;
 - Ubuntu CI is portability evidence; supported macOS Apple Silicon runtime
   qualification is driven locally;
