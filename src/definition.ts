@@ -36,11 +36,27 @@ import type { SupportTaskDescriptor } from "./support.js";
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
 const MAX_WORKFLOW_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
-const taskHandleBrand: unique symbol = Symbol("pi-workflow-task-handle");
-const artifactHandleBrand: unique symbol = Symbol(
+/**
+ * Handle brands, in the GLOBAL symbol registry (`Symbol.for`) rather than as
+ * module-local symbols.
+ *
+ * A builtin definition imports the component library through the package's own
+ * `./components` entry while the runtime that hands it the handles may be a
+ * second copy of this module - the dual-package hazard, and exactly what the
+ * test suite does when it drives a shipped `workflows/*.workflow.ts` through
+ * the source runtime. A module-local symbol makes `isTaskHandle` answer false
+ * for a handle that IS one, which surfaces as a component refusing a correct
+ * declaration ("pass handle.output ... never the task handle itself") for a
+ * reason the author cannot see. The registry key is the brand's whole meaning,
+ * so sharing it costs nothing and removes a false refusal.
+ */
+const taskHandleBrand: unique symbol = Symbol.for("pi-workflow-task-handle");
+const artifactHandleBrand: unique symbol = Symbol.for(
 	"pi-workflow-artifact-handle",
 );
-const handoffHandleBrand: unique symbol = Symbol("pi-workflow-handoff-handle");
+const handoffHandleBrand: unique symbol = Symbol.for(
+	"pi-workflow-handoff-handle",
+);
 
 export { type WorkflowBudget, WorkflowBudgetSchema };
 
