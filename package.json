@@ -1,6 +1,6 @@
 {
 	"name": "@vegardx/pi-workflow",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"description": "Durable workflow runtime for Pi.",
 	"type": "module",
 	"license": "MIT",
@@ -10,6 +10,7 @@
 		"skills",
 		"compatibility.json",
 		"README.md",
+		"CHANGELOG.md",
 		"LICENSE"
 	],
 	"main": "./dist/index.js",
@@ -22,7 +23,12 @@
 		"./extension": {
 			"types": "./dist/extension.d.ts",
 			"import": "./dist/extension.js"
-		}
+		},
+		"./runtime": {
+			"types": "./dist/runtime/index.d.ts",
+			"import": "./dist/runtime/index.js"
+		},
+		"./package.json": "./package.json"
 	},
 	"pi": {
 		"extensions": [
