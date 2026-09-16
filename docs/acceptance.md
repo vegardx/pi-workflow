@@ -418,7 +418,29 @@ An in-memory-only successful drive does not satisfy the first slice.
   producer is not a worktree agent task, with the fixed messages, and the
   launcher never lowers `handoff` into the pi-subagent request;
 - the runtime contract publishes `worktrees: true` and requires pi-subagent
-  contract revision 6 with `handoffExport: true`.
+  contract revision 7 with `handoffExport: true`, `vmMemoryCeiling: true`, and
+  `workspaceBudgetRefusal: true`.
+
+## Guest memory grant
+
+Revision 19 must prove:
+
+- `AgentTaskRequestSchema` accepts an optional `memoryBytes` and rejects a
+  value that is not a positive integer multiple of 64 MiB or that exceeds
+  4 GiB; the materializer refuses the same values with
+  "agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB";
+- an authored `memoryBytes` reaches pi-subagent unchanged in the lowered
+  request, an omitted one is absent from it, and it participates in agent task
+  identity like every other request field;
+- the launcher refuses a preflight whose resolved `sandbox.memoryBytes` differs
+  from a `memoryBytes` the request named, and accepts any resolved grant when
+  the request named none;
+- a preflight refusal raised by pi-subagent is relayed unchanged: the terminal
+  evidence and the task failure reason carry "memory request exceeds agent
+  ceiling" after the fixed prefix "Subagent preflight failed before launch.",
+  while a locally detected plan mismatch still records that prefix alone;
+- a `workspace-budget` failure classified `retry: "never"` is not retried, with
+  or without a declared retry policy, and no retry intent is journaled for it.
 
 ## Operator surface
 
@@ -609,8 +631,9 @@ An in-memory-only successful drive does not satisfy the first slice.
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-18 stores reject revision 1 through 17 leases, journals,
-  snapshots, run records, decision records, and dynamic proposal records;
+  and revision-19 stores reject revision 1 through 18 leases, journals,
+  snapshots, run records, decision records, and dynamic proposal records,
+  with no migration from revision 18;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - finalizers are `role: "finalizer"` tasks declared through `ctx.finalize`
   with exactly one of `support`, `agent`, or `workflow`, `kind` lowers to the
@@ -630,7 +653,7 @@ An in-memory-only successful drive does not satisfy the first slice.
 
 ## Dynamic workflows
 
-Dynamic acceptance (contract revision 18, `dynamicWorkflows: true`) must prove:
+Dynamic acceptance (contract revision 19, `dynamicWorkflows: true`) must prove:
 
 ### Parity
 

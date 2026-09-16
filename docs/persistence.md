@@ -436,7 +436,7 @@ thrown rather than converted into task failure.
 ```ts
 interface WorkflowDecisionRecord {
 	schema: "pi-workflow-decision";
-	contractRevision: 18;
+	contractRevision: 19;
 	binding: { kind: "checkpoint"; runId; taskId; executionId; effectSha256 };
 	source: "operator" | "default";
 	decidedBy?: string; // 1..256; present iff source is "operator"
@@ -472,7 +472,7 @@ through the ordinary verified input path.
 The binding union is discriminated by `kind`. The second member is the
 definition-level `source-approval` binding of the dynamic-workflows half,
 `{ kind: "source-approval"; definitionIdentitySha256; sourceSha256;
-contractRevision: 18 }`, stored in the same record format under
+contractRevision: 19 }`, stored in the same record format under
 `<storeRoot>/dynamic/<sourceSha256>/decisions/<bindingSha256>.json` through
 `WorkflowDecisionRecordStore.openRoot({ directory })`: outside any run, with
 no journal and no lease fence, created owner-only if absent, and refusing a

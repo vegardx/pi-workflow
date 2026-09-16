@@ -5,7 +5,7 @@ description: Use when running, waiting on, inspecting, recovering, or stopping a
 
 # Operating pi-workflow runs
 
-This skill covers `@vegardx/pi-workflow` 1.0.0, contract revision 18. It is
+This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 19. It is
 about running workflows, not writing them. Every tool name, parameter, bound,
 status, subcommand, legality rule, and quoted message below is taken from the
 runtime source (`src/tools.ts`, `src/service-views.ts`, `src/run-actions.ts`,

@@ -14,18 +14,20 @@ disagree.
 
 | Component | Value | Source |
 | --- | --- | --- |
-| `@vegardx/pi-workflow` | 1.1.0 | `package.json` `version` |
-| API version | 1.1.0 | `compatibility.json` `piWorkflow.api.version`; 1.1.0 is additive over 1.0.0: the optional checkpoint prompt view fields, the optional `WorkflowServiceOptions.registeredRoots`, and the package's own builtin workflow root |
+| `@vegardx/pi-workflow` | 2.0.0 | `package.json` `version` |
+| API version | 2.0.0 | `compatibility.json` `piWorkflow.api.version`; 2.0.0 is a major because contract revision 19 refuses revision-18 persisted state (see the `WORKFLOW_CONTRACT_REVISION` row). No frozen export was removed, renamed, or retyped: `AgentTaskRequestSchema` only gained the optional `memoryBytes` |
 | Frozen surfaces | authoring, service, contract, extension | [`docs/contracts.md` "Public API and stability"](contracts.md#public-api-and-stability); `compatibility.json` `piWorkflow.api.frozenSurfaces` |
 | Entry points | `.` frozen, `./extension` frozen, `./runtime` unfrozen (engine internals; may change in any minor release); `./package.json` is the manifest, not an API surface | `package.json` `exports`; `compatibility.json` `piWorkflow.api.entryPoints` |
 | Pinned export lists | `.`: 182 value exports, `./runtime`: 127 value exports; the two sets are disjoint and deep `dist/` paths are not importable | `test/fixtures/public-api/root-exports.json`, `runtime-exports.json` (`test/public-api.test.ts`, `scripts/check-pack.mjs`) |
 | TypeScript module resolution | `node16`, `nodenext`, or `bundler` (types are resolved through the `exports` map; no `typesVersions`; the package itself compiles with `module`/`moduleResolution` `NodeNext`, and `engines.node >=23.6.0` excludes toolchains that need `node10` fallbacks) | `package.json` `exports`, `tsconfig.json` |
-| `WORKFLOW_CONTRACT_REVISION` | 18 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`); unchanged by 1.0.0 and 1.1.0: neither the freeze, the checkpoint prompt, nor the builtin root changes a schema, event, identity, or handshake (1.1.0 adds optional view fields only) |
+| `WORKFLOW_CONTRACT_REVISION` | 19 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`); 2.0.0 raises it from 18 for the pi-subagent revision-7 handshake and the optional `memoryBytes` in agent task identity. Revision-19 stores refuse revision-18 leases, journals, snapshots, run records, decision records, and dynamic proposals, and there is no migration |
+| `WORKFLOW_HANDOFF_FORMAT.revision` | 7 | `src/contracts.ts`; the pi-subagent revision that defines the handoff rendering. It is an input to `WORKFLOW_HANDOFF_FORMAT_SHA256`, the `schemaSha256` of every handoff artifact, so revision-18 handoff artifacts do not verify under revision 19 |
+| Agent task `memoryBytes` | optional; a positive multiple of 64 MiB up to 4 GiB | `AgentTaskRequestSchema` (pi-subagent `MemoryBytesSchema`); omitted means the agent definition's own ceiling |
 | `WORKFLOW_RUNTIME_CONTRACT.features.checkpoints` | `true` | `src/contracts.ts` |
 | `WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows` | `true` (proposed `dynamic:<sha256>` sources run only after a human approval bound to their digest, manifest, host API, and import policy) | `src/contracts.ts` |
-| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0 and 1.1.0) | `package.json` `peerDependencies` |
-| Required pi-subagent contract revision | 6 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
-| pi-subagent commit built in CI | `172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf` | `.github/workflows/ci.yml` |
+| Required `@vegardx/pi-subagent` | `0.11.0` (exact; raised from `0.10.0` by 2.0.0) | `package.json` `peerDependencies` |
+| Required pi-subagent contract revision | 7 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
+| pi-subagent commit built in CI | `e42cd28f2f970872a1a460079efc1a992c0bd7c9` | `.github/workflows/ci.yml` |
 | Pi (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-server`, `@earendil-works/pi-tui`) | `>=0.85.0 <0.86` | `package.json` `peerDependencies` |
 | Node.js engines | `>=23.6.0` | `package.json` `engines` |
 | Node.js in CI | 24.16.0 | `.github/workflows/ci.yml` |
@@ -36,7 +38,7 @@ disagree.
 ## Required pi-subagent features
 
 `isCompatibleSubagentContract` accepts a pi-subagent runtime contract only when
-it is revision 6 and every feature below has exactly this value.
+it is revision 7 and every feature below has exactly this value.
 
 | Feature | Required value |
 | --- | --- |
@@ -57,6 +59,8 @@ it is revision 6 and every feature below has exactly this value.
 | `deepReconciliation` | `true` |
 | `worktrees` | `true` |
 | `handoffExport` | `true` |
+| `vmMemoryCeiling` | `true` |
+| `workspaceBudgetRefusal` | `true` |
 | `publicNetworkEgress` | `true` |
 | `explicitResources` | `true` |
 | `ambientExtensionsControl` | `true` |
@@ -66,7 +70,7 @@ it is revision 6 and every feature below has exactly this value.
 
 | Host | Status | What was exercised |
 | --- | --- | --- |
-| macOS arm64 | Qualified | Real Pi 0.85.0 print-mode sessions on Node.js 24.16.0 loaded the packed extension and ran trusted workflows through pi-subagent Gondolin VMs: single agent task, artifact pipeline, parallel barrier, settled results, fan-out, fan-in, and the pipeline builder. Evidence: the reports under [`docs/qualification/`](qualification/). Those reports record pi-subagent commit `55e84bd731e2017510ee85b2df898e7f2d3679f2`; the current CI pin `172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf` (pi-subagent 0.10.0, contract revision 6) has been verified only by the packed contract check, not by a new host run. 1.0.0 packed tarball qualification: see [`docs/qualification.md`](qualification.md), which records its own status; an unchecked item there is not a claim. |
+| macOS arm64 | Qualified | Real Pi 0.85.0 print-mode sessions on Node.js 24.16.0 loaded the packed extension and ran trusted workflows through pi-subagent Gondolin VMs: single agent task, artifact pipeline, parallel barrier, settled results, fan-out, fan-in, and the pipeline builder. Evidence: the reports under [`docs/qualification/`](qualification/). Those reports record pi-subagent commit `55e84bd731e2017510ee85b2df898e7f2d3679f2`; the current CI pin `e42cd28f2f970872a1a460079efc1a992c0bd7c9` (pi-subagent 0.11.0, contract revision 7) has been verified only by the packed contract check, not by a new host run. 1.0.0 packed tarball qualification: see [`docs/qualification.md`](qualification.md), which records its own status; an unchecked item there is not a claim. |
 | Linux x64 | Build-only | GitHub Actions `ubuntu-latest` on Node.js 24.16.0 builds the pinned pi-subagent commit, then runs `npm run check` (Biome, `tsc`, build, Vitest with fake subagent clients, pack check) and `npm audit --audit-level=low`. No real Pi session, model, or Gondolin VM is exercised. |
 | Other platforms | Not built | Nothing else is built, tested, or qualified. |
 

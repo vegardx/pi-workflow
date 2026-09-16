@@ -12,9 +12,10 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 1.1.0; runtime contract revision 18 with the feature flags
+views. Version 2.0.0; runtime contract revision 19 with the feature flags
 `checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
-and it requires pi-subagent contract revision 6 (`handoffExport: true`). The
+and it requires pi-subagent contract revision 7 (`handoffExport: true`,
+`vmMemoryCeiling: true`, `workspaceBudgetRefusal: true`). The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
 of the operator surface; a Pi tool for handoff export remains unavailable.
 
@@ -64,7 +65,7 @@ own publication, push, pull-request, merge, release, or deployment policy.
 (`defineWorkflow`, `defineSupportTask`, `WorkflowContext`, the handle and
 request types), the service API (`createWorkflowService`,
 `WorkflowServiceOptions`, every `WorkflowService` method and the views it
-returns), the contract layer (the revision-18 schemas, constants, and
+returns), the contract layer (the revision-19 schemas, constants, and
 compatibility predicates), and the extension entry (the default export of
 `@vegardx/pi-workflow/extension`, the fourteen `WORKFLOW_TOOL_DECLARATIONS`
 tools, the `/workflow` grammar, the `pi-workflow` widget, and the `alt+w`
@@ -72,9 +73,12 @@ inspector). A breaking change to any of them is a new major version; adding
 an export, an optional option or view field, a tool, or a `/workflow`
 subcommand is a minor version; see
 [Contracts](docs/contracts.md#public-api-and-stability) for the rule and
-[CHANGELOG.md](CHANGELOG.md) for the record. 1.1.0 is such a minor release:
+[CHANGELOG.md](CHANGELOG.md) for the record. 1.1.0 was such a minor release:
 it adds the optional `WorkflowServiceOptions.registeredRoots` and the
-package's own builtin workflow root, and changes nothing frozen.
+package's own builtin workflow root, and changes nothing frozen. 2.0.0 is a
+major for one reason only: contract revision 19 cannot read revision-18
+persisted runs, and there is no migration. Its one schema change is additive
+(the optional agent-task `memoryBytes`).
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:

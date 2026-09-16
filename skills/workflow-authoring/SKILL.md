@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` 1.0.0, contract revision 18. Every
+This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 19. Every
 rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
@@ -13,7 +13,7 @@ launch contracts). Quoted strings are the exact messages the runtime throws.
 Worked examples that load through the real definition loader and through the
 dynamic manifest VM are in [references/examples.md](references/examples.md).
 
-Not available in revision 18: `ctx.artifact`, fork context, a Pi tool for
+Not available in revision 19: `ctx.artifact`, fork context, a Pi tool for
 handoff export, a model-callable checkpoint decide tool (there is none by design: a model must
 never decide a checkpoint; only a human decides, through `/workflow decide`),
 and a model-callable dynamic-source approve, reject, or proposals tool (none
@@ -24,7 +24,7 @@ them fails when its source runs. `ctx.finalize` is available since revision
 are available since revision 17 (see
 [Worktree tasks and handoffs](#worktree-tasks-and-handoffs)); human
 checkpoints with `ctx.checkpoint` and dynamic workflows are available since
-revision 18 (see [Checkpoints](#checkpoints) and
+revision 19 (see [Checkpoints](#checkpoints) and
 [Dynamic workflows](#dynamic-workflows)).
 
 The same source is a static definition when it is saved as a `*.workflow.ts`
@@ -161,16 +161,16 @@ unique across all roots ("duplicate workflow name <name>: <path> and <path>").
 Static imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
 module specifiers of support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 18". Relative imports of helper files are therefore
+contract revision 19". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 18",
+"dynamic workflow imports are not supported by contract revision 19",
 "dynamic imports and CommonJS require are not supported by contract revision
 18", and "TypeScript import assignment is not supported by contract revision
 18". Import-like text inside strings and comments is fine. The
 `@vegardx/pi-workflow/runtime` subpath is not importable from a definition and
 is not part of the authoring API; definitions import from
 `@vegardx/pi-workflow` only, and the gate refuses the subpath with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 18".
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 19".
 The loader resolves imports from the definition file's location, so
 `@vegardx/pi-workflow` and `typebox` must be resolvable there.
 
@@ -373,6 +373,7 @@ request fails with "invalid agent task request".
 | `preloadSkills` | 0..64 unique skill names. |
 | `contextScopes` | Unique subset of `"global"`, `"project"`. |
 | `workspace` | `{ mode: "read-only", cwd }` or `{ mode: "worktree", cwd }`, `cwd` 1..4096 characters; use `ctx.cwd`. A worktree runs the child in an isolated pi-subagent worktree and produces a handoff. |
+| `memoryBytes` | Optional guest VM memory grant: a positive multiple of 64 MiB, at most 4 GiB. Omitted takes the agent definition's own ceiling; a value above that ceiling is refused at preflight ("memory request exceeds agent ceiling"). A malformed value fails with "agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB". Part of task identity; lowered unchanged to pi-subagent. |
 | `handoff` | Worktree tasks only: `"required"` (default when omitted) or `"optional"`. On a read-only request: "handoff policy requires a worktree workspace". Part of task identity; never sent to pi-subagent. |
 | `outputSchema` | JSON Schema for the structured result; the child must satisfy it. |
 | `limits.cumulativeRuntimeMs` | 1_000..3_600_000 across all attempts. |
@@ -388,7 +389,9 @@ request fails with "invalid agent task request".
 `retry` applies to a `failed` child whose failure is classified `backoff` or
 `manual` and listed in `on`; `resume` applies to an `interrupted` child
 classified `resume`. Failures classified `never` or `reconcile` are not
-retried. Every attempt runs on the same child run under the same task
+retried, `workspace-budget` among them: an exhausted `limits.workspaceWriteBytes`
+is a declared bound, not a transient error, so raise the bound or shrink the
+change instead of retrying. Every attempt runs on the same child run under the same task
 execution, backoff is waited out under the run deadline and stop signal, and
 settled usage across attempts counts against the budget.
 

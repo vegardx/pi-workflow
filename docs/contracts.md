@@ -6,15 +6,21 @@ nested run executor, artifact store, and static source runtime (exported from
 `@vegardx/pi-workflow/runtime`) implement the current subset; later
 interfaces remain design contracts. Version 1.0.0 freezes the public surfaces
 listed under [Public API and stability](#public-api-and-stability). The
-runtime contract is revision 18 and declares the feature flags `supportTaskExecution: true`,
+runtime contract is revision 19 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
 `operatorAttempts: true`, `worktrees: true`, `checkpoints: true`, and
-`dynamicWorkflows: true`. Revision 18 bundles two halves under one contract
+`dynamicWorkflows: true`. Revision 18 bundled two halves under one contract
 revision: checkpoints and dynamic workflows, both described in this document.
-It requires pi-subagent contract revision 6, whose features include
-`handoffExport: true`.
+Revision 19 adds no feature flag. It advances the pi-subagent handshake to
+contract revision 7, whose features include `handoffExport: true`,
+`vmMemoryCeiling: true`, and `workspaceBudgetRefusal: true`, and admits the
+optional `memoryBytes` on an agent task request, which enters task identity.
+`WORKFLOW_HANDOFF_FORMAT.revision` becomes 7 with it, so every handoff
+artifact's `schemaSha256` changes. Revision-19 stores refuse revision-18
+leases, journals, snapshots, run records, decision records, and dynamic
+proposals; there is no migration.
 
 ## Public API and stability
 
@@ -29,7 +35,7 @@ except as described here.
 2. **Service API** — `createWorkflowService`, `WorkflowServiceOptions`, every
    method of `WorkflowService`, `WorkflowServiceError`, and the view types and
    schemas those methods return.
-3. **Contract layer** — the revision-18 request, spec, record, evidence,
+3. **Contract layer** — the revision-19 request, spec, record, evidence,
    event, projection, and view schemas, the identity and bound constants,
    `WORKFLOW_RUNTIME_CONTRACT`, and the compatibility predicates.
 4. **Extension entry** — the default export of
@@ -69,7 +75,10 @@ frozen shape. A frozen schema may therefore gain optional fields under a new
 revision; it may not lose or retype fields under the same major.
 
 **Persisted state.** Runs journaled by revision 18 are readable by every 1.x
-release; a release that cannot read them is a major.
+release; a release that cannot read them is a major. Revision 19 cannot read
+them, which is why the release that carries it is 2.0.0 and not 1.2.0. Runs
+journaled by revision 19 are readable by every 2.x release under the same
+rule.
 
 **1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
 `registeredRoots`, and the package ships its own `workflows/` directory, which
@@ -77,6 +86,17 @@ the extension registers as a `builtin` root (see
 [Definition roots](#definition-roots)). No frozen export, shape, schema,
 message, tool, or contract revision changed; `WORKFLOW_CONTRACT_REVISION`
 stays 18.
+
+**2.0.0.** `WORKFLOW_CONTRACT_REVISION` becomes 19 for the pi-subagent
+revision-7 handshake, and `WORKFLOW_HANDOFF_FORMAT.revision` becomes 7 with
+it. The major is decided by the persisted-state rule above and by nothing
+else: revision-19 stores refuse revision-18 records and no migration is
+offered, so a 1.x run directory cannot be read. Every frozen surface is
+otherwise unchanged. The one schema change is additive and permitted under the
+freeze: `AgentTaskRequestSchema` and `AgentTaskAuthoringRequest` gain the
+optional `memoryBytes`, which is lowered unchanged to pi-subagent and enters
+agent task identity. No export was removed, renamed, or retyped, no returned
+union widened, and no tool name, parameter, or output schema changed.
 
 ## Static definition
 
@@ -176,7 +196,7 @@ and TypeScript import assignment is rejected rather than silently omitted from
 source identity. The `@vegardx/pi-workflow/runtime` subpath is not an allowed
 import: the gate matches specifiers exactly, so a definition that imports it
 fails with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 18". A support implementation is identified by its registered
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 19". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,
 with the same messages, applies to dynamic workflow source proposed through
@@ -592,7 +612,7 @@ the same validation messages (`DYNAMIC_CONTEXT_PROPERTIES` = `cwd`, `input`,
 `runId`, `signal`; `DYNAMIC_CONTEXT_METHODS` = `agent`, `checkpoint`,
 `fanIn`, `fanOut`, `finalize`, `handoff`, `log`, `phase`, `pipeline`,
 `result`, `results`, `settled`, `support`, `workflow`, and nothing more).
-`ctx.artifact` is not available in revision 18 on either frontend. In the VM
+`ctx.artifact` is not available in revision 19 on either frontend. In the VM
 declarations are synchronous RPC calls answered by the static-runtime context
 and barriers are asynchronous replies; see [Dynamic workflows](#dynamic-workflows).
 
@@ -691,7 +711,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 18;
+`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 19;
 a checkpoint task (`ctx.checkpoint`) lowers to `CheckpointTaskSpec`, whose
 `request` is the `CheckpointTaskRequest` described in
 [Checkpoints](#checkpoints). `role` is `"task"` for every ordinary
@@ -820,6 +840,7 @@ interface AgentTask<T> extends TaskRequestBase {
 	preloadSkills: string[];
 	contextScopes: Array<"global" | "project">;
 	workspace: WorkspaceRequest;
+	memoryBytes?: number; // guest VM memory grant; lowered to pi-subagent
 	handoff?: HandoffPolicy; // worktree tasks only; workflow-only
 	outputSchema: JsonSchema<T>;
 	limits: RunLimits;
@@ -847,6 +868,22 @@ A run may become `completed-degraded` only after every required task and
 required finalizer succeeds while an optional task or advisory finalizer failed.
 An optional task or advisory finalizer left `blocked` by a failed dependency
 counts as settled for completion and degrades the run the same way.
+
+`memoryBytes` (revision 19) is the guest VM memory grant: a positive integer
+multiple of 64 MiB, at most 4 GiB, validated against pi-subagent's
+`MemoryBytesSchema` and lowered unchanged. It is a request to narrow, never to
+widen: the agent definition declares the ceiling, an omitted request takes that
+ceiling, and pi-subagent refuses a request above it at preflight with
+`memory request exceeds agent ceiling`. The workflow cannot read agent
+frontmatter, so it neither predicts nor restates that refusal: the launcher
+relays pi-subagent's message unchanged after the fixed prefix
+`Subagent preflight failed before launch.`, in the terminal evidence and in the
+task failure reason. `memoryBytes` participates in agent task identity like
+every other request field, and the launcher requires the resolved
+`sandbox.memoryBytes` of the returned launch plan to equal a value the request
+named; a request that named none inherits whatever ceiling the plan resolved.
+Memory is not a workflow budget: there is no run-level total and the workflow
+never sums grants across tasks.
 
 `pi-subagent` accepts delegated context strings, not workflow artifact handles.
 Before agent preflight, workflow resolves each named input from its own store,
@@ -1980,10 +2017,10 @@ this order, each a `WorkflowServiceError` (code in brackets):
    UTF-8." (a lone surrogate or a NUL byte) [validation];
 3. the import gate of static definitions with its messages verbatim
    ("workflow import <specifier> is not identity-bound by contract revision
-   18", "dynamic workflow imports are not supported by contract revision 18",
+   19", "dynamic workflow imports are not supported by contract revision 19",
    "dynamic imports and CommonJS require are not supported by contract
-   revision 18", "TypeScript import assignment is not supported by contract
-   revision 18", "workflow definition syntax is invalid"); the allow-list is
+   revision 19", "TypeScript import assignment is not supported by contract
+   revision 19", "workflow definition syntax is invalid"); the allow-list is
    `@vegardx/pi-workflow`, `typebox`, and the module specifiers of the
    registered support tasks [validation];
 4. the dynamic-only rules: "dynamic workflow source may not use import.meta"
@@ -2834,7 +2871,7 @@ Physical process and worktree cleanup remain subagent-owned. Workflow verifies
 or imports required handoff evidence and invokes the subagent service's
 idempotent release operation rather than manipulating a child worktree.
 
-pi-subagent contract revision 6 exports a completed worktree attempt's handoff
+pi-subagent contract revision 7 exports a completed worktree attempt's handoff
 as bounded `git format-patch` bytes with a digest-bearing `HandoffRef`
 (`exportHandoff`, feature `handoffExport`). Workflow imports that export into
 its own store, verifies identity, format, digest, and size, and records

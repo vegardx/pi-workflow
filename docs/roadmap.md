@@ -222,6 +222,30 @@ Remaining:
   delivered there, embedders without Pi call `service.decideSource` directly,
   and no model surface can approve.
 
+## Revision 19 — the pi-subagent revision-7 handshake
+
+Delivered (contract revision 19, package 2.0.0; no new runtime contract
+feature flag):
+
+- the pi-subagent revision-7 handshake: `REQUIRED_SUBAGENT_CONTRACT` requires
+  revision 7 with `vmMemoryCeiling: true` and `workspaceBudgetRefusal: true`
+  alongside the existing features, the peer is `0.11.0` exactly, and
+  `WORKFLOW_HANDOFF_FORMAT.revision` becomes 7, which rotates the
+  `schemaSha256` of every handoff artifact;
+- the guest memory grant: an optional `memoryBytes` on the agent task request
+  and on `AgentTaskAuthoringRequest`, validated against pi-subagent's
+  `MemoryBytesSchema`, lowered unchanged, and part of agent task identity; the
+  agent definition keeps the ceiling and pi-subagent's refusal
+  ("memory request exceeds agent ceiling") is relayed unchanged;
+- the `workspace-budget` failure code: classified `retry: "never"` by
+  pi-subagent and therefore never retried by the workflow retrier;
+- the builtin `plan-to-ship` pipeline asks for the memory its stage needs:
+  1 GiB at `cheap`, 2 GiB at `standard`, 4 GiB at `deep`, under the
+  implementer template's raised 4 GiB ceiling.
+
+Not delivered: any migration from revision 18. Revision-19 stores refuse
+revision-18 persisted state, which is what makes this release a major.
+
 ## Non-goals
 
 - private or fallback subagent runtime;
