@@ -8,6 +8,8 @@ import {
 import {
 	type AgentTaskExecutionRecord,
 	type AgentTaskSpec,
+	type CheckpointTaskExecutionRecord,
+	type CheckpointTaskSpec,
 	MAX_NESTED_WORKFLOW_TASKS,
 	MAX_TASK_ATTEMPTS,
 	MAX_TASK_EXECUTION_GENERATIONS,
@@ -47,6 +49,7 @@ import {
 } from "./lifecycle.js";
 import {
 	deriveAgentTaskIdentity,
+	deriveCheckpointTaskIdentity,
 	deriveNestedWorkflowTaskIdentity,
 	deriveSupportTaskIdentity,
 	deriveWorkflowTaskId,
@@ -65,6 +68,19 @@ export class WorkflowEventReductionError extends Error {
 		super(`${message} at workflow event sequence ${sequence}`);
 		this.name = "WorkflowEventReductionError";
 	}
+}
+
+/**
+ * Whether an append failed because the reducer rejected the event (directly,
+ * or wrapped by the journal as "workflow journal event violates run
+ * invariants"), as opposed to an I/O, lease, or corruption failure.
+ */
+export function isWorkflowReductionRejection(error: unknown): boolean {
+	return (
+		error instanceof WorkflowEventReductionError ||
+		(error instanceof Error &&
+			error.cause instanceof WorkflowEventReductionError)
+	);
 }
 
 function fail(message: string, sequence: number): never {
@@ -118,6 +134,34 @@ function pathTasks(state: WorkflowStateProjection): WorkflowTaskProjection[] {
 
 function isFinalizer(task: WorkflowTaskProjection): boolean {
 	return task.task.spec.role === "finalizer";
+}
+
+function isCheckpointTask(task: WorkflowTaskProjection): boolean {
+	return task.task.spec.kind === "checkpoint";
+}
+
+/**
+ * An on-path checkpoint whose current execution has not reached a terminal:
+ * undecided (`created`, `checkpoint-requested`) or decided but not yet
+ * terminalized (`checkpoint-decided`). Exported for the failure sites that
+ * must cancel or commit it before a run may fail, interrupt, or block (`run
+ * failure leaves a checkpoint open`); a decided execution left behind would
+ * otherwise keep the failed run uninvalidatable (`workflow run has active
+ * task executions`).
+ */
+export function hasOpenCheckpoint(state: WorkflowStateProjection): boolean {
+	return pathTasks(state).some((task) => {
+		if (!isCheckpointTask(task)) return false;
+		const execution = task.currentExecutionId
+			? state.executions[task.currentExecutionId]
+			: undefined;
+		return (
+			execution !== undefined &&
+			(execution.phase === "created" ||
+				execution.phase === "checkpoint-requested" ||
+				execution.phase === "checkpoint-decided")
+		);
+	});
 }
 
 /** An operator resume intent that has neither been receipted nor declined. */
@@ -264,7 +308,13 @@ type NestedExecutionProjection = TaskExecutionProjection & {
 	execution: NestedWorkflowTaskExecutionRecord;
 };
 
-function describeKind(kind: "agent" | "support" | "workflow"): string {
+type CheckpointExecutionProjection = TaskExecutionProjection & {
+	execution: CheckpointTaskExecutionRecord;
+};
+
+function describeKind(
+	kind: "agent" | "support" | "workflow" | "checkpoint",
+): string {
 	return kind === "agent" ? "an agent" : `a ${kind}`;
 }
 
@@ -284,6 +334,12 @@ function isNestedExecution(
 	projection: TaskExecutionProjection,
 ): projection is NestedExecutionProjection {
 	return projection.execution.kind === "workflow";
+}
+
+function isCheckpointExecution(
+	projection: TaskExecutionProjection,
+): projection is CheckpointExecutionProjection {
+	return projection.execution.kind === "checkpoint";
 }
 
 function agentExecutionProjection(
@@ -329,6 +385,33 @@ function nestedExecutionProjection(
 		);
 	}
 	return projection;
+}
+
+function checkpointExecutionProjection(
+	state: WorkflowStateProjection,
+	executionId: TaskExecutionId,
+	sequence: number,
+): CheckpointExecutionProjection {
+	const projection = executionProjection(state, executionId, sequence);
+	if (!isCheckpointExecution(projection)) {
+		fail(
+			`checkpoint execution event targets ${describeKind(projection.execution.kind)} execution`,
+			sequence,
+		);
+	}
+	return projection;
+}
+
+function checkpointTaskSpec(
+	state: WorkflowStateProjection,
+	projection: CheckpointExecutionProjection,
+	sequence: number,
+): CheckpointTaskSpec {
+	const spec = state.tasks[projection.execution.taskId]?.task.spec;
+	if (spec?.kind !== "checkpoint") {
+		fail("checkpoint execution target is not a checkpoint task", sequence);
+	}
+	return spec;
 }
 
 function nestedTaskSpec(
@@ -420,7 +503,7 @@ function supportTaskSpec(
 
 function taskInputsSha256(
 	state: WorkflowStateProjection,
-	spec: SupportTaskSpec | NestedWorkflowTaskSpec,
+	spec: SupportTaskSpec | NestedWorkflowTaskSpec | CheckpointTaskSpec,
 	sequence: number,
 ): string {
 	const inputs: Record<string, string> = {};
@@ -432,7 +515,7 @@ function taskInputsSha256(
 		);
 		if (!artifact) {
 			fail(
-				`${spec.kind === "support" ? "support" : "workflow"} task input artifact is missing or ambiguous`,
+				`${spec.kind} task input artifact is missing or ambiguous`,
 				sequence,
 			);
 		}
@@ -500,6 +583,10 @@ function isSupportFailureStage(stage: string): boolean {
 		stage === "support-execution" ||
 		stage === "support-output"
 	);
+}
+
+function isCheckpointFailureStage(stage: string): boolean {
+	return stage === "checkpoint-expired" || stage === "checkpoint-input";
 }
 
 function isNestedFailureStage(stage: string): boolean {
@@ -609,6 +696,15 @@ function applyEvent(
 					namespace: task.namespace,
 					spec,
 				});
+			} else if (task.spec.kind === "checkpoint") {
+				const { identitySha256: identity, ...spec } = task.spec;
+				identitySha256 = identity;
+				derivedIdentity = deriveCheckpointTaskIdentity({
+					definitionIdentitySha256: state.definitionIdentitySha256,
+					inputSha256: state.inputSha256,
+					namespace: task.namespace,
+					spec,
+				});
 			} else {
 				const { identitySha256: identity, ...spec } = task.spec;
 				identitySha256 = identity;
@@ -640,6 +736,20 @@ function applyEvent(
 			}
 			if (identitySha256 !== derivedIdentity) {
 				fail("declared task identity digest does not match", event.sequence);
+			}
+			if (task.spec.kind === "checkpoint") {
+				if (task.spec.role === "finalizer") {
+					fail("a checkpoint cannot be a finalizer", event.sequence);
+				}
+				if (
+					task.spec.request.headless === "use-explicit-default" &&
+					task.spec.request.default === undefined
+				) {
+					fail(
+						"checkpoint headless default requires an explicit default",
+						event.sequence,
+					);
+				}
 			}
 			// A declaration for an existing id readopts an abandoned task onto the
 			// current path when everything but its position fields is unchanged.
@@ -973,6 +1083,10 @@ function applyEvent(
 						"support task execution implementation identity does not match",
 						event.sequence,
 					);
+				}
+			} else if (task.task.spec.kind === "checkpoint") {
+				if (execution.kind !== "checkpoint") {
+					fail("task execution kind does not match its task", event.sequence);
 				}
 			} else {
 				if (execution.kind !== "workflow") {
@@ -1972,6 +2086,137 @@ function applyEvent(
 			projection.phase = "nested-output-imported";
 			break;
 		}
+		case "task-execution-checkpoint-requested": {
+			const projection = checkpointExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = checkpointTaskSpec(state, projection, event.sequence);
+			if (projection.phase !== "created") {
+				fail("checkpoint request is out of order", event.sequence);
+			}
+			if (state.status !== "running" && state.status !== "waiting") {
+				fail(
+					"checkpoint request requires a running workflow run",
+					event.sequence,
+				);
+			}
+			if (
+				input.data.inputsSha256 !==
+				taskInputsSha256(state, spec, event.sequence)
+			) {
+				fail("checkpoint request does not match its task", event.sequence);
+			}
+			const expiresAt = input.data.expiresAt;
+			const timeoutMs = spec.request.timeoutMs;
+			if (
+				(expiresAt === undefined) !== (timeoutMs === undefined) ||
+				(expiresAt !== undefined &&
+					timeoutMs !== undefined &&
+					(!Number.isFinite(Date.parse(expiresAt)) ||
+						Date.parse(expiresAt) > Date.parse(event.timestamp) + timeoutMs))
+			) {
+				fail("checkpoint request expiry is invalid", event.sequence);
+			}
+			projection.checkpointRequest = {
+				inputsSha256: input.data.inputsSha256,
+				...(expiresAt === undefined ? {} : { expiresAt }),
+				requestedAt: event.timestamp,
+				sequence: event.sequence,
+			};
+			projection.phase = "checkpoint-requested";
+			break;
+		}
+		case "task-execution-checkpoint-decided": {
+			const projection = checkpointExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const spec = checkpointTaskSpec(state, projection, event.sequence);
+			const request = projection.checkpointRequest;
+			if (projection.phase !== "checkpoint-requested" || !request) {
+				fail("checkpoint decision is out of order", event.sequence);
+			}
+			if (state.status !== "running" && state.status !== "waiting") {
+				fail(
+					"checkpoint decision requires a running workflow run",
+					event.sequence,
+				);
+			}
+			const artifact = state.artifacts[input.data.artifactId];
+			if (
+				!artifact ||
+				artifact.runId !== state.runId ||
+				artifact.producerTaskId !== projection.execution.taskId ||
+				artifact.producerExecutionId !== projection.execution.id ||
+				artifact.output !== "result" ||
+				artifact.mediaType !== "application/json" ||
+				artifact.sha256 !== input.data.decisionSha256 ||
+				artifact.schemaSha256 !== deriveJsonValueSha256(spec.request.schema)
+			) {
+				fail("checkpoint decision artifact does not match", event.sequence);
+			}
+			// The decision time is the record's own timestamp, taken before the
+			// record was fsynced; the journal timestamp is only the append time.
+			const decidedAtMs = Date.parse(input.data.decidedAt);
+			if (
+				!Number.isFinite(decidedAtMs) ||
+				decidedAtMs > Date.parse(event.timestamp)
+			) {
+				fail("checkpoint decision time is invalid", event.sequence);
+			}
+			if (input.data.source === "default") {
+				if (
+					spec.request.headless !== "use-explicit-default" ||
+					spec.request.default === undefined ||
+					input.data.decisionSha256 !==
+						deriveJsonValueSha256(spec.request.default)
+				) {
+					fail(
+						"checkpoint default decision requires the headless default",
+						event.sequence,
+					);
+				}
+				if (input.data.decidedBy !== undefined) {
+					fail(
+						"checkpoint default decision may not name an approver",
+						event.sequence,
+					);
+				}
+			} else {
+				if (input.data.decidedBy === undefined) {
+					fail(
+						"checkpoint operator decision requires an approver",
+						event.sequence,
+					);
+				}
+				// Timeliness is judged by the decision time, so a record persisted
+				// just before `expiresAt` replays after it without being re-asked.
+				if (
+					request.expiresAt !== undefined &&
+					decidedAtMs >= Date.parse(request.expiresAt)
+				) {
+					fail("checkpoint decision follows its expiry", event.sequence);
+				}
+			}
+			projection.checkpointDecision = {
+				artifactId: input.data.artifactId,
+				decisionSha256: input.data.decisionSha256,
+				source: input.data.source,
+				...(input.data.decidedBy === undefined
+					? {}
+					: { decidedBy: input.data.decidedBy }),
+				...(input.data.reason === undefined
+					? {}
+					: { reason: input.data.reason }),
+				decidedAt: input.data.decidedAt,
+				sequence: event.sequence,
+			};
+			projection.phase = "checkpoint-decided";
+			break;
+		}
 		case "task-execution-terminal": {
 			const projection = executionProjection(
 				state,
@@ -2180,6 +2425,32 @@ function applyEvent(
 						event.sequence,
 					);
 				}
+			} else if (evidence.kind === "checkpoint") {
+				if (task.task.spec.kind !== "checkpoint") {
+					fail(
+						`${task.task.spec.kind} task has checkpoint terminal evidence`,
+						event.sequence,
+					);
+				}
+				if (projection.phase !== "checkpoint-decided") {
+					fail(
+						"checkpoint terminal evidence precedes its decision",
+						event.sequence,
+					);
+				}
+				if (input.data.outcome !== "completed") {
+					fail("checkpoint terminal outcome is not completed", event.sequence);
+				}
+				const decision = projection.checkpointDecision;
+				if (
+					!decision ||
+					evidence.artifactId !== decision.artifactId ||
+					evidence.decisionSha256 !== decision.decisionSha256 ||
+					evidence.source !== decision.source ||
+					evidence.decidedBy !== decision.decidedBy
+				) {
+					fail("checkpoint terminal decision does not match", event.sequence);
+				}
 			} else if (task.task.spec.kind === "workflow") {
 				const resolutionPhase =
 					projection.phase === "created" ||
@@ -2206,6 +2477,27 @@ function applyEvent(
 				) {
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
+			} else if (task.task.spec.kind === "checkpoint") {
+				const openPhase =
+					projection.phase === "created" ||
+					projection.phase === "checkpoint-requested";
+				const admitted =
+					(input.data.outcome === "failed" &&
+						evidence.stage === "checkpoint-input" &&
+						projection.phase === "created") ||
+					(input.data.outcome === "failed" &&
+						evidence.stage === "checkpoint-expired" &&
+						projection.phase === "checkpoint-requested") ||
+					(input.data.outcome === "cancelled" &&
+						evidence.stage === "stop" &&
+						openPhase);
+				if (
+					evidence.failureSha256 !==
+						deriveWorkflowFailureSha256(evidence.stage, evidence.message) ||
+					!admitted
+				) {
+					fail("workflow terminal evidence is inconsistent", event.sequence);
+				}
 			} else if (task.task.spec.kind === "support") {
 				const failurePhase =
 					projection.phase === "created" ||
@@ -2229,7 +2521,8 @@ function applyEvent(
 			} else {
 				if (
 					isSupportFailureStage(evidence.stage) ||
-					isNestedFailureStage(evidence.stage)
+					isNestedFailureStage(evidence.stage) ||
+					isCheckpointFailureStage(evidence.stage)
 				) {
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
@@ -2334,6 +2627,10 @@ function applyEvent(
 			}
 			const supportTask = task.task.spec.kind === "support";
 			const workflowTask = task.task.spec.kind === "workflow";
+			const checkpointTask = task.task.spec.kind === "checkpoint";
+			if (input.data.to === "running" && checkpointTask) {
+				fail("checkpoint task may not run", event.sequence);
+			}
 			if (input.data.to === "running" && supportTask) {
 				if (execution?.phase !== "support-intended") {
 					fail(
@@ -2371,9 +2668,35 @@ function applyEvent(
 			if (input.data.to === "waiting" && workflowTask) {
 				fail("workflow task may not wait", event.sequence);
 			}
-			if (input.data.to === "waiting" && !execution?.launchReceipt) {
+			if (input.data.to === "waiting" && checkpointTask) {
+				if (execution?.phase !== "checkpoint-requested") {
+					fail(
+						"checkpoint task became waiting without a persisted request",
+						event.sequence,
+					);
+				}
+			} else if (input.data.to === "waiting" && !execution?.launchReceipt) {
 				fail(
 					"task became waiting without a launched execution",
+					event.sequence,
+				);
+			}
+			if (input.data.to === "cancelling" && checkpointTask) {
+				fail("checkpoint task may not enter cancelling", event.sequence);
+			}
+			if (input.data.to === "interrupted" && checkpointTask) {
+				fail("checkpoint task may not be interrupted", event.sequence);
+			}
+			if (input.data.to === "cleanup-blocked" && checkpointTask) {
+				fail("checkpoint task may not be cleanup-blocked", event.sequence);
+			}
+			if (
+				input.data.from === "waiting" &&
+				input.data.to === "cancelled" &&
+				!checkpointTask
+			) {
+				fail(
+					"only a checkpoint task may be cancelled while waiting",
 					event.sequence,
 				);
 			}
@@ -2597,6 +2920,14 @@ function applyEvent(
 					(error as Error).message,
 					event.sequence,
 				);
+			}
+			if (
+				(input.data.to === "failed" ||
+					input.data.to === "interrupted" ||
+					input.data.to === "cleanup-blocked") &&
+				hasOpenCheckpoint(state)
+			) {
+				fail("run failure leaves a checkpoint open", event.sequence);
 			}
 			if (
 				input.data.to === "running" &&

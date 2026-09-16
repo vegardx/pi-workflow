@@ -175,7 +175,9 @@ function validateArtifactValue(
 	const outputSchema =
 		producer.spec.kind === "support"
 			? producer.spec.request.implementation.outputSchema
-			: producer.spec.request.outputSchema;
+			: producer.spec.kind === "checkpoint"
+				? producer.spec.request.schema
+				: producer.spec.request.outputSchema;
 	const expectedSchemaSha256 = deriveJsonValueSha256(outputSchema);
 	if (artifact.schemaSha256 !== expectedSchemaSha256) {
 		throw new WorkflowArtifactInputError(
