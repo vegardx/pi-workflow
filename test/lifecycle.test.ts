@@ -30,6 +30,12 @@ describe("workflow lifecycle", () => {
 		);
 	});
 
+	it("lets a waiting checkpoint be cancelled directly", () => {
+		expect(transitionWorkflowTaskStatus("waiting", "cancelled")).toBe(
+			"cancelled",
+		);
+	});
+
 	it("allows task retry attempts without replacing task identity", () => {
 		expect(transitionWorkflowTaskStatus("failed", "running")).toBe("running");
 		expect(transitionWorkflowTaskStatus("interrupted", "running")).toBe(

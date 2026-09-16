@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
+import {
+	canonicalSha256,
+	HANDOFF_EXPORT_MEDIA_TYPE,
+} from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
@@ -22,6 +25,10 @@ import {
 	type WorkflowRunStatus,
 	type WorkflowTaskId,
 } from "../src/contracts.js";
+import {
+	canonicalJson,
+	deriveJsonValueSha256 as digestJsonValueSha256,
+} from "../src/digest.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import {
 	deriveJsonValueSha256,
@@ -108,7 +115,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 17,
+		contractRevision: 18,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-01T00:00:00.000Z",
@@ -4304,6 +4311,55 @@ describe("handoff derivations", () => {
 			expect(() =>
 				deriveWorkflowHandoffDescriptor(mismatch, { execution, handoffImport }),
 			).toThrow("workflow handoff artifact does not match its import");
+		}
+	});
+});
+
+describe("canonical JSON digests", () => {
+	const fixtures: unknown[] = [
+		null,
+		true,
+		"text",
+		0,
+		-0,
+		1.5e300,
+		[],
+		{},
+		{ b: [1, { d: null, c: "x" }], a: { z: -0, y: [true, false] } },
+		{
+			schema: "pi-workflow-support-task-descriptor",
+			parametersSchema: { type: "object", additionalProperties: false },
+			nested: [[[{ k: [] }]]],
+		},
+	];
+
+	it("derives the same digest as pi-subagent's canonicalSha256", () => {
+		// `digest.ts` reproduces pi-subagent's canonical form so the dynamic
+		// worker can derive identities without loading pi-subagent; the two
+		// implementations must never drift.
+		for (const fixture of fixtures) {
+			expect(deriveJsonValueSha256(fixture)).toBe(canonicalSha256(fixture));
+			expect(digestJsonValueSha256(fixture)).toBe(canonicalSha256(fixture));
+		}
+		expect(canonicalJson({ b: 1, a: [-0, { d: 2, c: 3 }] })).toBe(
+			'{"a":[0,{"c":3,"d":2}],"b":1}',
+		);
+	});
+
+	it("refuses the values pi-subagent refuses with the same reasons", () => {
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = cyclic;
+		for (const [value, message] of [
+			[Number.NaN, "non-finite canonical number"],
+			[Number.POSITIVE_INFINITY, "non-finite canonical number"],
+			[{ a: undefined }, "undefined canonical field: a"],
+			[() => 1, "non-serializable canonical value: function"],
+			[Symbol("s"), "non-serializable canonical value: symbol"],
+			[10n, "non-serializable canonical value: bigint"],
+			[cyclic, "cyclic canonical value"],
+		] as const) {
+			expect(() => deriveJsonValueSha256(value)).toThrow(message);
+			expect(() => canonicalSha256(value)).toThrow(message);
 		}
 	});
 });

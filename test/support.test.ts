@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import vm from "node:vm";
 import { type Static, Type } from "typebox";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { SupportImplementation } from "../src/contracts.js";
@@ -10,6 +11,9 @@ import { createWorkflowService, WorkflowServiceError } from "../src/service.js";
 import type { WorkflowSubagentProvider } from "../src/subagent-provider.js";
 import {
 	defineSupportTask,
+	isValidSupportExportName,
+	SUPPORT_EXPORT_NAME,
+	SUPPORT_EXPORT_NAME_INVALID_MESSAGE,
 	type SupportTaskExecutionContext,
 	type SupportTaskRegistration,
 	supportRegistrationIdentity,
@@ -74,6 +78,34 @@ describe("typed support tasks", () => {
 			helper({ parameters: { strict: true, extra: 1 } as never }),
 		).not.toThrow();
 		expect(Object.isFrozen(helper.registration(execute))).toBe(true);
+	});
+
+	it("accepts parameters created in another realm, as dynamic VM sources do", () => {
+		const foreign = vm.runInNewContext(
+			"({ strict: true, nested: [1, { a: 2 }] })",
+		);
+		expect(Object.getPrototypeOf(foreign)).not.toBe(Object.prototype);
+		const descriptor = helper({ parameters: foreign as never });
+		expect(descriptor.parameters).toEqual({
+			strict: true,
+			nested: [1, { a: 2 }],
+		});
+		expect(Object.getPrototypeOf(descriptor.parameters)).toBe(Object.prototype);
+		expect(Object.isFrozen(descriptor.parameters)).toBe(true);
+		expect(() =>
+			helper({
+				parameters: vm.runInNewContext(
+					"({ strict: true, when: new Date(0) })",
+				) as never,
+			}),
+		).toThrow("support task parameters is not losslessly JSON-serializable");
+		expect(() =>
+			helper({
+				parameters: vm.runInNewContext(
+					"({ strict: true, gap: undefined })",
+				) as never,
+			}),
+		).toThrow("support task parameters is not losslessly JSON-serializable");
 	});
 
 	it("materializes the descriptor into a durable support task", () => {
@@ -295,5 +327,58 @@ describe("typed support tasks", () => {
 				{ ...registration, parametersSchema: { type: "nope" } as never },
 			]),
 		).rejects.toThrow("support registration parameters schema");
+	});
+
+	it("forwards a valid export name without changing the registration identity", () => {
+		const plain = helper.registration(execute);
+		const exported = helper.registration(execute, { exportName: "jsonParse" });
+		expect(exported.exportName).toBe("jsonParse");
+		expect(Object.isFrozen(exported)).toBe(true);
+		expect(Object.hasOwn(plain, "exportName")).toBe(false);
+		expect(helper.registration(execute, {}).exportName).toBeUndefined();
+		expectTypeOf(exported.exportName).toEqualTypeOf<string | undefined>();
+		// The export name is import policy (spec 9), not implementation identity.
+		expect(supportRegistrationIdentity(exported)).toBe(
+			supportRegistrationIdentity(plain),
+		);
+		expect(
+			supportRegistrationIdentity({ ...exported, exportName: "other" }),
+		).toBe(supportRegistrationIdentity(plain));
+		const valid = ["$", "_", "a", "A1", "camelCase", "$x_9", "x".repeat(128)];
+		for (const exportName of valid) {
+			expect(isValidSupportExportName(exportName), exportName).toBe(true);
+			expect(
+				helper.registration(execute, { exportName }).exportName,
+				exportName,
+			).toBe(exportName);
+		}
+	});
+
+	it("refuses invalid and reserved export names with the fixed message", () => {
+		expect(SUPPORT_EXPORT_NAME_INVALID_MESSAGE).toBe(
+			"Support task export name is invalid.",
+		);
+		expect(SUPPORT_EXPORT_NAME.source).toBe("^[A-Za-z_$][A-Za-z0-9_$]{0,127}$");
+		const invalid = [
+			"",
+			"default",
+			"1abc",
+			"with-dash",
+			"with space",
+			"with.dot",
+			"x".repeat(129),
+			"\u00e9",
+			"a/b",
+		];
+		for (const exportName of invalid) {
+			expect(isValidSupportExportName(exportName), exportName).toBe(false);
+			expect(
+				() => helper.registration(execute, { exportName }),
+				exportName,
+			).toThrow(SUPPORT_EXPORT_NAME_INVALID_MESSAGE);
+		}
+		// `default` matches the pattern but is refused explicitly.
+		expect(SUPPORT_EXPORT_NAME.test("default")).toBe(true);
+		expect(isValidSupportExportName("default")).toBe(false);
 	});
 });

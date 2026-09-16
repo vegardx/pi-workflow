@@ -720,7 +720,7 @@ describe("finalizers", () => {
 				role: "finalizer",
 				disposition: "required",
 			});
-			expect(events.every((event) => event.contractRevision === 17)).toBe(true);
+			expect(events.every((event) => event.contractRevision === 18)).toBe(true);
 
 			const finalBarrier = indexOfEvent(
 				events,
@@ -1123,6 +1123,9 @@ describe("finalizers", () => {
 				},
 				async reconcile() {
 					throw new Error("fake scheduler has no cleanup-blocked task");
+				},
+				async decide() {
+					throw new Error("fake scheduler records no decisions");
 				},
 				async stop() {
 					return { state: "terminal", runStatus: "cancelled" } as const;

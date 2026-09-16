@@ -48,6 +48,7 @@ function summary(
 		},
 		ownership: "inactive",
 		leasedElsewhere: false,
+		pendingCheckpointCount: 0,
 		requiresAttention:
 			status === "failed" ||
 			status === "interrupted" ||

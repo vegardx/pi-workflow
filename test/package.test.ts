@@ -5,6 +5,7 @@ import {
 	WORKFLOW_CONTRACT_REVISION,
 	WORKFLOW_RUNTIME_CONTRACT,
 } from "../src/contracts.js";
+import { DYNAMIC_TRANSFORMER_VERSION } from "../src/dynamic/constants.js";
 
 interface PackageJson {
 	name?: string;
@@ -14,6 +15,7 @@ interface PackageJson {
 	types?: string;
 	files?: string[];
 	engines?: { node?: string };
+	dependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
 	exports?: Record<string, unknown>;
 	pi?: { extensions?: string[]; skills?: string[] };
@@ -21,7 +23,12 @@ interface PackageJson {
 
 interface Compatibility {
 	schema: string;
-	piWorkflow: { package: string; version: string; contractRevision: number };
+	piWorkflow: {
+		package: string;
+		version: string;
+		contractRevision: number;
+		features: { checkpoints: boolean; dynamicWorkflows: boolean };
+	};
 	piSubagent: {
 		package: string;
 		peerRange: string;
@@ -32,6 +39,7 @@ interface Compatibility {
 	pi: { packages: string[]; peerRange: string };
 	node: { engines: string; ci: string };
 	typebox: { peerRange: string };
+	transformer: { package: string; version: string };
 	hosts: Array<{
 		platform: string;
 		status: "qualified" | "build-only";
@@ -122,6 +130,7 @@ describe("package contract", () => {
 			"workflow_invalidate",
 			"workflow_retry",
 			"workflow_resume",
+			"workflow_propose",
 		]);
 	});
 });
@@ -149,6 +158,15 @@ describe("compatibility matrix", () => {
 			package: packageJson.name,
 			version: packageJson.version,
 			contractRevision: WORKFLOW_CONTRACT_REVISION,
+			features: {
+				checkpoints: WORKFLOW_RUNTIME_CONTRACT.features.checkpoints,
+				dynamicWorkflows: WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows,
+			},
+		});
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(18);
+		expect(compatibility.piWorkflow.features).toEqual({
+			checkpoints: true,
+			dynamicWorkflows: true,
 		});
 		expect(compatibility.piSubagent.package).toBe("@vegardx/pi-subagent");
 		expect(compatibility.piSubagent.peerRange).toBe(
@@ -180,6 +198,11 @@ describe("compatibility matrix", () => {
 		expect(compatibility.typebox.peerRange).toBe(
 			packageJson.peerDependencies?.typebox,
 		);
+		expect(compatibility.transformer).toEqual({
+			package: "amaro",
+			version: DYNAMIC_TRANSFORMER_VERSION,
+		});
+		expect(packageJson.dependencies?.amaro).toBe(DYNAMIC_TRANSFORMER_VERSION);
 	});
 
 	it("cites existing evidence for every host status", async () => {

@@ -134,7 +134,7 @@ function records(
 ): WorkflowJournalEvent[] {
 	return inputs.map((input, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 17,
+		contractRevision: 18,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: RECORD_TIMESTAMP,

@@ -1,4 +1,5 @@
-import { Type } from "typebox";
+import vm from "node:vm";
+import { type TSchema, Type } from "typebox";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
 	type WorkflowHandoffDescriptor,
@@ -6,8 +7,10 @@ import {
 } from "../src/contracts.js";
 import {
 	type AgentTaskAuthoringRequest,
+	type CheckpointRequest,
 	createTaskHandle,
 	defineWorkflow,
+	type FinalizeRequest,
 	isArtifactHandle,
 	isHandoffHandle,
 	isTaskHandle,
@@ -74,6 +77,107 @@ describe("workflow definitions", () => {
 		} as unknown as Parameters<typeof definition.run>[0];
 		expect(definition.run(context)).toBe(handle);
 		expect(declared).toEqual([{ key: "child", request }]);
+	});
+
+	it("exposes typed checkpoint requests on the workflow context", async () => {
+		const runId = "workflow_definition";
+		const planTaskId = `task_${"b".repeat(64)}`;
+		const plan = createTaskHandle<{ answer: string }>(
+			{ runId, taskId: planTaskId },
+			{ runId, producerTaskId: planTaskId, output: "result" },
+		);
+		const schema = Type.Object({
+			proceed: Type.Boolean(),
+			note: Type.Optional(Type.String()),
+		});
+		const request: CheckpointRequest<typeof schema> = {
+			schema,
+			prompt: "Approve the plan?",
+			headless: "use-explicit-default",
+			default: { proceed: false },
+			timeoutMs: 3_600_000,
+			disposition: "required",
+			after: [plan.ref],
+			inputs: { plan: plan.output },
+			replay: "read-only",
+		};
+		expect(request.default).toEqual({ proceed: false });
+		const minimal: CheckpointRequest<typeof schema> = {
+			schema,
+			prompt: "Approve?",
+			headless: "block",
+		};
+		expect(minimal.default).toBeUndefined();
+		expect(minimal.timeoutMs).toBeUndefined();
+		// Compile-time only: the default is typed by the decision schema, and a
+		// finalizer has no checkpoint member.
+		const rejectDefault = (): CheckpointRequest<typeof schema> => ({
+			schema,
+			prompt: "Approve?",
+			headless: "block",
+			// @ts-expect-error the default must satisfy the decision schema
+			default: { proceed: "yes" },
+		});
+		expect(typeof rejectDefault).toBe("function");
+		const rejectFinalizer = (): FinalizeRequest<typeof schema> => ({
+			kind: "required",
+			// @ts-expect-error a checkpoint cannot be a finalizer
+			checkpoint: minimal,
+		});
+		expect(typeof rejectFinalizer).toBe("function");
+		const approveTaskId = `task_${"a".repeat(64)}`;
+		const approveHandle = createTaskHandle<{ proceed: boolean; note?: string }>(
+			{ runId, taskId: approveTaskId },
+			{ runId, producerTaskId: approveTaskId, output: "result" },
+		);
+		expect(Object.hasOwn(approveHandle, "handoff")).toBe(false);
+		expect(isHandoffHandle(approveHandle.output)).toBe(false);
+		const definition = defineWorkflow({
+			meta: {
+				name: "checkpointed",
+				description: "Checkpoint",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
+			inputSchema: Type.Object({}),
+			outputSchema: schema,
+			async run(ctx) {
+				const approve = ctx.checkpoint("approve", request);
+				expectTypeOf(approve).toEqualTypeOf<
+					TaskHandle<{ proceed: boolean; note?: string }>
+				>();
+				// Compile-time only: a checkpoint handle never carries a handoff.
+				const rejectHandoff = () =>
+					// @ts-expect-error TaskHandle is not a WorktreeTaskHandle
+					ctx.handoff(approve);
+				expect(typeof rejectHandoff).toBe("function");
+				const decision = await ctx.result(approve);
+				expectTypeOf(decision).toEqualTypeOf<{
+					proceed: boolean;
+					note?: string;
+				}>();
+				return decision;
+			},
+		});
+		expect(isWorkflowDefinition(definition)).toBe(true);
+		const declared: Array<{
+			key: string;
+			request: CheckpointRequest<typeof schema>;
+		}> = [];
+		const context = {
+			checkpoint(key: string, checkpoint: CheckpointRequest<typeof schema>) {
+				declared.push({ key, request: checkpoint });
+				return approveHandle;
+			},
+			async result(task: TaskHandle<unknown>) {
+				expect(task).toBe(approveHandle);
+				return { proceed: true };
+			},
+		} as unknown as Parameters<typeof definition.run>[0];
+		await expect(definition.run(context)).resolves.toEqual({ proceed: true });
+		expect(declared).toEqual([{ key: "approve", request }]);
+		expect(declared[0]?.request.inputs).toEqual({ plan: plan.output });
 	});
 
 	it("carries agent attempt policies through the authoring context", () => {
@@ -175,6 +279,43 @@ describe("workflow definitions", () => {
 		expect(definition.meta.concurrency).toBe(4);
 		expect(Object.isFrozen(definition.inputSchema)).toBe(true);
 		expect(Object.isFrozen(definition.outputSchema)).toBe(true);
+	});
+
+	it("accepts metadata and schemas created in another realm", () => {
+		const foreign = vm.runInNewContext(
+			`(${JSON.stringify({
+				meta: {
+					name: "foreign",
+					description: "Defined inside a vm context",
+					version: 1,
+					budget: { cost: 1000, childRuntimeMs: 3600000 },
+					timeoutMs: 3600000,
+				},
+				inputSchema: Type.Object({ question: Type.String() }),
+				outputSchema: Type.Object({ answer: Type.String() }),
+			})})`,
+		) as {
+			meta: Parameters<typeof defineWorkflow>[0]["meta"];
+			inputSchema: TSchema;
+			outputSchema: TSchema;
+		};
+		expect(Object.getPrototypeOf(foreign.meta)).not.toBe(Object.prototype);
+		const definition = defineWorkflow({
+			meta: foreign.meta,
+			inputSchema: foreign.inputSchema,
+			outputSchema: foreign.outputSchema,
+			run() {
+				return { answer: "yes" };
+			},
+		});
+		expect(isWorkflowDefinition(definition)).toBe(true);
+		expect(definition.meta).toMatchObject({ name: "foreign", concurrency: 4 });
+		expect(definition.inputSchema).toEqual(
+			JSON.parse(JSON.stringify(Type.Object({ question: Type.String() }))),
+		);
+		expect(Object.getPrototypeOf(definition.inputSchema)).toBe(
+			Object.prototype,
+		);
 	});
 
 	it("validates repeated schema IDs without shared validator state", () => {
