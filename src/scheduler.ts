@@ -14,6 +14,14 @@ import {
 	settledWorkflowUsage,
 	workflowUsage,
 } from "./budget.js";
+import {
+	CHECKPOINT_RUN_ENDING_REASON,
+	cancelOpenWorkflowCheckpoints,
+	createWorkflowCheckpointTaskExecutor,
+	type WorkflowCheckpointDecisionInput,
+	type WorkflowCheckpointExecutionResult,
+	type WorkflowCheckpointTaskExecutor,
+} from "./checkpoint-executor.js";
 import type {
 	SubagentTerminalEvidence,
 	TaskExecutionId,
@@ -22,6 +30,7 @@ import type {
 	WorkflowTaskId,
 	WorkflowTaskStatus,
 } from "./contracts.js";
+import type { WorkflowDecisionRecordStore } from "./decision-store.js";
 import type { WorkflowBudget } from "./definition.js";
 import type {
 	TaskExecutionProjection,
@@ -39,7 +48,7 @@ import {
 	type WorkflowNestedRunProvider,
 } from "./nested-run-executor.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
+import { hasOpenCheckpoint, reduceWorkflowEvents } from "./reducer.js";
 import { isReopenedTask, OPERATOR_RESUME_REASON } from "./run-actions.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 import type { SupportTaskRegistration } from "./support.js";
@@ -98,6 +107,16 @@ export type WorkflowSchedulerOutcome =
 				| "cancelled"
 				| "interrupted"
 				| "cleanup-blocked";
+	  }
+	| {
+			/** This lane has nothing else to do while a checkpoint awaits a decision. */
+			readonly state: "awaiting-decision";
+			readonly runStatus: WorkflowRunStatus;
+			readonly pendingCheckpoints: readonly {
+				readonly taskId: WorkflowTaskId;
+				readonly executionId: TaskExecutionId;
+				readonly expiresAt?: string;
+			}[];
 	  };
 
 /** pi-subagent reconcile facts for the child that was reconciled. */
@@ -117,6 +136,11 @@ export interface WorkflowSequentialScheduler {
 	readonly stopSignal: AbortSignal;
 	drive(): Promise<WorkflowSchedulerOutcome>;
 	reconcile(taskId: WorkflowTaskId): Promise<WorkflowSchedulerReconcileOutcome>;
+	/** Records an operator decision for a waiting checkpoint under the scheduler lock. */
+	decide(
+		taskId: WorkflowTaskId,
+		decision: WorkflowCheckpointDecisionInput,
+	): Promise<WorkflowCheckpointExecutionResult>;
 	stop(reason: string): Promise<WorkflowSchedulerOutcome>;
 }
 
@@ -135,6 +159,14 @@ export interface WorkflowSequentialSchedulerOptions {
 	readonly supportExecutor?: WorkflowSupportTaskExecutor;
 	readonly artifacts?: WorkflowArtifactStore;
 	readonly supportTasks?: ReadonlyMap<string, SupportTaskRegistration>;
+	/**
+	 * Checkpoint execution: either an explicit executor, or the artifact store
+	 * plus the decision record store used to build one bound to this
+	 * scheduler's stop signal. Without either, checkpoint tasks fail closed.
+	 */
+	readonly checkpointExecutor?: WorkflowCheckpointTaskExecutor;
+	readonly decisions?: WorkflowDecisionRecordStore;
+	readonly checkpoints?: { readonly headless: boolean };
 	/**
 	 * Nested execution: either an explicit executor, or the artifact store,
 	 * the nested run provider, and this run's nesting context used to build
@@ -316,6 +348,20 @@ export function createWorkflowSequentialScheduler(
 					signal: () => stopController.signal,
 				})
 			: undefined);
+	const checkpointExecutor =
+		options.checkpointExecutor ??
+		(options.artifacts && options.decisions
+			? createWorkflowCheckpointTaskExecutor({
+					journal,
+					artifacts: options.artifacts,
+					decisions: options.decisions,
+					signal: () => stopController.signal,
+					...(options.nesting
+						? { deadlineAt: options.nesting.deadlineAt }
+						: {}),
+					headless: options.checkpoints?.headless ?? false,
+				})
+			: undefined);
 	const retrier =
 		options.retrier ??
 		createWorkflowTaskRetrier({
@@ -409,6 +455,7 @@ export function createWorkflowSequentialScheduler(
 	}
 
 	async function failRunFromObservedStatus(reason: string): Promise<void> {
+		await cancelOpenWorkflowCheckpoints(journal, CHECKPOINT_RUN_ENDING_REASON);
 		const now = await state();
 		await changeRun(now.status, "failed", reason);
 	}
@@ -534,7 +581,14 @@ export function createWorkflowSequentialScheduler(
 		candidate: WorkflowTaskProjection,
 	): { allowed: true } | { allowed: false; deferred: boolean; reason: string } {
 		const candidateSpec = candidate.task.spec;
-		if (candidateSpec.kind === "support") return { allowed: true };
+		// Support tasks run in process; checkpoints are routed before admission
+		// and reserve nothing (they wait on a human, not on a child).
+		if (
+			candidateSpec.kind === "support" ||
+			candidateSpec.kind === "checkpoint"
+		) {
+			return { allowed: true };
+		}
 		// The candidate's own active execution is what admission is deciding
 		// on; counting it as a reservation would double-charge a task that is
 		// re-selected after restart.
@@ -622,6 +676,10 @@ export function createWorkflowSequentialScheduler(
 		return task.task.spec.kind === "workflow";
 	}
 
+	function isCheckpointTask(task: WorkflowTaskProjection): boolean {
+		return task.task.spec.kind === "checkpoint";
+	}
+
 	function occupiesLane(
 		current: WorkflowStateProjection,
 		task: WorkflowTaskProjection,
@@ -631,6 +689,8 @@ export function createWorkflowSequentialScheduler(
 		// intent finalized, exactly like a settled task in an active status.
 		if (isReopenedTask(current, task)) return true;
 		if (!ACTIVE_TASK_STATUSES.has(task.status)) return false;
+		// A parked checkpoint waits on a human and holds no lane.
+		if (isCheckpointTask(task)) return false;
 		if (isSupportTask(task)) return task.status === "running";
 		if (isNestedTask(task)) {
 			return task.status === "running" || task.status === "cancelling";
@@ -638,7 +698,22 @@ export function createWorkflowSequentialScheduler(
 		return executionFor(current, task)?.launchReceipt !== undefined;
 	}
 
-	async function failRunAfterRequiredSupportTask(
+	/**
+	 * A run may not fail, interrupt, or block while a checkpoint is open, so
+	 * run-ending transitions cancel first. Without an open checkpoint nothing
+	 * is awaited and the status just read stays the `from` of the transition;
+	 * after a cancel it is re-read, so a concurrently driving lane's
+	 * `waiting -> running` cannot leave the transition with a stale source.
+	 */
+	async function cancelOpenCheckpointsBefore(
+		current: WorkflowStateProjection,
+	): Promise<WorkflowRunStatus> {
+		if (!hasOpenCheckpoint(current)) return current.status;
+		await cancelOpenWorkflowCheckpoints(journal, CHECKPOINT_RUN_ENDING_REASON);
+		return (await state()).status;
+	}
+
+	async function failRunAfterRequiredTask(
 		taskId: WorkflowTaskId,
 	): Promise<WorkflowSchedulerOutcome | undefined> {
 		const after = await state();
@@ -650,8 +725,9 @@ export function createWorkflowSequentialScheduler(
 				after.status === "waiting" ||
 				after.status === "finalizing")
 		) {
+			const from = await cancelOpenCheckpointsBefore(after);
 			await changeRun(
-				after.status,
+				from,
 				"failed",
 				"A required workflow task did not complete.",
 			);
@@ -676,6 +752,9 @@ export function createWorkflowSequentialScheduler(
 					: task.status === "interrupted"
 						? "interrupted"
 						: "failed";
+			if (recovered !== "running") {
+				await cancelOpenCheckpointsBefore(after);
+			}
 			await changeRun(
 				"cleanup-blocked",
 				recovered,
@@ -695,8 +774,9 @@ export function createWorkflowSequentialScheduler(
 			return { state: "terminal", runStatus: after.status };
 		}
 		if (task.status === "cleanup-blocked") {
+			const from = await cancelOpenCheckpointsBefore(after);
 			await changeRun(
-				after.status,
+				from,
 				"cleanup-blocked",
 				"Nested workflow run requires reconciliation.",
 			);
@@ -707,14 +787,15 @@ export function createWorkflowSequentialScheduler(
 			task.status === "interrupted" &&
 			after.status !== "stopping"
 		) {
+			const from = await cancelOpenCheckpointsBefore(after);
 			await changeRun(
-				after.status,
+				from,
 				"interrupted",
 				"A required workflow task was interrupted.",
 			);
 			return { state: "terminal", runStatus: "interrupted" };
 		}
-		return failRunAfterRequiredSupportTask(taskId);
+		return failRunAfterRequiredTask(taskId);
 	}
 
 	async function prepareNested(
@@ -784,10 +865,74 @@ export function createWorkflowSequentialScheduler(
 		}
 		const intent = await supportExecutor.intend(taskId);
 		if (intent.state === "terminal") {
-			return (await failRunAfterRequiredSupportTask(taskId)) ?? prepare();
+			return (await failRunAfterRequiredTask(taskId)) ?? prepare();
 		}
 		busy.add(taskId);
 		return { state: "support", taskId };
+	}
+
+	/** On-path checkpoints whose durable request awaits a decision. */
+	function pendingCheckpoints(
+		current: WorkflowStateProjection,
+	): Extract<
+		WorkflowSchedulerOutcome,
+		{ state: "awaiting-decision" }
+	>["pendingCheckpoints"] {
+		return orderedTasks(current).flatMap((task) => {
+			if (!isCheckpointTask(task)) return [];
+			const execution = executionFor(current, task);
+			if (execution?.phase !== "checkpoint-requested") return [];
+			const expiresAt = execution.checkpointRequest?.expiresAt;
+			return [
+				{
+					taskId: task.task.id,
+					executionId: execution.execution.id,
+					...(expiresAt ? { expiresAt } : {}),
+				},
+			];
+		});
+	}
+
+	/**
+	 * This lane has nothing left to do while a checkpoint is parked: the run
+	 * waits (durably) and the caller decides whether to park the drive.
+	 */
+	async function awaitingDecision(
+		current: WorkflowStateProjection,
+	): Promise<WorkflowSchedulerOutcome> {
+		if (current.status === "running") {
+			await changeRun(
+				"running",
+				"waiting",
+				"Workflow run awaits a checkpoint decision.",
+			);
+		}
+		return {
+			state: "awaiting-decision",
+			runStatus: "waiting",
+			pendingCheckpoints: pendingCheckpoints(current),
+		};
+	}
+
+	async function prepareCheckpoint(
+		selected: WorkflowTaskProjection,
+	): Promise<PreparedWork> {
+		const taskId = selected.task.id;
+		if (!checkpointExecutor) {
+			const message =
+				"Checkpoint execution is not configured for this workflow run.";
+			await changeTask(taskId, selected.status, "blocked", message);
+			if (selected.task.spec.disposition === "required") {
+				await failRunFromObservedStatus(message);
+				return { state: "terminal", runStatus: "failed" };
+			}
+			return prepare();
+		}
+		const outcome = await checkpointExecutor.request(taskId);
+		if (outcome.state === "terminal") {
+			return (await failRunAfterRequiredTask(taskId)) ?? prepare();
+		}
+		return awaitingDecision(await state());
 	}
 
 	async function prepare(): Promise<PreparedWork> {
@@ -806,11 +951,11 @@ export function createWorkflowSequentialScheduler(
 			return { state: "stopping", runStatus: current.status };
 		}
 		const finalizing = current.status === "finalizing";
-		if (
-			!finalizing &&
-			(current.status === "created" || current.status === "waiting")
-		) {
-			await changeRun(current.status, "running");
+		// A fresh run starts running here. A waiting run resumes only once this
+		// lane has selected work for it (below): idle lanes of a parked or
+		// barrier-blocked run append nothing instead of flapping the status.
+		if (current.status === "created") {
+			await changeRun("created", "running");
 			current = await state();
 		}
 		if (finalizing && current.outputArtifactId === undefined) {
@@ -820,19 +965,41 @@ export function createWorkflowSequentialScheduler(
 		const candidates = () =>
 			orderedTasks(current).filter((task) => task.task.spec.role === role);
 
-		for (const task of candidates()) {
-			if (task.status !== "pending") continue;
-			const blockers = dependencies(current, task).filter((dependency) =>
-				DEPENDENCY_FAILURE_STATUSES.has(dependency.status),
-			);
-			if (blockers.length === 0) continue;
-			await changeTask(
-				task.task.id,
-				"pending",
-				"blocked",
-				"A workflow task dependency did not complete successfully.",
-			);
+		const blockDependents = async (): Promise<void> => {
+			for (const task of candidates()) {
+				if (task.status !== "pending") continue;
+				const blockers = dependencies(current, task).filter((dependency) =>
+					DEPENDENCY_FAILURE_STATUSES.has(dependency.status),
+				);
+				if (blockers.length === 0) continue;
+				await changeTask(
+					task.task.id,
+					"pending",
+					"blocked",
+					"A workflow task dependency did not complete successfully.",
+				);
+				current = await state();
+			}
+		};
+		await blockDependents();
+
+		// Expiry and crash repair for every requested checkpoint happen on
+		// every pass, before selection reads their status.
+		if (
+			checkpointExecutor &&
+			candidates().some(
+				(task) =>
+					isCheckpointTask(task) && executionFor(current, task) !== undefined,
+			)
+		) {
+			const settled = await checkpointExecutor.sweep(Date.now());
 			current = await state();
+			for (const result of settled) {
+				if (result.outcome === "completed") continue;
+				const failed = await failRunAfterRequiredTask(result.taskId);
+				if (failed) return failed;
+			}
+			if (settled.length > 0) await blockDependents();
 		}
 
 		const active = orderedTasks(current).filter((task) =>
@@ -851,6 +1018,13 @@ export function createWorkflowSequentialScheduler(
 			});
 		}
 		if (!selected) {
+			if (
+				candidates().some(
+					(task) => isCheckpointTask(task) && task.status === "waiting",
+				)
+			) {
+				return awaitingDecision(current);
+			}
 			if (current.status === "running") {
 				await changeRun(
 					"running",
@@ -862,6 +1036,18 @@ export function createWorkflowSequentialScheduler(
 				state: "idle",
 				runStatus: finalizing ? "finalizing" : "waiting",
 			};
+		}
+		if (current.status === "waiting") {
+			// Deferred from the top of the pass: the run resumes with the work.
+			await changeRun("waiting", "running");
+			current = await state();
+			selected = current.tasks[selected.task.id];
+		}
+		if (!selected) {
+			throw new WorkflowSchedulerError(
+				"selection",
+				"Selected workflow task disappeared.",
+			);
 		}
 		if (selected.status === "pending") {
 			await changeTask(
@@ -880,6 +1066,9 @@ export function createWorkflowSequentialScheduler(
 			);
 		}
 
+		if (isCheckpointTask(selected)) {
+			return prepareCheckpoint(selected);
+		}
 		if (isSupportTask(selected)) {
 			return prepareSupport(selected);
 		}
@@ -1213,7 +1402,8 @@ export function createWorkflowSequentialScheduler(
 			afterFinalization.status !== "completed" &&
 			afterFinalization.status !== "completed-degraded"
 		) {
-			await changeRun(afterFinalization.status, "failed", budgetFailure);
+			const from = await cancelOpenCheckpointsBefore(afterFinalization);
+			await changeRun(from, "failed", budgetFailure);
 			return { state: "terminal", runStatus: "failed" };
 		}
 		if (
@@ -1239,7 +1429,7 @@ export function createWorkflowSequentialScheduler(
 			);
 		}
 		const result = await supportExecutor.execute(taskId);
-		const failed = await failRunAfterRequiredSupportTask(taskId);
+		const failed = await failRunAfterRequiredTask(taskId);
 		if (failed) return failed;
 		const after = await state();
 		if (
@@ -1371,6 +1561,21 @@ export function createWorkflowSequentialScheduler(
 		return { ...outcome, subagent: prepared.subagent };
 	}
 
+	function decide(
+		taskId: WorkflowTaskId,
+		decision: WorkflowCheckpointDecisionInput,
+	): Promise<WorkflowCheckpointExecutionResult> {
+		return mutate(async () => {
+			if (!checkpointExecutor) {
+				throw new WorkflowSchedulerError(
+					"validation",
+					"Checkpoint execution is not configured for this workflow run.",
+				);
+			}
+			return checkpointExecutor.decide(taskId, decision);
+		});
+	}
+
 	async function stop(reason: string): Promise<WorkflowSchedulerOutcome> {
 		if (reason.length < 1 || reason.length > 4096) {
 			throw new WorkflowSchedulerError(
@@ -1446,6 +1651,25 @@ export function createWorkflowSequentialScheduler(
 				);
 			}
 			if (runningNested.length > 0) {
+				current = await state();
+			}
+			const openCheckpoints = orderedTasks(current).filter(
+				(task) =>
+					isCheckpointTask(task) &&
+					(task.status === "waiting" ||
+						(task.status === "ready" &&
+							executionFor(current, task) !== undefined)),
+			);
+			for (const task of openCheckpoints) {
+				if (!checkpointExecutor) {
+					throw new WorkflowSchedulerError(
+						"stop",
+						"Open checkpoint task has no executor to cancel it.",
+					);
+				}
+				await checkpointExecutor.cancel(task.task.id, reason);
+			}
+			if (openCheckpoints.length > 0) {
 				current = await state();
 			}
 
@@ -1599,6 +1823,7 @@ export function createWorkflowSequentialScheduler(
 		stopSignal: stopController.signal,
 		drive,
 		reconcile,
+		decide,
 		stop,
 	});
 }

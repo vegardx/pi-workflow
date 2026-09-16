@@ -6,11 +6,18 @@ import * as addFormatsModule from "ajv-formats";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
+import {
+	CHECKPOINT_RUN_ENDING_REASON,
+	cancelOpenWorkflowCheckpoints,
+} from "./checkpoint-executor.js";
 import type {
 	NestedWorkflowTaskRequest,
+	TaskExecutionId,
+	TaskKey,
 	WorkflowArtifactRef,
 	WorkflowHandoffDescriptor,
 	WorkflowRunId,
+	WorkflowRunStatus,
 	WorkflowTaskId,
 } from "./contracts.js";
 import {
@@ -53,14 +60,20 @@ import {
 	WorkflowTaskMaterializer,
 } from "./materializer.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
+import {
+	isWorkflowReductionRejection,
+	reduceWorkflowEvents,
+} from "./reducer.js";
 import type { DiscoveredWorkflow } from "./registry.js";
 import {
 	hasOpenOperatorIntent,
 	isReopenedTask,
 	OPERATOR_RESUME_REASON,
 } from "./run-actions.js";
-import type { WorkflowSequentialScheduler } from "./scheduler.js";
+import type {
+	WorkflowSchedulerOutcome,
+	WorkflowSequentialScheduler,
+} from "./scheduler.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
@@ -95,8 +108,151 @@ export type StaticWorkflowRunResult<T> = {
 	readonly artifact: WorkflowArtifactRef;
 };
 
+/** A checkpoint whose request is durable and whose decision is still open. */
+export type StaticWorkflowPendingCheckpoint = {
+	readonly taskId: WorkflowTaskId;
+	readonly executionId: TaskExecutionId;
+	readonly expiresAt?: string;
+};
+
+/**
+ * A drive that settled without finishing: the run waits at one or more
+ * checkpoints and resumes when it is driven again after a decision.
+ */
+export type StaticWorkflowParkedResult = {
+	readonly runId: WorkflowRunId;
+	readonly status: "waiting";
+	readonly parked: true;
+	readonly pendingCheckpoints: readonly StaticWorkflowPendingCheckpoint[];
+};
+
+export type StaticWorkflowDriveResult<T> =
+	| StaticWorkflowRunResult<T>
+	| StaticWorkflowParkedResult;
+
 export interface StaticWorkflowRuntime<TOutput> {
-	drive(): Promise<StaticWorkflowRunResult<TOutput>>;
+	drive(): Promise<StaticWorkflowDriveResult<TOutput>>;
+}
+
+export function isStaticWorkflowParked(
+	result: StaticWorkflowDriveResult<unknown>,
+): result is StaticWorkflowParkedResult {
+	return result.status === "waiting" && result.parked === true;
+}
+
+/**
+ * Private park sentinel: thrown through a barrier promise when the scheduler
+ * is quiescent at a checkpoint. Trusted source cannot forge it (the class is
+ * not exported) and cannot un-park the run by swallowing it: once a barrier
+ * observes it, every later barrier throws it again and the drive resolves
+ * parked.
+ */
+class StaticWorkflowParkSignal extends Error {
+	constructor(
+		readonly pendingCheckpoints: readonly StaticWorkflowPendingCheckpoint[],
+	) {
+		super("Workflow run is parked at a checkpoint.");
+		this.name = "StaticWorkflowParkSignal";
+	}
+}
+
+/**
+ * Recognises the private park sentinel without exporting its class, so the
+ * dynamic definition bridge can terminate its VM and rethrow the park instead
+ * of forwarding it (dynamic-workflow spec 8 step 7). Lookalikes with the same
+ * `name` and `message` are not park signals.
+ */
+export function isStaticWorkflowParkSignal(error: unknown): boolean {
+	return error instanceof StaticWorkflowParkSignal;
+}
+
+/**
+ * Symbol key of the non-enumerable host bridge on the static context. It is
+ * deliberately not re-exported from `src/index.ts`: static definitions can only
+ * import `@vegardx/pi-workflow`, so trusted source cannot reach it, and the VM
+ * never sees the context object at all.
+ */
+export const workflowHostBridge: unique symbol = Symbol(
+	"pi-workflow-host-bridge",
+);
+
+/** Host-only operations the dynamic shim lowers `fanOut`/`pipeline` onto. */
+export interface WorkflowHostBridge {
+	agentInNamespace(
+		namespace: readonly TaskKey[],
+		key: TaskKey,
+		request: AgentTaskAuthoringRequest<TSchema>,
+	): TaskHandle<unknown>;
+}
+
+/**
+ * Name carried by `DynamicWorkflowExecutionError` (dynamic-workflow spec 8).
+ * The static runtime cannot import the class (the dynamic definition imports
+ * this module), so the catch recognises it by name; its message is already
+ * bounded by construction and is bounded again here for the event.
+ */
+const DYNAMIC_EXECUTION_ERROR_NAME = "DynamicWorkflowExecutionError";
+const STATIC_SOURCE_FAILURE_REASON = "Static workflow source execution failed.";
+/** `-> failed` reason when the final graph fails for a cause without a fixed runtime message. */
+const FINAL_GRAPH_FAILURE_REASON = "Workflow final graph did not complete.";
+const MAX_FAILURE_REASON_CHARS = 4096;
+
+function sourceFailureReason(error: unknown): string {
+	if (
+		error instanceof Error &&
+		error.name === DYNAMIC_EXECUTION_ERROR_NAME &&
+		typeof error.message === "string" &&
+		error.message.length > 0
+	) {
+		return error.message.slice(0, MAX_FAILURE_REASON_CHARS);
+	}
+	return STATIC_SOURCE_FAILURE_REASON;
+}
+
+/** On-path checkpoints whose current execution awaits a decision, in materialization order. */
+function pendingCheckpoints(
+	state: WorkflowStateProjection,
+): readonly StaticWorkflowPendingCheckpoint[] {
+	return Object.values(state.tasks)
+		.filter(
+			(task) =>
+				task.committed &&
+				task.abandoned !== true &&
+				task.task.spec.kind === "checkpoint",
+		)
+		.sort(
+			(left, right) =>
+				left.task.materializationSequence - right.task.materializationSequence,
+		)
+		.flatMap((task) => {
+			const execution = task.currentExecutionId
+				? state.executions[task.currentExecutionId]
+				: undefined;
+			if (execution?.phase !== "checkpoint-requested") return [];
+			const expiresAt = execution.checkpointRequest?.expiresAt;
+			return [
+				Object.freeze({
+					taskId: task.task.id,
+					executionId: execution.execution.id,
+					...(expiresAt === undefined ? {} : { expiresAt }),
+				}),
+			];
+		});
+}
+
+/** Spec C3: every lane idle or awaiting, at least one awaiting, no lane errors. */
+function batchParks(batch: {
+	readonly outcomes: readonly WorkflowSchedulerOutcome[];
+	readonly errors: readonly unknown[];
+}): boolean {
+	return (
+		batch.errors.length === 0 &&
+		batch.outcomes.some((outcome) => outcome.state === "awaiting-decision") &&
+		batch.outcomes.every(
+			(outcome) =>
+				outcome.state === "idle" || outcome.state === "awaiting-decision",
+		)
+	);
 }
 
 export interface StaticWorkflowRuntimeOptions<TInput, TOutput> {
@@ -251,6 +407,40 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		return reduceWorkflowEvents(await journal.readEvents());
 	}
 
+	/** Statuses from which a failure site may append `-> failed`. */
+	function isFailable(status: WorkflowRunStatus): boolean {
+		return (
+			status === "created" ||
+			status === "running" ||
+			status === "waiting" ||
+			status === "finalizing"
+		);
+	}
+
+	/**
+	 * Appends `-> failed` from a status read a moment ago. A concurrently
+	 * driving lane may have ended the run in between (its own `-> failed`, or
+	 * a stop), in which case the reducer rejects the stale source ("run status
+	 * source does not match projection"). That rejection is swallowed only when
+	 * the run is no longer failable, so the caller's original error rather than
+	 * the race propagates; any other rejection is rethrown.
+	 */
+	async function failRun(
+		from: WorkflowRunStatus,
+		reason: string,
+	): Promise<void> {
+		try {
+			await journal.append("run-status-changed", {
+				from,
+				to: "failed",
+				reason,
+			});
+		} catch (error) {
+			if (!isWorkflowReductionRejection(error)) throw error;
+			if (isFailable((await state()).status)) throw error;
+		}
+	}
+
 	async function initialize(): Promise<void> {
 		const events = await journal.readEvents();
 		if (events.length === 0) {
@@ -306,10 +496,15 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			);
 		}
 		const value = await artifacts.readJson(artifact);
+		const spec = task.task.spec;
+		// A checkpoint's result is its decision, validated against the request
+		// schema the approver decided under.
 		const outputSchema =
-			task.task.spec.kind === "support"
-				? task.task.spec.request.implementation.outputSchema
-				: task.task.spec.request.outputSchema;
+			spec.kind === "support"
+				? spec.request.implementation.outputSchema
+				: spec.kind === "checkpoint"
+					? spec.request.schema
+					: spec.request.outputSchema;
 		if (!validator(outputSchema)(value)) {
 			throw new StaticWorkflowRuntimeError(
 				"result",
@@ -383,7 +578,10 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		return jsonCloneFrozen(descriptor, "Workflow handoff descriptor");
 	}
 
-	async function driveSchedulerBatch() {
+	async function driveSchedulerBatch(): Promise<{
+		readonly outcomes: readonly WorkflowSchedulerOutcome[];
+		readonly errors: readonly unknown[];
+	}> {
 		const settled = await Promise.allSettled(
 			Array.from({ length: scheduler.concurrency }, () => scheduler.drive()),
 		);
@@ -421,7 +619,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					}
 				}
 			}
-			const { outcomes, errors } = await driveSchedulerBatch();
+			const batch = await driveSchedulerBatch();
+			if (batchParks(batch)) {
+				throw new StaticWorkflowParkSignal(pendingCheckpoints(await state()));
+			}
+			const { outcomes, errors } = batch;
 			if (outcomes.every((outcome) => outcome.state === "idle")) {
 				const after = await state();
 				if (
@@ -472,7 +674,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				return;
 			}
 			const before = current.lastSequence;
-			const { errors } = await driveSchedulerBatch();
+			const batch = await driveSchedulerBatch();
+			if (batchParks(batch)) {
+				throw new StaticWorkflowParkSignal(pendingCheckpoints(await state()));
+			}
+			const { errors } = batch;
 			const after = await state();
 			if (after.lastSequence === before && errors.length > 0) {
 				throw errors[0];
@@ -518,7 +724,11 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				);
 			if (!unsettled) return;
 			const before = current.lastSequence;
-			const { outcomes, errors } = await driveSchedulerBatch();
+			const batch = await driveSchedulerBatch();
+			if (batchParks(batch)) {
+				throw new StaticWorkflowParkSignal(pendingCheckpoints(await state()));
+			}
+			const { outcomes, errors } = batch;
 			const after = await state();
 			const terminal = outcomes.find((outcome) => outcome.state === "terminal");
 			if (terminal?.state === "terminal" && after.status !== "completed") {
@@ -825,7 +1035,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		};
 	}
 
-	async function driveCurrent(): Promise<StaticWorkflowRunResult<TOutput>> {
+	async function driveCurrent(): Promise<StaticWorkflowDriveResult<TOutput>> {
 		if (signal.aborted) {
 			throw new StaticWorkflowRuntimeError(
 				"execution",
@@ -889,11 +1099,28 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		let appendedEffects = 0;
 		let effectTail = Promise.resolve();
 		let barrierTail = Promise.resolve();
+		// Set once a barrier observes the park signal; from then on every
+		// barrier re-throws it and the drive resolves parked, whatever the
+		// source does with the rejection.
+		let parked: StaticWorkflowParkedResult | undefined;
+
+		function park(
+			pending: readonly StaticWorkflowPendingCheckpoint[],
+		): StaticWorkflowParkedResult {
+			parked ??= Object.freeze({
+				runId: journal.runId,
+				status: "waiting",
+				parked: true,
+				pendingCheckpoints: Object.freeze([...pending]),
+			});
+			return parked;
+		}
 
 		function prepareBarrier(
 			kind: "result" | "results" | "settled" | "final",
 			tasks: readonly TaskHandle<unknown>[],
 		): () => Promise<void> {
+			if (parked) throw new StaticWorkflowParkSignal(parked.pendingCheckpoints);
 			const effectPrefix = effectTail;
 			const effectCount = effectOrdinal;
 			const commit = materializer.closeEpoch(kind, tasks);
@@ -918,10 +1145,20 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 		}
 
 		function barrier<T>(operation: () => Promise<T>): Promise<T> {
-			const result = barrierTail.then(operation);
+			if (parked) throw new StaticWorkflowParkSignal(parked.pendingCheckpoints);
+			const result = barrierTail.then(() => {
+				if (parked) {
+					throw new StaticWorkflowParkSignal(parked.pendingCheckpoints);
+				}
+				return operation();
+			});
 			barrierTail = result.then(
 				() => undefined,
-				() => undefined,
+				(error: unknown) => {
+					if (error instanceof StaticWorkflowParkSignal) {
+						park(error.pendingCheckpoints);
+					}
+				},
 			);
 			return result;
 		}
@@ -949,7 +1186,19 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			});
 		}
 
-		const context: WorkflowContext<TInput> = Object.freeze({
+		const hostBridge: WorkflowHostBridge = {
+			agentInNamespace(
+				namespace: readonly TaskKey[],
+				key: TaskKey,
+				request: AgentTaskAuthoringRequest<TSchema>,
+			): TaskHandle<unknown> {
+				const handle = materializer.agentInNamespace(namespace, key, request);
+				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+				return handle as TaskHandle<unknown>;
+			},
+		};
+		Object.freeze(hostBridge);
+		const contextMembers: WorkflowContext<TInput> = {
 			input,
 			runId: journal.runId,
 			cwd,
@@ -990,6 +1239,17 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					key,
 					nestedDeclaration(request),
 				);
+				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
+				return handle;
+			},
+			checkpoint(key, request) {
+				if (request === null || typeof request !== "object") {
+					throw new StaticWorkflowRuntimeError(
+						"validation",
+						"Workflow checkpoint request is invalid.",
+					);
+				}
+				const handle = materializer.checkpoint(key, request);
 				handles.set(handle.ref.taskId, handle as TaskHandle<unknown>);
 				return handle;
 			},
@@ -1218,6 +1478,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 								? current.executions[projected.currentExecutionId]
 								: undefined;
 							const evidence = execution?.terminal?.evidence;
+							// A checkpoint's terminal evidence is its decision, never a
+							// failure; an expired checkpoint carries workflow evidence at
+							// stage "checkpoint-expired" and maps like any other stage.
 							const failure = evidence
 								? evidence.kind === "workflow"
 									? { message: evidence.message, code: evidence.stage }
@@ -1241,7 +1504,16 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					}>;
 				});
 			},
+		};
+		// Non-enumerable and symbol-keyed: invisible to enumeration, JSON, and
+		// spread, reachable only by holders of `workflowHostBridge`.
+		Object.defineProperty(contextMembers, workflowHostBridge, {
+			value: hostBridge,
+			enumerable: false,
+			writable: false,
+			configurable: false,
 		});
+		const context: WorkflowContext<TInput> = Object.freeze(contextMembers);
 
 		let returned: unknown;
 		try {
@@ -1249,36 +1521,45 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			await barrierTail;
 			await effectTail;
 		} catch (error) {
-			const failed = await state();
-			if (
-				failed.status === "created" ||
-				failed.status === "running" ||
-				failed.status === "waiting" ||
-				failed.status === "finalizing"
-			) {
-				await journal.append("run-status-changed", {
-					from: failed.status,
-					to: "failed",
-					reason: "Static workflow source execution failed.",
-				});
+			if (error instanceof StaticWorkflowParkSignal || parked) {
+				// Parking is not a failure: the run stays `waiting` and resumes
+				// when driven again after a decision.
+				await effectTail.catch(() => undefined);
+				return park(
+					error instanceof StaticWorkflowParkSignal
+						? error.pendingCheckpoints
+						: [],
+				);
 			}
-			throw new StaticWorkflowRuntimeError(
-				"execution",
-				"Static workflow source execution failed.",
-				{ cause: error },
-			);
+			// D9: a dynamic VM failure carries its own exact reason; every other
+			// source failure keeps the fixed static reason.
+			const reason = sourceFailureReason(error);
+			const failed = await state();
+			if (isFailable(failed.status)) {
+				// `-> failed` fails closed on an open checkpoint (spec C1).
+				await cancelOpenWorkflowCheckpoints(
+					journal,
+					CHECKPOINT_RUN_ENDING_REASON,
+				);
+				await failRun(failed.status, reason);
+			}
+			throw new StaticWorkflowRuntimeError("execution", reason, {
+				cause: error,
+			});
 		}
+		if (parked) return parked;
 		if (effectOrdinal < expectedEffects.length) {
 			throw new StaticWorkflowRuntimeError(
 				"materialization",
 				"Workflow omitted a persisted phase or log effect during replay.",
 			);
 		}
-		let value: unknown;
+		let finalTarget: TaskHandle<unknown> | undefined;
+		let resolveValue: () => Promise<unknown>;
 		if (isTaskHandle(returned)) {
-			await prepareBarrier("final", [returned])();
-			await driveFinalGraph();
-			value = await loadTaskResult(returned.ref.taskId);
+			const handle = returned;
+			finalTarget = handle;
+			resolveValue = () => loadTaskResult(handle.ref.taskId);
 		} else if (isArtifactHandle(returned)) {
 			const handle = handles.get(returned.ref.producerTaskId);
 			if (!handle) {
@@ -1287,9 +1568,8 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					"Workflow returned an unknown artifact handle.",
 				);
 			}
-			await prepareBarrier("final", [handle])();
-			await driveFinalGraph();
-			value = await loadTaskResult(handle.ref.taskId);
+			finalTarget = handle;
+			resolveValue = () => loadTaskResult(handle.ref.taskId);
 		} else if (isHandoffHandle(returned)) {
 			// The descriptor is the run output; the patch bytes never are.
 			const handle = handles.get(returned.ref.producerTaskId);
@@ -1299,36 +1579,63 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					"Workflow returned an unknown handoff handle.",
 				);
 			}
-			await prepareBarrier("final", [handle])();
+			finalTarget = handle;
+			resolveValue = async () => {
+				const descriptor = await loadTaskHandoff(handle.ref.taskId);
+				if (descriptor === undefined) {
+					throw new StaticWorkflowRuntimeError(
+						"finalization",
+						"Workflow returned the handoff of a task that captured none.",
+					);
+				}
+				return descriptor;
+			};
+		} else {
+			finalTarget = undefined;
+			resolveValue = async () => returned;
+		}
+		try {
+			await prepareBarrier("final", finalTarget ? [finalTarget] : [])();
 			await driveFinalGraph();
-			const descriptor = await loadTaskHandoff(handle.ref.taskId);
-			if (descriptor === undefined) {
-				throw new StaticWorkflowRuntimeError(
-					"finalization",
-					"Workflow returned the handoff of a task that captured none.",
+		} catch (error) {
+			// The final graph may park on a checkpoint the source never awaited.
+			if (error instanceof StaticWorkflowParkSignal) {
+				return park(error.pendingCheckpoints);
+			}
+			// A required task that did not complete, or a scheduler failure that
+			// made progress before failing, must still end the run durably: the
+			// finalizer's own `-> failed` may have lost the race against a
+			// concurrently driving lane, so this path is the fail-closed backstop.
+			const failed = await state();
+			if (isFailable(failed.status)) {
+				// `-> failed` fails closed on an open checkpoint (spec C1).
+				await cancelOpenWorkflowCheckpoints(
+					journal,
+					CHECKPOINT_RUN_ENDING_REASON,
+				);
+				await failRun(
+					failed.status,
+					error instanceof StaticWorkflowRuntimeError
+						? error.message
+						: FINAL_GRAPH_FAILURE_REASON,
 				);
 			}
-			value = descriptor;
-		} else {
-			await prepareBarrier("final", [])();
-			await driveFinalGraph();
-			value = returned;
+			throw error;
 		}
+		const value = await resolveValue();
 		try {
 			return await finish(value);
 		} catch (error) {
+			if (error instanceof StaticWorkflowParkSignal) {
+				return park(error.pendingCheckpoints);
+			}
 			const failed = await state();
-			if (
-				failed.status === "created" ||
-				failed.status === "running" ||
-				failed.status === "waiting" ||
-				failed.status === "finalizing"
-			) {
-				await journal.append("run-status-changed", {
-					from: failed.status,
-					to: "failed",
-					reason: "Workflow output finalization failed.",
-				});
+			if (isFailable(failed.status)) {
+				await cancelOpenWorkflowCheckpoints(
+					journal,
+					CHECKPOINT_RUN_ENDING_REASON,
+				);
+				await failRun(failed.status, "Workflow output finalization failed.");
 			}
 			throw error;
 		}
