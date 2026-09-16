@@ -546,25 +546,19 @@ describe("operator resume", () => {
 				}),
 			);
 			await bounded(service.resume(runId, REASON), "resume");
-			const outcome = await bounded(service.wait(runId), "wait").then(
-				(view) => ({ view }),
-				(error: unknown) => ({ error }),
-			);
-			if (!("error" in outcome)) {
-				throw new Error(`wait resolved ${JSON.stringify(outcome.view)}`);
-			}
-			const messages: string[] = [];
-			for (
-				let cause: unknown = outcome.error;
-				cause instanceof Error;
-				cause = cause.cause
-			) {
-				messages.push(`${cause.name}: ${cause.message}`);
-			}
-			expect(messages).toContain(
-				"WorkflowSchedulerError: Operator re-attempt receipt is already completed; an interrupted task re-enters running only through an active or queued attempt.",
-			);
-			expect(messages.join("\n")).not.toMatch(/lifecycle|transition/i);
+			// The drive fails closed: the run ends `failed` durably and the
+			// refusal is its recorded reason, never a lifecycle error.
+			const view = await bounded(service.wait(runId), "wait");
+			expect(view.status).toBe("failed");
+			const logs = await service.logs(runId);
+			const runEntries = logs.entries.filter((entry) => entry.kind === "run");
+			expect(runEntries.at(-1)).toMatchObject({
+				kind: "run",
+				status: "failed",
+				reason:
+					"Operator re-attempt receipt is already completed; an interrupted task re-enters running only through an active or queued attempt.",
+			});
+			expect(JSON.stringify(logs)).not.toMatch(/lifecycle|transition/i);
 
 			// The refusal happened before any task transition: the task is still
 			// interrupted with its receipted attempt, and nothing was finalized.
