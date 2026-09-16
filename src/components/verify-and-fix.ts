@@ -29,10 +29,9 @@ import { WorkflowComponentError } from "./errors.js";
  * `verifyAndFix` — a bounded verify-then-fix loop over one implementer's
  * worktree handoff, unrolled at declaration into named tasks.
  *
- * Pattern: **A bounded loop with a barrier per round**
- * (`skills/workflow-authoring/SKILL.md`, the "Patterns" section added by
- * W3-SKILL; the rules it encodes are "Barriers and replay", "`after` versus
- * `inputs`" and "Budgets and admission" today).
+ * Pattern: `skills/workflow-authoring/SKILL.md` § "A bounded loop with a
+ * barrier per round". The rules it encodes live under "Barriers and replay",
+ * "`after` versus `inputs`" and "Budgets and admission".
  *
  * Lowering, and nothing else:
  *

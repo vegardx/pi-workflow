@@ -15,9 +15,9 @@ import { WorkflowComponentError } from "./errors.js";
 /**
  * `forEach` — one worker per item, keyed by a caller-supplied stable id.
  *
- * Pattern: **Fan-out over a stable id** (`skills/workflow-authoring/SKILL.md`,
- * the "Patterns" section added by W3-SKILL; the rules it encodes are "Keys,
- * namespaces, and handles" and "Barriers and replay" today).
+ * Pattern: `skills/workflow-authoring/SKILL.md` § "Fan-out over a stable id".
+ * The rules it encodes live under "Keys, namespaces, and handles" and
+ * "Barriers and replay".
  *
  * Lowering: exactly one `ctx.fanOut(namespace, items, { key, task })`. After
  * materialization the declarations are indistinguishable from the hand-written

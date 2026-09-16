@@ -25,10 +25,10 @@ import {
  * `reviewFanOut` — one read-only reviewer per lens over one reviewed subject,
  * a deterministic merge of what came back, and an optional synthesis reducer.
  *
- * Pattern: **Review fan-out with a degrading synthesis**
- * (`skills/workflow-authoring/SKILL.md`, the "Patterns" section added by
- * W3-SKILL; the rules it encodes are "Keys, namespaces, and handles",
- * "`after` versus `inputs`" and "Failure semantics for authors" today).
+ * Pattern: `skills/workflow-authoring/SKILL.md` § "Review fan-out with lens
+ * diversity and a degrading synthesis". The rules it encodes live under "Keys,
+ * namespaces, and handles", "`after` versus `inputs`" and "Failure semantics
+ * for authors".
  *
  * Lowering, and nothing else:
  *

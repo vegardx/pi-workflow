@@ -5,10 +5,9 @@ import { type Static, Type } from "typebox";
  * every workflow, and the deterministic rails that merge a fan-out of them
  * into one verdict.
  *
- * Pattern: **A reviewed subject reports findings, not prose**
- * (`skills/workflow-authoring/SKILL.md`, the "Patterns" section added by
- * W3-SKILL; the rules it encodes live today under "Agent requests" and
- * "Barriers and replay").
+ * Pattern: `skills/workflow-authoring/SKILL.md` § "A reviewed subject reports
+ * findings, not prose". The rules it encodes live under "Agent requests" and
+ * "Barriers and replay".
  *
  * Nothing here touches `ctx`. These are pure functions over JSON values, so
  * they are legal on either side of a barrier and identical on replay: the

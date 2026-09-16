@@ -7,10 +7,11 @@
  * nothing in the runtime**. That is what keeps the freeze intact while the
  * library evolves.
  *
- * Each component's doc comment names the pattern in
- * `skills/workflow-authoring/SKILL.md` that it encodes. **The patterns are the
- * primary artifact; a component is their executable form.** Read the pattern
- * first: a definition that declares the same primitives by hand is equally
+ * Each component's doc comment names the pattern it encodes by its exact
+ * heading in `skills/workflow-authoring/SKILL.md` § "Patterns", and
+ * `test/skill-examples.test.ts` fails a pointer that names no such heading.
+ * **The patterns are the primary artifact; a component is their executable
+ * form.** Read the pattern first: a definition that declares the same primitives by hand is equally
  * correct, and a component that cannot express a graph is not a reason to
  * bend the graph.
  *
