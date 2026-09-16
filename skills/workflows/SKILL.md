@@ -39,6 +39,7 @@ source of truth; a project may ship more.
 | `plan-to-ship` | `{plan, planDigest, effort}` | `{approved, shipped, deliverables[], reviews[], receipt}` — parks on the `approve-plan` and `ship` checkpoints, and never pushes, merges, or applies anything |
 | `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
 | `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict, findings, notes?}` — the blind plan reviewer, one read-only agent, no gate |
+| `deep-research` | `{question, depth, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |
 
 A host embedding this package may start an allowlisted builtin **headlessly**,
 without a model turn, through the service provider's `runBuiltin`. The
