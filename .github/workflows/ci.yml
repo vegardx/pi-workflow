@@ -16,7 +16,13 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Two consecutive runs with every suite green were cancelled at 15 minutes
+    # (34970590645 on main, 35068121561 on PR #46) after the tmpfs change; the
+    # heavy suites alone take 200-300 s each on the runner (scheduler 292 s,
+    # service 209 s, worktree-handoff 207 s) and `npm run check` also runs
+    # biome, tsc, build and the pack check. This is a job budget, not a test
+    # timeout; per-test bounds stay at 60 s.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
