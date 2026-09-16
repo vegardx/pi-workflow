@@ -12,7 +12,7 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. The runtime contract is revision 18 with the feature flags
+views. Version 1.0.0; runtime contract revision 18 with the feature flags
 `checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
 and it requires pi-subagent contract revision 6 (`handoffExport: true`). The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
@@ -58,6 +58,48 @@ incrementally across explicit result barriers.
 `pi-workflow` owns orchestration. It does not spawn private child runtimes or
 own publication, push, pull-request, merge, release, or deployment policy.
 
+## Stability
+
+`@vegardx/pi-workflow` 1.0.0 freezes four surfaces: the authoring API
+(`defineWorkflow`, `defineSupportTask`, `WorkflowContext`, the handle and
+request types), the service API (`createWorkflowService`,
+`WorkflowServiceOptions`, every `WorkflowService` method and the views it
+returns), the contract layer (the revision-18 schemas, constants, and
+compatibility predicates), and the extension entry (the default export of
+`@vegardx/pi-workflow/extension`, the fourteen `WORKFLOW_TOOL_DECLARATIONS`
+tools, the `/workflow` grammar, the `pi-workflow` widget, and the `alt+w`
+inspector). A breaking change to any of them is a new major version; adding
+an export, an optional option or view field, a tool, or a `/workflow`
+subcommand is a minor version; see
+[Contracts](docs/contracts.md#public-api-and-stability) for the rule and
+[CHANGELOG.md](CHANGELOG.md) for the record.
+
+Import from the package root for anything that declares a shape or drives
+the two APIs:
+
+```ts
+import { createWorkflowService, defineWorkflow } from "@vegardx/pi-workflow";
+```
+
+The engine (reducer, scheduler, executors, static runtime, materializer,
+registry discovery, stores, projections, predicates, identity derivations,
+and the dynamic VM host) lives at `@vegardx/pi-workflow/runtime`. That
+subpath is exported but **not frozen**: its names may change in any minor
+release, no name is exported from both entries, and the import gate refuses
+it from a workflow definition. Embedders that import it accept that cost:
+
+```ts
+import { WorkflowRunJournal, reduceWorkflowEvents } from "@vegardx/pi-workflow/runtime";
+```
+
+`@vegardx/pi-workflow/package.json` is exported so an embedder can read the
+installed `version` without knowing the install path
+(`import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })`).
+Deep `dist/` paths are not exported. The exact root and runtime export lists
+are pinned in `test/fixtures/public-api/root-exports.json` and
+`runtime-exports.json`; the pack check and `test/public-api.test.ts` fail
+when the package deviates from them.
+
 ## Documentation
 
 - [Glossary](docs/glossary.md)
@@ -72,7 +114,9 @@ own publication, push, pull-request, merge, release, or deployment policy.
 - [Research source ledger](docs/research-sources.md)
 - [Roadmap](docs/roadmap.md)
 - [Compatibility matrix](docs/compatibility.md)
+- [Changelog](CHANGELOG.md)
 - [Workflow authoring skill](skills/workflow-authoring/SKILL.md)
+- [1.0.0 qualification](docs/qualification.md)
 - [macOS arm64 Phase 1 qualification](docs/qualification/macos-arm64-phase1.md)
 - [macOS arm64 artifact pipeline qualification](docs/qualification/macos-arm64-artifact-pipeline.md)
 - [macOS arm64 bounded parallel qualification](docs/qualification/macos-arm64-parallel.md)
@@ -214,10 +258,12 @@ pass the matching `helper.registration(execute)` objects to
 persisted descriptor against that constructor registry by exact implementation
 identity, runs the implementation in the host process without a subagent,
 model, VM, or worktree, and commits the output as a workflow-owned artifact.
-The public entry points are `createWorkflowSupportTaskExecutor`,
-`supportRegistrationIdentity`, `deriveSupportImplementationIdentitySha256`,
-`SupportTaskExecutionRecordSchema`, and `SupportTaskTerminalEvidenceSchema`;
-see [Contracts](docs/contracts.md#support-task-execution).
+The root exports are `defineSupportTask`, `SupportTaskExecutionRecordSchema`,
+and `SupportTaskTerminalEvidenceSchema`; the engine pieces
+`createWorkflowSupportTaskExecutor`, `supportRegistrationIdentity`, and
+`deriveSupportImplementationIdentitySha256` are exported from
+`@vegardx/pi-workflow/runtime`; see
+[Contracts](docs/contracts.md#support-task-execution).
 
 ## Nested workflows
 
@@ -271,12 +317,12 @@ reserves the child's declared budget, caps the child's deadline at its own,
 records the injected artifact identities in the child's run record, and
 imports the child's verified output as a parent-owned artifact before the task
 completes. Depth is bounded at 0 through 3, a run may declare at most 64
-workflow tasks, and recursion along the ancestor chain is rejected. The public
-entry points are `createWorkflowNestedRunExecutor`,
-`deriveNestedWorkflowRunId`, `NestedWorkflowTaskSpecSchema`,
+workflow tasks, and recursion along the ancestor chain is rejected. The root
+exports are `NestedWorkflowTaskSpecSchema`,
 `NestedWorkflowInputArtifactsSchema`, `NestedWorkflowTerminalEvidenceSchema`,
-and `MAX_NESTED_WORKFLOW_DEPTH`; see
-[Contracts](docs/contracts.md#nested-workflow-tasks).
+and `MAX_NESTED_WORKFLOW_DEPTH`; `createWorkflowNestedRunExecutor` and
+`deriveNestedWorkflowRunId` are exported from `@vegardx/pi-workflow/runtime`;
+see [Contracts](docs/contracts.md#nested-workflow-tasks).
 
 ## Retry and resume
 
@@ -311,10 +357,10 @@ bounded by the workflow deadline and stop signal, and declines the attempt when
 either arrives first. Failures classified `never` or `reconcile` are never
 retried by policy; an operator may still re-execute the task through
 `workflow_retry` or, for an interrupted child classified `resume`, re-attempt
-it through `workflow_resume`. The public entry points
-are `createWorkflowTaskRetrier`, `AgentRetryPolicySchema`,
-`AgentResumePolicySchema`, `settledAgentUsage`, and
-`currentSubagentAttemptId`; see
+it through `workflow_resume`. The root exports are `AgentRetryPolicySchema`
+and `AgentResumePolicySchema`; `createWorkflowTaskRetrier`,
+`settledAgentUsage`, and `currentSubagentAttemptId` are exported from
+`@vegardx/pi-workflow/runtime`; see
 [Contracts](docs/contracts.md#retry-and-resume-attempts).
 
 ## Worktree tasks and handoffs
@@ -354,11 +400,12 @@ reconciliation; a completed child that captured no handoff completes under
 descriptor, not patch bytes) or returned as the workflow output;
 `WorkflowService.exportHandoff(runId, taskId)` returns the descriptor and the
 verified bytes. The workflow never applies, pushes, merges, or checks out a
-handoff. The public entry points are `WorkflowHandoffDescriptorSchema`,
+handoff. The root exports are `WorkflowHandoffDescriptorSchema`,
 `HandoffPolicySchema`, `AgentWorkspaceRequestSchema`,
 `SubagentHandoffEvidenceSchema`, `MAX_WORKFLOW_HANDOFF_BYTES`,
-`WORKFLOW_HANDOFF_FORMAT_SHA256`, `deriveSubagentSettlementEvidence`,
-`deriveWorkflowHandoffDescriptor`, and `isHandoffHandle`; see
+`WORKFLOW_HANDOFF_FORMAT_SHA256`, and `isHandoffHandle`;
+`deriveSubagentSettlementEvidence` and `deriveWorkflowHandoffDescriptor` are
+exported from `@vegardx/pi-workflow/runtime`; see
 [Contracts](docs/contracts.md#worktree-tasks-and-handoffs).
 
 ## Checkpoints
@@ -399,12 +446,13 @@ and `createWorkflowService({ checkpoints: { headless: true } })` decides
 reaches `failed`, `interrupted`, or `cleanup-blocked` with an open checkpoint:
 `stop`, the deadline, and every failure path cancel it first
 ("Workflow run ended before the checkpoint was decided."). A checkpoint can
-never be a finalizer. The public entry points are
-`CheckpointTaskSpecSchema`, `CheckpointTaskRequestSchema`,
-`CheckpointTerminalEvidenceSchema`, `createWorkflowCheckpointTaskExecutor`,
+never be a finalizer. The root exports are `CheckpointTaskSpecSchema`,
+`CheckpointTaskRequestSchema`, `CheckpointTerminalEvidenceSchema`,
+`WorkflowDecisionRecordSchema`, `WorkflowDecideOptionsSchema`, and
+`deriveDecisionRecordSha256`; `createWorkflowCheckpointTaskExecutor`,
 `CHECKPOINT_RUN_ENDING_REASON`, `WorkflowDecisionRecordStore`,
-`WorkflowDecisionRecordSchema`, `deriveCheckpointEffectSha256`,
-`isStaticWorkflowParked`, and `WorkflowDecideOptionsSchema`; see
+`deriveCheckpointEffectSha256`, and `isStaticWorkflowParked` are exported
+from `@vegardx/pi-workflow/runtime`; see
 [Contracts](docs/contracts.md#checkpoints) and
 [Persistence and recovery](docs/persistence.md#decision-records).
 
@@ -454,13 +502,21 @@ the run `failed` with an exact reason (for example
 appends "Dynamic workflow source execution failed: <name>: <message>". A
 dynamic run is always a root run: it may declare nested static children, but
 a dynamic definition is never a nested child, and `service.list()` stays
-static-only (`service.proposals()` lists proposals). The public entry points
-are `createDynamicWorkflowDefinition`, `createDynamicDiscoveredWorkflow`,
+static-only (`service.proposals()` lists proposals). The root exports are
+`DynamicWorkflowProposalRecordSchema`, `DynamicWorkflowProposalViewSchema`,
+`SourceApprovalDecisionBindingSchema`, and the intake, approval, reference,
+transformer, and watchdog constants (`DYNAMIC_REF_PREFIX`,
+`DYNAMIC_REF_PATTERN`, `DYNAMIC_HOST_API_REVISION`, `DYNAMIC_TRANSFORMER`,
+`DYNAMIC_TRANSFORMER_VERSION`, `DYNAMIC_BUILTIN_MODULES`,
+`DYNAMIC_VM_BOOT_TIMEOUT_MS`, `DYNAMIC_VM_COMPUTE_TIMEOUT_MS`,
+`DYNAMIC_VM_MANIFEST_TIMEOUT_MS`, `MAX_DYNAMIC_SOURCE_BYTES`,
+`MAX_DYNAMIC_MANIFEST_BYTES`, `MAX_DYNAMIC_PROPOSALS`,
+`MAX_DYNAMIC_PROPOSAL_RECORD_BYTES`, `MAX_DYNAMIC_APPROVAL_RENDER_BYTES`);
+`createDynamicWorkflowDefinition`, `createDynamicDiscoveredWorkflow`,
 `extractDynamicWorkflowManifest`, `deriveDynamicHostApiSha256`,
 `deriveDynamicImportPolicySha256`, `deriveDynamicDefinitionIdentitySha256`,
-`DynamicWorkflowExecutionError`, `DynamicWorkflowProposalRecordSchema`,
-`DynamicWorkflowProposalViewSchema`, `SourceApprovalDecisionBindingSchema`,
-and the `DYNAMIC_*` constants; see
+`DynamicWorkflowExecutionError`, and the VM and RPC bounds are exported from
+`@vegardx/pi-workflow/runtime`; see
 [Contracts](docs/contracts.md#dynamic-workflows),
 [Persistence and recovery](docs/persistence.md#dynamic-proposals-and-run-definition-copies),
 and [Authority model](docs/authority.md#dynamic-workflow-host-api).
@@ -476,8 +532,9 @@ each as a new task-execution generation with a fresh preflight, operation ID,
 and subagent or child run. Abandoned declarations stay as history and are never
 scheduled, a later declaration may readopt an abandoned key with an unchanged
 request, result artifacts bind to the execution that produced them, and every
-generation's settled usage counts against the budget. The public entry points
-are `invalidationClosure` and `MAX_TASK_EXECUTION_GENERATIONS`; the run view
+generation's settled usage counts against the budget. The root export is
+`MAX_TASK_EXECUTION_GENERATIONS`; `invalidationClosure` is exported from
+`@vegardx/pi-workflow/runtime`; the run view
 lists every task with its generation and abandoned marker, and there is no Pi
 tool for invalidation yet; see
 [Contracts](docs/contracts.md#durable-effect-interpretation).

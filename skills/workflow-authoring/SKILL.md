@@ -5,8 +5,8 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` contract revision 18. Every rule
-below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
+This skill covers `@vegardx/pi-workflow` 1.0.0, contract revision 18. Every
+rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
 launch contracts). Quoted strings are the exact messages the runtime throws.
@@ -139,9 +139,13 @@ rejected. `import()`, `require()`, and `import x = require()` fail with
 "dynamic workflow imports are not supported by contract revision 18",
 "dynamic imports and CommonJS require are not supported by contract revision
 18", and "TypeScript import assignment is not supported by contract revision
-18". Import-like text inside strings and comments is fine. The loader
-resolves imports from the definition file's location, so `@vegardx/pi-workflow`
-and `typebox` must be resolvable there.
+18". Import-like text inside strings and comments is fine. The
+`@vegardx/pi-workflow/runtime` subpath is not importable from a definition and
+is not part of the authoring API; definitions import from
+`@vegardx/pi-workflow` only, and the gate refuses the subpath with
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 18".
+The loader resolves imports from the definition file's location, so
+`@vegardx/pi-workflow` and `typebox` must be resolvable there.
 
 The module must default-export the definition; otherwise "workflow module has
 no valid default definition". An exception during module evaluation surfaces

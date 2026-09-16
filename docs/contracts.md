@@ -1,10 +1,12 @@
 # Contracts
 
-This document defines the target contracts. The exported static definition,
+This document defines the target contracts. The static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
-nested run executor, artifact store, and static source runtime implement the
-current subset; later interfaces remain design contracts. The runtime contract
-is revision 18 and declares the feature flags `supportTaskExecution: true`,
+nested run executor, artifact store, and static source runtime (exported from
+`@vegardx/pi-workflow/runtime`) implement the current subset; later
+interfaces remain design contracts. Version 1.0.0 freezes the public surfaces
+listed under [Public API and stability](#public-api-and-stability). The
+runtime contract is revision 18 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
@@ -13,6 +15,61 @@ is revision 18 and declares the feature flags `supportTaskExecution: true`,
 revision: checkpoints and dynamic workflows, both described in this document.
 It requires pi-subagent contract revision 6, whose features include
 `handoffExport: true`.
+
+## Public API and stability
+
+`@vegardx/pi-workflow` 1.0.0 freezes four surfaces. A frozen surface is a set
+of exported names whose TypeScript shape (parameters, return types, property
+names, union members, schema fields) and documented behaviour do not change
+except as described here.
+
+1. **Authoring API** — `defineWorkflow`, `defineSupportTask`,
+   `WorkflowContext` and every handle and request type, and the handle
+   predicates, imported from `@vegardx/pi-workflow`.
+2. **Service API** — `createWorkflowService`, `WorkflowServiceOptions`, every
+   method of `WorkflowService`, `WorkflowServiceError`, and the view types and
+   schemas those methods return.
+3. **Contract layer** — the revision-18 request, spec, record, evidence,
+   event, projection, and view schemas, the identity and bound constants,
+   `WORKFLOW_RUNTIME_CONTRACT`, and the compatibility predicates.
+4. **Extension entry** — the default export of
+   `@vegardx/pi-workflow/extension`, the fourteen tools of
+   `WORKFLOW_TOOL_DECLARATIONS` with their parameter and output schemas, the
+   `/workflow` command grammar, the `pi-workflow` widget, and the `alt+w`
+   inspector.
+
+The complete list of frozen exports is
+`test/fixtures/public-api/root-exports.json`; the pack check and
+`test/public-api.test.ts` fail when the package deviates from it.
+
+**Semantic versioning.** A change that removes or renames a frozen export,
+narrows an accepted input, widens a returned union, removes a schema field,
+changes a fixed message a caller is told to match, or changes a tool's name,
+parameters, or output schema is breaking and requires a new major version.
+Adding an export, an optional option, an optional view field, a tool, or a
+`/workflow` subcommand is a minor version. Everything else is a patch.
+
+**Runtime entry.** `@vegardx/pi-workflow/runtime` exports the engine:
+reducer, scheduler, executors, static runtime, materializer, registry
+discovery, stores, projections, predicates, identity derivations, and the
+dynamic VM host. It is not frozen: its exports may change in any minor release
+without notice beyond this document and the changelog. Authored workflows
+cannot import it (the import gate accepts exactly `@vegardx/pi-workflow`,
+`typebox`, and registered support modules). Embedders that import it accept
+that cost.
+
+**Contract revision.** `WORKFLOW_CONTRACT_REVISION` is independent of the
+package version. It increments when persisted records, event data, identity
+derivations, the pi-subagent handshake, or the dynamic host API change in a
+way an older revision must refuse; each revision is described in this document
+and in `docs/compatibility.md`. A revision bump is a minor version when it
+only adds optional fields, feature flags, or event types and every frozen
+shape still type-checks; it is a major version when it changes or removes any
+frozen shape. A frozen schema may therefore gain optional fields under a new
+revision; it may not lose or retype fields under the same major.
+
+**Persisted state.** Runs journaled by revision 18 are readable by every 1.x
+release; a release that cannot read them is a major.
 
 ## Static definition
 
@@ -109,7 +166,10 @@ helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
 `typebox`, and the module specifiers present in the constructor-injected
 support registry; every other static import, dynamic import, CommonJS require,
 and TypeScript import assignment is rejected rather than silently omitted from
-source identity. A support implementation is identified by its registered
+source identity. The `@vegardx/pi-workflow/runtime` subpath is not an allowed
+import: the gate matches specifiers exactly, so a definition that imports it
+fails with
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 18". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,
 with the same messages, applies to dynamic workflow source proposed through
@@ -647,7 +707,8 @@ changed requests for an existing on-path key always fail.
 
 Explicit invalidation (`task-invalidated`) names a cause task and carries the
 exact closure and the exact abandoned epochs; the reducer recomputes both with
-the exported `invalidationClosure` helper and rejects any other set. The
+the runtime's `invalidationClosure` helper (`@vegardx/pi-workflow/runtime`)
+and rejects any other set. The
 closure is the cause plus every transitive dependent through `after` and
 `inputs`, abandoned tasks included, minus tasks already `invalidated`; the
 cause itself must not already be `invalidated`. The exposing barrier is the
@@ -1442,10 +1503,13 @@ interface WorkflowService {
 	stop(runId: WorkflowRunId, reason: string): Promise<WorkflowServiceRunView>;
 	decide(runId: WorkflowRunId, taskId: string, options: { decision: unknown; approver: string; reason?: string }): Promise<WorkflowServiceRunView>;
 	invalidate(runId: WorkflowRunId, causeTaskId: string, reason: string): Promise<WorkflowServiceRunView>;
+	retry(runId: WorkflowRunId, taskId: WorkflowTaskId, reason: string): Promise<WorkflowServiceRunView>;
+	resume(runId: WorkflowRunId, reason: string, options?: WorkflowResumeOptions): Promise<WorkflowServiceRunView>;
 	reconcile(runId: WorkflowRunId, options?: { taskId?: WorkflowTaskId }): Promise<WorkflowServiceReconcileView>;
 	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
 	inspect(runId: WorkflowRunId, options?: WorkflowInspectOptions): Promise<WorkflowRunInspection>;
 	logs(runId: WorkflowRunId, options?: WorkflowLogOptions): Promise<WorkflowLogPage>;
+	previewInvalidation(runId: WorkflowRunId, causeTaskId: WorkflowTaskId): Promise<WorkflowInvalidationPreview>;
 	subscribe(listener: (observation: WorkflowRunObservation) => void): () => void;
 	exportHandoff(runId: WorkflowRunId, taskId: string): Promise<WorkflowServiceHandoffExport>;
 	propose(source: string, options: { proposer: DynamicWorkflowProposer }): Promise<DynamicWorkflowProposalView>;
@@ -1455,6 +1519,10 @@ interface WorkflowService {
 	shutdown(): Promise<void>;
 }
 ```
+
+This interface is frozen at 1.0.0: the twenty-three methods above are the
+`WorkflowService` of `src/service.ts`, pinned by name in
+`test/public-api.test.ts` and by signature in `test/public-api.types.ts`.
 
 `validate` and `run` accept a `dynamic:<sha256>` reference for an approved
 dynamic proposal in addition to a static definition name or path; `list()`

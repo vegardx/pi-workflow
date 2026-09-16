@@ -149,8 +149,13 @@ Delivered:
   `pi.skills`, with loader-tested examples;
 - compatibility matrix (`compatibility.json`, `docs/compatibility.md`) checked
   against the manifest, the contract constants, CI, and the packed
-  pi-subagent contract.
-
+  pi-subagent contract;
+- 1.0.0 API freeze: root entry frozen (authoring, service, contract layer,
+  extension entry), engine moved to `@vegardx/pi-workflow/runtime`
+  (unfrozen), `./package.json` exported, export lists pinned by test and pack
+  check (`test/fixtures/public-api/`), semver and contract-revision rule in
+  `docs/contracts.md` "Public API and stability", `CHANGELOG.md`, and the
+  manual qualification note (`docs/qualification.md`);
 - the human-only `/workflow decide <run-prefix> <task-key> <json>
   [reason…]` command over `WorkflowService.decide` (interactive session and
   explicit confirm required; approver: the Pi session identity, never an
@@ -161,13 +166,19 @@ Delivered:
   explicit `ctx.ui.confirm`, approver `{ kind: "human", via, sessionId? }`);
   there is no model-callable approve, reject, or proposals tool, by design.
 
-Remaining:
+Remaining after 1.0 (additive under the freeze: each is a minor version
+unless it changes a frozen shape):
 
 - a handoff export tool over `WorkflowService.exportHandoff` that writes the
   handoff bytes to a caller path; deferred because a tool result of up to
   16 MiB returned to a model is wrong and writing caller paths needs its own
   authority text;
-- first stable static-workflow API.
+- a by-hand host run of worktree agent tasks with handoff import and of the
+  other paths `docs/qualification.md` lists as unit-tested only for 1.0.0;
+- a decision path for a checkpoint inside a nested child run (`decide`
+  refuses nested runs today; see `docs/qualification.md`);
+- the Phase 3 remainder above (richer logs and reconciliation controls,
+  retention and pin coordination).
 
 ## Phase 5 — dynamic workflows
 
