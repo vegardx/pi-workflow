@@ -48,7 +48,7 @@ import {
 	type WorkflowNestedRunProvider,
 } from "./nested-run-executor.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { hasOpenCheckpoint, reduceWorkflowEvents } from "./reducer.js";
+import { hasOpenCheckpoint } from "./reducer.js";
 import { isReopenedTask, OPERATOR_RESUME_REASON } from "./run-actions.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 import type { SupportTaskRegistration } from "./support.js";
@@ -424,7 +424,7 @@ export function createWorkflowSequentialScheduler(
 	}
 
 	async function state(): Promise<WorkflowStateProjection> {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	async function append(input: WorkflowEventInput): Promise<void> {

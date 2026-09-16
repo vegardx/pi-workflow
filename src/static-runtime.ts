@@ -405,7 +405,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 	}
 
 	async function state() {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	/** Statuses from which a failure site may append `-> failed`. */

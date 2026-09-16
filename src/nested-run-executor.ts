@@ -37,7 +37,6 @@ import {
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
@@ -309,7 +308,7 @@ export function createWorkflowNestedRunExecutor(
 	}
 
 	async function state(): Promise<WorkflowStateProjection> {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	/**

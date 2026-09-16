@@ -145,13 +145,13 @@ function nestedSchedulerFor(
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
-			let current = reduceWorkflowEvents(await journal.readEvents());
+			let current = await journal.readState();
 			if (current.status === "created" || current.status === "waiting") {
 				await journal.append("run-status-changed", {
 					from: current.status,
 					to: "running",
 				});
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const task = Object.values(current.tasks)
 				.sort(
@@ -327,7 +327,7 @@ function mixedSchedulerFor(
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
-			const current = reduceWorkflowEvents(await journal.readEvents());
+			const current = await journal.readState();
 			const task = Object.values(current.tasks)
 				.sort(
 					(left, right) =>
@@ -387,7 +387,7 @@ async function nestedDeclarationFailure(
 	);
 	expect(error).toBeInstanceOf(StaticWorkflowRuntimeError);
 	expect((error as StaticWorkflowRuntimeError).stage).toBe("execution");
-	const state = reduceWorkflowEvents(await journal.readEvents());
+	const state = await journal.readState();
 	expect(Object.keys(state.tasks)).toHaveLength(0);
 	expect(state.status).toBe("failed");
 	return (error as StaticWorkflowRuntimeError).cause;
@@ -465,13 +465,13 @@ function schedulerFor(
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
-			let current = reduceWorkflowEvents(await journal.readEvents());
+			let current = await journal.readState();
 			if (current.status === "created" || current.status === "waiting") {
 				await journal.append("run-status-changed", {
 					from: current.status,
 					to: "running",
 				});
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const task = Object.values(current.tasks)
 				.sort(
@@ -820,7 +820,7 @@ describe("static workflow runtime nested workflows", () => {
 			status: "completed",
 			value: { answer: "from child" },
 		});
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const tasks = Object.values(state.tasks).sort(
 			(left, right) =>
 				left.task.materializationSequence - right.task.materializationSequence,
@@ -920,7 +920,7 @@ describe("static workflow runtime nested workflows", () => {
 			nesting: await nesting(),
 		});
 		await expect(runtime.drive()).rejects.toBe(sentinel);
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const tasks = Object.values(state.tasks).sort(
 			(left, right) =>
 				left.task.materializationSequence - right.task.materializationSequence,
@@ -1036,7 +1036,7 @@ describe("static workflow runtime nested workflows", () => {
 			value: { answer: "from child" },
 		});
 		expect(scheduler.calls).toBe(1);
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const tasks = Object.values(state.tasks);
 		expect(tasks).toHaveLength(1);
 		const task = tasks[0]?.task;
@@ -1172,7 +1172,7 @@ describe("static workflow runtime", () => {
 		expect(calls).toBe(2);
 		expect(scheduler.calls).toBe(0);
 		expect(
-			reduceWorkflowEvents(await journal.readEvents()).effects.map((effect) => [
+			(await journal.readState()).effects.map((effect) => [
 				effect.kind,
 				effect.value,
 			]),
@@ -1230,7 +1230,7 @@ describe("static workflow runtime", () => {
 			value: { answer: "done" },
 		});
 		expect(scheduler.calls).toBe(2);
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(state.barriers.map((barrier) => barrier.kind)).toEqual([
 			"result",
 			"final",
@@ -1293,7 +1293,7 @@ describe("static workflow runtime", () => {
 		await expect(runtime.drive()).resolves.toMatchObject({
 			value: { values: ["alpha", "beta"] },
 		});
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(state.barriers[0]?.kind).toBe("settled");
 		expect(
 			Object.values(state.tasks).map((task) => task.task.namespace),
@@ -1341,9 +1341,9 @@ describe("static workflow runtime", () => {
 		await expect(runtime.drive()).resolves.toMatchObject({
 			value: { answer: "approved" },
 		});
-		const tasks = Object.values(
-			reduceWorkflowEvents(await journal.readEvents()).tasks,
-		).map((task) => task.task);
+		const tasks = Object.values((await journal.readState()).tasks).map(
+			(task) => task.task,
+		);
 		expect(tasks.map((task) => task.namespace)).toEqual([
 			["analysis"],
 			["analysis"],
@@ -1392,9 +1392,7 @@ describe("static workflow runtime", () => {
 			await expect(runtime.drive()).rejects.toMatchObject({
 				stage: "execution",
 			});
-			expect(
-				Object.keys(reduceWorkflowEvents(await journal.readEvents()).tasks),
-			).toHaveLength(0);
+			expect(Object.keys((await journal.readState()).tasks)).toHaveLength(0);
 		}
 	});
 
@@ -1441,7 +1439,7 @@ describe("static workflow runtime", () => {
 		await expect(runtime.drive()).resolves.toMatchObject({
 			value: { answer: "combined" },
 		});
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const aggregate = Object.values(state.tasks).find(
 			(task) => task.task.spec.key === "aggregate",
 		)?.task;
@@ -1489,9 +1487,7 @@ describe("static workflow runtime", () => {
 			await expect(runtime.drive()).rejects.toMatchObject({
 				stage: "execution",
 			});
-			expect(
-				Object.keys(reduceWorkflowEvents(await journal.readEvents()).tasks),
-			).toHaveLength(0);
+			expect(Object.keys((await journal.readState()).tasks)).toHaveLength(0);
 		}
 	});
 
@@ -1529,7 +1525,7 @@ describe("static workflow runtime", () => {
 			scheduler: schedulerFor(journal, artifacts, new Map()),
 		});
 		await expect(runtime.drive()).rejects.toMatchObject({ stage: "execution" });
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(Object.keys(state.tasks)).toHaveLength(0);
 		expect(state.status).toBe("failed");
 	});
@@ -1541,13 +1537,13 @@ describe("static workflow runtime", () => {
 			concurrency: 1,
 			stopSignal: new AbortController().signal,
 			async drive() {
-				let current = reduceWorkflowEvents(await journal.readEvents());
+				let current = await journal.readState();
 				if (current.status === "created") {
 					await journal.append("run-status-changed", {
 						from: "created",
 						to: "running",
 					});
-					current = reduceWorkflowEvents(await journal.readEvents());
+					current = await journal.readState();
 				}
 				const task = Object.values(current.tasks)[0];
 				if (!task || task.status === "failed") {
@@ -1681,7 +1677,7 @@ describe("static workflow runtime", () => {
 			),
 		});
 		await runtime.drive();
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(state.barriers[0]?.sequence).toBeLessThan(
 			state.effects[0]?.sequence ?? 0,
 		);
@@ -1725,10 +1721,9 @@ describe("static workflow runtime", () => {
 			value: { answer: "complete" },
 		});
 		expect(scheduler.calls).toBe(1);
-		expect(
-			Object.values(reduceWorkflowEvents(await journal.readEvents()).tasks)[0]
-				?.status,
-		).toBe("completed");
+		expect(Object.values((await journal.readState()).tasks)[0]?.status).toBe(
+			"completed",
+		);
 	});
 
 	it("rejects declaration drift on source re-execution", async () => {
@@ -1947,9 +1942,7 @@ describe("static workflow runtime", () => {
 			status: "completed",
 			value: { answer: "yes" },
 		});
-		expect(reduceWorkflowEvents(await journal.readEvents()).status).toBe(
-			"completed",
-		);
+		expect((await journal.readState()).status).toBe("completed");
 	});
 
 	it("serializes concurrent source drives", async () => {
@@ -2054,13 +2047,13 @@ function worktreeSchedulerFor(
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
-			let current = reduceWorkflowEvents(await journal.readEvents());
+			let current = await journal.readState();
 			if (current.status === "created" || current.status === "waiting") {
 				await journal.append("run-status-changed", {
 					from: current.status,
 					to: "running",
 				});
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const task = Object.values(current.tasks)
 				.filter((candidate) => candidate.abandoned !== true)
@@ -2320,7 +2313,7 @@ describe("static workflow runtime worktree handoffs", () => {
 			value: { commit: handoffCommitFor(1) },
 		});
 		expect(scheduler.calls).toBe(1);
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const taskId = writerTaskId(state);
 		const executionId = deriveTaskExecutionId(journal.runId, taskId, 1);
 		const [handoff] = handoffArtifactsOf(state, taskId);
@@ -2418,7 +2411,7 @@ describe("static workflow runtime worktree handoffs", () => {
 		});
 		const result = completed(await runtime.drive());
 		expect(result.status).toBe("completed");
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const taskId = writerTaskId(state);
 		const [handoff] = handoffArtifactsOf(state, taskId);
 		if (!handoff) throw new Error("missing handoff artifact");
@@ -2524,7 +2517,7 @@ describe("static workflow runtime worktree handoffs", () => {
 			"commit-mismatch",
 		);
 		// The journal is valid; only the workflow-owned bytes fail identity.
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(state.tasks[writerTaskId(state)]?.status).toBe("completed");
 		expect(state.outputArtifactId).toBeUndefined();
 	});
@@ -2562,7 +2555,7 @@ describe("static workflow runtime worktree handoffs", () => {
 			value: { answer: "written" },
 		});
 		expect(handoffCalls).toBe(1);
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		const [handoff] = handoffArtifactsOf(state, writerTaskId(state));
 		if (!handoff) throw new Error("missing handoff artifact");
 		const blob = path.join(artifacts.root, `${handoff.sha256}.patch`);
@@ -2598,7 +2591,7 @@ describe("static workflow runtime worktree handoffs", () => {
 		expect(scheduler.calls).toBe(1);
 		expect(handoffCalls).toBe(1);
 		// The durable journal is untouched by the failed replays.
-		const after = reduceWorkflowEvents(await journal.readEvents());
+		const after = await journal.readState();
 		expect(after.tasks[writerTaskId(after)]?.status).toBe("completed");
 		expect(after.status).toBe("completed");
 		expect(after.lastSequence).toBe(state.lastSequence);
@@ -2644,7 +2637,7 @@ describe("static workflow runtime worktree handoffs", () => {
 			stage: "execution",
 			message: "Static workflow source execution failed.",
 		});
-		let state = reduceWorkflowEvents(await journal.readEvents());
+		let state = await journal.readState();
 		expect(state.status).toBe("failed");
 		const taskId = writerTaskId(state);
 		const gen1 = deriveTaskExecutionId(journal.runId, taskId, 1);
@@ -2681,7 +2674,7 @@ describe("static workflow runtime worktree handoffs", () => {
 		});
 		expect(scheduler.calls).toBe(2);
 
-		state = reduceWorkflowEvents(await journal.readEvents());
+		state = await journal.readState();
 		expect(state.tasks[taskId]).toMatchObject({
 			status: "completed",
 			currentExecutionId: gen2,
@@ -2767,13 +2760,13 @@ function blockingScheduler(
 		calls: 0,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
-			let current = reduceWorkflowEvents(await journal.readEvents());
+			let current = await journal.readState();
 			if (current.status === "created") {
 				await journal.append("run-status-changed", {
 					from: "created",
 					to: "running",
 				});
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const work = Object.values(current.tasks).find(
 				(task) => task.task.spec.kind === "agent",
@@ -2832,13 +2825,13 @@ function checkpointSchedulerFor(
 		decisions,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
 			scheduler.calls += 1;
-			let current = reduceWorkflowEvents(await journal.readEvents());
+			let current = await journal.readState();
 			if (current.status === "created" || current.status === "waiting") {
 				await journal.append("run-status-changed", {
 					from: current.status,
 					to: "running",
 				});
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const task = Object.values(current.tasks)
 				.filter((candidate) => candidate.committed)
@@ -2898,7 +2891,7 @@ function checkpointSchedulerFor(
 					reason: CHECKPOINT_AWAITS_REASON,
 				});
 				if (options.throwAfterRequest) throw options.throwAfterRequest;
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const decision = decisions.get(spec.key);
 			if (decision === undefined) {
@@ -3080,7 +3073,7 @@ describe("static workflow runtime checkpoints", () => {
 		const parked = await runtime.drive();
 		expect(isStaticWorkflowParked(parked)).toBe(true);
 		expect(scheduler.calls).toBe(1);
-		const parkedState = reduceWorkflowEvents(await journal.readEvents());
+		const parkedState = await journal.readState();
 		expect(Object.values(parkedState.tasks).map((task) => task.status)).toEqual(
 			["waiting"],
 		);
@@ -3155,7 +3148,7 @@ describe("static workflow runtime checkpoints", () => {
 			stage: "result",
 			message: "Workflow task artifact no longer matches its output schema.",
 		});
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(state.status).toBe("failed");
 		expect(Object.values(state.tasks)[0]?.status).toBe("completed");
 	});
@@ -3248,7 +3241,7 @@ describe("static workflow runtime checkpoints", () => {
 		expect(
 			isStaticWorkflowParked(parked) && parked.pendingCheckpoints,
 		).toHaveLength(1);
-		const state = reduceWorkflowEvents(await journal.readEvents());
+		const state = await journal.readState();
 		expect(state.status).toBe("waiting");
 		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["settled"]);
 
@@ -3281,7 +3274,7 @@ describe("static workflow runtime checkpoints", () => {
 		});
 		const parked = await runtime.drive();
 		expect(isStaticWorkflowParked(parked)).toBe(true);
-		let state = reduceWorkflowEvents(await journal.readEvents());
+		let state = await journal.readState();
 		expect(state.status).toBe("waiting");
 		expect(state.barriers.map((barrier) => barrier.kind)).toEqual(["final"]);
 		expect(state.outputArtifactId).toBeUndefined();
@@ -3292,7 +3285,7 @@ describe("static workflow runtime checkpoints", () => {
 			status: "completed",
 			value: { proceed: true },
 		});
-		state = reduceWorkflowEvents(await journal.readEvents());
+		state = await journal.readState();
 		expect(state.status).toBe("completed");
 		expect(await artifacts.readJson(completed(finished).artifact)).toEqual({
 			proceed: true,
@@ -3385,13 +3378,13 @@ describe("static workflow runtime checkpoints", () => {
 			calls: 0,
 			async drive(): Promise<WorkflowSchedulerOutcome> {
 				scheduler.calls += 1;
-				let current = reduceWorkflowEvents(await journal.readEvents());
+				let current = await journal.readState();
 				if (current.status === "created" || current.status === "waiting") {
 					await journal.append("run-status-changed", {
 						from: current.status,
 						to: "running",
 					});
-					current = reduceWorkflowEvents(await journal.readEvents());
+					current = await journal.readState();
 				}
 				const tasks = Object.values(current.tasks);
 				const approve = tasks.find(
@@ -3642,9 +3635,7 @@ describe("static workflow runtime checkpoints", () => {
 			stage: "validation",
 			message: "Workflow checkpoint request is invalid.",
 		});
-		expect(reduceWorkflowEvents(await journal.readEvents()).status).toBe(
-			"failed",
-		);
+		expect((await journal.readState()).status).toBe("failed");
 	});
 
 	it("runs a gated task only after the checkpoint is decided", async () => {
@@ -3679,7 +3670,7 @@ describe("static workflow runtime checkpoints", () => {
 		});
 		const parked = await runtime.drive();
 		expect(isStaticWorkflowParked(parked)).toBe(true);
-		let state = reduceWorkflowEvents(await journal.readEvents());
+		let state = await journal.readState();
 		expect(Object.values(state.tasks).map((task) => task.status)).toEqual([
 			"waiting",
 			"pending",
@@ -3689,7 +3680,7 @@ describe("static workflow runtime checkpoints", () => {
 			status: "completed",
 			value: { answer: "written" },
 		});
-		state = reduceWorkflowEvents(await journal.readEvents());
+		state = await journal.readState();
 		expect(Object.values(state.tasks).map((task) => task.status)).toEqual([
 			"completed",
 			"completed",
@@ -3777,9 +3768,9 @@ describe("static workflow runtime host bridge", () => {
 		expect(Symbol.for("pi-workflow-host-bridge")).not.toBe(workflowHostBridge);
 
 		// The bridge lowers exactly like `fanOut`: same namespace, same task identity.
-		const bridged = Object.values(
-			reduceWorkflowEvents(await journal.readEvents()).tasks,
-		).map((task) => task.task);
+		const bridged = Object.values((await journal.readState()).tasks).map(
+			(task) => task.task,
+		);
 		const fanned = await fixture();
 		const viaFanOut = createStaticWorkflowRuntime({
 			definition: defineWorkflow({

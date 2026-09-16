@@ -37,7 +37,6 @@ import {
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 
 export type WorkflowTaskLaunchOutcome =
@@ -245,7 +244,7 @@ function agentOperationId(
 async function state(
 	journal: WorkflowRunJournal,
 ): Promise<WorkflowStateProjection> {
-	return reduceWorkflowEvents(await journal.readEvents());
+	return journal.readState();
 }
 
 async function append(

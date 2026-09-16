@@ -89,6 +89,11 @@ pi-subagent preflight grants are intentionally process-local.
 `run.json` is a bounded typed projection rebuilt from those events and is returned only when it exactly equals reduction of the
 complete current journal. A valid older snapshot is ignored until rebuilt.
 Unknown, divergent, corrupt, or future-version records fail closed.
+Within a process the journal remembers its last reduction only as a resume
+point: every state read still parses the complete journal file, and the
+reducer extends the remembered projection only when the file begins with
+exactly the events it covered, otherwise it replays from the start. Nothing
+about that resume point is persisted or trusted over the events.
 
 Each run has a single-writer lease backed by an OS-owned localhost listener.
 Every workflow state write and workflow-owned effect carries its monotonic

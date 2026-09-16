@@ -36,7 +36,6 @@ import {
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
 import {
 	type SupportTaskRegistration,
 	supportRegistrationIdentity,
@@ -252,7 +251,7 @@ export function createWorkflowSupportTaskExecutor(
 	}
 
 	async function state(): Promise<WorkflowStateProjection> {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	async function append(input: WorkflowEventInput): Promise<void> {

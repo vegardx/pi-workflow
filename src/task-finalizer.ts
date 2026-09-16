@@ -45,7 +45,7 @@ import {
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { hasOpenCheckpoint, reduceWorkflowEvents } from "./reducer.js";
+import { hasOpenCheckpoint } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -216,7 +216,7 @@ export function createWorkflowTaskFinalizer(
 	}
 
 	async function state(): Promise<WorkflowStateProjection> {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	async function append(input: WorkflowEventInput): Promise<void> {

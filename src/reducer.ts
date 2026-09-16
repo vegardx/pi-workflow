@@ -3077,9 +3077,44 @@ function assertValidState(
 	}
 }
 
+/** A projection together with the exact events it was reduced from. */
+export interface WorkflowReduction {
+	readonly events: readonly WorkflowJournalEvent[];
+	readonly projection: WorkflowStateProjection;
+}
+
 export function reduceWorkflowEvents(
 	events: readonly WorkflowJournalEvent[],
 ): WorkflowStateProjection {
+	return reduceWorkflowEventsFrom(undefined, events);
+}
+
+/**
+ * `reduceWorkflowEvents(events)` that resumes from `base` when `base.events`
+ * is a deep-equal prefix of `events`: the base projection is extended by the
+ * events that follow instead of replaying the prefix. The result is the same
+ * either way, provided `base.projection` is the reduction of `base.events`;
+ * the journal keeps its last reduction so appends and state reads cost the
+ * events since it rather than the whole journal again. A base that is not a
+ * prefix (longer, or differing in any record) is ignored and the events
+ * reduce from the start. Nothing here is persisted or trusted over the
+ * events themselves.
+ */
+export function reduceWorkflowEventsFrom(
+	base: WorkflowReduction | undefined,
+	events: readonly WorkflowJournalEvent[],
+): WorkflowStateProjection {
+	if (base && isEventPrefix(base.events, events)) {
+		if (base.events.length === events.length) return base.projection;
+		const last = base.events[base.events.length - 1];
+		if (!last) throw new Error("unreachable: empty reduction prefix");
+		return extendState(
+			structuredClone(base.projection),
+			events,
+			base.events.length,
+			Date.parse(last.timestamp),
+		);
+	}
 	const first = events[0];
 	if (!first)
 		throw new WorkflowEventReductionError("missing run-created event", 0);
@@ -3107,11 +3142,34 @@ export function reduceWorkflowEvents(
 		barriers: [],
 	};
 	assertValidState(state, 1);
-	let previousTimestamp = Date.parse(first.timestamp);
+	const previousTimestamp = Date.parse(first.timestamp);
 	if (!Number.isFinite(previousTimestamp)) {
 		fail("first event timestamp is invalid", 1);
 	}
-	for (const event of events.slice(1)) {
+	return extendState(state, events, 1, previousTimestamp);
+}
+
+/** Whether `prefix` is non-empty and every record equals its counterpart in `events`. */
+function isEventPrefix(
+	prefix: readonly WorkflowJournalEvent[],
+	events: readonly WorkflowJournalEvent[],
+): boolean {
+	return (
+		prefix.length > 0 &&
+		prefix.length <= events.length &&
+		prefix.every((event, index) => isDeepStrictEqual(event, events[index]))
+	);
+}
+
+/** Applies `events[start..]` to a mutable `state` and returns it frozen. */
+function extendState(
+	state: WorkflowStateProjection,
+	events: readonly WorkflowJournalEvent[],
+	start: number,
+	lastTimestamp: number,
+): WorkflowStateProjection {
+	let previousTimestamp = lastTimestamp;
+	for (const event of events.slice(start)) {
 		const timestamp = Date.parse(event.timestamp);
 		if (
 			event.runId !== state.runId ||
@@ -3141,6 +3199,5 @@ export function reduceWorkflowEvents(
 export async function rebuildWorkflowSnapshot(
 	journal: WorkflowRunJournal,
 ): Promise<WorkflowRunSnapshot> {
-	const state = reduceWorkflowEvents(await journal.readEvents());
-	return journal.writeSnapshot(state);
+	return journal.writeSnapshot(await journal.readState());
 }
