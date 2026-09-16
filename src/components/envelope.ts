@@ -5,7 +5,8 @@ import { WorkflowComponentError } from "./errors.js";
 /**
  * `envelope` — the effort dial, as one constant table.
  *
- * Pattern: `skills/workflow-authoring/SKILL.md`, "Budgets and admission" (the
+ * Pattern: `skills/workflow-authoring/SKILL.md` § "An envelope: effort as one
+ * table". The rules it encodes live under "Budgets and admission" (the
  * scheduler admits a task only while `settled + reserved + candidate <=
  * meta.budget`, and a run with a token budget needs `limits.totalTokens` on
  * every agent task) and "Barriers and replay" (everything declared before a

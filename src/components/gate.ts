@@ -20,11 +20,12 @@ import { WorkflowComponentError } from "./errors.js";
 /**
  * `gate` — one human decision, lowered to `ctx.checkpoint`.
  *
- * Pattern: `skills/workflow-authoring/SKILL.md`, "Checkpoints" (the three
- * rules a gate must obey: the prompt is a question, `inputs` carry everything
- * the decider must read, and the decision schema stays small and flat). The
- * patterns are the primary artifact; this function is their executable form
- * and adds no runtime behaviour of its own.
+ * Pattern: `skills/workflow-authoring/SKILL.md` § "A gate: one human
+ * decision". The rules it encodes live under "Checkpoints": the prompt is a
+ * question, `inputs` carry everything the decider must read, and the decision
+ * schema stays small and flat. The patterns are the primary artifact; this
+ * function is their executable form and adds no runtime behaviour of its
+ * own.
  *
  * Replay law 1 (keys are a pure function of namespace, declaration ordinal and
  * a caller-supplied stable id): `gate` passes `key` through untouched and
