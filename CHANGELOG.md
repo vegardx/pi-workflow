@@ -9,7 +9,7 @@ surfaces described in
 ## Unreleased
 
 Additive since 2.0.0, so the next release is the minor 2.1.0: two new entry
-points — a component library and a service-provider seam — two more builtin
+points — a component library and a service-provider seam — three more builtin
 workflows built out of the first, two short reference skills, a model-routing
 port the host installs, a lease-free read of a settled run's output and of a
 checkpoint's decided value, and a support-task wiring fix in the extension. No
@@ -58,6 +58,26 @@ and the required pi-subagent contract stays revision 7 (`0.11.0`).
   that structurally against the shipped file. The verdict is recomputed from the
   findings' severities and the more severe of the two is recorded, so a blocking
   finding can never be filed under `ready`.
+- **The builtin `deep-research` workflow.** `workflows/deep-research.workflow.ts`
+  and the `researcher` agent template it names. In: `{ question, depth,
+  sources? }`, where `depth` is also the thread count — a caller who names no
+  sources gets a fixed per-depth table of two, three or five angles, and a
+  caller who names up to 16 `{ id, kind: "path" | "url" | "note", ref | text }`
+  gets one thread per source. Out: `{ answer, claims, crossChecks, coverage }`.
+  The graph is `forEach` twice around two `ctx.settled` barriers: independent
+  read-only threads, then one cross-check per reporting thread briefed as a
+  *different* thread and run on the other model family, so no thread marks its
+  own homework, then one reducer that writes the answer and nothing else. The
+  claims and the cross-checks are computed on a deterministic rail, and
+  **nothing is de-duplicated** — unlike a review, two threads reaching the same
+  claim from different material is corroboration rather than noise. A dead
+  thread subtracts a coverage row instead of failing the run, and a run that
+  also loses its reducer still records every claim under a deterministic
+  `answer` saying what is missing. No checkpoint, no worktree and no handoff,
+  which `headlessBuiltinViolations` asserts structurally — the definition is
+  deliberately **not** on `BUILTIN_HEADLESS_WORKFLOWS`, because being
+  structurally headless and having a reason to start without a model turn are
+  different things.
 - **`CompiledStageDocumentSchema`,** exported from
   `@vegardx/pi-workflow/components`. The compiled stage document — `{
   deliverables: [{ id, stages }], effort, gates }` over the `implement`,

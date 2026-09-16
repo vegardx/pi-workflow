@@ -569,6 +569,62 @@ same reason the workflow's is: pi-subagent unions the agent's scopes with the
 request's, so a `project` scope in the template would hand the blind reviewer
 `AGENTS.md`.
 
+### `deep-research`
+
+`workflows/deep-research.workflow.ts` answers one question from several
+independent threads at once, has each thread's claims checked by a *different*
+thread, and reports the answer with what it rests on.
+
+```text
+workflow_run { ref: "deep-research", input: { question, depth, sources? } }
+```
+
+`question` is up to 2048 characters. `depth` is `cheap`, `standard`, or `deep`
+— here it is also the **thread count**, because a caller who names no `sources`
+gets a fixed per-depth table of angles: two (`evidence`, `counterpoint`), three
+(`+ context`), or five (`+ alternatives`, `risk`). A caller who does name
+`sources` gets one thread per source instead, up to 16 of
+`{ id, kind: "path" | "url" | "note", ref | text, title? }`.
+
+The stages, in order:
+
+1. **`research/<thread>`** — one read-only `researcher` per thread, all at
+   once, `disposition: "optional"`. The task key *is* the source id, or the
+   angle id from the table `depth` selected: `forEach`'s `idOf`, reading a
+   field the input schema requires in both cases. Reordering the sources moves
+   the tasks without renaming any of them.
+2. **the barrier and the claim merge** — `ctx.settled`, then a deterministic
+   rail: the claims of the threads that reported, in (thread, claim) order,
+   with ids made unique and the tail past 64 dropped. Nothing is
+   de-duplicated. Two threads reaching the same claim from different material
+   is corroboration, which is the strongest thing a fan-out produces; a review
+   collapses a repeated finding, and research must not.
+3. **`cross-check/<thread>`** — one checker per reporting thread that still
+   owns a claim, briefed as the *next* reporting thread, so **no thread marks
+   its own homework**. It runs on the other model family for the same reason,
+   and reports `agrees` plus a note per claim it was handed. A row naming a
+   claim the checker was never given is dropped rather than reported.
+4. **`synthesis`** — a reducer over the threads that reported. It writes the
+   `answer` and nothing else: the claims and the cross-checks are already
+   computed and are not the model's to change.
+
+The output is `{ answer, claims, crossChecks, coverage }`. A claim is
+`{ id, statement, support: [{ source, quote? }], confidence }`; a cross-check
+is `{ claim, by, agrees, note? }`; `coverage` carries one row per declared
+thread — `{ thread, reported, claims?, checkedBy? }` — so an answer that lost a
+point of view reads as two threads of five rather than as a whole one. A run
+whose reducer never ran still records every claim and a deterministic `answer`
+saying what is missing. **There is no gate, no worktree and no handoff**:
+the graph is structurally headless, which `headlessBuiltinViolations` asserts
+against the shipped file — though `deep-research` is deliberately *not* on
+`BUILTIN_HEADLESS_WORKFLOWS`, since only the blind review has a reason to start
+without a model turn.
+
+Its one agent template is `researcher`, and it covers all three kinds of task.
+It has `read`, `grep`, `find` and `ls` and **no network tool**, so a `url`
+source is a citation a thread may cite and may not fetch; a claim resting on
+one is reported at low confidence rather than dressed up as read.
+
 ## Component library
 
 `@vegardx/pi-workflow/components` is the library the builtins are assembled
