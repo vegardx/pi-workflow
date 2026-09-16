@@ -33,6 +33,10 @@
 			"types": "./dist/components/index.d.ts",
 			"import": "./dist/components/index.js"
 		},
+		"./service-provider": {
+			"types": "./dist/service-provider.d.ts",
+			"import": "./dist/service-provider.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"pi": {
