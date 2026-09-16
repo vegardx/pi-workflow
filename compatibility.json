@@ -2,14 +2,14 @@
 	"schema": "pi-workflow-compatibility",
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
-		"version": "1.1.0",
-		"contractRevision": 18,
+		"version": "2.0.0",
+		"contractRevision": 19,
 		"features": {
 			"checkpoints": true,
 			"dynamicWorkflows": true
 		},
 		"api": {
-			"version": "1.1.0",
+			"version": "2.0.0",
 			"frozenSurfaces": ["authoring", "service", "contract", "extension"],
 			"entryPoints": {
 				".": "frozen",
@@ -21,8 +21,8 @@
 	},
 	"piSubagent": {
 		"package": "@vegardx/pi-subagent",
-		"peerRange": "0.10.0",
-		"contractRevision": 6,
+		"peerRange": "0.11.0",
+		"contractRevision": 7,
 		"requiredFeatures": {
 			"nativeSessionBackend": true,
 			"gondolinSandbox": true,
@@ -41,12 +41,14 @@
 			"deepReconciliation": true,
 			"worktrees": true,
 			"handoffExport": true,
+			"vmMemoryCeiling": true,
+			"workspaceBudgetRefusal": true,
 			"publicNetworkEgress": true,
 			"explicitResources": true,
 			"ambientExtensionsControl": true,
 			"hostBrokeredTools": true
 		},
-		"ciCommit": "172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf"
+		"ciCommit": "e42cd28f2f970872a1a460079efc1a992c0bd7c9"
 	},
 	"pi": {
 		"packages": [
@@ -89,7 +91,7 @@
 			"platform": "linux-x64",
 			"status": "build-only",
 			"node": "24.16.0",
-			"piSubagentCommit": "172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf",
+			"piSubagentCommit": "e42cd28f2f970872a1a460079efc1a992c0bd7c9",
 			"evidence": [".github/workflows/ci.yml"]
 		}
 	]
