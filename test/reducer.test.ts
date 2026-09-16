@@ -14,6 +14,7 @@ import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
 import {
 	invalidationClosure,
 	reduceWorkflowEvents,
+	reduceWorkflowEventsFrom,
 	WorkflowEventReductionError,
 } from "../src/reducer.js";
 
@@ -455,6 +456,64 @@ describe("workflow event reducer", () => {
 			throw new Error("missing task declaration");
 		}
 		expect(Object.isFrozen(declaration.data.task)).toBe(false);
+	});
+
+	it("extends a base reduction only over a deep-equal event prefix", () => {
+		const running = {
+			type: "run-status-changed",
+			data: { from: "created", to: "running" },
+		} as const;
+		const events = journalEvents([
+			runCreated(),
+			running,
+			{ type: "run-status-changed", data: { from: "running", to: "waiting" } },
+			{ type: "run-status-changed", data: { from: "waiting", to: "running" } },
+		]);
+		const prefix = events.slice(0, 2);
+		const full = reduceWorkflowEvents(events);
+		const base = { events: prefix, projection: reduceWorkflowEvents(prefix) };
+		expect(reduceWorkflowEventsFrom(undefined, events)).toEqual(full);
+		const extended = reduceWorkflowEventsFrom(base, events);
+		expect(extended).toEqual(full);
+		expect(Object.isFrozen(extended)).toBe(true);
+		expect(base.projection).toMatchObject({
+			status: "running",
+			lastSequence: 2,
+		});
+		expect(reduceWorkflowEventsFrom(base, prefix)).toBe(base.projection);
+		// The base projection stands for its prefix: a marked one shows through
+		// when the prefix matches (the prefix is not replayed) and is ignored
+		// when any covered record differs or the base reaches past the events.
+		const marker = "c".repeat(64);
+		const marked = { ...base.projection, inputSha256: marker };
+		expect(
+			reduceWorkflowEventsFrom({ events: prefix, projection: marked }, events)
+				.inputSha256,
+		).toBe(marker);
+		const tampered = journalEvents([
+			runCreated(),
+			{ ...running, data: { ...running.data, reason: "tampered" } },
+		]);
+		expect(
+			reduceWorkflowEventsFrom({ events: tampered, projection: marked }, events)
+				.inputSha256,
+		).toBe(inputSha256);
+		expect(
+			reduceWorkflowEventsFrom({ events, projection: marked }, prefix)
+				.inputSha256,
+		).toBe(inputSha256);
+		expect(
+			reduceWorkflowEventsFrom({ events: [], projection: marked }, events)
+				.inputSha256,
+		).toBe(inputSha256);
+		// The tail is validated exactly as a replay validates it.
+		const skipped = [...prefix, { ...events[2], sequence: 4 }];
+		expect(() => reduceWorkflowEvents(skipped as never)).toThrow(
+			WorkflowEventReductionError,
+		);
+		expect(() => reduceWorkflowEventsFrom(base, skipped as never)).toThrow(
+			WorkflowEventReductionError,
+		);
 	});
 
 	it("rejects attempt events on unknown executions", () => {

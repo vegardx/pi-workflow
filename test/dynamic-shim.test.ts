@@ -67,7 +67,6 @@ import {
 	acquireWorkflowRunLease,
 	type WorkflowRunLease,
 } from "../src/persistence/run-lease.js";
-import { reduceWorkflowEvents } from "../src/reducer.js";
 import { discoverWorkflows } from "../src/registry.js";
 import type {
 	WorkflowSchedulerOutcome,
@@ -1245,13 +1244,13 @@ function schedulerFor(
 		concurrency: 1,
 		stopSignal: new AbortController().signal,
 		async drive(): Promise<WorkflowSchedulerOutcome> {
-			let current = reduceWorkflowEvents(await journal.readEvents());
+			let current = await journal.readState();
 			if (current.status === "created" || current.status === "waiting") {
 				await journal.append("run-status-changed", {
 					from: current.status,
 					to: "running",
 				});
-				current = reduceWorkflowEvents(await journal.readEvents());
+				current = await journal.readState();
 			}
 			const task = Object.values(current.tasks)
 				.sort(
@@ -1578,11 +1577,12 @@ function ready<T>(value: T | undefined, label: string): T {
 describe("dynamic shim parity with the static loader", () => {
 	// Measured in isolation on an otherwise loaded 18-core machine: the
 	// registry load (jiti transpiling this checkout behind the package shim)
-	// takes about 3 s and each drive about 8 s for its 102 fsynced journal
-	// appends; driving both concurrently saved nothing, the fsyncs serialize.
-	// The single combined test (19 s) exceeded the 60 s budget under
-	// full-suite load, so the cold start is shared here and each drive is its
-	// own test with its own budget.
+	// takes about 3 s and each drive about 2.5 s for its 102 fsynced journal
+	// appends (8 s before the journal resumed its reduction from the last
+	// append; the shard-1 runner then timed the static drive out at 60 s).
+	// Driving both concurrently saves nothing, the fsyncs serialize, so the
+	// cold start is shared here and each drive is its own test with its own
+	// budget.
 	let viaRegistry: WorkflowDefinition | undefined;
 	let viaShim: WorkflowDefinition | undefined;
 	let reference: Driven | undefined;

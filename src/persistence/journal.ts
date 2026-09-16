@@ -19,6 +19,7 @@ import {
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
 } from "../events.js";
+import type { WorkflowReduction } from "../reducer.js";
 import {
 	WorkflowPersistenceCorruptionError,
 	type WorkflowRunLease,
@@ -98,6 +99,13 @@ type JournalCoordinator = {
 	sequence: number;
 	tail: Promise<void>;
 	uncertain: boolean;
+	/**
+	 * The last reduction of this journal's durable events: the resume point
+	 * for the next one, never a substitute for reading them. Every read still
+	 * parses the whole file and the reducer replays from the start unless the
+	 * file begins with exactly these events.
+	 */
+	reduction: WorkflowReduction | undefined;
 };
 
 const coordinators = new Map<string, JournalCoordinator>();
@@ -520,10 +528,17 @@ export class WorkflowRunJournal {
 						await handle.close();
 					}
 				}
+				let reduction: WorkflowReduction | undefined;
 				if (events.length > 0) {
-					const { reduceWorkflowEvents } = await import("../reducer.js");
+					const { reduceWorkflowEventsFrom } = await import("../reducer.js");
 					try {
-						reduceWorkflowEvents(events);
+						reduction = {
+							events,
+							projection: reduceWorkflowEventsFrom(
+								coordinator?.reduction,
+								events,
+							),
+						};
 					} catch (error) {
 						throw new WorkflowPersistenceCorruptionError(
 							"workflow journal violates run invariants",
@@ -548,9 +563,11 @@ export class WorkflowRunJournal {
 						sequence: events.length,
 						tail: Promise.resolve(),
 						uncertain: false,
+						reduction: undefined,
 					};
 					coordinators.set(key, coordinator);
 				}
+				coordinator.reduction = reduction;
 				const journal = new WorkflowRunJournal(
 					directory,
 					runId,
@@ -624,14 +641,17 @@ export class WorkflowRunJournal {
 				if (!Value.Check(WorkflowJournalEventSchema, roundTrip.value)) {
 					throw new Error("invalid JSON-roundtripped workflow journal event");
 				}
-				const existingEvents = await this.readEventsUncoordinated();
-				const { reduceWorkflowEvents } = await import("../reducer.js");
+				const events = [
+					...(await this.readEventsUncoordinated()),
+					roundTrip.value,
+				];
+				const { reduceWorkflowEventsFrom } = await import("../reducer.js");
 				let projected: WorkflowStateProjection;
 				try {
-					projected = reduceWorkflowEvents([
-						...existingEvents,
-						roundTrip.value,
-					]);
+					projected = reduceWorkflowEventsFrom(
+						this.coordinator.reduction,
+						events,
+					);
 				} catch (error) {
 					throw new Error("workflow journal event violates run invariants", {
 						cause: error,
@@ -677,6 +697,7 @@ export class WorkflowRunJournal {
 					throw error;
 				}
 				this.coordinator.sequence = event.sequence;
+				this.coordinator.reduction = { events, projection: projected };
 				const onAppended = this.onAppended;
 				if (onAppended) {
 					const notice: WorkflowJournalAppendNotice = Object.freeze({
@@ -732,15 +753,41 @@ export class WorkflowRunJournal {
 		});
 	}
 
+	/**
+	 * `reduceWorkflowEvents(await readEvents())`: the projection of every
+	 * durable event, read from the journal file in full each time. The
+	 * reduction resumes from the coordinator's last one when the file still
+	 * begins with exactly the events it covered, so a run's state reads cost
+	 * the events since that reduction rather than the whole journal.
+	 */
+	readState(): Promise<WorkflowStateProjection> {
+		return this.enqueue(async () => {
+			await this.lease.assertCurrent();
+			return this.reduceUncoordinated(await this.readEventsUncoordinated());
+		});
+	}
+
+	private async reduceUncoordinated(
+		events: readonly WorkflowJournalEvent[],
+	): Promise<WorkflowStateProjection> {
+		const { reduceWorkflowEventsFrom } = await import("../reducer.js");
+		const projection = reduceWorkflowEventsFrom(
+			this.coordinator.reduction,
+			events,
+		);
+		this.coordinator.reduction = { events, projection };
+		return projection;
+	}
+
 	writeSnapshot(state: WorkflowStateProjection): Promise<WorkflowRunSnapshot> {
 		return this.lease.withCurrent(() =>
 			this.enqueue(async () => {
 				if (!Value.Check(WorkflowStateProjectionSchema, state)) {
 					throw new Error("invalid workflow run snapshot state");
 				}
-				const events = await this.readEventsUncoordinated();
-				const { reduceWorkflowEvents } = await import("../reducer.js");
-				const rebuilt = reduceWorkflowEvents(events);
+				const rebuilt = await this.reduceUncoordinated(
+					await this.readEventsUncoordinated(),
+				);
 				if (
 					state.lastSequence !== this.coordinator.sequence ||
 					!isDeepStrictEqual(state, rebuilt)
@@ -829,10 +876,13 @@ export class WorkflowRunJournal {
 					"workflow run snapshot identity, sequence, or fencing mismatch",
 				);
 			}
-			const { reduceWorkflowEvents } = await import("../reducer.js");
+			const { reduceWorkflowEventsFrom } = await import("../reducer.js");
 			let rebuilt: WorkflowStateProjection;
 			try {
-				rebuilt = reduceWorkflowEvents(events.slice(0, snapshot.lastSequence));
+				rebuilt = reduceWorkflowEventsFrom(
+					this.coordinator.reduction,
+					events.slice(0, snapshot.lastSequence),
+				);
 			} catch (error) {
 				throw new WorkflowPersistenceCorruptionError(
 					"workflow run snapshot covers an invalid journal projection",

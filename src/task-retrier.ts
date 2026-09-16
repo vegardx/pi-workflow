@@ -14,7 +14,6 @@ import type {
 	WorkflowTaskProjection,
 } from "./events.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import { reduceWorkflowEvents } from "./reducer.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 
 export type WorkflowAttemptKind = "retry" | "resume";
@@ -141,7 +140,7 @@ export function createWorkflowTaskRetrier(
 	const chains = new Map<WorkflowTaskId, Promise<unknown>>();
 
 	async function state(): Promise<WorkflowStateProjection> {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	async function append(input: WorkflowEventInput): Promise<void> {

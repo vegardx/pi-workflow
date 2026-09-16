@@ -46,10 +46,7 @@ import {
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
-import {
-	isWorkflowReductionRejection,
-	reduceWorkflowEvents,
-} from "./reducer.js";
+import { isWorkflowReductionRejection } from "./reducer.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
@@ -354,7 +351,7 @@ export async function cancelOpenWorkflowCheckpoints(
 	reason: string,
 ): Promise<void> {
 	const read = async (): Promise<WorkflowStateProjection> =>
-		reduceWorkflowEvents(await journal.readEvents());
+		journal.readState();
 	let state = await read();
 	for (const task of pathCheckpoints(state)) {
 		const taskId = task.task.id;
@@ -460,7 +457,7 @@ export function createWorkflowCheckpointTaskExecutor(
 	}
 
 	async function state(): Promise<WorkflowStateProjection> {
-		return reduceWorkflowEvents(await journal.readEvents());
+		return journal.readState();
 	}
 
 	async function append(input: WorkflowEventInput): Promise<void> {

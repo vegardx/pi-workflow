@@ -8,7 +8,10 @@ import {
 	WorkflowPersistenceCorruptionError,
 	type WorkflowRunLease,
 } from "../src/persistence/run-lease.js";
-import { rebuildWorkflowSnapshot } from "../src/reducer.js";
+import {
+	rebuildWorkflowSnapshot,
+	reduceWorkflowEvents,
+} from "../src/reducer.js";
 
 function fixtureRoot(name: string): string {
 	return path.resolve(".pi", "test-journal", `${name}-${randomUUID()}`);
@@ -87,6 +90,47 @@ describe("workflow run journal", () => {
 		]);
 		expect(events.map((event) => event.sequence)).toEqual([1, 2]);
 		expect(await first.journal.readEvents()).toHaveLength(2);
+	});
+
+	it("reads the projection from the journal, resuming from its last reduction", async () => {
+		const root = fixtureRoot("state");
+		const { journal } = await openJournal(root, "workflow_state");
+		await expect(journal.readState()).rejects.toThrow(
+			"missing run-created event",
+		);
+		await journal.append("run-created", runCreated);
+		await journal.append("run-status-changed", {
+			from: "created",
+			to: "running",
+		});
+		const state = await journal.readState();
+		expect(state).toEqual(reduceWorkflowEvents(await journal.readEvents()));
+		expect(state).toMatchObject({ status: "running", lastSequence: 2 });
+		expect(Object.isFrozen(state)).toBe(true);
+		// An unchanged journal reads as the same reduction, not a replay.
+		expect(await journal.readState()).toBe(state);
+		await journal.append("run-status-changed", {
+			from: "running",
+			to: "waiting",
+		});
+		const next = await journal.readState();
+		expect(next).not.toBe(state);
+		expect(next).toMatchObject({ status: "waiting", lastSequence: 3 });
+		expect(next).toEqual(reduceWorkflowEvents(await journal.readEvents()));
+		expect(await journal.readState()).toBe(next);
+		// The file stays authoritative: a rewritten canonical record is what
+		// the next read projects, not the remembered reduction of the old one.
+		const lines = (await readFile(journal.journalPath, "utf8")).split("\n");
+		const created = JSON.parse(lines[0] ?? "") as {
+			data: { inputSha256: string };
+		};
+		created.data.inputSha256 = "c".repeat(64);
+		lines[0] = JSON.stringify(created);
+		await writeFile(journal.journalPath, lines.join("\n"));
+		const rewritten = await journal.readState();
+		expect(rewritten.inputSha256).toBe("c".repeat(64));
+		expect(rewritten).toMatchObject({ status: "waiting", lastSequence: 3 });
+		expect(rewritten).toEqual(reduceWorkflowEvents(await journal.readEvents()));
 	});
 
 	it("repairs one torn tail and rejects interior corruption", async () => {
