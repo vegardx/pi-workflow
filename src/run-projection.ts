@@ -24,6 +24,7 @@ import { WorkflowPersistenceCorruptionError } from "./persistence/run-lease.js";
 import { invalidationClosure } from "./reducer.js";
 import {
 	availableWorkflowRunActions,
+	pendingCheckpoints,
 	requiresAttention,
 	runActionFacts,
 	type WorkflowRunOwnership,
@@ -31,9 +32,11 @@ import {
 import type { WorkflowRunRecord } from "./run-record.js";
 import {
 	MAX_WORKFLOW_INSPECTION_ITEMS,
+	MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
 	type WorkflowArtifactView,
 	type WorkflowBarrierView,
 	type WorkflowBudgetView,
+	type WorkflowCheckpointTaskView,
 	type WorkflowEffectView,
 	type WorkflowExecutionAttemptView,
 	type WorkflowExecutionView,
@@ -41,6 +44,7 @@ import {
 	type WorkflowInvalidationPreview,
 	type WorkflowLogEntry,
 	type WorkflowLogPage,
+	type WorkflowPendingCheckpointView,
 	type WorkflowRunInspection,
 	type WorkflowRunSummary,
 	type WorkflowServiceTaskView,
@@ -110,6 +114,105 @@ function settlementView(
 export interface TaskViewOptions {
 	/** Include `dependsOn` and `inputs`; inspection only. */
 	readonly graph?: boolean;
+	/**
+	 * Cut checkpoint prompts longer than this many characters and mark them
+	 * `promptTruncated`; the lease-free inspection passes
+	 * `MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH`, artifact-backed views omit it.
+	 */
+	readonly promptLimit?: number;
+}
+
+/** A frozen deep copy of a persisted JSON value for a view. */
+function frozenJson<T>(value: T): T {
+	return Object.freeze(structuredClone(value));
+}
+
+/**
+ * The checkpoint facts of a checkpoint task: its request from the persisted
+ * spec, and its durable request and decision from the current execution's
+ * projection (C12 timestamps). Verified inputs and the decision value are
+ * artifact-backed and added by the service; the decision store is never read.
+ */
+function checkpointTaskView(
+	state: WorkflowStateProjection,
+	task: WorkflowTaskProjection,
+	promptLimit: number | undefined,
+): WorkflowCheckpointTaskView | undefined {
+	const spec = task.task.spec;
+	if (spec.kind !== "checkpoint") return undefined;
+	const execution = currentExecution(state, task);
+	const request = execution?.checkpointRequest;
+	const decision = execution?.checkpointDecision;
+	const truncated =
+		promptLimit !== undefined && spec.request.prompt.length > promptLimit;
+	return Object.freeze({
+		prompt: truncated
+			? spec.request.prompt.slice(0, promptLimit)
+			: spec.request.prompt,
+		...(truncated ? { promptTruncated: true as const } : {}),
+		schema: frozenJson(spec.request.schema),
+		headless: spec.request.headless,
+		...(spec.request.default === undefined
+			? {}
+			: { default: frozenJson(spec.request.default) }),
+		...(spec.request.timeoutMs === undefined
+			? {}
+			: { timeoutMs: spec.request.timeoutMs }),
+		...(request ? { requestedAt: request.requestedAt } : {}),
+		...(request?.expiresAt === undefined
+			? {}
+			: { expiresAt: request.expiresAt }),
+		...(decision
+			? {
+					decision: Object.freeze({
+						source: decision.source,
+						...(decision.decidedBy === undefined
+							? {}
+							: { decidedBy: decision.decidedBy }),
+						decidedAt: decision.decidedAt,
+						...(decision.reason === undefined
+							? {}
+							: { reason: decision.reason }),
+						sha256: decision.decisionSha256,
+					}),
+				}
+			: {}),
+	});
+}
+
+/**
+ * The run view's `pendingCheckpoints`: the tasks `pendingCheckpoints` (the
+ * `decide` predicate) selects, in materialization order, bounded to
+ * `MAX_WORKFLOW_INSPECTION_ITEMS`. Empty unless a checkpoint waits.
+ */
+export function pendingCheckpointViews(
+	state: WorkflowStateProjection,
+): readonly WorkflowPendingCheckpointView[] {
+	return Object.freeze(
+		pendingCheckpoints(state)
+			.slice(0, MAX_WORKFLOW_INSPECTION_ITEMS)
+			.flatMap((taskId) => {
+				const task = state.tasks[taskId];
+				const request = task
+					? currentExecution(state, task)?.checkpointRequest
+					: undefined;
+				if (!task || !request) return [];
+				const executionId = task.currentExecutionId;
+				if (executionId === undefined) return [];
+				return [
+					Object.freeze({
+						taskId,
+						namespace: Object.freeze([...task.task.namespace]),
+						key: task.task.spec.key,
+						executionId,
+						requestedAt: request.requestedAt,
+						...(request.expiresAt === undefined
+							? {}
+							: { expiresAt: request.expiresAt }),
+					}),
+				];
+			}),
+	);
 }
 
 export function isCompletedWorktreeTask(task: WorkflowTaskProjection): boolean {
@@ -169,6 +272,7 @@ export function taskViews(
 			const outcome: TaskExecutionOutcome | undefined =
 				execution?.terminal?.outcome;
 			const handoff = taskHandoffView(state, task);
+			const checkpoint = checkpointTaskView(state, task, options.promptLimit);
 			return Object.freeze({
 				id: task.task.id,
 				namespace: Object.freeze([...task.task.namespace]),
@@ -186,6 +290,7 @@ export function taskViews(
 				...(outcome ? { outcome } : {}),
 				...(task.abandoned === true ? { abandoned: true as const } : {}),
 				...(handoff === undefined ? {} : { handoff: Object.freeze(handoff) }),
+				...(checkpoint === undefined ? {} : { checkpoint }),
 				...(options.graph
 					? {
 							dependsOn: Object.freeze(
@@ -304,6 +409,7 @@ export function runSummary(
 		leasedElsewhere: ownership === "leased-elsewhere",
 		availableActions: availableWorkflowRunActions(facts),
 		requiresAttention: requiresAttention(facts),
+		pendingCheckpointCount: facts.pendingCheckpointCount,
 		...(state?.outputArtifactId
 			? { outputArtifactId: state.outputArtifactId }
 			: {}),
@@ -544,7 +650,12 @@ export function runInspection(
 	};
 	if (include.has("budget")) inspection.budget = budgetView(record, state);
 	if (include.has("tasks")) {
-		const views = state ? taskViews(state, { graph: true }) : [];
+		const views = state
+			? taskViews(state, {
+					graph: true,
+					promptLimit: MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
+				})
+			: [];
 		inspection.tasks = Object.freeze(
 			taskId === undefined ? views : views.filter((task) => task.id === taskId),
 		);
@@ -777,6 +888,27 @@ function logEntry(
 				message: `Execution generation ${generation ?? "?"} ended ${input.data.outcome}.`,
 			});
 		}
+		case "task-execution-checkpoint-requested":
+			return Object.freeze({
+				...base,
+				kind: "checkpoint" as const,
+				...taskOfExecution(input.data.executionId),
+				status: "requested",
+				message: "Checkpoint requested.",
+			});
+		case "task-execution-checkpoint-decided":
+			// The journaled source and reason only; the value stays in its
+			// artifact and the approver identity in the inspection.
+			return Object.freeze({
+				...base,
+				kind: "checkpoint" as const,
+				...taskOfExecution(input.data.executionId),
+				status: "decided",
+				...(input.data.reason === undefined
+					? {}
+					: { reason: input.data.reason }),
+				message: `Checkpoint decided by ${input.data.source}.`,
+			});
 		case "task-invalidated":
 			return Object.freeze({
 				...base,
