@@ -189,22 +189,26 @@ try {
 	// and CHANGELOG.md: 145 entries and 2009 KiB unpacked (revision 18 before
 	// the freeze: 125 entries and 1762 KiB; before that 100 entries and
 	// 1536 KiB).
-	// Bounds: 200 entries and 2560 KiB. Measured 156 entries / 2182 KiB at 1.1.0
+	// Bounds: 208 entries and 2688 KiB. Measured 156 entries / 2182 KiB at 1.1.0
 	// (builtin workflow, three agent templates and two skills added since the
 	// 145 / 2009 KiB freeze measurement); 160 entries left four spare, so the
 	// entry bound was raised deliberately. amaro is a dependency and is not
 	// packed. Unreleased at W2-PLANREVIEW: 186 entries / 2486 KiB, after the
 	// component library, the service-provider entry, deep-review, plan-review,
 	// two agent templates and two reference skills - 14 entries and 74 KiB
-	// spare, so the next thing this package ships raises the bounds and records
-	// its own measurement here rather than nudging them silently.
-	if (workflow.entryCount > 200 || workflow.unpackedSize > 2560 * 1024) {
+	// spare. Unreleased at W2-PTS + W4-INSPECT: 186 entries / 2577 KiB (the
+	// plan-to-ship compiler's README, CHANGELOG and skill prose), 17 KiB over
+	// the old 2560 KiB bound, so the bounds were raised deliberately to 208
+	// entries and 2688 KiB (22 entries and 111 KiB spare). The next thing this
+	// package ships records its own measurement here rather than nudging
+	// them silently.
+	if (workflow.entryCount > 208 || workflow.unpackedSize > 2688 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
 		);
 	}
 	process.stdout.write(
-		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 200 entries, 2560 KiB)\n`,
+		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 2688 KiB)\n`,
 	);
 	const rootExports = await readExportList(rootExportList);
 	const runtimeExports = await readExportList(runtimeExportList);
