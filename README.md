@@ -14,10 +14,9 @@ approved its exact digest), and an operator surface (`/workflow`, the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
 views. The runtime contract is revision 18 with the feature flags
 `checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
-and it requires pi-subagent contract revision 6 (`handoffExport: true`). A Pi
-tool for handoff export and the `/workflow decide` and
-`/workflow approve|reject` commands (follow-ups on the operator surface)
-remain unavailable.
+and it requires pi-subagent contract revision 6 (`handoffExport: true`). The
+human-only `/workflow decide` and `/workflow approve|reject` commands are part
+of the operator surface; a Pi tool for handoff export remains unavailable.
 
 ## Goal
 
@@ -147,8 +146,9 @@ immediately, marked `parked: true` and listing `pendingCheckpoints`; do not
 poll it. Checkpoint decisions are human-only: there is no model-callable
 decide tool, by design, and a model must never decide a checkpoint. A parked
 run is surfaced to the operator, and only a human decides it through
-`/workflow decide <run> <task> <json> [reason…]`, whose approver is the Pi
-session user and which follows as the pass-through for
+`/workflow decide <run> <task> <json> [reason…]`, which requires an
+interactive Pi session and an explicit confirmation, records the Pi session
+identity as approver (never an argument), and is the pass-through for
 `service.decide(runId, taskId, { decision, approver, reason? })`.
 `workflow_propose` submits dynamic workflow TypeScript source and returns its
 proposal as `dynamic:<sha256>`; it only proposes. Approval is human-only and

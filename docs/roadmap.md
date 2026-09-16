@@ -151,16 +151,18 @@ Delivered:
   against the manifest, the contract constants, CI, and the packed
   pi-subagent contract.
 
+- the human-only `/workflow decide <run-prefix> <task-key> <json>
+  [reason…]` command over `WorkflowService.decide` (interactive session and
+  explicit confirm required; approver: the Pi session identity, never an
+  argument); there is no model-callable decide tool, by design;
+- the human-only `/workflow approve dynamic:<sha256> [reason…]` and
+  `/workflow reject dynamic:<sha256> [reason…]` commands over
+  `WorkflowService.decideSource` (interactive session, rendered proposal,
+  explicit `ctx.ui.confirm`, approver `{ kind: "human", via, sessionId? }`);
+  there is no model-callable approve, reject, or proposals tool, by design.
+
 Remaining:
 
-- the human-only `/workflow decide <run> <task> <json> [reason…]` command
-  (approver: the Pi session user) over `WorkflowService.decide`, a follow-up
-  in `src/ui/commands.ts`; there is no model-callable decide tool, by design;
-- the human-only `/workflow approve dynamic:<sha256>` and `/workflow reject
-  dynamic:<sha256> [reason…]` commands over `WorkflowService.decideSource`
-  (explicit `ctx.ui.confirm`, approver `{ kind: "human", via, sessionId }`),
-  the same follow-up; there is no model-callable approve, reject, or
-  proposals tool, by design;
 - a handoff export tool over `WorkflowService.exportHandoff` that writes the
   handoff bytes to a caller path; deferred because a tool result of up to
   16 MiB returned to a model is wrong and writing caller paths needs its own
@@ -201,9 +203,9 @@ whose generic decision record store holds the source approvals):
 
 Remaining:
 
-- the `/workflow approve|reject` Pi commands (Phase 4 above); until they land
-  embedders call `service.decideSource` directly, and no model surface can
-  approve.
+- none beyond Phase 4; the `/workflow approve|reject` Pi commands are
+  delivered there, embedders without Pi call `service.decideSource` directly,
+  and no model surface can approve.
 
 ## Non-goals
 

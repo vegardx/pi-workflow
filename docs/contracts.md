@@ -1895,14 +1895,18 @@ Approval is a human decision and never a model tool. There is no
 `workflow_approve`, `workflow_reject`, or `workflow_proposals` tool;
 `workflow_propose` only proposes, and its output tells the model that a human
 must approve with `/workflow approve`. The Pi commands `/workflow approve
-dynamic:<sha256>` and `/workflow reject dynamic:<sha256> [reason…]` are a
-follow-up in `src/ui/commands.ts`: they refuse
-outside an interactive session, render the proposal (name, budget,
-digests, schemas, and the numbered source, cut at
-`MAX_DYNAMIC_APPROVAL_RENDER_BYTES` = 64 KiB), require an explicit
-`ctx.ui.confirm`, record nothing when the confirm is cancelled, and call
+dynamic:<sha256> [reason…]` and `/workflow reject dynamic:<sha256>
+[reason…]` (`src/ui/commands.ts`, `src/extension.ts`) refuse outside an
+interactive session ("Dynamic workflow approval requires an interactive Pi
+session."), render the proposal through `renderDynamicProposal` (name,
+budget, proposer, current decision, runnability, digests, schemas, and the
+numbered source, cut at `MAX_DYNAMIC_APPROVAL_RENDER_BYTES` = 64 KiB with a
+pointer to the stored source file), require an explicit `ctx.ui.confirm`,
+record nothing when the confirm is cancelled ("No decision recorded."),
+refuse an already decided proposal from the view's decision state, and call
 `decideSource` with `approver: { kind: "human", via: "/workflow approve" |
-"/workflow reject", sessionId }`. Until they land, embedders call
+"/workflow reject", sessionId? }` (the session id when the context carries
+one). Every service refusal is surfaced verbatim. Embedders without Pi call
 `decideSource` directly; no model surface can.
 
 `decideSource(ref, { decision, approver, reason? })` runs under the service
@@ -2541,10 +2545,16 @@ artifact metadata is missing.". The lease-free `inspect` and `listRuns` omit
 `decide` is a service method, and checkpoint decisions are human-only. There
 is no model-callable decide tool, by design: a model must never decide a
 checkpoint, and `WORKFLOW_TOOL_DECLARATIONS` declares none. The extension
-command `/workflow decide <run> <task> <json> [reason…]` follows in
-`src/ui/commands.ts` as the pass-through to `decide(runId, taskId,
-{ decision, approver, reason })` with `approver` set to the Pi session user
-identity; until then embedders call the service directly. A parked run is
+command `/workflow decide <run-prefix> <task-key> <json> [reason…]`
+(`src/ui/commands.ts`) is the pass-through to `decide(runId, taskId,
+{ decision, approver, reason })`: it is offered only while `availableActions`
+lists `decide`, parses `<json>` as one (optionally quoted) token and refuses
+invalid JSON ("Checkpoint decision is not valid JSON.") before reaching the
+service, requires an interactive session ("Checkpoint decisions require an
+interactive Pi session.") and an explicit confirm that shows the checkpoint
+prompt and the parsed decision, and records `approver` as the Pi session
+identity (`"pi-session"`; the pinned extension API exposes no user name),
+never an argument. Embedders without Pi call the service directly. A parked run is
 surfaced to the operator, never polled by a model: `wait` returns immediately
 with `parked: true` and `pendingCheckpoints`, and the `/workflow` widget and
 inspector show the pending checkpoints.
