@@ -6,6 +6,41 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## Unreleased
+
+Additive since 2.0.0, so the next release is the minor 2.1.0: a fourth entry
+point carrying a component library, and a support-task wiring fix in the
+extension. No frozen export, shape, schema, message, or tool changed;
+`WORKFLOW_CONTRACT_REVISION` stays 19 and the required pi-subagent contract
+stays revision 7 (`0.11.0`).
+
+### Added
+
+- **`@vegardx/pi-workflow/components`.** A fourth entry point exporting the
+  component library: `gate`, `envelope`, `forEach`, and `reviewFanOut`, with
+  their error and finding types. Adding an entry point and its exports is a
+  minor release under the stability policy. The entry is **unfrozen** — its
+  exports may change in any minor release — and it is recorded as such in
+  `compatibility.json` `piWorkflow.api.entryPoints` and
+  [docs/compatibility.md](docs/compatibility.md). Its export list is not
+  pinned, but it is checked to be disjoint from the two pinned lists, so no
+  frozen surface moves with it.
+- **Authored definitions may import `@vegardx/pi-workflow/components`.** The
+  definition import gate now accepts that specifier alongside
+  `@vegardx/pi-workflow`, `typebox`, and registered support modules. It is
+  trusted package code and makes the same identity trade the root import
+  already makes: a definition's source identity covers its own bytes, not the
+  package's. `@vegardx/pi-workflow/runtime` remains rejected.
+
+### Fixed
+
+- **Support task registrations reach the workflow service.** The extension
+  built its service without passing `supportTasks`, so the host-process
+  support implementations in `src/support-registry.ts` were never registered
+  and their module specifiers were never admitted to the definition import
+  gate. The extension now passes them, which is the constructor form the
+  contract's `supportTaskExecution` feature promises.
+
 ## 2.0.0
 
 Major release. The only reason it is a major is the stability policy's
