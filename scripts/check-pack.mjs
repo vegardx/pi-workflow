@@ -63,6 +63,7 @@ try {
 		qualificationNote,
 		"skills/workflow-authoring/SKILL.md",
 		"skills/workflow-authoring/references/examples.md",
+		"skills/workflows/SKILL.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
 		"dist/checkpoint-executor.d.ts",
@@ -223,6 +224,7 @@ process.stdout.write("packed exports: root " + pinned.root.actual.length + ", ru
 const compatibility = JSON.parse(await readFile("node_modules/@vegardx/pi-workflow/compatibility.json", "utf8"));
 const subagentManifest = JSON.parse(await readFile("node_modules/@vegardx/pi-subagent/package.json", "utf8"));
 const skill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflow-authoring/SKILL.md", "utf8");
+const operatingSkill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflows/SKILL.md", "utf8");
 if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.schema !== "pi-workflow-runtime" ||
 	!workflow.isCompatibleSubagentContract(subagent.SUBAGENT_RUNTIME_CONTRACT) ||
@@ -318,8 +320,9 @@ if (
 	!Array.isArray(manifest.pi?.skills) ||
 	manifest.pi.skills.length !== 1 ||
 	manifest.pi.skills[0] !== "./skills" ||
-	!/^---\\nname: workflow-authoring\\n/.test(skill)
-) throw new Error("packed authoring skill is not declared in the pi manifest");
+	!/^---\\nname: workflow-authoring\\n/.test(skill) ||
+	!/^---\\nname: workflows\\n/.test(operatingSkill)
+) throw new Error("packed authoring and operating skills are not declared in the pi manifest");
 if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piWorkflow.version !== manifest.version ||

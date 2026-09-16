@@ -99,7 +99,7 @@ describe("package contract", () => {
 		});
 	});
 
-	it("declares the extension and the authoring skill to Pi", async () => {
+	it("declares the extension and both bundled skills to Pi", async () => {
 		const packageJson = await readJson<PackageJson>("../package.json");
 		expect(packageJson.pi).toEqual({
 			extensions: ["./dist/extension.js"],
@@ -121,6 +121,11 @@ describe("package contract", () => {
 				),
 			),
 		).resolves.toBeUndefined();
+		const operating = await readFile(
+			new URL("../skills/workflows/SKILL.md", import.meta.url),
+			"utf8",
+		);
+		expect(operating.startsWith("---\nname: workflows\n")).toBe(true);
 	});
 });
 
