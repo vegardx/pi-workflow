@@ -4,12 +4,15 @@ This document defines the target contracts. The exported static definition,
 materializer, sequential scheduler, task finalizer, support task executor,
 nested run executor, artifact store, and static source runtime implement the
 current subset; later interfaces remain design contracts. The runtime contract
-is revision 17 and declares the feature flags `supportTaskExecution: true`,
+is revision 18 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
-`operatorAttempts: true`, and `worktrees: true`. It requires pi-subagent
-contract revision 6, whose features include `handoffExport: true`.
+`operatorAttempts: true`, `worktrees: true`, `checkpoints: true`, and
+`dynamicWorkflows: true`. Revision 18 bundles two halves under one contract
+revision: checkpoints and dynamic workflows, both described in this document.
+It requires pi-subagent contract revision 6, whose features include
+`handoffExport: true`.
 
 ## Static definition
 
@@ -108,7 +111,13 @@ support registry; every other static import, dynamic import, CommonJS require,
 and TypeScript import assignment is rejected rather than silently omitted from
 source identity. A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
-Multi-file definition provenance remains future work.
+Multi-file definition provenance remains future work. The same import gate,
+with the same messages, applies to dynamic workflow source proposed through
+`service.propose`; dynamic source additionally may not use `import.meta`
+("dynamic workflow source may not use import.meta") and must have exactly
+one default export and no named or re-exports ("dynamic workflow source must
+have exactly one default export and no named exports"). See
+[Dynamic workflows](#dynamic-workflows).
 
 ## Support-task descriptors
 
@@ -150,9 +159,13 @@ constructor-injected support registry.
 (`handle.handoff`); a handoff input delivers the `WorkflowHandoffDescriptor`
 to the implementation under its input name, never patch bytes. There is no
 string-addressed API and no inline callback: the implementation is referenced
-by descriptor identity and resolved at execution time from the registry. A
-future dynamic frontend lowers the same descriptor into the same
-`SupportTaskSpec`; the scheduler and executor never distinguish the frontend.
+by descriptor identity and resolved at execution time from the registry. The
+dynamic frontend lowers the same descriptor into the same `SupportTaskSpec`:
+a registration made with `helper.registration(execute, { exportName })` is
+published to dynamic sources as the named export `exportName` of its
+`moduleSpecifier`, wrapped so that `registration()` throws ("Dynamic workflow
+source may not register support implementations."); the scheduler and
+executor never distinguish the frontend.
 
 ## Support-task execution
 
@@ -167,8 +180,15 @@ required task fails the run.
 ### Registry and identity
 
 Implementations are supplied as `createWorkflowService({ supportTasks })`
-registrations produced by `helper.registration(execute)`. The service validates
-each registration, rejects duplicate names, and freezes the map. The registry
+registrations produced by `helper.registration(execute, { exportName? })`. The service validates
+each registration, rejects duplicate names, and freezes the map. An
+`exportName` must match `^[A-Za-z_$][A-Za-z0-9_$]{0,127}$` and may not be
+`default` ("Support task export name is invalid."); two registrations with
+the same `moduleSpecifier` and `exportName` are refused ("Duplicate support
+task export name: <moduleSpecifier>#<exportName>"). Registrations with an
+`exportName` form the frozen `supportHelpers` list handed to every dynamic
+VM and hashed into `importPolicySha256`; a registration without one is not
+importable by dynamic sources. The registry
 is authoritative and immutable, never persisted, and resolved again on every
 restart. Resolution compares one canonical digest,
 `deriveSupportImplementationIdentitySha256(spec.request.implementation)`,
@@ -415,7 +435,10 @@ interface WorkflowContext<TInput> {
 		key: TaskKey,
 		request: NestedWorkflowRequest,
 	): TaskHandle<TOutput>;
-	checkpoint<T>(key: string, request: CheckpointRequest<T>): TaskHandle<T>;
+	checkpoint<TDecisionSchema extends TSchema>(
+		key: TaskKey,
+		request: CheckpointRequest<TDecisionSchema>,
+	): TaskHandle<Static<TDecisionSchema>>;
 	artifact<T>(
 		key: string,
 		value: T,
@@ -446,6 +469,15 @@ interface FinalizeRequest<TOutputSchema extends TSchema> {
 	readonly workflow?: NestedWorkflowRequest;
 }
 ```
+
+A dynamic workflow VM exposes this interface verbatim: the same members with
+the same validation messages (`DYNAMIC_CONTEXT_PROPERTIES` = `cwd`, `input`,
+`runId`, `signal`; `DYNAMIC_CONTEXT_METHODS` = `agent`, `checkpoint`,
+`fanIn`, `fanOut`, `finalize`, `handoff`, `log`, `phase`, `pipeline`,
+`result`, `results`, `settled`, `support`, `workflow`, and nothing more).
+`ctx.artifact` is not available in revision 18 on either frontend. In the VM
+declarations are synchronous RPC calls answered by the static-runtime context
+and barriers are asynchronous replies; see [Dynamic workflows](#dynamic-workflows).
 
 `ctx.finalize(key, request)` declares a finalizer task: exactly one of
 `support`, `agent`, or `workflow` names the work, and `kind` lowers into the
@@ -522,7 +554,7 @@ scheduler consumes only validated records, never workflow closures.
 ```ts
 interface TaskSpecBase {
 	key: string;
-	kind: "agent" | "support" | "workflow";
+	kind: "agent" | "support" | "workflow" | "checkpoint";
 	role: "task" | "finalizer";
 	disposition: "required" | "optional";
 	after: TaskRef[];
@@ -542,11 +574,14 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow"` in revision 17; a checkpoint task
-kind remains a design contract. `role` is `"task"` for every ordinary
-declaration (`ctx.agent`, `ctx.support`, `ctx.workflow`, fan-out, fan-in, and
-pipelines) and `"finalizer"` for `ctx.finalize`; it participates in task
-identity. An ordinary task may not depend on a finalizer through `after` or
+`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 18;
+a checkpoint task (`ctx.checkpoint`) lowers to `CheckpointTaskSpec`, whose
+`request` is the `CheckpointTaskRequest` described in
+[Checkpoints](#checkpoints). `role` is `"task"` for every ordinary
+declaration (`ctx.agent`, `ctx.support`, `ctx.workflow`, `ctx.checkpoint`,
+fan-out, fan-in, and pipelines) and `"finalizer"` for `ctx.finalize`; it
+participates in task identity. A checkpoint is never a finalizer
+("a checkpoint cannot be a finalizer"). An ordinary task may not depend on a finalizer through `after` or
 `inputs` ("ordinary task may not depend on a finalizer"); a finalizer may
 depend on any declared task of either role. Keys are unique within a workflow
 namespace.
@@ -748,7 +783,15 @@ active tasks to `cancelling` before interruption and drains them without
 exceeding the same durable lifecycle. Failed dependencies map pending dependents
 to `blocked`. Run status `waiting` means no committed task is currently
 selectable by the lane that observed it; other lanes may still be executing
-agent children or in-process support tasks.
+agent children or in-process support tasks. A lane that has nothing else to do
+while a checkpoint awaits a decision also moves the run `running -> waiting`
+(reason "Workflow run awaits a checkpoint decision."); see
+[Checkpoints](#checkpoints). A `waiting` run resumes (`waiting -> running`,
+no reason) only when a lane has selected work for it or the runtime enters
+finalization; a lane that finds the run already `waiting` and has nothing to
+select appends nothing, so idle lanes of a parked or barrier-blocked run never
+flap the status, and a re-drive whose sweep expires or defaults the checkpoint
+before any lane has work ends the run from `waiting`.
 
 The journal stores bounded child-settlement evidence and a digest of the complete
 child result, not model output, structured values, session paths, or
@@ -1279,7 +1322,7 @@ and `cleanup-blocked`; they never enter `waiting`.
 Workflow definition
   Workflow run (depth 0..3)
     Workflow task
-      Task execution generation (kind agent | support | workflow)
+      Task execution generation (kind agent | support | workflow | checkpoint)
         Subagent run (agent tasks only)
           Subagent attempt
           Imported result artifact
@@ -1289,7 +1332,23 @@ Workflow definition
         Child workflow run (workflow tasks only; depth + 1)
           Workflow task ... (same hierarchy)
           Imported result artifact
+        Decision record (checkpoint tasks only; one per execution binding)
+          Result artifact (the decision value)
+
+Dynamic workflow definition (dynamic:<sourceSha256>)
+  Proposal (per source digest; manifest, hostApiSha256, importPolicySha256)
+    Source approval decision record (one per definition identity)
+      Workflow run (depth 0 only; copies of source, manifest, proposal, and
+        approval in its definition/ directory)
 ```
+
+A dynamic definition's identity is path-free:
+`definitionIdentitySha256 = deriveJsonValueSha256({ contractRevision: 18,
+hostApiSha256, kind: "dynamic-workflow", manifestSha256, sourceSha256 })`
+(`deriveDynamicDefinitionIdentitySha256`), so it never collides with a
+static identity, and every task identity in a dynamic run inherits it through
+the ordinary materializer derivation. The source approval binds that
+identity, so a changed host API rebinds the same source.
 
 A workflow task of kind `workflow` owns one task execution whose deterministic
 `childRunId` names the linked child run. The child run record persists `depth`
@@ -1381,6 +1440,7 @@ interface WorkflowService {
 	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	wait(runId: WorkflowRunId, options?: { timeoutMs?: number }): Promise<WorkflowServiceWaitView>;
 	stop(runId: WorkflowRunId, reason: string): Promise<WorkflowServiceRunView>;
+	decide(runId: WorkflowRunId, taskId: string, options: { decision: unknown; approver: string; reason?: string }): Promise<WorkflowServiceRunView>;
 	invalidate(runId: WorkflowRunId, causeTaskId: string, reason: string): Promise<WorkflowServiceRunView>;
 	reconcile(runId: WorkflowRunId, options?: { taskId?: WorkflowTaskId }): Promise<WorkflowServiceReconcileView>;
 	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
@@ -1388,9 +1448,19 @@ interface WorkflowService {
 	logs(runId: WorkflowRunId, options?: WorkflowLogOptions): Promise<WorkflowLogPage>;
 	subscribe(listener: (observation: WorkflowRunObservation) => void): () => void;
 	exportHandoff(runId: WorkflowRunId, taskId: string): Promise<WorkflowServiceHandoffExport>;
+	propose(source: string, options: { proposer: DynamicWorkflowProposer }): Promise<DynamicWorkflowProposalView>;
+	inspectProposal(ref: string): Promise<DynamicWorkflowProposalView & { source: string }>;
+	proposals(): Promise<readonly (DynamicWorkflowProposalView | { ref: `dynamic:${string}`; issue: string })[]>;
+	decideSource(ref: string, options: { decision: "approved" | "rejected"; approver: DynamicSourceApprover; reason?: string }): Promise<DynamicWorkflowProposalView>;
 	shutdown(): Promise<void>;
 }
 ```
+
+`validate` and `run` accept a `dynamic:<sha256>` reference for an approved
+dynamic proposal in addition to a static definition name or path; `list()`
+stays static-only and proposals are discovered through `proposals()`. The
+four dynamic methods are specified under
+[Dynamic workflows](#dynamic-workflows).
 
 Every value a method returns is defined once as a TypeBox schema in
 `service-views.ts`; the TypeScript view types derive from those schemas, the
@@ -1416,14 +1486,29 @@ record's injected artifact identity map; a child run is addressable by its own
 run ID for status, wait, stop, reconcile, inspect, and logs.
 `createWorkflowService` accepts an optional `supportTasks` registration list
 that becomes the frozen constructor registry and supplies the nested run
-provider to every run it composes.
+provider to every run it composes, and an optional
+`checkpoints: { headless?: boolean }` policy (default `{ headless: false }`;
+anything else is `validation` "Workflow service checkpoint options are
+invalid.") described in [Checkpoints](#checkpoints). It also accepts an
+optional `dynamic: { bootTimeoutMs?: number; computeTimeoutMs?: number }`
+(each an integer 1 through 2 147 483 647; anything else, including unknown
+keys, is `validation` "Workflow service dynamic options are invalid.") that
+exists so embedders and tests on slow hosts can lengthen the dynamic VM boot
+watchdog (manifest extraction and every run drive) and compute watchdog; it
+does not change `hostApiSha256`.
 
 `wait(runId, { timeoutMs })` validates `timeoutMs` as an integer 1 through
 2 147 483 647 (`validation`, "Invalid workflow wait timeout.") before touching
 the run. When the drive outlives the timeout the method returns the current
 view with `timedOut: true` and leaves the drive running; a later `wait`
-observes it. Without a timeout the behaviour is unchanged. A `parked`
-field for checkpoint pauses is reserved and never emitted.
+observes it. Without a timeout the behaviour is unchanged. A run parked at a
+checkpoint is settled without failure: `wait` returns its non-terminal
+`waiting` view immediately, marked `parked: true` and listing
+`pendingCheckpoints`, instead of blocking until the decision. Callers must not
+poll; a later `wait` after `decide` follows the restarted drive. A parked run
+whose pending expiry or deadline has already passed is re-driven once before
+`wait` answers, so the returned view reflects the expiry, default, or stop.
+`parked` is emitted only on the wait view.
 
 `invalidate(runId, causeTaskId, reason)` is the trigger for re-execution
 (`retry` below is its restricted form) and is exposed by the
@@ -1517,11 +1602,16 @@ Lifecycle methods refuse through the same predicates, and every summary
 carries `availableActions`: the subset of `stop`, `wait`, `reconcile`,
 `invalidate`, `retry`, `resume`, `decide` that is legal for the run's facts,
 filtered by the actions implemented in this build (`stop`, `wait`,
-`reconcile`, `invalidate`, `retry`, `resume`; `decide` waits for
-checkpoints) and returned in that fixed order. A run leased by
-another live service has no available actions. `requiresAttention` is
-`cleanup-blocked`, or `failed`/`interrupted` without invalidated work awaiting
-recovery. Tools and widgets consume `availableActions`; nothing recomputes it.
+`reconcile`, `invalidate`, `retry`, `resume`, `decide`) and returned in that
+fixed order. A run leased by another live service has no available actions.
+`requiresAttention` is `cleanup-blocked`, `failed`/`interrupted` without
+invalidated work awaiting recovery, or at least one checkpoint awaiting a
+decision (`pendingCheckpointCount > 0`). `pendingCheckpoints(state)` is the
+one predicate behind the `decide` action, the service's `decide`
+precondition, the run view's `pendingCheckpoints`, and the summary's
+`pendingCheckpointCount`: on-path checkpoint tasks whose status is `waiting`
+and whose current execution is in phase `checkpoint-requested`. Tools and
+widgets consume `availableActions`; nothing recomputes it.
 
 | Action | Legal iff |
 | --- | --- |
@@ -1532,7 +1622,7 @@ recovery. Tools and widgets consume `availableActions`; nothing recomputes it.
 | `invalidate` | `failed` or `interrupted`, not nested, not awaiting recovery, deadline not passed, not being driven |
 | `retry` | `invalidate` is legal and a task's current execution is terminal `failed` or `interrupted` |
 | `resume` | `interrupted`, not nested, not awaiting recovery, deadline not passed, not being driven, and a task passes `resumeRefusal` |
-| `decide` | predicate ships; never emitted until checkpoints exist |
+| `decide` | run is `running` or `waiting`, not nested, deadline not passed, at least one checkpoint awaiting a decision (not gated on `driving`: a live drive with another lane busy accepts a decision) |
 
 ### Read surface
 
@@ -1562,7 +1652,8 @@ appear only on a fresh first page. A summary carries `runId`,
 `updatedAt` (last complete event), `deadlineAt`, `depth`, `parent`,
 `lastSequence`, `taskCounts` (on-path tasks per status, zero-filled, plus
 `abandoned` and `total`), `ownership`, `leasedElsewhere`, `availableActions`,
-`requiresAttention`, and `outputArtifactId`; never the output value.
+`requiresAttention`, `pendingCheckpointCount`, and `outputArtifactId`; never
+the output value.
 
 `inspect(runId, { include, taskId })` returns `run` (the same summary) plus
 the requested sections, default `run`, `budget`, `tasks`: `budget` (declared
@@ -1584,7 +1675,12 @@ corruption, or a journal that violates run invariants).
 `logs(runId, { afterSequence, limit })` (`afterSequence` ≥ 0, `limit` 1..500
 default 100; otherwise "Invalid workflow log query.") derives one entry per
 `workflow-effect`, `run-status-changed`, `task-status-changed`, attempt
-intent/receipt/decline, `task-execution-terminal`, and `task-invalidated`
+intent/receipt/decline, `task-execution-terminal`,
+`task-execution-checkpoint-requested` (kind `checkpoint`, status `requested`,
+"Checkpoint requested."), `task-execution-checkpoint-decided` (kind
+`checkpoint`, status `decided`, `Checkpoint decided by ${source}.` with the
+journaled `source` (`operator` or `default`) and `reason`; never the decision
+value or the approver), and `task-invalidated`
 event with fixed message formats, `status`, journaled `reason`, and
 `failureCode` (subagent code or workflow stage); abandoned effects are marked,
 not dropped. Declarations, barriers, artifact and identity events, digests,
@@ -1649,9 +1745,22 @@ highest generation recorded for the task, or 0), the current execution's `execut
 executions: the attempt count), `settlement` (`attemptOrdinal`, `status`,
 `failureCode`, `failureRetry`, `usageComplete` from the agent or nested
 settlement), `outcome` (the terminal outcome), `abandoned: true` for abandoned
-history, and, for a completed worktree task, `handoff` (its
-`WorkflowHandoffDescriptor`; status views need no subagent acquisition).
+history, for a completed worktree task, `handoff` (its
+`WorkflowHandoffDescriptor`; status views need no subagent acquisition), and,
+for every checkpoint task, `checkpoint` (see
+[Checkpoint views](#checkpoint-views)). Every run view that carries `tasks`
+also carries `pendingCheckpoints`: the on-path checkpoints awaiting a decision
+in materialization order, each `{ taskId, namespace, key, executionId,
+requestedAt, expiresAt? }`, empty unless a checkpoint waits.
 `inspect` adds `dependsOn` and `inputs`.
+
+### Dynamic run view
+
+A run view carries `dynamic: { ref, sourceSha256, approvalSha256,
+hostApiSha256 }` exactly when the run record's `definitionKind` is
+`"dynamic"`; static run views carry no `dynamic` member. `approvalSha256` is
+the digest of the approval record copied into the run directory when the run
+was created (`deriveDecisionRecordSha256`).
 
 ### Handoff export
 
@@ -1670,22 +1779,803 @@ methods described under [Lifecycle methods](#lifecycle-methods), advertised
 through `availableActions` and exposed as `workflow_retry` and
 `workflow_resume`.
 
+## Dynamic workflows
+
+A dynamic workflow is `defineWorkflow` source proposed as text and executed in
+a worker-thread VM against the ordinary static runtime after a human approved
+it. The runtime contract publishes `dynamicWorkflows: true`. Nothing below
+runs without Pi project trust: every dynamic service method first refuses
+with `validation` "Dynamic workflows require project trust." when the project
+is untrusted (D10: the source is untrusted orchestration input executing in a
+determinism boundary inside a trusted process, and a run writes under
+`<cwd>/.pi/workflow`). The user-fixed rules of the design are: approval is
+human-only through a Pi command with an explicit `ctx.ui.confirm`, never a
+model tool; approval records are definition-level (per source digest) and
+copied into every run directory; dynamic runs are root runs (depth 0) that
+may declare nested static children, and a dynamic definition is never a
+nested child; the source language is full TypeScript through a bundled
+transformer whose identity is part of `hostApiSha256`; one VM per drive;
+declarations are synchronous in the VM so it exposes `WorkflowContext`
+exactly, and barriers are asynchronous replies.
+
+### Reference and intake
+
+A dynamic reference is `dynamic:<sourceSha256>` (`DYNAMIC_REF_PATTERN` =
+`^dynamic:[a-f0-9]{64}$`), where `sourceSha256` is the SHA-256 of the UTF-8
+bytes of the source exactly as proposed. A string that starts with `dynamic:`
+but does not match is `validation` "Invalid dynamic workflow reference.";
+`dynamic:` references never reach static discovery.
+
+`propose(source, { proposer })` runs under the service lock and refuses, in
+this order, each a `WorkflowServiceError` (code in brackets):
+
+1. trust: [validation] "Dynamic workflows require project trust.";
+2. bounds: "Dynamic workflow source must be a string.", "Dynamic workflow
+   source is empty.", "Dynamic workflow source exceeds 262144 bytes."
+   (`MAX_DYNAMIC_SOURCE_BYTES`), and "Dynamic workflow source is not valid
+   UTF-8." (a lone surrogate or a NUL byte) [validation];
+3. the import gate of static definitions with its messages verbatim
+   ("workflow import <specifier> is not identity-bound by contract revision
+   18", "dynamic workflow imports are not supported by contract revision 18",
+   "dynamic imports and CommonJS require are not supported by contract
+   revision 18", "TypeScript import assignment is not supported by contract
+   revision 18", "workflow definition syntax is invalid"); the allow-list is
+   `@vegardx/pi-workflow`, `typebox`, and the module specifiers of the
+   registered support tasks [validation];
+4. the dynamic-only rules: "dynamic workflow source may not use import.meta"
+   and "dynamic workflow source must have exactly one default export and no
+   named exports" (a re-export of an allowed module counts as a named
+   export; top-level `await` is permitted) [validation];
+5. the proposer: `{ kind: "tool" | "command" | "api", via }` else "Invalid
+   dynamic workflow proposer." [validation];
+6. the store cap: a new digest while the store already holds
+   `MAX_DYNAMIC_PROPOSALS` (1024) proposals is [conflict] "Dynamic workflow
+   proposal store is full.";
+7. manifest extraction in a manifest-only VM (below): any VM failure is
+   [validation] "Dynamic workflow manifest extraction failed: <reason>" with
+   the bridge reason from the failure table; a manifest that fails
+   `DynamicWorkflowManifestSchema`, whose schemas fail
+   `validateJsonSchemaDocument`, or whose canonical bytes exceed
+   `MAX_DYNAMIC_MANIFEST_BYTES` (512 KiB) is "Dynamic workflow manifest is
+   invalid.";
+8. the write to the proposal store: a known digest under the same
+   `hostApiSha256` returns the existing proposal (idempotent; a differing
+   manifest for the same bytes is store corruption), a known digest under a
+   different `hostApiSha256` has its derived records rewritten atomically
+   while the source bytes are never rewritten, and any other store failure is
+   [persistence] "Dynamic workflow proposal store is corrupt.".
+
+The returned `DynamicWorkflowProposalView` (`DynamicWorkflowProposalViewSchema`,
+the `workflow_propose` output) is `{ ref, sourceSha256, sourceBytes,
+manifest, manifestSha256, hostApiSha256, importPolicySha256,
+definitionIdentitySha256, transformer, proposer, proposedAt, decision?,
+runnable, path }`, where `decision` is `{ decision, approver, approvedAt,
+approvalSha256, reason? }` once a human decided and `runnable` is true iff the
+decision is `approved` and both `hostApiSha256` and `importPolicySha256`
+equal the current ones. `inspectProposal(ref)` returns the same view plus
+`source`; it is the only surface that returns the source text and is not a
+tool. `proposals()` is a bounded lease-free scan of the proposal store
+(sorted by digest, at most 1024 entries); a corrupt entry or an unreadable
+approval is reported as `{ ref, issue }` instead of failing the listing. An
+unknown digest is [not-found] "Dynamic workflow proposal not found:
+dynamic:<sha>".
+
+### Proposal store and manifest VM
+
+Proposals are derived data keyed by source digest under
+`<storeRoot>/dynamic/<sourceSha256>/` (`source.workflow.ts` with the exact
+bytes, the active `manifest.json` + `proposal.json` pair under
+`records/<version>/` named by the pointer file `current`, and the
+definition-level `decisions/` store), written through a temporary directory
+and one atomic rename with the same `wx`, fsync, mode `0600`/`0700`,
+symlink-refusing, and canonical-bytes discipline as the artifact and decision
+stores; a host API change stages a new pair and swaps `current` in one
+rename, so readers never see a mixed pair; see
+[Persistence and recovery](persistence.md#dynamic-proposals-and-run-definition-copies).
+The `proposal.json` record (`DynamicWorkflowProposalRecordSchema`) carries
+`schema: "pi-workflow-dynamic-proposal"`, `contractRevision`, `sourceSha256`,
+`sourceBytes`, `manifest`, `manifestSha256`, `hostApiSha256`,
+`importPolicySha256`, `definitionIdentitySha256`, `transformer` (`{ name:
+"amaro", version: "1.2.0", mode: "transform", options }`), `proposer`,
+`proposedAt`, and `projectRoot`.
+
+The manifest is `{ meta, inputSchema, outputSchema }` of the source's default
+export, normalised through the same `defineWorkflow` the registry uses, so a
+proposal's manifest equals what static discovery would compute for the same
+source (`concurrency` defaults to 4). It is extracted by booting a
+manifest-only worker (`extractDynamicWorkflowManifest`): the worker
+transforms and evaluates the module with `runId: "workflow_manifest"`, `cwd:
+"/"`, `input: null`, a zero seed and epoch, posts `ready { manifest }`, and
+exits; the boot watchdog is `DYNAMIC_VM_MANIFEST_TIMEOUT_MS` (5000 ms). The
+module is evaluated but `run` is never called during extraction.
+
+### Approval
+
+Approval is a human decision and never a model tool. There is no
+`workflow_approve`, `workflow_reject`, or `workflow_proposals` tool;
+`workflow_propose` only proposes, and its output tells the model that a human
+must approve with `/workflow approve`. The Pi commands `/workflow approve
+dynamic:<sha256>` and `/workflow reject dynamic:<sha256> [reason…]` are a
+follow-up in `src/ui/commands.ts`: they refuse
+outside an interactive session, render the proposal (name, budget,
+digests, schemas, and the numbered source, cut at
+`MAX_DYNAMIC_APPROVAL_RENDER_BYTES` = 64 KiB), require an explicit
+`ctx.ui.confirm`, record nothing when the confirm is cancelled, and call
+`decideSource` with `approver: { kind: "human", via: "/workflow approve" |
+"/workflow reject", sessionId }`. Until they land, embedders call
+`decideSource` directly; no model surface can.
+
+`decideSource(ref, { decision, approver, reason? })` runs under the service
+lock and refuses, in this order: trust; the reference ("Invalid dynamic
+workflow reference."); the approver, which must be `{ kind: "human", via,
+sessionId? }` ("Invalid dynamic workflow approver."; a `kind: "model"`
+approver fails the schema); the decision, `"approved"` or `"rejected"`
+("Invalid dynamic workflow decision."); a `reason` outside 1..4096
+characters ("Invalid dynamic workflow decision reason."); an unknown digest
+([not-found] "Dynamic workflow proposal not found: dynamic:<sha>"); a
+proposal whose `hostApiSha256` is not the current one ("Dynamic workflow
+proposal predates the current host API; propose the source again."), whose
+`importPolicySha256` is not the current one ("Dynamic workflow import policy
+changed since the proposal; propose the source again."), or whose
+`projectRoot` is not this project ("Dynamic workflow proposal belongs to
+another project."); and an existing decision ([conflict] "Dynamic workflow
+source is already approved." or "Dynamic workflow source was rejected.").
+
+The decision is one `WorkflowDecisionRecord` in the proposal's `decisions/`
+store, opened with `WorkflowDecisionRecordStore.openRoot` (definition-level:
+no run, no journal, no lease fence). Its binding is
+`{ kind: "source-approval", definitionIdentitySha256, sourceSha256,
+contractRevision: 18 }` (`SourceApprovalDecisionBindingSchema`), its
+`source` is `"operator"`, `decidedBy` is `human:<approver.via>`, and its
+`value` (`DynamicSourceApprovalSchema`, `valueSchemaSha256 =
+DYNAMIC_SOURCE_APPROVAL_SCHEMA_SHA256`) is `{ schema:
+"pi-workflow-source-approval", sourceSha256, manifestSha256, hostApiSha256,
+importPolicySha256, definitionIdentitySha256, decision, approver,
+approvedAt, projectRoot, reason? }`. The store enforces the human-only rule on
+write and read: a `source-approval` record must be an operator decision
+whose `decidedBy` starts with `human:` and whose value digests equal the
+binding, else "invalid workflow decision record"; the run-scoped store
+refuses `source-approval` bindings ("workflow decision record binding does
+not belong to a run") and the definition-level store refuses `checkpoint`
+bindings ("workflow decision record binding does not belong to a definition
+store"). One record exists per binding ("decision record already exists for
+this binding"), there is no revoke, and a rejection is as immutable as an
+approval: re-proposing a rejected digest returns the proposal with
+`decision.decision === "rejected"` and `runnable: false`, and only a changed
+source (a new digest) can be approved. Because the binding carries
+`definitionIdentitySha256`, which contains `hostApiSha256`, a package upgrade
+(a new `DYNAMIC_HOST_API_REVISION`, transformer, bound, or shim export)
+rebinds the same source and requires a fresh human approval; the earlier
+record stays on disk and simply no longer matches. `importPolicySha256` is
+separate from the host API because it depends on the embedder's support
+registry, not the package; the approval captures it and `run`, `validate`,
+and resume refuse when the current registry digest differs.
+
+### Running
+
+`run("dynamic:<sha>", input)` and `validate("dynamic:<sha>", input?)` replace
+static resolution with these checks, in this order, before anything durable
+is created: trust; the reference; the proposal ([not-found] as above);
+`validation` "Dynamic workflow proposal belongs to another project.",
+"Dynamic workflow proposal predates the current host API; propose the source
+again.", "Dynamic workflow import policy changed since approval."; then the
+approval: an unreadable or non-approval record is [persistence] "Dynamic
+workflow approval record is invalid.", no record is "Dynamic workflow source
+is not approved for the current host API.", a rejection is "Dynamic workflow
+source was rejected.", another project's approval is "Dynamic workflow
+approval belongs to another project.", and an approval whose manifest, import
+policy, or host API digest disagrees with the proposal is "Dynamic workflow
+approval does not match the proposal.". Input validation then follows the
+static path. `validate` returns `{ valid: true, workflow }` with `scope:
+"dynamic"`, `source: "proposal"`, `path` = the stored
+`source.workflow.ts`, and `identitySha256` = `definitionIdentitySha256`;
+`WorkflowRootScope` gains `"dynamic"` while discovery still registers only
+`package` and `builtin` roots.
+
+`run` chooses `createdAt` first (it fixes the VM clock), builds the dynamic
+`DiscoveredWorkflow` (`createDynamicDiscoveredWorkflow`: the definition from
+the manifest, the proposal's path-free identity, `scope: "dynamic"`, `source:
+"proposal"`), binds the subagent owner, takes the lease, opens the journal,
+writes the run's `definition/` copy (source, manifest, proposal record, and
+approval record, each written exclusively; an existing file is [persistence]
+"Workflow run definition copy already exists."), and only then creates the
+run record, so a run record implies the copies exist. The record carries
+`definitionKind: "dynamic"`, `definitionPath` (the stored source path),
+`definitionName` from the manifest, `definitionIdentitySha256`,
+`definitionSourceSha256`, `approvalSha256 =
+deriveDecisionRecordSha256(approval)`, and `hostApiSha256`. Static root and
+nested child records carry `definitionKind: "static"` and neither digest;
+`definitionKind === "dynamic"` requires both digests, `depth: 0`, and no
+`parent`, otherwise the record is rejected as an invalid run record.
+`compose` is unchanged, and `ctx.workflow` from dynamic source resolves only
+discovered static definitions, so a dynamic definition can never be a child.
+
+### Resume verification
+
+On resume (`wait`, `stop`, `reconcile`, `invalidate`, and every other
+inactive open) a dynamic record is rebuilt from the run directory alone
+(`dynamicWorkflowForRecord`); the proposal store and the definition-level
+decision store are never consulted. The `definition/` copy is read with the
+store discipline (`O_NOFOLLOW`, size bounds, fatal UTF-8, canonical bytes)
+and verified in this order, each refusal a `WorkflowServiceError`:
+
+1. a missing, oversized, non-canonical, or schema-invalid copy is
+   [persistence] "Workflow run definition copy is missing or corrupt."; a
+   record without both dynamic digests is "Workflow run record is invalid.";
+2. `sha256(copied source) !== record.definitionSourceSha256`: [validation]
+   "Dynamic workflow source changed since the run was created.";
+3. the copied approval fails `WorkflowDecisionRecordSchema`, its record digest
+   differs from `record.approvalSha256`, it is not a `source-approval` record
+   for `record.definitionIdentitySha256`, or its decision is not `approved`
+   (a single flipped byte suffices): "Dynamic workflow approval record
+   changed since the run was created.";
+4. `deriveDynamicHostApiSha256() !== record.hostApiSha256`: "Dynamic workflow
+   host API changed since the run was created.";
+5. the current `importPolicySha256` differs from the approval's: "Dynamic
+   workflow import policy changed since approval.";
+6. the copied manifest's digest differs from the approval's, or the copied
+   proposal's identity differs from the record's: "Dynamic workflow manifest
+   changed since approval.";
+7. `cwd !== record.cwd`: "Workflow definition, source, or project identity
+   changed.".
+
+Deleting the store decision after a run was created leaves that run
+resumable (the copy is the evidence) while a new `run` refuses "Dynamic
+workflow source is not approved for the current host API.".
+
+### Host API and import policy digests
+
+`deriveDynamicHostApiSha256()` is a build-time constant: the canonical digest
+of `contractRevision`, `DYNAMIC_HOST_API_REVISION` (1), the sorted
+`DYNAMIC_BUILTIN_MODULES`, `DYNAMIC_SHIM_EXPORTS`,
+`DYNAMIC_CONTEXT_PROPERTIES`, `DYNAMIC_CONTEXT_METHODS`, the RPC method and
+message-type lists, the patched globals (`Date`, `Math.random`, `console`),
+`DYNAMIC_VM_CODE_GENERATION`, every VM limit (`MAX_DYNAMIC_SOURCE_BYTES`,
+`MAX_DYNAMIC_MANIFEST_BYTES`, `MAX_DYNAMIC_RPC_MESSAGES`,
+`MAX_DYNAMIC_RPC_MESSAGE_BYTES`, `MAX_DYNAMIC_RPC_ARGS`,
+`MAX_DYNAMIC_HANDLE_REFS`, `MAX_DYNAMIC_VM_ERROR_CHARS`, the boot, manifest,
+compute, sync-wait, and abort-grace timeouts, and
+`DYNAMIC_VM_RESOURCE_LIMITS`), and the `DYNAMIC_TRANSFORMER` identity
+(`amaro` 1.2.0, `mode: "transform"`, Node's own transform options).
+`MAX_DYNAMIC_PROPOSALS`, `MAX_DYNAMIC_PROPOSAL_RECORD_BYTES`, and
+`MAX_DYNAMIC_APPROVAL_RENDER_BYTES` are store and UI caps outside it. Review
+rule: a behavioural change to the shim, the bridge, or the prelude that no
+constant captures must bump `DYNAMIC_HOST_API_REVISION`, because changing the
+digest is what invalidates every recorded approval.
+
+`deriveDynamicImportPolicySha256(supportHelpers)` is registry-derived and
+order-independent: the sorted built-in modules plus, per published helper,
+`{ moduleSpecifier, exportName, implementationIdentitySha256 }`. The service
+computes it from the registrations that carry an `exportName`, and the same
+`supportHelpers` list travels to the worker as the module table of importable
+helpers. The installed transformer must be exactly `DYNAMIC_TRANSFORMER_VERSION`
+("dynamic workflow transformer version mismatch" at service construction and
+in the worker); `compatibility.json` records `transformer: { package:
+"amaro", version: "1.2.0" }`.
+
+### The VM
+
+Each drive spawns one `node:worker_threads` worker
+(`resourceLimits: DYNAMIC_VM_RESOURCE_LIMITS` = 256 MiB old generation, 32 MiB
+young generation, 16 MiB code range, 4 MiB stack; `env: {}`; captured and
+discarded stdout/stderr; named `pi-workflow-dynamic:<first 12 hex of the
+digest>`) with `workerData` `{ mode: "manifest" | "run", source,
+sourceSha256, filename: "dynamic:<sha>.workflow.ts", supportHelpers,
+syncBuffer, syncPort }`. The worker pins the transformer version, waits for
+`start { input, runId, cwd, seed, epochMs }`, transforms the source with
+`amaro` in transform mode (full TypeScript: enums, parameter properties,
+`satisfies`, namespaces; `module Foo {}` is an error; `import type` and
+`type` specifiers are erased), rewrites the surviving value imports into
+`__import`/`__importNamespace` calls over a frozen module table and the
+default export into `__exports.default`, wraps the body in one async function
+(top-level `await` is permitted, as in the static loader), evaluates it with
+`vm.Script` in a context created with `codeGeneration: { strings: false, wasm:
+false }`, normalises the default export through the real `defineWorkflow`
+("workflow module has no valid default definition" otherwise), and posts
+`ready { manifest }`. The transform is a pure function of the bytes, the
+options, and the amaro version; it is recomputed on every boot and never
+persisted. The module table is `@vegardx/pi-workflow` (the real
+`DEFAULT_WORKFLOW_CONCURRENCY`, `MAX_WORKFLOW_CONCURRENCY`,
+`WORKFLOW_CONTRACT_REVISION`, `defineWorkflow`, `isArtifactHandle`,
+`isTaskHandle`, `isWorkflowDefinition`, and `defineSupportTask` wrapped so
+`registration()` throws "Dynamic workflow source may not register support
+implementations."), `typebox` (a frozen copy of the namespace), and each
+published support helper under `moduleSpecifier` and `exportName`. An import
+the table does not hold fails the transform ("dynamic workflow import
+<specifier> is not available"); a missing export fails evaluation ("Dynamic
+workflow import "<specifier>" has no export "<name>"."). Module objects are
+worker-realm objects exposed into the context, so `instanceof` against
+context intrinsics is not guaranteed.
+
+Determinism aids, all part of `hostApiSha256` and explicitly not security:
+the prelude fixes `Date`'s zero-argument forms and `Date.now()` to the run's
+`createdAt` (`epochMs`), seeds `Math.random` with xorshift128+ from the first
+16 bytes of `seed = deriveJsonValueSha256({ kind: "dynamic-vm-seed", runId })`
+so two boots of the same run see the same sequence, replaces `console` with
+frozen no-ops, and then seals the global: the contextified global cannot be
+frozen, so it is a proxy that refuses every definition, assignment, and
+deletion after the prelude with the message a frozen object gives
+("Cannot add property <name>, object is not extensible"). Nothing else is
+exposed: `typeof process`, `require`, `fetch`, `setTimeout`,
+`structuredClone`, `TextEncoder`, and `queueMicrotask` are all `"undefined"`
+in the context, `eval` and `new Function` throw `EvalError`, and `import()`
+rejects because the script has no dynamic-import callback. The worker
+thread's own realm still has `process` (with an empty environment); the VM
+context does not. The worker-thread VM is a determinism and API boundary,
+not an OS security boundary.
+
+### RPC bridge
+
+All VM→host traffic and asynchronous host→VM traffic travel on the worker's
+main channel; only `reply` messages answering `call` requests travel on a
+dedicated `syncPort`. VM→host messages (`DynamicVmMessageSchema`) are `ready
+{ manifest }`, `call { id, method, args }` for the synchronous methods
+(`DYNAMIC_SYNC_METHODS` = `agent`, `agentInNamespace`, `checkpoint`,
+`finalize`, `log`, `phase`, `support`, `workflow`), `await { id, method,
+handles }` for the asynchronous barriers (`DYNAMIC_ASYNC_METHODS` = `handoff`,
+`result`, `results`, `settled`; at most `MAX_DYNAMIC_HANDLE_REFS` = 256
+handles), `done { result }` (`{ kind: "value", value }`, `{ kind: "task",
+ref }`, or `{ kind: "artifact", ref }`), and `failed { error }` (`{ name,
+message, stack? }`, bounded to 128, 1024, and 8192 characters). Host→VM
+messages are `start`, `reply { id, ok: true, value, aborted }` or `reply {
+id, ok: false, error, aborted }`, and `abort { reason }`. Request ids are
+contiguous integers from 1 to `MAX_DYNAMIC_RPC_MESSAGES`. Handles never cross
+as objects: a task handle travels as `{ kind: "task-handle", ref, output,
+handoff? }` (`handoff` present exactly when the real handle is a worktree
+handle) and a result or handoff artifact handle as `{ kind:
+"artifact-handle", ref }`; the host resolves refs against the handles it
+issued in this drive and answers an unknown one with the reply error
+"Dynamic workflow referenced an unknown task handle.", while the shim
+rebuilds a returned ref into a real, frozen, worker-realm `TaskHandle`
+("Dynamic workflow host returned an invalid task handle." otherwise).
+
+Every VM message is admitted by a guard, and each violation is fatal to the
+drive (stage `protocol`): a message outside the schema ("Dynamic workflow VM
+sent an invalid message."), a message whose JSON exceeds
+`MAX_DYNAMIC_RPC_MESSAGE_BYTES` (17 MiB, above the 16 MiB artifact bound
+plus envelope: "Dynamic workflow VM message exceeds 17825792 bytes."), more
+than `MAX_DYNAMIC_RPC_MESSAGES` messages ("Dynamic workflow VM exceeded
+65536 messages."), a request id that is not the previous one plus one
+("Dynamic workflow VM request ids are not contiguous."), a `call` while
+another `call` is unanswered ("Dynamic workflow VM issued overlapping
+synchronous calls."), a second `ready`, or anything but `failed` before
+`ready`. The host checks `call` arguments before dispatch
+(`DYNAMIC_SYNC_CALL_ARGS_SCHEMAS`: a task key and a request object for the
+declarations, a namespace of 1..32 keys plus key and request for
+`agentInNamespace`, one string for `phase` and `log`); a failure is the
+non-fatal reply error "Dynamic workflow call arguments are invalid.", and
+`phase`/`log` are admitted on type alone so the static context produces its
+own length messages ("Workflow phase must contain 1 to 128 characters.",
+"Workflow log must contain 1 to 4096 characters."). The same size bound
+applies to replies: an oversized barrier result becomes the reply error
+"Dynamic workflow barrier result exceeds 17825792 bytes." rather than a
+failure. Reply errors carry `name` and `message` only (host stacks stay
+host-side) and are rethrown into the source with the names preserved
+(`WorkflowMaterializationError`, `StaticWorkflowRuntimeError`, plain
+`Error`, `DynamicWorkflowHostError`).
+
+Synchronous declarations: the shim's `syncCall` posts `call`, then blocks in
+`Atomics.wait` on a 4-byte shared flag for at most `DYNAMIC_VM_SYNC_WAIT_MS`
+(30000 ms; "Dynamic workflow host did not answer a synchronous declaration
+within 30000 ms." names the effective wait) and reads the reply with
+`receiveMessageOnPort` ("Dynamic workflow host answered the wrong
+synchronous call." if it is missing or names another id). The host answers a
+`call` synchronously inside its message handler by invoking the static
+context method (`phase`, `log`, `agent`, `support`, `workflow`, `checkpoint`,
+`finalize`) or, for `agentInNamespace`, the non-enumerable symbol-keyed host
+bridge on the context (`workflowHostBridge`, which does what `fanOut`'s
+per-item body does and is not exported from the package), then posts the
+reply on `syncPort`, stores the flag, and notifies. `fanOut`, `fanIn`, and
+`pipeline` are lowered in the shim with the static runtime's validations and
+messages verbatim ("Workflow fan-out namespace is invalid.", "Workflow
+fan-out exceeds 64 items.", "Workflow fan-out options are invalid.",
+"Workflow fan-in requires 1 to 64 sources.", "Workflow fan-in options are
+invalid.", "Workflow fan-in input keys must be unique.", "Workflow pipeline
+definition is invalid.", "Workflow pipeline exceeds 64 stages.", "Workflow
+pipeline must return one of its stage handles."), thrown with the name
+`StaticWorkflowRuntimeError`; a request that contains a function is refused
+before the call ("Workflow request contains a function."). The deadlock rule
+is normative and tested: (R1) the host answers a `call` synchronously within
+the message handler, with no `await` on that path; (R2) the VM has at most
+one outstanding `call` and blocks until it is answered; (R3) the host never
+sends the VM a message that requires a VM reply (`start`, `reply`, and
+`abort` are one-way); (R4) `await` requests are answered on the main channel
+and the shim awaits a promise, so barrier drives of any duration cannot
+deadlock the VM; (R5) the `Atomics.wait` timeout is a fail-safe for a hung
+host, not a scheduling mechanism.
+
+Asynchronous barriers: `ctx.result`, `ctx.results`, `ctx.settled`, and
+`ctx.handoff` post `await` ("Workflow barrier target is not a task handle."
+for a non-handle; `ctx.handoff` requires a worktree handle, "Workflow handoff
+barrier requires a worktree task handle.") and return a promise settled by
+the main-channel reply; several may be outstanding. The host resolves the
+refs and runs the ordinary `ctx.result`/`results`/`settled`/`handoff`, which
+prepare the barrier and drive the scheduler exactly as for static source;
+values are deep-frozen in the VM before they are returned. A `results` or
+`result` barrier that rejects becomes a reply error, except the static
+runtime's park signal (a checkpoint awaiting a decision): the bridge stops
+answering, terminates the worker, and rethrows the very same signal so the
+static runtime parks the run `waiting` with no `-> failed`; the next drive
+boots a fresh VM. `done` resolves `run()`: a JSON value (the shim
+round-trips it; "Dynamic workflow return value is not JSON." otherwise), a
+real task handle, or a real result or handoff artifact handle looked up in
+the host's handle map ("Dynamic workflow returned an unknown task handle."
+for one the host never issued); the static runtime then performs the final
+barrier and output commit as for static source.
+
+Abort mirroring: when the host `ctx.signal` aborts, the host posts `abort {
+reason }` (the signal reason's message, or "Workflow stop requested.") and
+every later reply carries `aborted: true`; the shim aborts its own
+`AbortController` on either, so the VM's `ctx.signal.aborted` becomes true.
+The host then waits `DYNAMIC_VM_ABORT_GRACE_MS` (1000 ms) for `done` or
+`failed`; otherwise it terminates the worker and `run()` rejects with stage
+`abort` ("Dynamic workflow execution was aborted."). A context already
+aborted before boot is refused with the same reason without spawning.
+
+Termination and watchdogs: the worker is always terminated before the drive
+settles (success, failure, park, abort, and a terminate failure never replaces
+the primary outcome). Host timers are `unref`'d: the boot watchdog runs from
+spawn to `ready` (`DYNAMIC_VM_BOOT_TIMEOUT_MS` = 10000 ms in run mode, 5000
+ms in manifest mode); the compute watchdog is armed after `ready` and
+re-armed after every answered request while no `await` is outstanding,
+cleared on any VM message, and paused while a barrier is outstanding
+(`DYNAMIC_VM_COMPUTE_TIMEOUT_MS` = 30000 ms); the message-count bound is the
+guard's; a worker `error` with `ERR_WORKER_OUT_OF_MEMORY` is the memory
+failure; an `exit` before `done`/`failed` and any other `error` are exit
+failures. A `DynamicVm` runs once ("Dynamic workflow VM has already run.").
+
+### Definition, failure reasons, and parity
+
+`createDynamicWorkflowDefinition({ manifest, source, supportHelpers,
+createdAt })` returns an ordinary `WorkflowDefinition` whose `meta` and
+schemas come from the approved manifest and whose `run(ctx)` requires the
+static-runtime context (`protocol` "Dynamic workflow bridge requires the
+static runtime context." otherwise), boots one VM per call with `start`
+taken from the context (`input`, `runId`, `cwd`) and the run (`seed`,
+`epochMs = Date.parse(createdAt)`), fails a `ready` manifest that differs
+from the approved one (`manifest` "Dynamic workflow manifest changed since
+approval."), and always terminates the worker. Because `startDrive` creates
+a new static runtime per drive and the worker is spawned inside `run`, every
+restart, park, and invalidation recovery re-executes the source from entry in
+a fresh worker and replays the persisted prefix exactly as static source does.
+Of the `DynamicVmBridgeOverrides`, the service sets only `bootTimeoutMs` and
+`computeTimeoutMs`, from its `dynamic` option; `resourceLimits`, `syncWaitMs`,
+and `workerEntry` are test-only and never set by the service.
+
+Every failure is a `DynamicWorkflowExecutionError` with a `stage` (`boot`,
+`transform`, `manifest`, `source`, `protocol`, `watchdog`, `memory`, `exit`,
+`abort`) and a fixed message; the static runtime recognises the error by name
+and appends `run-status-changed <status> -> failed` with that exact message
+as the reason (after cancelling open checkpoints), where the static path
+appends "Static workflow source execution failed.". A source that throws
+appends "Dynamic workflow source execution failed: <name>: <message>"
+(bounded). The complete table is in
+[Failure taxonomy](failures.md#dynamic-workflow-failure-reasons).
+
+Parity: the same source loaded statically and through the shim yields the
+same manifest, and driven under the same definition identity, run id, and
+input it yields identical `{ type, data }` journal payloads, the same output
+value, and the same output artifact digest. The single documented exception
+is the `-> failed` reason for a throwing source (the two fixed reasons above).
+
 ## Checkpoints
 
+A checkpoint is a human decision that a run parks on. It is an ordinary
+declarative task of `kind: "checkpoint"` whose result is the decision value,
+validated against the request's JSON Schema and stored as the execution's JSON
+`result` artifact, so dependents consume it through the same verified input
+path as any other result. Nothing in the runtime, and no model-callable tool,
+can approve a checkpoint on a human's behalf: a decision enters the run only
+through `WorkflowService.decide`.
+
+### Authoring
+
 ```ts
-interface CheckpointRequest<T> extends TaskRequestBase {
-	schema: JsonSchema<T>;
-	prompt: string;
-	default?: T;
-	headless: "block" | "use-explicit-default";
-	expiresAt?: string;
+interface CheckpointRequest<TDecisionSchema extends TSchema> {
+	readonly schema: TDecisionSchema;
+	readonly prompt: string;
+	readonly default?: Static<TDecisionSchema>;
+	readonly headless: "block" | "use-explicit-default";
+	readonly timeoutMs?: number;
+	readonly disposition?: "required" | "optional";
+	readonly after?: readonly TaskRef[];
+	readonly inputs?: Readonly<Record<TaskKey, ArtifactHandle<unknown> | HandoffHandle>>;
+	readonly replay?: "auto" | "off" | "read-only";
 }
+
+checkpoint<TDecisionSchema extends TSchema>(
+	key: TaskKey,
+	request: CheckpointRequest<TDecisionSchema>,
+): TaskHandle<Static<TDecisionSchema>>;
 ```
 
-Checkpoint decisions are immutable, schema-validated, and bound to workflow run,
-task, definition, and effect identity. Headless execution blocks unless the
-definition contains an explicit permitted default. Checkpoints are not part of
-the first vertical slice.
+`ctx.checkpoint(key, request)` returns an ordinary `TaskHandle` typed by the
+decision schema: `handle.ref` is usable in `after`, `handle.output` (output
+`result`) in later `inputs`, and the handle is a legal target of
+`ctx.result`, `ctx.results`, `ctx.settled`, and the final return. A
+checkpoint handle never carries a `handoff`. `after` gates the checkpoint on
+earlier tasks; `inputs` name the result or handoff artifacts the approver is
+shown (a handoff input appears as its `WorkflowHandoffDescriptor`, never as
+patch bytes, and its producer must be a worktree agent task: "task input names
+a handoff of a non-worktree task"). `disposition` defaults to `"required"` and
+`replay` to `"read-only"`.
+
+The static runtime rejects a request that is not an object with
+`StaticWorkflowRuntimeError("validation", "Workflow checkpoint request is
+invalid.")`. The materializer then validates, after the shared prologue
+(final barrier, task limit, key, duplicate key, `after` resolution, input
+resolution, role dependencies), in this order, each a
+`WorkflowMaterializationError`:
+
+1. role `finalizer` → "a checkpoint cannot be a finalizer" (`FinalizeRequest`
+   has no `checkpoint` member, so `ctx.finalize` reaches
+   "finalizer requires exactly one of support, agent, or workflow" first);
+2. `schema` must be a bounded JSON-serializable JSON Schema that compiles
+   under Ajv strict mode (the same checks as an agent output schema, named
+   "checkpoint decision schema");
+3. `prompt` is a string of 1..4096 characters → "invalid checkpoint prompt";
+4. `headless` is `"block"` or `"use-explicit-default"` →
+   "invalid checkpoint headless policy";
+5. `timeoutMs`, when present, is a safe integer of 1_000..365 days →
+   "invalid checkpoint timeout";
+6. `default`, when present, must be lossless JSON ("checkpoint default is not
+   JSON") and satisfy `schema` ("checkpoint default does not match its
+   schema");
+7. `headless: "use-explicit-default"` requires a `default` →
+   "checkpoint headless default requires an explicit default";
+8. the lowered `CheckpointTaskRequest` must satisfy
+   `CheckpointTaskRequestSchema` ("invalid checkpoint task request") and the
+   lowered task `MaterializedCheckpointTaskSchema`
+   ("invalid materialized checkpoint task").
+
+The lowered spec is `CheckpointTaskSpec { key, kind: "checkpoint", role,
+disposition, after, inputs, replay, request: { schema, prompt, headless,
+default?, timeoutMs? }, identitySha256 }`; `deriveCheckpointTaskIdentity`
+covers the request (including `default` and `timeoutMs`), the role, and the
+definition and input identities, like the support identity. The reducer
+repeats the two structural rules on `task-declared` ("a checkpoint cannot be
+a finalizer", "checkpoint headless default requires an explicit default").
+Finalizers may depend on checkpoints.
+
+### Execution and expiry
+
+A checkpoint execution is a `CheckpointTaskExecutionRecord { kind:
+"checkpoint", id, runId, taskId, generation, taskIdentitySha256 }` and passes
+through the phases `created -> checkpoint-requested -> checkpoint-decided ->
+terminal`. Its events are:
+
+- `task-execution-checkpoint-requested { executionId, inputsSha256,
+  expiresAt? }`: `inputsSha256` binds the exact artifacts shown to the
+  approver (result digests, or handoff digests); `expiresAt` is present iff
+  the request has `timeoutMs`, computed by the executor as
+  `min(now + timeoutMs, run deadlineAt)` and reducer-checked to be a finite
+  timestamp no later than `event.timestamp + timeoutMs`. Without `timeoutMs`
+  the run deadline is the only bound.
+- `task-execution-checkpoint-decided { executionId, artifactId,
+  decisionSha256, source: "operator" | "default", decidedAt, decidedBy?,
+  reason? }`: `decisionSha256` equals the canonical digest of the `result`
+  artifact (`sha256`), which must belong to this execution with media type
+  `application/json` and `schemaSha256` equal to the digest of the request
+  schema. `decidedAt` is the decision record's own time, taken before the
+  record was fsynced; it must be a finite timestamp no later than the event's
+  `timestamp` ("checkpoint decision time is invalid"). A default decision must
+  equal the request's `default` and names no approver; an operator decision
+  names one and its `decidedAt` must precede `expiresAt` ("checkpoint decision
+  follows its expiry"). Timeliness is judged by the decision time, never by
+  the append time, so a record persisted just before the expiry replays after
+  the watchdog fired without asking the approver again.
+- `task-execution-terminal` with `CheckpointTerminalEvidence { kind:
+  "checkpoint", artifactId, decisionSha256, source, decidedBy? }`, outcome
+  `completed`, matching the decision; or `WorkflowExecutionFailureEvidence`
+  with stage `checkpoint-input` (outcome `failed`, phase `created`),
+  `checkpoint-expired` (outcome `failed`, phase `checkpoint-requested`), or
+  `stop` (outcome `cancelled`, either open phase).
+
+Checkpoints occupy no concurrency lane and reserve no budget: the scheduler
+routes a selected checkpoint to the checkpoint executor before admission, and
+a requested checkpoint holds nothing while it waits. Task statuses are
+`pending`, `ready`, `waiting`, `completed`, `failed`, `cancelled`, `blocked`,
+and `invalidated`, never `running`, `cancelling`, `interrupted`, or
+`cleanup-blocked`; the lifecycle gains `waiting -> cancelled`, admitted only
+for checkpoints. Fixed task reasons: "Checkpoint awaits a decision."
+(`ready -> waiting`), "Checkpoint decided." (`-> completed`), "Checkpoint
+expired without a decision." (`-> failed` at `checkpoint-expired`),
+"Workflow run ended before the checkpoint was decided."
+(`CHECKPOINT_RUN_ENDING_REASON`, `-> cancelled` when the run leaves `running`
+or `waiting` for a failure state), and "Workflow stop requested." (an abort
+observed before the request is durable).
+
+Expiry policy (`headless` on the request): an expired `block` checkpoint fails
+its execution at stage `checkpoint-expired`; an expired
+`use-explicit-default` checkpoint records the default decision (`source:
+"default"`) and completes. Expiry is applied by the scheduler's sweep on every
+`prepare()`, by the service watchdog that re-drives a parked run at its
+earliest expiry, and inside `decide`, which expires an overdue checkpoint
+instead of accepting the operator's value ("Checkpoint has expired."). A
+required checkpoint that fails or is cancelled fails the run ("A required
+workflow task did not complete."); an optional one is visible degradation and
+`settled` reports `{ status: "rejected", outcome: "failed", failure: {
+message: "Checkpoint expired without a decision.", code: "checkpoint-expired"
+} }`.
+
+Headless mode (`createWorkflowService({ checkpoints: { headless: true } })`)
+short-circuits only `use-explicit-default`: such a checkpoint is decided from
+its default immediately after the request event (`ready -> completed`, never
+`waiting`). A `block` checkpoint parks in headless mode too; an API caller may
+still decide it, and `timeoutMs` or the deadline bounds it.
+
+Input failures before the request (a missing or ambiguous producer artifact,
+"Checkpoint input artifact evidence is incomplete."; an input that cannot be
+read and verified, "Checkpoint inputs could not be read and verified.")
+terminalize the execution `failed` at stage `checkpoint-input`.
+
+### Parking
+
+A lane whose scheduler pass finds nothing selectable while at least one
+checkpoint is `waiting` returns the outcome `awaiting-decision` (appending
+`running -> waiting`, "Workflow run awaits a checkpoint decision.", when the
+run was `running`). The static runtime parks the drive when a batch's outcomes
+are all `idle` or `awaiting-decision`, at least one is `awaiting-decision`,
+and the batch produced no errors: `drive()` resolves to a
+`StaticWorkflowParkedResult { runId, status: "waiting", parked: true,
+pendingCheckpoints: [{ taskId, executionId, expiresAt? }] }`
+(`isStaticWorkflowParked`) and never appends `-> failed`. Parking is
+signalled through the barrier promise by a private sentinel; trusted source
+that catches it cannot un-park the run, because every later barrier rethrows
+it and the drive still resolves parked. A live drive whose other lane is busy
+keeps running, and `decide` works against it as well.
+
+The service keeps a parked run's lease and marks it settled: `wait` returns
+the `waiting` view with `parked: true` at once (see
+[Lifecycle methods](#lifecycle-methods)); `status` reads the projection; a
+watchdog re-drives the run at the earliest pending `expiresAt` or at
+`deadlineAt`, whichever is first (bounded to the timer maximum), so expiry
+and the deadline stop are applied without a caller; `stop` cancels the open
+checkpoints (`waiting -> cancelled` at stage `stop` with the operator's
+reason) and lands `cancelled`; `reconcile` re-parks; `shutdown` releases the
+lease without stopping a parked run, and a later session resumes it through
+`wait`, `decide`, or `stop`. `invalidate` is refused while the run is
+`waiting` ("Workflow run status does not admit invalidation."), and the
+reducer refuses `task-invalidated` while a checkpoint execution is open
+("workflow run has active task executions"). No operator `retry` or `resume`
+exists in this build.
+
+Every failure transition fails closed on an open checkpoint: the reducer
+rejects `run-status-changed` to `failed`, `interrupted`, or `cleanup-blocked`
+while an on-path checkpoint's current execution is not terminal (phase
+`created`, `checkpoint-requested`, or `checkpoint-decided`; "run failure
+leaves a checkpoint open"), and every failure site (scheduler, task
+finalizer, and the static runtime's source and finalization failures) first
+settles them through `cancelOpenWorkflowCheckpoints(journal,
+CHECKPOINT_RUN_ENDING_REASON)`: an undecided execution is cancelled, and a
+decided one whose terminal never landed is committed from its projection
+(terminal `completed` with the decision's `CheckpointTerminalEvidence`, then
+"Checkpoint decided."), so a failed run never retains an active execution
+that would block `invalidate`. A
+cancel that loses the race against a concurrent decision is tolerated: the
+decided execution is left alone.
+
+A parked nested child run holds its parent's lane: the parent task stays
+`running` and continues once the child's checkpoint is decided, expired, or
+cancelled and the child's drive re-settles. `decide` refuses a nested run
+("Nested workflow runs are decided through their parent run.") and the
+`decide` action is never offered for one; no path decides a nested child's
+checkpoint yet.
+
+### Decisions
+
+A decision is immutable once recorded. Its durable record is the
+`WorkflowDecisionRecord` in the run's `decisions/` store (see
+[Persistence and recovery](persistence.md#decision-records)), bound to
+`{ kind: "checkpoint", runId, taskId, executionId, effectSha256 }`, where
+`effectSha256 = deriveCheckpointEffectSha256({ taskIdentitySha256,
+inputsSha256 })` is the checkpoint's effect identity: the task identity
+(definition identity, request, role, inputs by name) plus the exact artifact
+digests the approver saw. One record exists per binding: a byte-identical
+re-put is idempotent and a different record is a conflict, so a second
+decision for the same execution is refused ("Checkpoint decision conflicts
+with existing decision evidence."). The decision value is additionally the
+execution's JSON `result` artifact (never a `.patch`), and the journal
+(`checkpoint-decided`, terminal evidence, `-> completed`) is a projection of
+the record: after a crash at any prefix the executor converges on the same
+`decisionSha256` without asking the human again. A new execution generation
+(after invalidation) has a new execution id and therefore a new binding, and
+is asked again; a completed checkpoint outside the invalidation closure
+replays from its result artifact, validated against the request schema, and
+is not re-asked.
+
+`WorkflowService.decide(runId, taskId, { decision, approver, reason? })`
+records an operator decision and restarts the parked drive. Under the service
+lock it refuses, in this order, each a `WorkflowServiceError("validation",
+…)`:
+
+1. "Invalid workflow run ID." and "Invalid workflow task ID.";
+2. "Invalid checkpoint decision options." (options not an object, or a
+   property outside `decision`, `approver`, `reason`);
+3. "Invalid checkpoint approver." (`approver` not a string of 1..256
+   characters) and "Invalid checkpoint decision reason." (`reason` present
+   but not a string of 1..4096 characters);
+4. "Nested workflow runs are decided through their parent run.";
+5. "Workflow run status does not admit a checkpoint decision." (run not
+   `running` or `waiting`);
+6. "Unknown workflow task." (missing or abandoned) and "Workflow task is not
+   a checkpoint task.";
+7. "Checkpoint is not awaiting a decision." (task not `waiting`, no durable
+   request, or already decided);
+8. "Workflow run deadline has passed.".
+
+The scheduler then records the decision under its lock through the checkpoint
+executor; executor refusals of stage `validation` or `decision` surface as
+`validation` with the executor's message: "Checkpoint is already decided."
+(a repeated decision; a decided-but-uncommitted execution is committed
+first), "Checkpoint is not awaiting a decision." (no durable request yet),
+"Checkpoint has expired." (the checkpoint is expired first, per its policy),
+"Checkpoint decision does not match its schema.", "Checkpoint decision is not
+losslessly JSON serializable.", "Checkpoint decision exceeds the workflow
+artifact bound.", and "Checkpoint decision conflicts with existing decision
+evidence.". Inputs that no longer hash to the durable `inputsSha256` are a
+`persistence` error ("Checkpoint inputs do not match durable intent."), never
+a decision. On success the settled drive is restarted without being awaited
+(`wait` observes it); a live drive continues and is re-driven if it parks on
+an outcome older than the decision. The method returns the current run view.
+
+### Checkpoint views
+
+Every checkpoint task's view carries `checkpoint: { prompt, promptTruncated?,
+schema, headless, default?, timeoutMs?, requestedAt?, expiresAt?, inputs?,
+decision? }`, with `decision: { source, decidedBy?, decidedAt, reason?,
+sha256, value? }`; `requestedAt` copies the request event's timestamp and
+`decidedAt` copies the decided event's `decidedAt` (the decision record's
+time, not the append time).
+Artifact-backed views (`status`, `wait`, `stop`, `decide`, `reconcile`) read
+the verified input values into `inputs` (handoff inputs as descriptors) and
+the recorded decision into `decision.value`; a read failure is `persistence`
+"Checkpoint inputs could not be read and verified." or "Checkpoint decision
+artifact metadata is missing.". The lease-free `inspect` and `listRuns` omit
+`inputs` and `decision.value`, and `inspect` cuts prompts longer than
+`MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH` (256) characters, marking them
+`promptTruncated: true`. Log entries never carry the value or the approver.
+
+### Operator surface
+
+`decide` is a service method, and checkpoint decisions are human-only. There
+is no model-callable decide tool, by design: a model must never decide a
+checkpoint, and `WORKFLOW_TOOL_DECLARATIONS` declares none. The extension
+command `/workflow decide <run> <task> <json> [reason…]` follows in
+`src/ui/commands.ts` as the pass-through to `decide(runId, taskId,
+{ decision, approver, reason })` with `approver` set to the Pi session user
+identity; until then embedders call the service directly. A parked run is
+surfaced to the operator, never polled by a model: `wait` returns immediately
+with `parked: true` and `pendingCheckpoints`, and the `/workflow` widget and
+inspector show the pending checkpoints.
+
+### Reducer rules
+
+The reducer enforces, with these exact messages: "checkpoint execution target
+is not a checkpoint task"; "checkpoint request is out of order"; "checkpoint
+request requires a running workflow run" (the run must be `running` or
+`waiting`); "checkpoint request does not match its task" (`inputsSha256`);
+"checkpoint request expiry is invalid"; "checkpoint decision is out of
+order"; "checkpoint decision requires a running workflow run"; "checkpoint
+decision artifact does not match"; "checkpoint default decision requires the
+headless default"; "checkpoint default decision may not name an approver";
+"checkpoint operator decision requires an approver"; "checkpoint decision
+follows its expiry"; "checkpoint terminal evidence precedes its decision";
+"checkpoint terminal outcome is not completed"; "checkpoint terminal decision
+does not match"; kind mismatches such as "support task has checkpoint
+terminal evidence" and "checkpoint task has subagent terminal evidence";
+"workflow terminal evidence is inconsistent" for any stage or phase
+combination outside the three admitted above (so `handoff-import` is never
+admitted on a checkpoint, and `checkpoint-expired` or `checkpoint-input` never
+on another kind); "checkpoint task may not run"; "checkpoint task became
+waiting without a persisted request"; "checkpoint task may not enter
+cancelling"; "checkpoint task may not be interrupted"; "checkpoint task may
+not be cleanup-blocked"; "only a checkpoint task may be cancelled while
+waiting"; "checkpoint task input artifact is missing or ambiguous";
+"checkpoint decision time is invalid"; and "run failure leaves a checkpoint
+open". The reducer verifies digests and
+provenance but never validates a value against the JSON Schema; the
+materializer validates `default` and the executor validates operator values.
 
 ## Finalizers
 
@@ -1780,7 +2670,14 @@ stopped, and only explicit reconciliation or release may transition it to a
 proved terminal outcome. It is never degraded success. Support tasks use only
 `pending`, `ready`, `blocked`, `running`, `completed`, `failed`, and
 `cancelled`. Nested workflow tasks additionally use `cancelling`,
-`interrupted`, and `cleanup-blocked` but never `waiting`.
+`interrupted`, and `cleanup-blocked` but never `waiting`. Checkpoint tasks
+use `pending`, `ready`, `waiting`, `completed`, `failed`, `cancelled`,
+`blocked`, and `invalidated`; `waiting -> cancelled` exists since revision 18
+and is admitted only for a checkpoint ("only a checkpoint task may be
+cancelled while waiting"). A run leaves `running` or `waiting` for `failed`,
+`interrupted`, or `cleanup-blocked` only after every non-terminal checkpoint
+has been cancelled or, if already decided, committed ("run failure leaves a
+checkpoint open").
 `completed-degraded` requires every required task and required finalizer to
 succeed while one or more optional tasks or advisory finalizers failed; all
 degradations remain visible. Completion (`finalizing -> completed` or

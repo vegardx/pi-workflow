@@ -8,7 +8,12 @@ This document owns workflow terminology.
 | --- | --- |
 | Workflow definition | Reusable, versioned orchestration program with input/output schemas. |
 | Static workflow | Trusted saved TypeScript workflow authored before execution. |
-| Dynamic workflow | Task-specific workflow program executed through a bounded host API. |
+| Dynamic workflow | A `defineWorkflow` source proposed as text (`dynamic:<sha256>`, the SHA-256 of its UTF-8 bytes) rather than discovered from a file, executed in a worker-thread VM against the ordinary static runtime through a bounded RPC host API only after a human approved it; always a root run and never a nested child. |
+| Proposal | Derived, immutable-by-digest record of proposed dynamic source under `<storeRoot>/dynamic/<sourceSha256>/` (source bytes, the `manifest.json` + `proposal.json` pair under `records/<version>/` that `current` names, and a definition-level `decisions/` store); re-proposing the same bytes returns it, and only a host API change replaces its derived pair (staged, then one pointer swap). |
+| Manifest | The `meta`, `inputSchema`, and `outputSchema` a dynamic source's default export declares, extracted in a manifest-only VM at proposal time; its canonical digest is part of the definition identity and of every approval. |
+| Source approval | Definition-level decision record with the `source-approval` binding (`definitionIdentitySha256`, `sourceSha256`, `contractRevision`) whose value records `approved` or `rejected`, a human approver, and the manifest, host API, and import policy digests; written only through `/workflow approve|reject` with an explicit confirm, copied into every run directory, and final. |
+| Host API digest | `hostApiSha256`: canonical digest of everything the VM frontend exposes to dynamic source (context members, shim exports, RPC methods and message types, every bound and timeout, resource limits, code-generation settings, the `amaro` transformer identity, and `DYNAMIC_HOST_API_REVISION`); part of the definition identity, so a package upgrade rebinds and requires a fresh approval. |
+| Import policy digest | `importPolicySha256`: canonical digest of the built-in module allow-list plus the registered support helpers published for dynamic import (module specifier, `exportName`, implementation identity); registry-derived, separate from the host API, captured by the approval and re-checked on run and resume. |
 | Workflow registry | Ordered collection of discovered definitions with provenance and collision rules. |
 | Workflow run | One execution of a workflow definition with concrete validated input. |
 | Phase | Progress label grouping related effects; it is not independently schedulable. |
@@ -43,6 +48,7 @@ This document owns workflow terminology.
 | Baseline | The clean checkout a worktree attempt started from, journaled as the launch plan's `workspaceBaselineSha256` on the preflight (pi-subagent's digest, opaque to the workflow) together with the settlement's and the imported handoff's `baselineHead`; a replayed handoff must match this exact triple, and a new execution generation may take a new baseline. |
 | Structured output | Schema-validated result produced through the subagent terminating tool. |
 | Checkpoint | Durable human decision that gates later work. |
+| Decision record | Immutable, schema-validated, binding-addressed record of a human or default decision under a `decisions/` directory: a run-scoped `checkpoint` binding for checkpoint decisions, or a definition-level `source-approval` binding for dynamic source approvals. |
 | Journal | Append-only lifecycle event record and source of truth. |
 | Snapshot | Derived current state reconstructed from journal events. |
 | Projection | Bounded state view for UI, prompts, or APIs. |

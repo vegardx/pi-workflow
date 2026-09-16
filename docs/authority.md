@@ -107,13 +107,63 @@ exists in any direction.
 
 ## Dynamic workflow host API
 
-Dynamic code receives only bounded operations such as task declaration, result
-barriers, phases, artifacts, and checkpoints. Calls cross RPC and are validated
-by the same host materializer used by static workflows.
+Dynamic workflow source is untrusted orchestration input executing inside a
+trusted process. It is admitted in three human-gated steps, none of which a
+model can complete on its own:
+
+1. Proposal. `service.propose` (and the `workflow_propose` tool, which only
+   proposes) requires Pi project trust ("Dynamic workflows require project
+   trust."), exactly like project static definitions: a run writes under
+   `<cwd>/.pi/workflow`, and the source may declare agent tasks against the
+   project. The proposal applies the static import gate and the two
+   dynamic-only source rules, extracts the manifest in a manifest-only VM, and
+   records nothing that grants execution.
+2. Approval. Approval is a human decision recorded through a Pi command with
+   an explicit `ctx.ui.confirm` (`/workflow approve dynamic:<sha256>` and
+   `/workflow reject dynamic:<sha256> [reason…]`, a follow-up on the
+   operator surface), never through a model-callable tool: there is no
+   `workflow_approve`, `workflow_reject`, or `workflow_proposals` tool, and the
+   service accepts only an approver whose `kind` is `"human"` ("Invalid dynamic
+   workflow approver."). The decision is one immutable definition-level
+   record with the `source-approval` binding, bound to the source digest, the
+   manifest digest, `hostApiSha256` (through the definition identity), and
+   `importPolicySha256`. A changed source, a changed host API (package
+   upgrade), or a changed support registry therefore refuses to run or resume
+   until a human approves again; a rejection is equally final ("Dynamic
+   workflow source was rejected.").
+3. Run. `service.run` and `service.validate` accept `dynamic:<sha256>` only
+   for an approved proposal of this project under the current host API and
+   import policy, copy the approval into the run directory, and resume only
+   from that copy. `service.list()` stays static-only; proposals are visible
+   through `service.proposals()`.
+
+Inside the VM, dynamic code receives exactly the `WorkflowContext` the static
+runtime provides: task declaration (`agent`, `support`, `workflow`,
+`checkpoint`, `finalize`, fan-out, fan-in, pipelines), phases and logs, and
+the result, settled, and handoff barriers. Every declaration crosses the RPC
+bridge as a bounded JSON message and is validated by the same host
+materializer, scheduler, and executors used for static workflows; handles
+cross only as references and are resolved by the host against the handles it
+issued in this run. A dynamic definition may declare nested static children,
+which are resolved through the ordinary discovery pass and trust gate; a
+dynamic definition can never be a nested child. Support tasks are declared
+through helpers the embedder published with an `exportName`; the source can
+describe a support task but never supply an implementation ("Dynamic workflow
+source may not register support implementations.").
 
 Dynamic code receives no direct filesystem, process, environment, network,
 module import, extension, scheduler, store, credential, or `SubagentService`
-object. The worker-thread VM is not an OS security boundary.
+object: the context has no `process`, `require`, `fetch`, timers,
+`structuredClone`, or `TextEncoder`, `import()` and `eval`/`new Function`
+throw, the imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
+published support helpers, and the worker runs with an empty environment,
+heap limits, and watchdogs. `Date`, `Math.random`, and `console` are patched
+so a re-executed drive replays deterministically. These are determinism aids
+and API bounds; the worker-thread VM is a determinism and API boundary, not
+an OS security boundary, and dynamic code is never trusted merely because it
+runs in a VM. What it may do is bounded by what the human approved and by the
+runtime policy, agent definitions, and project trust that bound every static
+workflow as well.
 
 ## Deterministic support tasks
 
