@@ -114,9 +114,16 @@ that does not know the field ignores it, and nothing derives identity from it).
 The package ships two more builtin workflows, `deep-review` and `plan-review`,
 from the same `workflows/` builtin root; `plan-review` is the only name on
 `BUILTIN_HEADLESS_WORKFLOWS`, and declares no checkpoint, worktree or handoff.
-No frozen export was removed, renamed, or retyped,
-no returned union widened, and no tool name, parameter, or output schema
-changed.
+The lease-free `inspect` gains two additive reads: `WorkflowInspectSection`
+gains the member `"output"`, which puts a terminal run's committed output on
+`run.output` (`WorkflowRunSummarySchema` gains the optional `output`, bounded
+by `MAX_WORKFLOW_ARTIFACT_BYTES`), and `WorkflowCheckpointDecisionView.value`
+is now also filled from the run's durable decision record, so a decided
+checkpoint's value is visible without the decision artifact. Both are
+additive: an `include` that was valid stays valid, an inspection that
+validated still validates, and nothing persisted changed. No frozen export was
+removed, renamed, or retyped, no returned union widened, and no tool name, no
+tool output schema, and no accepted tool parameter was narrowed or removed.
 
 ## Static definition
 
@@ -1849,7 +1856,12 @@ Reads never acquire a run lease. `listRuns`, `inspect`, and `logs` read runs
 this service owns through their own journals and every other run through the
 lease-free readers `WorkflowRunRecordStore.readFrom` and
 `readWorkflowJournalUnleased` (complete-record prefix; a torn tail is measured,
-never repaired). Ownership is `owned`, `leased-elsewhere` (the recorded lease
+never repaired). The two durable values `inspect` cannot project from the
+journal alone - a settled run's output and a decided checkpoint's value - are
+read the same way: an owned run through its own stores, every other run
+through `WorkflowArtifactStore.openUnleased` and
+`WorkflowDecisionRecordStore.openUnleased`, which verify what an owned store
+verifies and refuse every write. Ownership is `owned`, `leased-elsewhere` (the recorded lease
 port answers with this run's identity, or an occupant that cannot identify
 itself, matching acquisition's fail-safe), or `inactive`. `status()` keeps
 leasing as before.
@@ -1872,7 +1884,8 @@ appear only on a fresh first page. A summary carries `runId`,
 `lastSequence`, `taskCounts` (on-path tasks per status, zero-filled, plus
 `abandoned` and `total`), `ownership`, `leasedElsewhere`, `availableActions`,
 `requiresAttention`, `pendingCheckpointCount`, and `outputArtifactId`; never
-the output value.
+the output value (`WorkflowRunSummarySchema`'s optional `output` is filled
+only by `inspect(runId, { include: [..., "output"] })`).
 
 `inspect(runId, { include, taskId })` returns `run` (the same summary) plus
 the requested sections, default `run`, `budget`, `tasks`: `budget` (declared
@@ -1882,7 +1895,17 @@ budget or evidence is incomplete), `tasks` (the enriched task view with
 `dependsOn` and `inputs`), `executions` (ordered by task then newest
 generation; identities, phases, attempts with fixed declined reasons,
 settlement, terminal outcome with failure code and stage, produced artifact
-ids), `effects`, `barriers`, and `artifacts` (metadata and digests only).
+ids), `effects`, `barriers`, `artifacts` (metadata and digests only), and
+`output`. `output` is not a section of its own: it puts the run's committed
+output value on `run.output`, read through
+`WorkflowArtifactStore.openUnleased` and verified against the digest and size
+the journal records. It is absent unless the run is terminal and committed an
+output, and absent from every inspection that did not ask for it, so the
+default selection still reads no artifact. Its bound is the artifact bound,
+`MAX_WORKFLOW_ARTIFACT_BYTES` (16 MiB), enforced on the write and re-checked
+on the read; an unreadable output is `persistence` "Workflow output could not
+be read and verified." and missing metadata "Workflow output artifact
+metadata is missing.".
 Bounded sections keep 256 items (`executions` the first 256 in order, or all
 of one task's when `taskId` is given; the others the newest 256) and record
 the omitted count in `truncated`. Refusals: "Invalid workflow run ID.",
@@ -2762,8 +2785,15 @@ Artifact-backed views (`status`, `wait`, `stop`, `decide`, `reconcile`) read
 the verified input values into `inputs` (handoff inputs as descriptors) and
 the recorded decision into `decision.value`; a read failure is `persistence`
 "Checkpoint inputs could not be read and verified." or "Checkpoint decision
-artifact metadata is missing.". The lease-free `inspect` and `listRuns` omit
-`inputs` and `decision.value`, and `inspect` cuts prompts longer than
+artifact metadata is missing.". The lease-free `inspect` omits `inputs` but
+does carry `decision.value`, read from the run's durable decision record
+through `WorkflowDecisionRecordStore.openUnleased` instead of from the
+decision artifact. The journal stays authoritative: the value is shown only
+when the record's `valueSha256` equals the `sha256` the journalled decision
+names, and a record that cannot be read or that disagrees is `persistence`
+"Checkpoint decision could not be read and verified."; a binding with no
+record at all simply carries no value. `listRuns` carries no checkpoint view
+at all, and `inspect` cuts prompts longer than
 `MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH` (256) characters, marking them
 `promptTruncated: true`. Log entries never carry the value or the approver.
 
