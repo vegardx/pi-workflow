@@ -13,11 +13,15 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { canonicalArtifactJson } from "./artifact-store.js";
+import {
+	canonicalArtifactJson,
+	resolveRunSubdirectory,
+} from "./artifact-store.js";
 import {
 	CheckpointDecisionSourceSchema,
 	TaskExecutionIdSchema,
 	WORKFLOW_CONTRACT_REVISION,
+	type WorkflowRunId,
 	WorkflowRunIdSchema,
 	WorkflowTaskIdSchema,
 } from "./contracts.js";
@@ -254,10 +258,17 @@ async function readFileNoFollow(filePath: string): Promise<Buffer | undefined> {
 export class WorkflowDecisionRecordStore {
 	readonly root: string;
 	/** Absent for a definition-level store. */
+	private readonly runId: WorkflowRunId | undefined;
+	/** Absent for a read-only store opened without the run's lease. */
 	private readonly journal: WorkflowRunJournal | undefined;
 
-	private constructor(root: string, journal: WorkflowRunJournal | undefined) {
+	private constructor(
+		root: string,
+		runId: WorkflowRunId | undefined,
+		journal: WorkflowRunJournal | undefined,
+	) {
 		this.root = root;
+		this.runId = runId;
 		this.journal = journal;
 	}
 
@@ -277,8 +288,35 @@ export class WorkflowDecisionRecordStore {
 				);
 			}
 			await chmod(root, 0o700);
-			return new WorkflowDecisionRecordStore(root, options.journal);
+			return new WorkflowDecisionRecordStore(
+				root,
+				options.journal.runId,
+				options.journal,
+			);
 		});
+	}
+
+	/**
+	 * A read-only run-scoped store opened without the run's lease, for the
+	 * lease-free views. {@link read} verifies exactly what an owned store's
+	 * does - canonical bytes, the schema, provenance, the binding, and the
+	 * value digest - and {@link put} refuses, so nothing is created and
+	 * nothing is fenced.
+	 */
+	static async openUnleased(options: {
+		storeRoot: string;
+		runId: WorkflowRunId;
+	}): Promise<WorkflowDecisionRecordStore> {
+		if (!Value.Check(WorkflowRunIdSchema, options.runId)) {
+			throw new WorkflowDecisionRecordError("invalid workflow run ID");
+		}
+		const root = await resolveRunSubdirectory(
+			options.storeRoot,
+			options.runId,
+			"decisions",
+			(message) => new WorkflowDecisionRecordError(message),
+		);
+		return new WorkflowDecisionRecordStore(root, options.runId, undefined);
 	}
 
 	/**
@@ -306,7 +344,7 @@ export class WorkflowDecisionRecordStore {
 			);
 		}
 		await chmod(root, 0o700);
-		return new WorkflowDecisionRecordStore(root, undefined);
+		return new WorkflowDecisionRecordStore(root, undefined, undefined);
 	}
 
 	/** Refuses bindings that this store is not the authority for. */
@@ -318,19 +356,19 @@ export class WorkflowDecisionRecordStore {
 		}
 		switch (binding.kind) {
 			case "checkpoint":
-				if (this.journal === undefined) {
+				if (this.runId === undefined) {
 					throw new WorkflowDecisionRecordError(
 						"workflow decision record binding does not belong to a definition store",
 					);
 				}
-				if (binding.runId !== this.journal.runId) {
+				if (binding.runId !== this.runId) {
 					throw new WorkflowDecisionRecordError(
 						"workflow decision record belongs to another run",
 					);
 				}
 				return;
 			case "source-approval":
-				if (this.journal !== undefined) {
+				if (this.runId !== undefined) {
 					throw new WorkflowDecisionRecordError(
 						"workflow decision record binding does not belong to a run",
 					);
@@ -350,6 +388,13 @@ export class WorkflowDecisionRecordStore {
 	 */
 	private mutate<T>(operation: () => Promise<T>): Promise<T> {
 		const journal = this.journal;
+		if (journal === undefined && this.runId !== undefined) {
+			return Promise.reject(
+				new WorkflowDecisionRecordError(
+					"workflow decision record store is read-only",
+				),
+			);
+		}
 		const predecessor = decisionMutations.get(this.root) ?? Promise.resolve();
 		const result = predecessor.then(() =>
 			journal === undefined ? operation() : journal.withCurrent(operation),

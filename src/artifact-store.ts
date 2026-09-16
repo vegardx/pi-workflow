@@ -24,6 +24,33 @@ import type { WorkflowRunJournal } from "./persistence/journal.js";
 export const MAX_WORKFLOW_ARTIFACT_BYTES = 16 * 1024 * 1024;
 export const MAX_WORKFLOW_ARTIFACT_STORE_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Resolves `<storeRoot>/runs/<runId>/<name>` for a lease-free reader and
+ * proves it did not escape the run directory. A missing subdirectory is not
+ * an error: the joined path is returned and every read of it fails as a
+ * missing file, exactly as a read of an empty store would.
+ */
+export async function resolveRunSubdirectory(
+	storeRoot: string,
+	runId: string,
+	name: "artifacts" | "decisions",
+	fail: (message: string) => Error,
+): Promise<string> {
+	const directory = await realpath(path.join(storeRoot, "runs", runId));
+	const expected = path.join(directory, name);
+	let root: string;
+	try {
+		root = await realpath(expected);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return expected;
+		throw error;
+	}
+	if (path.dirname(root) !== directory || path.basename(root) !== name) {
+		throw fail(`workflow ${name} directory escapes its run`);
+	}
+	return root;
+}
+
 /** git's fixed mbox separator line; the object id is checked by the importer. */
 const HANDOFF_PATCH_FIRST_LINE =
 	/^From [a-f0-9]{40,64} Mon Sep 17 00:00:00 2001$/;
@@ -132,26 +159,27 @@ export class WorkflowArtifactStore {
 	readonly runId: WorkflowArtifactRef["runId"];
 	readonly maxArtifactBytes: number;
 	readonly maxTotalBytes: number;
-	private readonly journal: WorkflowRunJournal;
+	/** Absent on a read-only store opened without the run's lease. */
+	private readonly journal: WorkflowRunJournal | undefined;
 
 	private constructor(
 		root: string,
+		runId: WorkflowArtifactRef["runId"],
 		maxArtifactBytes: number,
 		maxTotalBytes: number,
-		journal: WorkflowRunJournal,
+		journal: WorkflowRunJournal | undefined,
 	) {
 		this.root = root;
-		this.runId = journal.runId;
+		this.runId = runId;
 		this.maxArtifactBytes = maxArtifactBytes;
 		this.maxTotalBytes = maxTotalBytes;
 		this.journal = journal;
 	}
 
-	static async open(options: {
-		journal: WorkflowRunJournal;
+	private static boundsOf(options: {
 		maxArtifactBytes?: number;
 		maxTotalBytes?: number;
-	}): Promise<WorkflowArtifactStore> {
+	}): { maxArtifactBytes: number; maxTotalBytes: number } {
 		const maxArtifactBytes =
 			options.maxArtifactBytes ?? MAX_WORKFLOW_ARTIFACT_BYTES;
 		const maxTotalBytes =
@@ -164,6 +192,16 @@ export class WorkflowArtifactStore {
 		) {
 			throw new WorkflowArtifactStoreError("invalid workflow artifact bounds");
 		}
+		return { maxArtifactBytes, maxTotalBytes };
+	}
+
+	static async open(options: {
+		journal: WorkflowRunJournal;
+		maxArtifactBytes?: number;
+		maxTotalBytes?: number;
+	}): Promise<WorkflowArtifactStore> {
+		const { maxArtifactBytes, maxTotalBytes } =
+			WorkflowArtifactStore.boundsOf(options);
 		return options.journal.withCurrent(async () => {
 			const expected = path.join(options.journal.directory, "artifacts");
 			await mkdir(expected, { recursive: true, mode: 0o700 });
@@ -179,11 +217,43 @@ export class WorkflowArtifactStore {
 			await chmod(root, 0o700);
 			return new WorkflowArtifactStore(
 				root,
+				options.journal.runId,
 				maxArtifactBytes,
 				maxTotalBytes,
 				options.journal,
 			);
 		});
+	}
+
+	/**
+	 * A read-only store over a run's artifact directory, opened without the
+	 * run's lease for the lease-free views. Every reader verifies exactly what
+	 * an owned store's does - own-reference identity, the byte bound, the
+	 * recorded size, the sha256, and canonical JSON - and every writer refuses,
+	 * so nothing is created and nothing is fenced. A run with no artifact
+	 * directory opens; its reads fail as a missing blob.
+	 */
+	static async openUnleased(options: {
+		storeRoot: string;
+		runId: WorkflowArtifactRef["runId"];
+		maxArtifactBytes?: number;
+		maxTotalBytes?: number;
+	}): Promise<WorkflowArtifactStore> {
+		const { maxArtifactBytes, maxTotalBytes } =
+			WorkflowArtifactStore.boundsOf(options);
+		const root = await resolveRunSubdirectory(
+			options.storeRoot,
+			options.runId,
+			"artifacts",
+			(message) => new WorkflowArtifactStoreError(message),
+		);
+		return new WorkflowArtifactStore(
+			root,
+			options.runId,
+			maxArtifactBytes,
+			maxTotalBytes,
+			undefined,
+		);
 	}
 
 	/** The per-blob bound of a handoff: the store bound capped by the contract bound. */
@@ -220,8 +290,14 @@ export class WorkflowArtifactStore {
 	 * directory (process-wide) and fences it on the current lease.
 	 */
 	private mutate<T>(operation: () => Promise<T>): Promise<T> {
+		const journal = this.journal;
+		if (journal === undefined) {
+			return Promise.reject(
+				new WorkflowArtifactStoreError("workflow artifact store is read-only"),
+			);
+		}
 		const predecessor = artifactMutations.get(this.root) ?? Promise.resolve();
-		const result = predecessor.then(() => this.journal.withCurrent(operation));
+		const result = predecessor.then(() => journal.withCurrent(operation));
 		const settled = result.then(
 			() => undefined,
 			() => undefined,
@@ -397,7 +473,7 @@ export class WorkflowArtifactStore {
 	private isOwnReference(ref: WorkflowArtifactRef): boolean {
 		return (
 			Value.Check(WorkflowArtifactRefSchema, ref) &&
-			ref.runId === this.journal.runId &&
+			ref.runId === this.runId &&
 			ref.id ===
 				deriveWorkflowArtifactId({
 					runId: ref.runId,
