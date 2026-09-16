@@ -105,12 +105,14 @@ async function acquire(
 	return { events, client: await acquireWorkflowService(events, CONTEXT) };
 }
 
-async function realService(): Promise<WorkflowService> {
+async function realService(
+	override?: WorkflowSubagentProvider,
+): Promise<WorkflowService> {
 	const base = await mkdtemp(path.join(os.tmpdir(), "pi-workflow-provider-"));
 	bases.push(base);
 	const cwd = path.join(base, "project");
 	await mkdir(cwd, { recursive: true });
-	const subagents: WorkflowSubagentProvider = {
+	const subagents: WorkflowSubagentProvider = override ?? {
 		bind: async () => {
 			throw new Error("the projection must never bind a subagent");
 		},
@@ -208,6 +210,45 @@ function plan(deliverables: number, lenses: readonly string[] = ["contracts"]) {
 
 function planInput(deliverables = 1, effort = "standard") {
 	return { plan: plan(deliverables), planDigest: "a".repeat(64), effort };
+}
+
+/**
+ * The shipped `plan-review`'s own input (spec 2.2). The allowlist's structural
+ * check dry-materializes the real graph, so it needs a real input; `{}` was
+ * enough only while the definition did not exist.
+ */
+function planReviewInput(deliverables = 1) {
+	return {
+		plan: plan(deliverables),
+		planDigest: "a".repeat(64),
+		intent: "Ship the sample plan.",
+		compiled: {
+			deliverables: Array.from({ length: deliverables }, (_unused, index) => ({
+				id: `d${index}`,
+				stages: [
+					{ use: "implement", id: "implement" },
+					{ use: "verify-and-fix", id: "verify", maxRounds: 2 },
+					{
+						use: "review-fan-out",
+						id: "review",
+						synthesis: "optional",
+						lenses: [{ id: "contracts" }],
+					},
+				],
+			})),
+			effort: "standard",
+			gates: "approve-plan+ship",
+		},
+		projection: {
+			cost: 30,
+			totalTokens: 4_000_000,
+			childRuntimeMs: 5_000_000,
+			tasks: 5,
+			budget: { cost: 900, childRuntimeMs: 172_800_000 },
+			fits: true,
+		},
+		effort: "standard",
+	};
 }
 
 describe("registration and discovery", () => {
@@ -539,6 +580,38 @@ describe("runBuiltin and awaitRun", () => {
 		);
 	});
 
+	// The allowlist is not a string check alone: `runBuiltin` also resolves the
+	// ref and refuses it unless it came from the BUILTIN root, and the runtime
+	// then validates the input. This drives all three against the definition
+	// pi-maestro actually reaches, through the real service.
+	it("starts the shipped plan-review through the real runtime", async () => {
+		const service = await realService({
+			// The reviewer itself is `test/plan-review.test.ts`'s subject; here a
+			// binding that refuses every launch is enough to prove the gate opened
+			// and a durable run exists on the other side of it.
+			bind: async (runId) => ({
+				workflowRunId: runId,
+				ownerId: `pi-workflow:${runId}`,
+				client: {
+					preflight: async () => {
+						throw new Error("no subagent in this test");
+					},
+				} as never,
+			}),
+		});
+		const { client } = await acquire(service);
+		const receipt = await client.runBuiltin("plan-review", planReviewInput());
+		expect(receipt.runId).toMatch(/^workflow_[a-z0-9]+$/);
+		// Started by this client, so `awaitRun` is permitted on it.
+		const view = await client.awaitRun(receipt.runId, { timeoutMs: 30_000 });
+		expect(view.status).toBe("failed");
+		// And the input the exit flow sends really does validate against the
+		// shipped schema: a schema refusal never creates a run at all.
+		await expect(
+			client.validate("plan-review", planReviewInput()),
+		).resolves.toMatchObject({ valid: true, workflow: { scope: "builtin" } });
+	});
+
 	it("refuses awaitRun on a run this client did not start", async () => {
 		const { client } = await acquire(serviceDouble());
 		const error = await client
@@ -642,9 +715,9 @@ describe("the headless allowlist's structural safety property", () => {
 		).resolves.toEqual(["checkpoint", "worktree", "handoff"]);
 	});
 
-	// W2 ships `plan-review`; until then the allowlist names a definition that
-	// is not discoverable yet, and this asserts exactly that - so the day the
-	// definition lands, this case starts checking it instead of the absence.
+	// W2 shipped `plan-review`, so the intersection of the allowlist with the
+	// discovered builtins is no longer empty: this case now checks the real
+	// definition rather than asserting its absence.
 	it("holds for every allowlisted builtin that exists", async () => {
 		const service = await realService();
 		const builtins = (await service.list()).filter(
@@ -657,14 +730,17 @@ describe("the headless allowlist's structural safety property", () => {
 			const definition = (
 				(await import(summary.path)) as { default: WorkflowDefinition }
 			).default;
-			await expect(headlessBuiltinViolations(definition, {})).resolves.toEqual(
-				[],
-			);
+			await expect(
+				headlessBuiltinViolations(definition, planReviewInput()),
+			).resolves.toEqual([]);
 		}
 		expect(builtins.length).toBeGreaterThan(0);
-		expect(allowlisted.length).toBe(
-			builtins.filter((summary) => summary.name === "plan-review").length,
+		// Every allowlisted name ships, and `plan-review` is one of them: an
+		// allowlist entry nobody can resolve is a refusal waiting to happen.
+		expect(allowlisted.map((summary) => summary.name).sort()).toEqual(
+			[...BUILTIN_HEADLESS_WORKFLOWS].sort(),
 		);
+		expect(allowlisted).toHaveLength(1);
 	});
 
 	it("proves plan-to-ship would never pass the allowlist", async () => {
