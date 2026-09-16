@@ -84,6 +84,8 @@ export type ServiceApiPins = [
 			| "storeRoot"
 			| "projectTrusted"
 			| "subagents"
+			// 1.1.0 (additive): package-provided definition roots.
+			| "registeredRoots"
 			| "maxConcurrency"
 			| "maxWorkflowCost"
 			| "maxWorkflowTotalTokens"
@@ -92,6 +94,12 @@ export type ServiceApiPins = [
 			| "supportTasks"
 			| "checkpoints"
 			| "dynamic"
+		>
+	>,
+	Assert<
+		Equal<
+			WorkflowServiceOptions["registeredRoots"],
+			readonly WorkflowRoot[] | undefined
 		>
 	>,
 	Assert<

@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
+import type { WorkflowRoot } from "./registry.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
 import type {
 	WorkflowRunSummary,
@@ -167,6 +168,43 @@ function sessionIdOf(ctx: ExtensionContext): string | undefined {
 		: undefined;
 }
 
+/**
+ * The package's own definitions, shipped in the tarball next to `dist/` and
+ * registered as a `builtin` root. It is trusted package code: the definitions
+ * install with the package, load without Pi project trust, and resolve their
+ * `@vegardx/pi-workflow` and `typebox` imports from their own location inside
+ * the installed package.
+ */
+const BUILTIN_WORKFLOW_ROOT = path.resolve(
+	import.meta.dirname,
+	"..",
+	"workflows",
+);
+
+/**
+ * The builtin root, unless this checkout *is* the project being worked in
+ * (developing pi-workflow itself). There the same directory is already
+ * `<cwd>/workflows`, and discovery refuses two roots that resolve to one
+ * path; the project root wins and the definitions load under `project` scope
+ * with the usual trust gate.
+ */
+function builtinRoots(cwd: string, agentDir: string): readonly WorkflowRoot[] {
+	const shadowed = [
+		path.join(cwd, "workflows"),
+		path.join(cwd, CONFIG_DIR_NAME, "workflows"),
+		path.join(agentDir, "workflows"),
+	].some((root) => path.resolve(root) === BUILTIN_WORKFLOW_ROOT);
+	return shadowed
+		? []
+		: [
+				Object.freeze({
+					path: BUILTIN_WORKFLOW_ROOT,
+					scope: "builtin",
+					source: "package",
+				} as const),
+			];
+}
+
 export default function workflowExtension(pi: ExtensionAPI): void {
 	let service: WorkflowService | undefined;
 	let serviceCwd: string | undefined;
@@ -182,12 +220,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		if (service && serviceCwd === ctx.cwd) return service;
 		if (service) await service.shutdown();
 		serviceCwd = ctx.cwd;
+		const agentDir = getAgentDir();
 		service = await createWorkflowService({
 			cwd: ctx.cwd,
-			agentDir: getAgentDir(),
+			agentDir,
 			storeRoot: path.join(ctx.cwd, CONFIG_DIR_NAME, "workflow"),
 			projectTrusted: () => ctx.isProjectTrusted(),
 			subagents: createWorkflowSubagentProvider(pi.events, ctx),
+			registeredRoots: builtinRoots(ctx.cwd, agentDir),
 		});
 		return service;
 	}

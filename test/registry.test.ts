@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
 	type DiscoveredWorkflow,
@@ -169,6 +170,36 @@ describe("workflow registry", () => {
 		expect(second[0]?.identity.identitySha256).not.toBe(
 			first[0]?.identity.identitySha256,
 		);
+	});
+
+	// F1: the package ships its own definitions under workflows/ and the
+	// extension registers that directory as a builtin root.
+	it("discovers the package's builtin root without project trust", async () => {
+		const root = fixture("builtin-root");
+		const cwd = path.join(root, "project");
+		await mkdir(cwd, { recursive: true });
+		const builtin = fileURLToPath(new URL("../workflows", import.meta.url));
+		const workflows = await discoverWorkflows({
+			cwd,
+			agentDir: path.join(root, "agent"),
+			projectTrusted: false,
+			registeredRoots: [{ path: builtin, scope: "builtin", source: "package" }],
+		});
+		const planToShip = workflows.find(
+			(entry) => entry.definition.meta.name === "plan-to-ship",
+		);
+		if (!planToShip) throw new Error("plan-to-ship was not discovered");
+		expect(planToShip.scope).toBe("builtin");
+		expect(planToShip.source).toBe("package");
+		expect(planToShip.root).toBe(await realpath(builtin));
+		expect(path.dirname(planToShip.path)).toBe(await realpath(builtin));
+		// Every shipped definition loads: the whole root is the extension's.
+		expect(workflows.every((entry) => entry.scope === "builtin")).toBe(true);
+		// The agent templates live under the same root and are ignored by
+		// discovery: only `*.workflow.*` files are definitions.
+		expect(
+			workflows.every((entry) => entry.path.endsWith(".workflow.ts")),
+		).toBe(true);
 	});
 
 	it("names the dynamic scope without discovering it", async () => {

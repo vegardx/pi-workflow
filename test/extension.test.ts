@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	createEventBus,
 	type ExtensionAPI,
@@ -12,6 +13,7 @@ import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowRunId, WorkflowTaskId } from "../src/contracts.js";
 import workflowExtension from "../src/extension.js";
+import { discoverWorkflows } from "../src/registry.js";
 import type {
 	WorkflowRunSummary,
 	WorkflowServiceRunView,
@@ -110,6 +112,47 @@ const theme = {
 
 function rendered(component: { render(width: number): string[] } | undefined) {
 	return component?.render(200).map((line) => line.trimEnd());
+}
+
+type ToolText = { content: Array<{ type: string; text?: string }> };
+
+/** The single text block a workflow tool returns. */
+function toolText(result: unknown): string {
+	const [block] = (result as ToolText).content;
+	if (block?.type !== "text" || typeof block.text !== "string") {
+		throw new Error("workflow tool did not return one text block");
+	}
+	return block.text;
+}
+
+/** The directory the extension registers as its builtin root. */
+const builtinRoot = fileURLToPath(new URL("../workflows", import.meta.url));
+
+/**
+ * The definitions the package itself ships, discovered through the registry
+ * exactly as the extension's service does.
+ */
+async function builtinSummaryList(): Promise<unknown> {
+	const workflows = await discoverWorkflows({
+		cwd: await emptyProject(),
+		agentDir: path.join(await emptyProject(), "agent"),
+		projectTrusted: false,
+		registeredRoots: [
+			{ path: builtinRoot, scope: "builtin", source: "package" },
+		],
+	});
+	return workflows.map((entry) => ({
+		name: entry.definition.meta.name,
+		description: entry.definition.meta.description,
+		version: entry.definition.meta.version,
+		concurrency: entry.definition.meta.concurrency,
+		budget: { ...entry.definition.meta.budget },
+		timeoutMs: entry.definition.meta.timeoutMs,
+		scope: entry.scope,
+		source: entry.source,
+		path: entry.path,
+		identitySha256: entry.identity.identitySha256,
+	}));
 }
 
 async function emptyProject(): Promise<string> {
@@ -329,19 +372,71 @@ describe("workflow Pi extension", () => {
 		};
 		const list = tools.find((tool) => tool.name === "workflow_list");
 		if (!list) throw new Error("workflow_list missing");
-		await expect(
-			list.execute(
-				"call-1",
-				{},
+		const listed = await list.execute(
+			"call-1",
+			{},
+			new AbortController().signal,
+			undefined,
+			context as never,
+		);
+		// The empty project contributes nothing; the package's own builtin
+		// root is what is listed.
+		expect(
+			(JSON.parse(toolText(listed)) as Array<{ scope: string }>).filter(
+				(entry) => entry.scope === "builtin",
+			),
+		).toEqual(await builtinSummaryList());
+		await handlers.get("session_shutdown")?.({}, context);
+	});
+
+	// F1: the extension registers the package's own workflows/ directory as a
+	// builtin root, so the shipped definitions are listed in an untrusted
+	// project, carry scope "builtin" and source "package", and validate.
+	it("registers the package builtin workflow root without project trust", async () => {
+		const { tools, handlers } = capture();
+		const context = {
+			cwd: await emptyProject(),
+			isProjectTrusted: () => false,
+			ui: { notify: vi.fn() },
+		};
+		const call = async (name: string, params: unknown) => {
+			const tool = tools.find((candidate) => candidate.name === name);
+			if (!tool) throw new Error(`${name} missing`);
+			const result = await tool.execute(
+				`call-${name}`,
+				params,
 				new AbortController().signal,
 				undefined,
 				context as never,
-			),
-		).resolves.toEqual({
-			content: [{ type: "text", text: "[]" }],
-			details: [],
-		});
-		await handlers.get("session_shutdown")?.({}, context);
+			);
+			return JSON.parse(toolText(result));
+		};
+		try {
+			const listed = (await call("workflow_list", {})) as Array<
+				Record<string, unknown>
+			>;
+			expect(listed.filter((entry) => entry.scope === "builtin")).toEqual(
+				await builtinSummaryList(),
+			);
+			const planToShip = listed.find((entry) => entry.name === "plan-to-ship");
+			expect(planToShip).toMatchObject({
+				name: "plan-to-ship",
+				scope: "builtin",
+				source: "package",
+			});
+			expect(path.dirname(String(planToShip?.path))).toBe(
+				await realpath(builtinRoot),
+			);
+			const validated = await call("workflow_validate", {
+				ref: "plan-to-ship",
+			});
+			expect(validated).toMatchObject({
+				valid: true,
+				workflow: { name: "plan-to-ship", scope: "builtin" },
+			});
+		} finally {
+			await handlers.get("session_shutdown")?.({}, context);
+		}
 	});
 
 	it("keeps the widget out of non-TUI sessions", async () => {
@@ -395,7 +490,9 @@ describe("workflow Pi extension", () => {
 			ui: { notify },
 		};
 		await command.handler("list", print);
-		expect(log).toHaveBeenCalledWith("No workflows found");
+		// The project is empty; the package's builtin root is always listed.
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("plan-to-ship"));
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("builtin"));
 		expect(notify).not.toHaveBeenCalled();
 
 		const rpc = { ...print, mode: "rpc" };

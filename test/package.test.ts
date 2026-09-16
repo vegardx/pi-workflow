@@ -18,7 +18,7 @@ interface PackageJson {
 	dependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
 	exports?: Record<string, unknown>;
-	pi?: { extensions?: string[]; skills?: string[] };
+	pi?: { extensions?: string[]; skills?: string[]; workflows?: string[] };
 }
 
 interface Compatibility {
@@ -99,15 +99,35 @@ describe("package contract", () => {
 		});
 	});
 
-	it("declares the extension and both bundled skills to Pi", async () => {
+	it("declares the extension, both bundled skills, and the builtin workflows to Pi", async () => {
 		const packageJson = await readJson<PackageJson>("../package.json");
 		expect(packageJson.pi).toEqual({
 			extensions: ["./dist/extension.js"],
 			skills: ["./skills"],
+			workflows: ["./workflows"],
 		});
 		expect(packageJson.files).toEqual(
-			expect.arrayContaining(["dist", "docs", "skills", "compatibility.json"]),
+			expect.arrayContaining([
+				"dist",
+				"docs",
+				"skills",
+				"workflows",
+				"compatibility.json",
+			]),
 		);
+		// The declared root is the directory the extension registers as its
+		// builtin root, and it holds the shipped definitions.
+		await expect(
+			access(new URL("../workflows/plan-to-ship.workflow.ts", import.meta.url)),
+		).resolves.toBeUndefined();
+		// W3: the agents plan-to-ship names travel in the same directory as
+		// templates. `files: ["workflows"]` ships them; discovery ignores them
+		// because they are not `*.workflow.*`.
+		for (const agent of ["planner", "implementer", "reviewer"]) {
+			await expect(
+				access(new URL(`../workflows/agents/${agent}.md`, import.meta.url)),
+			).resolves.toBeUndefined();
+		}
 		const skill = await readFile(
 			new URL("../skills/workflow-authoring/SKILL.md", import.meta.url),
 			"utf8",
@@ -339,5 +359,7 @@ describe("compatibility matrix 1.0", () => {
 			"| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0 and 1.1.0) |",
 		);
 		expect(doc).toContain("[`docs/qualification.md`](qualification.md)");
+		// F1: the builtin root is part of the packaged surface.
+		expect(doc).toContain("| Builtin workflow root | `workflows/`");
 	});
 });
