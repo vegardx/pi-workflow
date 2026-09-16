@@ -12,17 +12,15 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The full vitest suite took 1517 s on one 4 vCPU runner (run 35099072360),
+# and under that contention real-clock tests observed their 1 s expiries and
+# deadlines late. The suite is therefore sharded across parallel jobs; the
+# static checks, build, pack check and audit run once in their own job.
 jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    # Two consecutive runs with every suite green were cancelled at 15 minutes
-    # (34970590645 on main, 35068121561 on PR #46) after the tmpfs change; the
-    # heavy suites alone take 200-300 s each on the runner (scheduler 292 s,
-    # service 209 s, worktree-handoff 207 s) and `npm run check` also runs
-    # biome, tsc, build and the pack check. This is a job budget, not a test
-    # timeout; per-test bounds stay at 60 s.
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,15 +43,57 @@ jobs:
         working-directory: pi-subagent
       - run: npm ci
         working-directory: pi-workflow
-      # Every suite writes its journals, artifact stores, and leases under
-      # .pi/ in the checkout and fsyncs each append. On the runner's disk the
-      # fsync-bound suites ran 10-50x slower than locally (nested-execution
-      # 304 s, scheduler 256 s, service 221 s in run 34970590645) and the job
-      # exceeded its 15 minute budget. A tmpfs keeps the durability code path
-      # intact while removing the disk cost.
-      - run: mkdir -p .pi && sudo mount -t tmpfs -o size=2g tmpfs .pi
+      - run: npx biome check .
         working-directory: pi-workflow
-      - run: npm run check
+      - run: npx tsc --noEmit
+        working-directory: pi-workflow
+      - run: npm run build
+        working-directory: pi-workflow
+      - run: npm run pack:check
         working-directory: pi-workflow
       - run: npm audit --audit-level=low
+        working-directory: pi-workflow
+
+  test:
+    name: Test (shard ${{ matrix.shard }} of 4)
+    runs-on: ubuntu-latest
+    # A job budget, not a test timeout; per-test bounds stay at 60 s.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: pi-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vegardx/pi-subagent
+          ref: 172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf
+          path: pi-subagent
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: |
+            pi-workflow/package-lock.json
+            pi-subagent/package-lock.json
+      - run: npm ci
+        working-directory: pi-subagent
+      - run: npm run build
+        working-directory: pi-subagent
+      - run: npm ci
+        working-directory: pi-workflow
+      # Project-scoped tests load @vegardx/pi-workflow through the package
+      # self-reference, which resolves to dist/, so the build must be current.
+      - run: npm run build
+        working-directory: pi-workflow
+      # Every suite writes its journals, artifact stores, and leases under
+      # .pi/ in the checkout and fsyncs each append. On the runner's disk the
+      # fsync-bound suites ran 10-50x slower than locally (run 34970590645).
+      # A tmpfs keeps the durability code path intact without the disk cost.
+      - run: mkdir -p .pi && sudo mount -t tmpfs -o size=2g tmpfs .pi
+        working-directory: pi-workflow
+      - run: npx vitest run --shard=${{ matrix.shard }}/4
         working-directory: pi-workflow
