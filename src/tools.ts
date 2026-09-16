@@ -8,9 +8,11 @@ import {
 	WorkflowRunStatusSchema,
 	WorkflowTaskIdSchema,
 } from "./contracts.js";
+import { MAX_DYNAMIC_SOURCE_BYTES } from "./dynamic/constants.js";
 import { encodeWorkflowRunCursor } from "./run-projection.js";
 import type { WorkflowService } from "./service.js";
 import {
+	DynamicWorkflowProposalViewSchema,
 	WorkflowInspectOptionsSchema,
 	WorkflowLogOptionsSchema,
 	WorkflowLogPageSchema,
@@ -36,7 +38,8 @@ export type WorkflowToolName =
 	| "workflow_logs"
 	| "workflow_invalidate"
 	| "workflow_retry"
-	| "workflow_resume";
+	| "workflow_resume"
+	| "workflow_propose";
 
 type DeepReadonly<T> = T extends readonly (infer U)[]
 	? readonly DeepReadonly<U>[]
@@ -208,6 +211,7 @@ export const WorkflowRootScopeSchema = Type.Union([
 	Type.Literal("global"),
 	Type.Literal("package"),
 	Type.Literal("builtin"),
+	Type.Literal("dynamic"),
 ]);
 
 export const WorkflowDefinitionSummarySchema = Type.Object(
@@ -304,7 +308,7 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			name: "workflow_validate",
 			label: "Validate Workflow",
 			description:
-				"Validate a trusted static workflow reference and optionally its JSON input without creating a run.",
+				"Validate a trusted static workflow reference and optionally its JSON input without creating a run. Accepts dynamic:<sha256> for an approved dynamic workflow proposal.",
 			promptGuidelines: [],
 			parameters: Type.Object(
 				{
@@ -327,7 +331,7 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			name: "workflow_run",
 			label: "Run Workflow",
 			description:
-				"Start a trusted durable static workflow. Returns a run ID immediately; use workflow_wait or workflow_status to observe it.",
+				"Start a trusted durable static workflow. Returns a run ID immediately; use workflow_wait or workflow_status to observe it. Accepts dynamic:<sha256> for an approved dynamic workflow proposal.",
 			promptGuidelines: [],
 			parameters: Type.Object(
 				{
@@ -558,5 +562,40 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			summarizeCall: (params) =>
 				params.taskId ? `${params.runId} · ${params.taskId}` : params.runId,
 			summarizeResult: runStatusSummary,
+		}),
+		declare({
+			name: "workflow_propose",
+			label: "Propose Dynamic Workflow",
+			description:
+				"Propose dynamic workflow TypeScript source for human approval. Returns the proposal as dynamic:<sha256>; a human must approve it with /workflow approve before workflow_run or workflow_validate accept that reference. The model cannot approve.",
+			promptGuidelines: [
+				"Author the source exactly like a static *.workflow.ts definition (workflow-authoring skill): default-export one defineWorkflow call; import only @vegardx/pi-workflow, typebox, and registered support modules.",
+				"Never state or assume a proposal is approved; approval is a human decision outside the tool surface.",
+			],
+			parameters: Type.Object(
+				{
+					source: Type.String({
+						minLength: 1,
+						maxLength: MAX_DYNAMIC_SOURCE_BYTES,
+					}),
+				},
+				{ additionalProperties: false },
+			),
+			output: DynamicWorkflowProposalViewSchema,
+			/** Proposes only: the human decision never passes through a tool. */
+			execute(service, params) {
+				return service.propose(params.source, {
+					proposer: { kind: "tool", via: "workflow_propose" },
+				});
+			},
+			summarizeCall: (params) => `${Buffer.byteLength(params.source)} bytes`,
+			summarizeResult: (value) =>
+				`${value.ref} · ${
+					value.runnable
+						? "approved"
+						: value.decision
+							? value.decision.decision
+							: "awaiting approval"
+				}`,
 		}),
 	]);

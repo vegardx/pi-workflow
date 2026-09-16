@@ -12,7 +12,9 @@ checks fail when this document, the manifest, or the constants disagree.
 | Component | Value | Source |
 | --- | --- | --- |
 | `@vegardx/pi-workflow` | 0.1.0 | `package.json` `version` |
-| `WORKFLOW_CONTRACT_REVISION` | 17 | `src/contracts.ts` |
+| `WORKFLOW_CONTRACT_REVISION` | 18 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`) |
+| `WORKFLOW_RUNTIME_CONTRACT.features.checkpoints` | `true` | `src/contracts.ts` |
+| `WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows` | `true` (proposed `dynamic:<sha256>` sources run only after a human approval bound to their digest, manifest, host API, and import policy) | `src/contracts.ts` |
 | Required `@vegardx/pi-subagent` | `0.10.0` (exact) | `package.json` `peerDependencies` |
 | Required pi-subagent contract revision | 6 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
 | pi-subagent commit built in CI | `172bd5eb73d4f2a6bf2ed13a65ac8b9c46ea6faf` | `.github/workflows/ci.yml` |
@@ -20,6 +22,7 @@ checks fail when this document, the manifest, or the constants disagree.
 | Node.js engines | `>=23.6.0` | `package.json` `engines` |
 | Node.js in CI | 24.16.0 | `.github/workflows/ci.yml` |
 | `typebox` | `>=1.3.14 <2` | `package.json` `peerDependencies` |
+| Dynamic source transformer (`amaro`) | `1.2.0` (exact) | `package.json` `dependencies`, `DYNAMIC_TRANSFORMER_VERSION` |
 
 ## Required pi-subagent features
 
@@ -59,7 +62,7 @@ it is revision 6 and every feature below has exactly this value.
 | Other platforms | Not built | Nothing else is built, tested, or qualified. |
 
 Support tasks, nested workflows, retry and resume attempts, invalidation,
-finalizers, interrupted-child retention, and worktree tasks with handoff
-import are covered by unit and packed-contract tests only; no host
-qualification report exists for them yet. In particular, no worktree task has
+finalizers, interrupted-child retention, worktree tasks with handoff import,
+and checkpoints with immutable decision records are covered by unit and
+packed-contract tests only; no host qualification report exists for them yet. In particular, no worktree task has
 been run against a packed pi-subagent on any host.

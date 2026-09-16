@@ -39,6 +39,42 @@ try {
 		"skills/workflow-authoring/references/examples.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
+		"dist/checkpoint-executor.d.ts",
+		"dist/checkpoint-executor.js",
+		"dist/decision-store.d.ts",
+		"dist/decision-store.js",
+		"dist/dynamic/approval.d.ts",
+		"dist/dynamic/approval.js",
+		"dist/dynamic/constants.d.ts",
+		"dist/dynamic/constants.js",
+		"dist/dynamic/contracts.d.ts",
+		"dist/dynamic/contracts.js",
+		"dist/dynamic/decision-contracts.d.ts",
+		"dist/dynamic/decision-contracts.js",
+		"dist/dynamic/definition.d.ts",
+		"dist/dynamic/definition.js",
+		"dist/dynamic/execution-error.d.ts",
+		"dist/dynamic/execution-error.js",
+		"dist/dynamic/identity.d.ts",
+		"dist/dynamic/identity.js",
+		"dist/dynamic/proposal-store.d.ts",
+		"dist/dynamic/proposal-store.js",
+		"dist/dynamic/rpc.d.ts",
+		"dist/dynamic/rpc.js",
+		"dist/dynamic/run-definition.d.ts",
+		"dist/dynamic/run-definition.js",
+		"dist/dynamic/shim.d.ts",
+		"dist/dynamic/shim.js",
+		"dist/dynamic/source.d.ts",
+		"dist/dynamic/source.js",
+		"dist/dynamic/transformer-identity.d.ts",
+		"dist/dynamic/transformer-identity.js",
+		"dist/dynamic/transformer.d.ts",
+		"dist/dynamic/transformer.js",
+		"dist/dynamic/vm-host.d.ts",
+		"dist/dynamic/vm-host.js",
+		"dist/dynamic/worker.d.ts",
+		"dist/dynamic/worker.js",
 		"dist/extension.d.ts",
 		"dist/extension.js",
 		"dist/index.d.ts",
@@ -74,7 +110,11 @@ try {
 			throw new Error(`development source leaked into package: ${filePath}`);
 		}
 	}
-	if (workflow.entryCount > 100 || workflow.unpackedSize > 1536 * 1024) {
+	// Revision 18 ships dist/dynamic/* and the checkpoint modules: 125 entries
+	// and 1762 KiB unpacked when the bounds were set (previously 100 entries
+	// and 1536 KiB). The bounds are the next round values with headroom for
+	// docs growth only; amaro is a dependency and is not packed.
+	if (workflow.entryCount > 160 || workflow.unpackedSize > 2048 * 1024) {
 		throw new Error("packed package exceeds release bounds");
 	}
 
@@ -96,7 +136,7 @@ try {
 		],
 		{ cwd: project, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
 	);
-	await execFileAsync(
+	const smoke = await execFileAsync(
 		process.execPath,
 		[
 			"--input-type=module",
@@ -137,8 +177,37 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 17 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 18 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows !== true ||
+	typeof workflow.createDynamicWorkflowDefinition !== "function" ||
+	typeof workflow.createDynamicDiscoveredWorkflow !== "function" ||
+	typeof workflow.deriveDynamicHostApiSha256 !== "function" ||
+	typeof workflow.deriveDynamicImportPolicySha256 !== "function" ||
+	typeof workflow.deriveDynamicDefinitionIdentitySha256 !== "function" ||
+	typeof workflow.extractDynamicWorkflowManifest !== "function" ||
+	typeof workflow.deriveDecisionRecordSha256 !== "function" ||
+	!workflow.DynamicWorkflowProposalViewSchema ||
+	!workflow.DynamicWorkflowProposalRecordSchema ||
+	!workflow.SourceApprovalDecisionBindingSchema ||
+	!workflow.Sha256Schema ||
+	!workflow.WorkflowMetaSchema ||
+	manifest.dependencies?.amaro !== "1.2.0" ||
+	!workflow.CheckpointTaskSpecSchema ||
+	!workflow.CheckpointTaskRequestSchema ||
+	!workflow.CheckpointTerminalEvidenceSchema ||
+	typeof workflow.createWorkflowCheckpointTaskExecutor !== "function" ||
+	typeof workflow.cancelOpenWorkflowCheckpoints !== "function" ||
+	typeof workflow.CHECKPOINT_RUN_ENDING_REASON !== "string" ||
+	typeof workflow.WorkflowDecisionRecordStore?.open !== "function" ||
+	!workflow.WorkflowDecisionRecordSchema ||
+	!workflow.CheckpointDecisionBindingSchema ||
+	typeof workflow.deriveDecisionBindingSha256 !== "function" ||
+	typeof workflow.isStaticWorkflowParked !== "function" ||
+	typeof workflow.pendingCheckpoints !== "function" ||
+	!workflow.WorkflowDecideOptionsSchema ||
+	!workflow.WorkflowPendingCheckpointViewSchema ||
 	!workflow.WorkflowHandoffDescriptorSchema ||
 	workflow.MAX_WORKFLOW_HANDOFF_BYTES !== 16 * 1024 * 1024 ||
 	typeof workflow.verifyWorkflowHandoffEvidence !== "function" ||
@@ -162,7 +231,7 @@ if (
 if (
 	!Array.isArray(workflow.WORKFLOW_TOOL_DECLARATIONS) ||
 	!Object.isFrozen(workflow.WORKFLOW_TOOL_DECLARATIONS) ||
-	workflow.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name).join(",") !== "workflow_list,workflow_validate,workflow_run,workflow_status,workflow_wait,workflow_stop,workflow_reconcile,workflow_runs,workflow_inspect,workflow_logs,workflow_invalidate,workflow_retry,workflow_resume" ||
+	workflow.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name).join(",") !== "workflow_list,workflow_validate,workflow_run,workflow_status,workflow_wait,workflow_stop,workflow_reconcile,workflow_runs,workflow_inspect,workflow_logs,workflow_invalidate,workflow_retry,workflow_resume,workflow_propose" ||
 	!workflow.WORKFLOW_TOOL_DECLARATIONS.every((tool) => typeof tool.execute === "function" && tool.parameters?.type === "object" && typeof tool.output?.type === "string" && typeof tool.summarizeCall === "function" && typeof tool.summarizeResult === "function") ||
 	!workflow.WorkflowServiceRunViewSchema ||
 	!workflow.WorkflowRunPageSchema ||
@@ -183,14 +252,38 @@ if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piWorkflow.version !== manifest.version ||
 	compatibility.piWorkflow.contractRevision !== workflow.WORKFLOW_CONTRACT_REVISION ||
+	compatibility.piWorkflow.features?.checkpoints !== workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints ||
+	compatibility.piWorkflow.features?.dynamicWorkflows !== workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows ||
+	compatibility.transformer?.package !== "amaro" ||
+	compatibility.transformer?.version !== manifest.dependencies?.amaro ||
 	compatibility.piSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piSubagent.peerRange !== manifest.peerDependencies?.["@vegardx/pi-subagent"] ||
 	compatibility.piSubagent.peerRange !== subagentManifest.version
 ) throw new Error("packed compatibility matrix disagrees with the packed contracts");
+// Live smoke: the packed dist/dynamic/vm-host.js must resolve and boot the
+// packed dist/dynamic/worker.js (spec 12.3); the production manifest watchdog
+// (DYNAMIC_VM_MANIFEST_TIMEOUT_MS) bounds the boot.
+const source = [
+	'import { defineWorkflow } from "@vegardx/pi-workflow";',
+	"export default defineWorkflow({",
+	'\tmeta: { name: "pack-check", description: "Pack check", version: 1, budget: { cost: 1, childRuntimeMs: 60000 }, timeoutMs: 60000 },',
+	'\tinputSchema: { type: "object", properties: {}, additionalProperties: false },',
+	'\toutputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },',
+	"\tasync run() { return { ok: true }; },",
+	"});",
+	"",
+].join("\\n");
+const startedAt = performance.now();
+const m = await workflow.extractDynamicWorkflowManifest({ source, supportHelpers: [] });
+const elapsedMs = Math.round(performance.now() - startedAt);
+if (m.meta.name !== "pack-check" || m.meta.version !== 1) throw new Error("packed dynamic worker did not produce the expected manifest");
+if (elapsedMs > workflow.DYNAMIC_VM_MANIFEST_TIMEOUT_MS) throw new Error("packed dynamic manifest smoke exceeded the manifest watchdog");
+process.stdout.write(\`dynamic manifest smoke: \${elapsedMs} ms (watchdog \${workflow.DYNAMIC_VM_MANIFEST_TIMEOUT_MS} ms)\\n\`);
 `,
 		],
 		{ cwd: project, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
 	);
+	process.stdout.write(smoke.stdout);
 } finally {
 	await rm(temporary, { recursive: true, force: true });
 }

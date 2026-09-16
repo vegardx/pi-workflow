@@ -654,7 +654,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 		requiredSubagent: REQUIRED_SUBAGENT_CONTRACT,
 		features: Object.freeze({
 			staticWorkflows: true,
-			dynamicWorkflows: false,
+			dynamicWorkflows: true,
 			durableRuns: true,
 			parallel: true,
 			settledResults: true,
