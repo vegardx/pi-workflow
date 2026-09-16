@@ -10,8 +10,10 @@ import {
 	type SubagentClient,
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
+import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	CompiledStageDocumentSchema,
 	DIVERSE_MODEL_ID,
 	envelope,
 	MAX_REVIEW_LENSES,
@@ -27,7 +29,10 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
-import { compileStages } from "../workflows/plan-to-ship.workflow.js";
+import {
+	compileStageDocument,
+	compileStages,
+} from "../workflows/plan-to-ship.workflow.js";
 
 // W2-PTS acceptance: the builtin plan-to-ship definition, now a COMPILER over
 // `plan.deliverables[].stages` and `plan.policy`, driven through the real
@@ -571,6 +576,191 @@ async function decide(
 		approver: "vegard",
 	});
 }
+
+/** The example plan of plan-loop spec 2.1, in the shipped vocabulary. */
+function examplePlan(): PlanInput {
+	return {
+		slug: "compose-catalogue",
+		title: "Component catalogue",
+		repos: [{ key: "wf", path: "/repo" }],
+		policy: {
+			effort: "standard",
+			gates: "approve-plan+ship",
+			maxFixRounds: 1,
+			publish: { mode: "pr", base: "main" },
+		},
+		deliverables: [
+			{
+				id: "catalogue",
+				title: "Ship the component catalogue",
+				after: [],
+				reads: [],
+				tasks: [
+					{ id: "impl", title: "Write src/components/*.ts" },
+					{
+						id: "rev-contracts",
+						title: "Contract review",
+						by: { lens: "contracts", tier: "heavy", diverse: true },
+					},
+				],
+				stages: [
+					{ use: "implement", id: "build" },
+					{
+						use: "verify-and-fix",
+						id: "green",
+						maxRounds: 2,
+						escalate: "thinking",
+					},
+					{
+						use: "review-fan-out",
+						id: "review",
+						synthesis: "required",
+						lenses: [
+							{ id: "contracts", tier: "heavy", diverse: true },
+							{ id: "replay", tier: "standard" },
+						],
+					},
+				],
+			},
+		],
+	};
+}
+
+describe("plan-to-ship: the compiled stage document", () => {
+	// The plan-facing view of the SAME compilation the run walks: what
+	// `plan-review` validates its `compiled` input against and what pi-maestro
+	// derives for itself from the stored plan. It must therefore be exactly the
+	// plan's stage list with the 2.1 defaults filled in - no task keys, no
+	// policy gates, and `maxRounds` in the component's VERIFY rounds.
+	function check(document: unknown): void {
+		const errors = [...Value.Errors(CompiledStageDocumentSchema, document)];
+		expect(errors.map((error) => error.message)).toEqual([]);
+		expect(Value.Check(CompiledStageDocumentSchema, document)).toBe(true);
+	}
+
+	it("derives the default stage list as pi-maestro's `defaultStagesFor` does", () => {
+		const document = compileStageDocument(plan());
+		check(document);
+		expect(document).toEqual({
+			effort: "standard",
+			gates: "approve-plan+ship",
+			deliverables: [
+				{
+					id: "d0",
+					stages: [
+						{ use: "implement", id: "implement" },
+						// The plan counts one FIX round; a compiled document records
+						// the two VERIFY rounds the component was asked for.
+						{ use: "verify-and-fix", id: "verify", maxRounds: 2 },
+						{
+							use: "review-fan-out",
+							id: "review",
+							lenses: [{ id: "correctness", tier: "standard", diverse: false }],
+							synthesis: "optional",
+						},
+					],
+				},
+			],
+		});
+	});
+
+	it("derives the spec's own example plan", () => {
+		const document = compileStageDocument(examplePlan());
+		check(document);
+		expect(document).toEqual({
+			effort: "standard",
+			gates: "approve-plan+ship",
+			deliverables: [
+				{
+					id: "catalogue",
+					stages: [
+						{ use: "implement", id: "build" },
+						{
+							use: "verify-and-fix",
+							id: "green",
+							maxRounds: 3,
+							escalate: "thinking",
+						},
+						{
+							use: "review-fan-out",
+							id: "review",
+							synthesis: "required",
+							lenses: [
+								{ id: "contracts", tier: "heavy", diverse: true },
+								{ id: "replay", tier: "standard" },
+							],
+						},
+					],
+				},
+			],
+		});
+	});
+
+	it.each(["approve-plan", "approve-plan+ship", "every-deliverable"] as const)(
+		"carries the gate policy %s without inventing a stage for it",
+		(gates) => {
+			const document = compileStageDocument(plan({ deliverables: 3 }), {
+				gates,
+			});
+			check(document);
+			expect(document.gates).toBe(gates);
+			// A gate the POLICY adds is not a stage of the plan: `gates` already
+			// says where a person is asked, and pi-maestro's own derivation of this
+			// document has no way to know the compiler's gate keys.
+			for (const deliverable of document.deliverables) {
+				expect(deliverable.stages.map((stage) => stage.use)).toEqual([
+					"implement",
+					"verify-and-fix",
+					"review-fan-out",
+				]);
+			}
+			// The lowering, from the same compilation, is where the gates are named.
+			expect(compileStages(plan({ deliverables: 3 }), { gates }).gates).toEqual(
+				gates === "approve-plan"
+					? ["approve-plan"]
+					: gates === "approve-plan+ship"
+						? ["approve-plan", "ship"]
+						: ["approve-plan", "approve-d0", "approve-d1", "ship"],
+			);
+		},
+	);
+
+	it("keeps a declared gate stage, because the plan declared it", () => {
+		const document = compileStageDocument(
+			plan({
+				lensesPerDeliverable: [],
+				stages: [
+					{ use: "implement", id: "build" },
+					{
+						use: "gate",
+						id: "look",
+						question: "Is the patch worth verifying?",
+						show: ["build"],
+					},
+				],
+			}),
+		);
+		check(document);
+		expect(document.deliverables[0]?.stages[1]).toEqual({
+			use: "gate",
+			id: "look",
+			question: "Is the patch worth verifying?",
+			show: ["build"],
+		});
+	});
+
+	it("refuses what the lowering refuses, from the same compilation", () => {
+		expect(() =>
+			compileStageDocument(
+				plan({
+					stages: [
+						{ use: "dynamic", id: "invent", brief: "Work it out." },
+					] as unknown as readonly PlanStage[],
+				}),
+			),
+		).toThrow("dynamic stages are not compiled yet");
+	});
+});
 
 describe("plan-to-ship: the compiler", () => {
 	it("compiles a v3 plan with neither `stages` nor `policy` to the default stage list", () => {
