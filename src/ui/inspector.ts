@@ -6,6 +6,11 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import {
+	checkpointSchemaSummary,
+	checkpointTaskKey,
+	renderCheckpointInputs,
+} from "../checkpoint-render.js";
 import type {
 	WorkflowRunId,
 	WorkflowRunStatus,
@@ -164,8 +169,8 @@ export function nextRunFilter(filter: RunFilterName): RunFilterName {
 export type WorkflowRunActionName =
 	WorkflowRunSummary["availableActions"][number];
 
-/** Palette entries: `wait` is meaningless in a live view; `decide` awaits checkpoints. */
-export type InspectorAction = Exclude<WorkflowRunActionName, "wait" | "decide">;
+/** Palette entries: `wait` alone is meaningless in a live, self-refreshing view. */
+export type InspectorAction = Exclude<WorkflowRunActionName, "wait">;
 
 export const INSPECTOR_ACTION_LABELS: Readonly<
 	Record<InspectorAction, string>
@@ -175,15 +180,21 @@ export const INSPECTOR_ACTION_LABELS: Readonly<
 	invalidate: "Invalidate a task and its dependents",
 	retry: "Retry failed work",
 	resume: "Resume interrupted child",
+	decide: "Decide a checkpoint",
 });
 
+/**
+ * `decide` is deliberately absent: the inspector cannot host the guided form,
+ * so it resolves with a `decide` intent and the form runs its own confirm.
+ */
 export const CONFIRMED_INSPECTOR_ACTIONS: ReadonlySet<InspectorAction> =
 	new Set<InspectorAction>(["stop", "invalidate", "retry", "resume"]);
 
-/** Actions that need a task before they can be confirmed. */
+/** Actions that need a task before they can be confirmed or handed over. */
 const TASK_REQUIRED_ACTIONS: ReadonlySet<InspectorAction> = new Set([
 	"invalidate",
 	"resume",
+	"decide",
 ]);
 
 /** Actions that accept a task scope from the task tab. */
@@ -192,6 +203,7 @@ const TASK_SCOPED_ACTIONS: ReadonlySet<InspectorAction> = new Set([
 	"resume",
 	"reconcile",
 	"retry",
+	"decide",
 ]);
 
 export const DEFAULT_STOP_REASON = "Stopped by operator.";
@@ -217,7 +229,24 @@ const STATIC_CONSEQUENCES: Readonly<
 function isInspectorAction(
 	action: WorkflowRunActionName,
 ): action is InspectorAction {
-	return action !== "wait" && action !== "decide";
+	return action !== "wait";
+}
+
+/**
+ * Whether the task is the one `decide` can act on: a checkpoint whose request
+ * is durable and whose decision is not recorded yet. The run's
+ * `availableActions` says a checkpoint waits somewhere; this says which task.
+ */
+export function isPendingCheckpointTask(
+	task: Pick<WorkflowServiceTaskView, "abandoned" | "checkpoint">,
+): boolean {
+	const { checkpoint } = task;
+	return (
+		task.abandoned !== true &&
+		checkpoint !== undefined &&
+		checkpoint.requestedAt !== undefined &&
+		checkpoint.decision === undefined
+	);
 }
 
 /** The only source of palette entries: the service's own projection. */
@@ -225,14 +254,20 @@ export function paletteActions(summary: WorkflowRunSummary): InspectorAction[] {
 	return summary.availableActions.filter(isInspectorAction);
 }
 
-/** Task-scoped subset of the run's actions; abandoned tasks are never actionable. */
+/**
+ * Task-scoped subset of the run's actions; abandoned tasks are never
+ * actionable, and `decide` is offered only on the checkpoint task that is
+ * actually awaiting a decision.
+ */
 export function taskActions(
 	summary: WorkflowRunSummary,
-	task: Pick<WorkflowServiceTaskView, "abandoned">,
+	task: Pick<WorkflowServiceTaskView, "abandoned" | "checkpoint">,
 ): InspectorAction[] {
 	if (task.abandoned === true) return [];
-	return paletteActions(summary).filter((action) =>
-		TASK_SCOPED_ACTIONS.has(action),
+	const pending = isPendingCheckpointTask(task);
+	return paletteActions(summary).filter(
+		(action) =>
+			TASK_SCOPED_ACTIONS.has(action) && (action !== "decide" || pending),
 	);
 }
 
@@ -298,6 +333,13 @@ export interface InspectorActionRequest {
 	readonly reason?: string;
 }
 
+/**
+ * What the operator asked for. `action` is a confirmed request the caller
+ * forwards to the service as it is; `decide` is a checkpoint the caller must
+ * answer through the guided form, because the inspector owns the terminal
+ * while it is open and cannot host a dialog. Both carry `state`, so the
+ * caller reopens the inspector exactly where it was.
+ */
 export type InspectorIntent =
 	| { type: "close"; state: InspectorState }
 	| {
@@ -305,6 +347,19 @@ export type InspectorIntent =
 			state: InspectorState;
 			request: InspectorActionRequest;
 			confirmed: true;
+	  }
+	| {
+			type: "decide";
+			state: InspectorState;
+			run: WorkflowRunSummary;
+			taskId: WorkflowTaskId;
+			/**
+			 * The same request shape the other intents carry, so a caller that
+			 * dispatches every intent through `performRunAction` can keep doing
+			 * so; it carries no `decision`, which is what makes that call ask
+			 * the injected form instead of recording anything.
+			 */
+			request: InspectorActionRequest;
 	  };
 
 export type InspectorKey =
@@ -490,6 +545,9 @@ function actionIntent(
 	action: InspectorAction,
 	reason?: string,
 ): InspectorIntent {
+	if (action === "decide" && ui.pendingTaskId) {
+		return decideIntent(state, run, ui.pendingTaskId);
+	}
 	return {
 		type: "action",
 		state,
@@ -501,6 +559,30 @@ function actionIntent(
 			...(reason ? { reason } : {}),
 		},
 	};
+}
+
+/** The checkpoint the caller answers through the guided form. */
+function decideIntent(
+	state: InspectorState,
+	run: WorkflowRunSummary,
+	taskId: WorkflowTaskId,
+): InspectorIntent {
+	return {
+		type: "decide",
+		state,
+		run,
+		taskId,
+		request: { action: "decide", run, taskId },
+	};
+}
+
+/** Rows the task picker lets the operator choose for the pending action. */
+function selectableTask(
+	action: InspectorAction | undefined,
+	task: Pick<WorkflowServiceTaskView, "abandoned" | "checkpoint">,
+): boolean {
+	if (task.abandoned === true) return false;
+	return action !== "decide" || isPendingCheckpointTask(task);
 }
 
 function verticalDelta(key: InspectorKey): number | undefined {
@@ -711,16 +793,20 @@ export function reduceInspector(
 				const action = actions[ui.selectedAction];
 				if (!action) return step();
 				nextUi.pendingAction = action;
-				if (!CONFIRMED_INSPECTOR_ACTIONS.has(action)) {
-					done(actionIntent(next, inspection.run, nextUi, action));
-					return step();
-				}
+				// The task comes first even for an unconfirmed action: `decide`
+				// addresses one checkpoint and the form needs to know which.
 				if (TASK_REQUIRED_ACTIONS.has(action) && !ui.pendingTaskId) {
 					nextUi.screen = "task-picker";
 					nextUi.selectedTask = Math.max(
 						0,
-						tasksOf(inspection).findIndex((task) => task.abandoned !== true),
+						tasksOf(inspection).findIndex((task) =>
+							selectableTask(action, task),
+						),
 					);
+					return step();
+				}
+				if (!CONFIRMED_INSPECTOR_ACTIONS.has(action)) {
+					done(actionIntent(next, inspection.run, nextUi, action));
 					return step();
 				}
 				if (action === "invalidate" && ui.pendingTaskId) {
@@ -743,9 +829,14 @@ export function reduceInspector(
 				nextUi.selectedTask = clamp(ui.selectedTask + delta, tasks.length - 1);
 			} else if (key === "enter" && inspection && ui.pendingAction) {
 				const task = tasks[ui.selectedTask];
-				// Abandoned rows are visible but never selectable.
-				if (task && task.abandoned !== true) {
+				// Abandoned rows are visible but never selectable, and `decide`
+				// only reaches a checkpoint that is still awaiting a decision.
+				if (task && selectableTask(ui.pendingAction, task)) {
 					nextUi.pendingTaskId = task.id;
+					if (!CONFIRMED_INSPECTOR_ACTIONS.has(ui.pendingAction)) {
+						done(actionIntent(next, inspection.run, nextUi, ui.pendingAction));
+						return step();
+					}
 					if (ui.pendingAction === "invalidate") {
 						effects.push({
 							type: "load-preview",
@@ -988,7 +1079,29 @@ function overviewLines(
 		keyValue("Sequence", String(run.lastSequence), width),
 		keyValue("Actions", run.availableActions.join(", ") || "none", width),
 	);
+	// A parked run leads with the question it is parked on: the first pending
+	// checkpoint in materialization order, as the run view lists them.
+	const pending = pendingCheckpointTasks(inspection);
+	const first = pending[0];
+	if (first) {
+		lines.push("", ...checkpointLines(first, run.runId, width, theme));
+		if (pending.length > 1) {
+			lines.push(
+				theme.fg(
+					"muted",
+					`+${pending.length - 1} more checkpoint(s) awaiting a decision`,
+				),
+			);
+		}
+	}
 	return lines;
+}
+
+/** On-path checkpoints awaiting a decision, in materialization order. */
+export function pendingCheckpointTasks(
+	inspection: WorkflowRunInspection,
+): readonly WorkflowServiceTaskView[] {
+	return (inspection.tasks ?? []).filter(isPendingCheckpointTask);
 }
 
 function taskRow(
@@ -1028,6 +1141,89 @@ function tasksLines(
 	const selected = clamp(ui.selectedTask, tasks.length - 1);
 	for (const [index, task] of tasks.entries()) {
 		lines.push(taskRow(inspection, task, index === selected, width, theme));
+	}
+	return lines;
+}
+
+/** Line and byte bounds of one checkpoint block in a detail pane. */
+const MAX_CHECKPOINT_DETAIL_PROMPT_LINES = 8;
+const MAX_CHECKPOINT_DETAIL_INPUT_LINES = 12;
+const CHECKPOINT_DETAIL_INPUTS_BYTES = 2_048;
+
+function boundedBlock(
+	text: string,
+	limit: number,
+	width: number,
+	theme: LineTheme,
+): string[] {
+	const lines = text.split("\n");
+	const kept = lines.slice(0, limit).map((line) => truncate(line, width));
+	if (lines.length > limit) {
+		kept.push(
+			theme.fg("dim", `  … +${lines.length - limit} line(s) · /workflow show`),
+		);
+	}
+	return kept;
+}
+
+/** The recorded decision, or the fact that a person still has to answer. */
+function checkpointDecisionLabel(
+	checkpoint: NonNullable<WorkflowServiceTaskView["checkpoint"]>,
+): string {
+	const decision = checkpoint.decision;
+	if (!decision) {
+		return checkpoint.requestedAt
+			? "awaiting a person · space to decide"
+			: "not requested yet";
+	}
+	const value =
+		"value" in decision ? JSON.stringify(decision.value) : decision.sha256;
+	return `${decision.source}${decision.decidedBy ? ` · ${decision.decidedBy}` : ""} · ${value}`;
+}
+
+/**
+ * The answerable question of one checkpoint task, bounded for a detail pane:
+ * the task key `/workflow decide` accepts, the answer shape, the prompt and
+ * the declared inputs. Every value is the one the pending-checkpoint view
+ * fields carry, rendered through the one shared renderer, so the inspector,
+ * the dialogs and the tool output never disagree. A lease-free `inspect`
+ * carries no verified `inputs`; the block then stops after the prompt.
+ */
+function checkpointLines(
+	task: Pick<WorkflowServiceTaskView, "namespace" | "key" | "checkpoint">,
+	runId: WorkflowRunId,
+	width: number,
+	theme: LineTheme,
+): string[] {
+	const checkpoint = task.checkpoint;
+	if (!checkpoint) return [];
+	const lines = [
+		theme.fg("accent", "Checkpoint"),
+		keyValue("Task key", checkpointTaskKey(task), width),
+		keyValue("Answer", checkpointSchemaSummary(checkpoint.schema), width),
+	];
+	lines.push(
+		...boundedBlock(
+			checkpoint.promptTruncated ? `${checkpoint.prompt}…` : checkpoint.prompt,
+			MAX_CHECKPOINT_DETAIL_PROMPT_LINES,
+			width,
+			theme,
+		),
+	);
+	const inputs = checkpoint.inputs ?? {};
+	if (Object.keys(inputs).length > 0) {
+		lines.push(theme.fg("muted", "Inputs"));
+		lines.push(
+			...boundedBlock(
+				renderCheckpointInputs(inputs, {
+					budget: CHECKPOINT_DETAIL_INPUTS_BYTES,
+					run: runId,
+				}),
+				MAX_CHECKPOINT_DETAIL_INPUT_LINES,
+				width,
+				theme,
+			),
+		);
 	}
 	return lines;
 }
@@ -1123,6 +1319,12 @@ function taskDetailLines(
 	);
 	const child = childRunIdOf(inspection, task.id);
 	if (child) lines.push(keyValue("Child run", `${child} · o open`, width));
+	if (task.checkpoint) {
+		lines.push(
+			...checkpointLines(task, inspection.run.runId, width, theme),
+			keyValue("Decision", checkpointDecisionLabel(task.checkpoint), width),
+		);
+	}
 	lines.push(
 		keyValue("Artifacts", String(current?.artifactIds.length ?? 0), width),
 		keyValue(
@@ -1310,7 +1512,9 @@ export function taskPickerBody(
 	return [
 		theme.fg(
 			"muted",
-			`Choose the task to ${ui.pendingAction ?? "act on"} · abandoned tasks cannot be selected`,
+			ui.pendingAction === "decide"
+				? "Choose the checkpoint to decide · only a checkpoint awaiting a decision can be selected"
+				: `Choose the task to ${ui.pendingAction ?? "act on"} · abandoned tasks cannot be selected`,
 		),
 		"",
 		...tasks.map((task, index) =>

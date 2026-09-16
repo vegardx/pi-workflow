@@ -5,7 +5,7 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import type { WorkflowRunId } from "./contracts.js";
+import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
 import type {
@@ -15,11 +15,15 @@ import type {
 import { createWorkflowSubagentProvider } from "./subagent-provider.js";
 import { WORKFLOW_TOOL_DECLARATIONS, workflowToolText } from "./tools.js";
 import {
+	type CheckpointDecisionOutcome,
+	collectCheckpointDecision,
+} from "./ui/checkpoint-form.js";
+import {
 	ACTION_CONSEQUENCES,
 	type ActionRequest,
 	actionUnavailableMessage,
-	CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE,
 	CONFIRMED_ACTIONS,
+	checkpointDecisionMode,
 	collectLogTail,
 	DEFAULT_DECIDE_APPROVER,
 	decideConsequence,
@@ -48,6 +52,11 @@ import {
 	taskPath,
 } from "./ui/format.js";
 import type { InspectorIntent, InspectorState } from "./ui/inspector.js";
+import {
+	createParkedRunObserver,
+	type ParkedObserverContext,
+	type ParkedRunObserver,
+} from "./ui/parked-observer.js";
 import {
 	createWidgetController,
 	type WidgetController,
@@ -162,8 +171,11 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	let service: WorkflowService | undefined;
 	let serviceCwd: string | undefined;
 	let widget: WidgetController | undefined;
+	let observer: ParkedRunObserver | undefined;
 	// Each TUI session start supersedes the previous one; a start that lost
-	// the race while awaiting the service never installs its controller.
+	// the race while awaiting the service never installs its controller. The
+	// parked-run observer shares the counter: an `ExtensionContext` throws
+	// once its session is replaced, so it never outlives its generation.
 	let widgetGeneration = 0;
 
 	async function getService(ctx: ExtensionContext): Promise<WorkflowService> {
@@ -189,6 +201,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		const generation = ++widgetGeneration;
 		widget?.stop();
 		widget = undefined;
+		observer?.stop();
+		observer = undefined;
 		try {
 			await loadTextComponent();
 			const runtime = await getService(ctx);
@@ -204,6 +218,20 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			await controller.start();
 			// A start that overlapped this one's first refresh already stopped
 			// the controller through `widget`; nothing else to release.
+			if (generation !== widgetGeneration) return;
+			// Asking the session user to decide a parked checkpoint is a
+			// session act: the observer only ever sees this generation's
+			// context, and a superseded one stops it.
+			const parked = createParkedRunObserver({
+				service: runtime,
+				getContext: () =>
+					generation === widgetGeneration
+						? (ctx as ParkedObserverContext)
+						: undefined,
+				onDecided: () => widget?.refresh(),
+			});
+			observer = parked;
+			parked.start();
 		} catch {
 			if (generation === widgetGeneration) {
 				ctx.ui.setWidget(WORKFLOW_WIDGET_KEY, undefined);
@@ -211,10 +239,21 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		}
 	});
 
+	// A dialog opened by Pi or another extension replaces an open one, so the
+	// observer defers its own while a foreign prompt is on screen.
+	pi.on("ui_prompt_start", () => {
+		observer?.notePromptStart();
+	});
+	pi.on("ui_prompt_end", () => {
+		observer?.notePromptEnd();
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
 		widgetGeneration += 1;
 		widget?.stop();
 		widget = undefined;
+		observer?.stop();
+		observer = undefined;
 		if (ctx?.mode === "tui") ctx.ui.setWidget(WORKFLOW_WIDGET_KEY, undefined);
 		const active = service;
 		service = undefined;
@@ -308,8 +347,21 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			state = intent.state;
 			if (intent.type === "close") return;
 			try {
-				const outcome = await performRunAction(runtime, intent.request);
+				// The inspector owns the terminal while it is open and cannot
+				// host a dialog, so its decide intent resolves here: the form
+				// asks, and the inspector reopens where the operator left it.
+				const outcome = await performRunAction(
+					runtime,
+					intent.request,
+					intent.type === "decide"
+						? {
+								collectDecision: () =>
+									collectDecisionFor(ctx, runtime, intent.run, intent.taskId),
+							}
+						: {},
+				);
 				ctx.ui.notify(outcome.message, outcome.level);
+				if (intent.type === "decide") await widget?.refresh();
 			} catch (error) {
 				ctx.ui.notify(
 					error instanceof Error ? error.message : String(error),
@@ -317,6 +369,47 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				);
 			}
 		}
+	}
+
+	/**
+	 * The guided form bound to one checkpoint: `performRunAction` calls it for
+	 * a `decide` that carries no decision, and it records the answer itself.
+	 * The task view comes from `status`, the only artifact-backed read that
+	 * carries the full prompt and the verified inputs the form shows; nothing
+	 * is recorded when it resolves `undefined`.
+	 */
+	async function collectDecisionFor(
+		ctx: ExtensionContext,
+		runtime: WorkflowService,
+		run: WorkflowRunSummary,
+		taskId: WorkflowTaskId,
+		reason?: string,
+	): Promise<CheckpointDecisionOutcome | undefined> {
+		const view = await runtime.status(run.runId);
+		const task = view.tasks?.find((candidate) => candidate.id === taskId);
+		const pending = (view.pendingCheckpoints ?? []).some(
+			(checkpoint) => checkpoint.taskId === taskId,
+		);
+		if (!task?.checkpoint || !pending) {
+			throw new WorkflowCommandError(
+				`Checkpoint ${task ? taskPath(task) : taskId} is not awaiting a decision.`,
+			);
+		}
+		return collectCheckpointDecision(
+			ctx,
+			{
+				id: task.id,
+				namespace: task.namespace,
+				key: task.key,
+				checkpoint: task.checkpoint,
+			},
+			run,
+			{
+				service: runtime,
+				approver: checkpointApprover(ctx),
+				...(reason ? { reason } : {}),
+			},
+		);
 	}
 
 	async function resolveTask(
@@ -351,6 +444,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			action === "invalidate" && task
 				? await runtime.previewInvalidation(run.runId, task.id)
 				: undefined;
+		// A checkpoint decision is a human act: without a dialog nothing is
+		// recorded, unlike the other actions in print mode. With `<json>` the
+		// fixed confirm still gates it; without one the guided form asks the
+		// session user and confirms for itself.
+		const decideMode =
+			parsed.kind === "decide"
+				? checkpointDecisionMode(parsed, ctx.hasUI)
+				: undefined;
 		const request: ActionRequest = {
 			action,
 			run,
@@ -361,17 +462,16 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				: {}),
 			...(preview ? { preview } : {}),
 			...(parsed.kind === "decide"
-				? { decision: parsed.decision, approver: checkpointApprover(ctx) }
+				? {
+						...(decideMode === "confirm" ? { decision: parsed.decision } : {}),
+						approver: checkpointApprover(ctx),
+					}
 				: {}),
 		};
-		// A checkpoint decision is a human act: without a dialog to confirm it
-		// nothing is recorded, unlike the other actions in print mode.
-		if (action === "decide" && !ctx.hasUI) {
-			throw new WorkflowCommandError(CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE);
-		}
 		if (
 			ctx.hasUI &&
 			CONFIRMED_ACTIONS.has(action) &&
+			decideMode !== "form" &&
 			!(await ctx.ui.confirm(
 				`${action} ${shortId(run.runId)}?`,
 				consequenceFor(request, task),
@@ -379,7 +479,22 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		) {
 			return;
 		}
-		const outcome = await performRunAction(runtime, request);
+		const outcome = await performRunAction(
+			runtime,
+			request,
+			decideMode === "form" && task
+				? {
+						collectDecision: () =>
+							collectDecisionFor(
+								ctx,
+								runtime,
+								run,
+								task.id,
+								"reason" in parsed ? parsed.reason : undefined,
+							),
+					}
+				: {},
+		);
 		operatorOutput(ctx, outcome.message, outcome.level);
 		if (action === "decide") await widget?.refresh();
 	}

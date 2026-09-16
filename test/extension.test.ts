@@ -10,8 +10,14 @@ import type { SubagentService } from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowRunId, WorkflowTaskId } from "../src/contracts.js";
 import workflowExtension from "../src/extension.js";
+import type {
+	WorkflowRunSummary,
+	WorkflowServiceRunView,
+} from "../src/service-views.js";
 import { WORKFLOW_TOOL_DECLARATIONS } from "../src/tools.js";
+import { createParkedRunObserver } from "../src/ui/parked-observer.js";
 
 type Handler = (...args: unknown[]) => unknown;
 type Command = {
@@ -164,7 +170,14 @@ describe("workflow Pi extension", () => {
 			"List, run, inspect, and control durable workflows",
 		);
 		expect(shortcuts).toEqual(["alt+w"]);
-		expect([...handlers.keys()]).toEqual(["session_start", "session_shutdown"]);
+		// The prompt events keep the parked-run observer off the screen while
+		// Pi or another extension holds a dialog open.
+		expect([...handlers.keys()]).toEqual([
+			"session_start",
+			"ui_prompt_start",
+			"ui_prompt_end",
+			"session_shutdown",
+		]);
 		expect(
 			tools.find((tool) => tool.name === "workflow_run")?.description,
 		).toContain("run ID immediately");
@@ -701,4 +714,613 @@ export default defineWorkflow({
 			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
 		}
 	});
+});
+
+// ---------------------------------------------------------------------------
+// The parked-run observer
+// ---------------------------------------------------------------------------
+
+const PARKED_RUN_ID = "workflow_parked00000000000000000000" as WorkflowRunId;
+const PARKED_TASK_ID = "task_parked01" as WorkflowTaskId;
+
+function parkedSummary(
+	overrides: Partial<WorkflowRunSummary> = {},
+): WorkflowRunSummary {
+	return {
+		runId: PARKED_RUN_ID,
+		definitionName: "ui-decide",
+		status: "waiting",
+		createdAt: "2026-09-16T12:00:00.000Z",
+		updatedAt: "2026-09-16T12:00:01.000Z",
+		deadlineAt: "2026-09-16T13:00:00.000Z",
+		depth: 0,
+		lastSequence: 4,
+		taskCounts: {},
+		ownership: "owned",
+		leasedElsewhere: false,
+		availableActions: ["wait", "stop", "decide"],
+		requiresAttention: false,
+		pendingCheckpointCount: 1,
+		...overrides,
+	} as unknown as WorkflowRunSummary;
+}
+
+function parkedView(executionId = "execution-1"): WorkflowServiceRunView {
+	return {
+		runId: PARKED_RUN_ID,
+		status: "waiting",
+		definitionName: "ui-decide",
+		createdAt: "2026-09-16T12:00:00.000Z",
+		deadlineAt: "2026-09-16T13:00:00.000Z",
+		depth: 0,
+		tasks: [
+			{
+				id: PARKED_TASK_ID,
+				namespace: ["review"],
+				key: "approve",
+				kind: "checkpoint",
+				checkpoint: {
+					prompt: "Approve the plan?",
+					schema: { type: "boolean" },
+					headless: "block",
+				},
+			},
+		],
+		pendingCheckpoints: [
+			{
+				taskId: PARKED_TASK_ID,
+				namespace: ["review"],
+				key: "approve",
+				executionId,
+				requestedAt: "2026-09-16T12:00:01.000Z",
+				taskKey: "review/approve",
+			},
+		],
+	} as unknown as WorkflowServiceRunView;
+}
+
+/**
+ * A service that reports exactly what the observer's predicates read: the
+ * `listRuns` page, the artifact-backed `status` view, and the observations
+ * `subscribe` delivers.
+ */
+function observerHarness(
+	options: {
+		runs?: () => readonly WorkflowRunSummary[];
+		view?: () => WorkflowServiceRunView;
+	} = {},
+) {
+	const listeners: ((observation: unknown) => void)[] = [];
+	const runs = options.runs ?? (() => [parkedSummary()]);
+	const view = options.view ?? (() => parkedView());
+	const service = {
+		listRuns: vi.fn(async () => ({
+			runs: [...runs()],
+			total: runs().length,
+			issues: [],
+			issuesTruncated: 0,
+			generatedAt: "2026-09-16T12:00:02.000Z",
+		})),
+		status: vi.fn(async () => view()),
+		decide: vi.fn(async () => view()),
+		subscribe: vi.fn((listener: (observation: unknown) => void) => {
+			listeners.push(listener);
+			return () => {
+				listeners.splice(listeners.indexOf(listener), 1);
+			};
+		}),
+	};
+	let fire: (() => void) | undefined;
+	const notify = vi.fn();
+	const context = { hasUI: true, ui: { notify } };
+	const collect = vi.fn<
+		(
+			ctx: unknown,
+			task: unknown,
+			run: unknown,
+			options: unknown,
+		) => Promise<undefined>
+	>(async () => undefined);
+	const observer = createParkedRunObserver({
+		service: service as never,
+		getContext: () => context as never,
+		collect: collect as never,
+		setTimer: (callback) => {
+			fire = callback;
+			return 1;
+		},
+		clearTimer: () => {
+			fire = undefined;
+		},
+	});
+	return {
+		service,
+		observer,
+		collect,
+		notify,
+		context,
+		listeners,
+		park(status = "waiting") {
+			for (const listener of [...listeners]) {
+				listener({ runId: PARKED_RUN_ID, status, sequence: 5 });
+			}
+		},
+		async tick() {
+			fire?.();
+			await observer.settled();
+		},
+	};
+}
+
+describe("parked run observer", () => {
+	it("asks once per execution for an owned run the service offers decide on", async () => {
+		const harness = observerHarness();
+		harness.observer.start();
+		await harness.observer.settled();
+		expect(harness.collect).toHaveBeenCalledTimes(1);
+		const [ctx, task, run] = harness.collect.mock.calls[0] ?? [];
+
+		expect(ctx).toBe(harness.context);
+		expect(task).toMatchObject({
+			id: PARKED_TASK_ID,
+			key: "approve",
+			checkpoint: { prompt: "Approve the plan?" },
+		});
+		expect(run).toMatchObject({ runId: PARKED_RUN_ID });
+		// A dismissal names the fallback and is final for this execution.
+		expect(harness.notify).toHaveBeenCalledWith(
+			"Checkpoint review/approve still waits. /workflow decide workflow_par… review/approve — or alt+w.",
+			"info",
+		);
+		harness.park();
+		await harness.tick();
+		expect(harness.collect).toHaveBeenCalledTimes(1);
+		harness.observer.stop();
+	});
+
+	it("asks again once the run parks on a new execution", async () => {
+		let executionId = "execution-1";
+		const harness = observerHarness({ view: () => parkedView(executionId) });
+		harness.observer.start();
+		await harness.observer.settled();
+		executionId = "execution-2";
+		harness.park();
+		await harness.tick();
+		expect(harness.collect).toHaveBeenCalledTimes(2);
+		harness.observer.stop();
+	});
+
+	it("never asks for a run leased elsewhere or one without decide", async () => {
+		for (const summary of [
+			parkedSummary({ ownership: "leased-elsewhere", leasedElsewhere: true }),
+			// A nested child is never offered `decide`.
+			parkedSummary({ depth: 1, availableActions: ["wait", "stop"] }),
+			parkedSummary({ pendingCheckpointCount: 0 }),
+		]) {
+			const harness = observerHarness({ runs: () => [summary] });
+			harness.observer.start();
+			await harness.observer.settled();
+			expect(harness.collect).not.toHaveBeenCalled();
+			harness.observer.stop();
+		}
+	});
+
+	it("never asks without a dialog-capable session", async () => {
+		const harness = observerHarness();
+		harness.context.hasUI = false;
+		harness.observer.start();
+		await harness.observer.settled();
+		expect(harness.collect).not.toHaveBeenCalled();
+		expect(harness.service.listRuns).not.toHaveBeenCalled();
+		harness.observer.stop();
+	});
+
+	it("defers while a foreign prompt is open and asks once it closes", async () => {
+		const harness = observerHarness();
+		harness.observer.notePromptStart();
+		harness.observer.start();
+		await harness.observer.settled();
+		expect(harness.collect).not.toHaveBeenCalled();
+		harness.observer.notePromptEnd();
+		await harness.observer.settled();
+		expect(harness.collect).toHaveBeenCalledTimes(1);
+		harness.observer.stop();
+	});
+
+	it("stops when the session that owns the context is replaced", async () => {
+		const harness = observerHarness();
+		harness.observer.start();
+		await harness.observer.settled();
+		expect(harness.listeners).toHaveLength(1);
+		harness.collect.mockClear();
+		// An `ExtensionContext` throws once its session is replaced.
+		Object.defineProperty(harness.context, "hasUI", {
+			get() {
+				throw new Error("session replaced");
+			},
+		});
+		harness.park();
+		await harness.tick();
+		expect(harness.collect).not.toHaveBeenCalled();
+		expect(harness.listeners).toHaveLength(0);
+	});
+
+	it("keeps the session alive when the service fails", async () => {
+		const harness = observerHarness();
+		harness.service.listRuns.mockRejectedValueOnce(new Error("unreadable"));
+		harness.observer.start();
+		await expect(harness.observer.settled()).resolves.toBeUndefined();
+		expect(harness.collect).not.toHaveBeenCalled();
+		harness.observer.stop();
+	});
+});
+
+const PARKING_WORKFLOW = `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "ui-decide", description: "Checkpoint workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  async run(ctx) {
+    ctx.phase("review");
+    const approve = ctx.checkpoint("approve", { schema: { type: "object", properties: { proceed: { type: "boolean" } }, required: ["proceed"], additionalProperties: false }, prompt: "Approve the plan?", headless: "block", timeoutMs: 60000 });
+    const decision = await ctx.result(approve);
+    return { answer: decision.proceed ? "approved" : "declined" };
+  }
+};
+`;
+
+async function parkingProject(): Promise<string> {
+	const cwd = path.resolve(".pi", "test-extension", `parked-${randomUUID()}`);
+	await mkdir(path.join(cwd, "workflows"), { recursive: true });
+	await writeFile(
+		path.join(cwd, "workflows", "ui-decide.workflow.ts"),
+		PARKING_WORKFLOW,
+	);
+	return cwd;
+}
+
+function sessionUi() {
+	return {
+		notify: vi.fn(),
+		select:
+			vi.fn<
+				(
+					title: string,
+					options: string[],
+					opts?: { timeout?: number; signal?: AbortSignal },
+				) => Promise<string | undefined>
+			>(),
+		confirm: vi.fn<(title: string, message: string) => Promise<boolean>>(
+			async () => true,
+		),
+		input: vi.fn(async () => undefined),
+		editor: vi.fn(async () => undefined),
+		setWidget: vi.fn(),
+	};
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 500));
+
+describe("parked runs prompt the session user end to end", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function toolbox(tools: ToolDefinition[]) {
+		return (name: string) => {
+			const found = tools.find((candidate) => candidate.name === name);
+			if (!found) throw new Error(`${name} missing`);
+			return found;
+		};
+	}
+
+	it("asks the parked checkpoint once and records the session decision", async () => {
+		const { tools, handlers } = capture({ subagents: true });
+		const tool = toolbox(tools);
+		const ui = sessionUi();
+		ui.select.mockResolvedValue("true — yes");
+		const context = {
+			cwd: await parkingProject(),
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui,
+		};
+		const signal = new AbortController().signal;
+		try {
+			await handlers.get("session_start")?.({ reason: "startup" }, context);
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-decide", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+
+			// The park is observed and asked without any operator command.
+			await vi.waitFor(() => expect(ui.select).toHaveBeenCalledTimes(1), {
+				timeout: 10_000,
+			});
+			const [title, options, opts] = ui.select.mock.calls[0] ?? [];
+			expect(title).toContain("Approve the plan?");
+			expect(title).toContain("Checkpoint approve · run ");
+			expect(title).toContain("Answer: { proceed: boolean }");
+			expect(options).toEqual(["true — yes", "false — no"]);
+			// The expiry renders as a live countdown on the dialog.
+			expect((opts as { timeout: number }).timeout).toBeGreaterThan(0);
+			expect((opts as { signal: AbortSignal }).signal).toBeInstanceOf(
+				AbortSignal,
+			);
+			expect(ui.confirm).toHaveBeenCalledTimes(1);
+			expect(ui.confirm.mock.calls[0]?.[0]).toBe("Decide approve?");
+
+			// The answer is the recorded decision and the run continues from it.
+			await vi.waitFor(
+				async () => {
+					const view = await tool("workflow_status").execute(
+						"call-2",
+						{ runId },
+						signal,
+						undefined,
+						context as never,
+					);
+					expect(view.details).toMatchObject({ status: "completed" });
+				},
+				{ timeout: 10_000 },
+			);
+			const final = await tool("workflow_status").execute(
+				"call-3",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			const view = final.details as {
+				output?: unknown;
+				tasks?: { key: string; checkpoint?: { decision?: unknown } }[];
+			};
+			expect(view.output).toEqual({ answer: "approved" });
+			expect(
+				view.tasks?.find((task) => task.key === "approve")?.checkpoint
+					?.decision,
+			).toMatchObject({
+				source: "operator",
+				decidedBy: "pi-session",
+				value: { proceed: true },
+			});
+			// One execution, one prompt.
+			await settle();
+			expect(ui.select).toHaveBeenCalledTimes(1);
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	}, 30_000);
+
+	it("records nothing when the prompt is dismissed and leaves the run parked", async () => {
+		const { tools, handlers } = capture({ subagents: true });
+		const tool = toolbox(tools);
+		const ui = sessionUi();
+		ui.select.mockResolvedValue(undefined);
+		const context = {
+			cwd: await parkingProject(),
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui,
+		};
+		const signal = new AbortController().signal;
+		try {
+			await handlers.get("session_start")?.({ reason: "startup" }, context);
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-decide", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			await vi.waitFor(() => expect(ui.select).toHaveBeenCalledTimes(1), {
+				timeout: 10_000,
+			});
+			expect(ui.confirm).not.toHaveBeenCalled();
+			expect(ui.notify).toHaveBeenCalledWith(
+				expect.stringContaining("/workflow decide"),
+				"info",
+			);
+
+			// The run stays parked and the same execution is never asked twice.
+			const parked = await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(parked.details).toMatchObject({
+				status: "waiting",
+				parked: true,
+			});
+			await settle();
+			expect(ui.select).toHaveBeenCalledTimes(1);
+			const view = await tool("workflow_status").execute(
+				"call-3",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			const tasks = (
+				view.details as {
+					tasks?: { key: string; checkpoint?: { decision?: unknown } }[];
+				}
+			).tasks;
+			expect(
+				tasks?.find((task) => task.key === "approve")?.checkpoint?.decision,
+			).toBeUndefined();
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	}, 30_000);
+
+	it("answers /workflow decide without JSON through the same form", async () => {
+		const { tools, commands, handlers } = capture({ subagents: true });
+		const tool = toolbox(tools);
+		const command = commands.get("workflow");
+		if (!command) throw new Error("/workflow missing");
+		const ui = sessionUi();
+		ui.select.mockResolvedValue("true — yes");
+		// An RPC session has dialogs but no widget and no observer, so the
+		// command is the only thing that can ask.
+		const context = {
+			cwd: await parkingProject(),
+			mode: "rpc",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui,
+		};
+		const signal = new AbortController().signal;
+		try {
+			await handlers.get("session_start")?.({ reason: "startup" }, context);
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-decide", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(ui.select).not.toHaveBeenCalled();
+
+			await command.handler(`decide ${runId.slice(0, 14)} approve`, context);
+			expect(ui.select).toHaveBeenCalledTimes(1);
+			expect(ui.select.mock.calls[0]?.[0]).toContain("Approve the plan?");
+			// The form confirms for itself; the fixed decide confirm is skipped.
+			expect(ui.confirm).toHaveBeenCalledTimes(1);
+			expect(ui.confirm.mock.calls[0]?.[0]).toBe("Decide approve?");
+			expect(ui.notify.mock.calls.at(-1)?.[0]).toMatch(
+				new RegExp(`^decide accepted for ${runId}: approve decided; run is `),
+			);
+			const view = await tool("workflow_status").execute(
+				"call-3",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			const tasks = (
+				view.details as {
+					tasks?: { key: string; checkpoint?: { decision?: unknown } }[];
+				}
+			).tasks;
+			expect(
+				tasks?.find((task) => task.key === "approve")?.checkpoint?.decision,
+			).toMatchObject({ decidedBy: "pi-session", value: { proceed: true } });
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	}, 30_000);
+
+	it("never prompts in a session without dialogs", async () => {
+		const { tools, handlers } = capture({ subagents: true });
+		const tool = toolbox(tools);
+		const ui = sessionUi();
+		const context = {
+			cwd: await parkingProject(),
+			mode: "print",
+			hasUI: false,
+			isProjectTrusted: () => true,
+			ui,
+		};
+		const signal = new AbortController().signal;
+		try {
+			await handlers.get("session_start")?.({ reason: "startup" }, context);
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-decide", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			const parked = await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(parked.details).toMatchObject({
+				status: "waiting",
+				parked: true,
+			});
+			await settle();
+			expect(ui.select).not.toHaveBeenCalled();
+			expect(ui.confirm).not.toHaveBeenCalled();
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	}, 30_000);
+
+	it("defers the dialog while another prompt holds the screen", async () => {
+		const { tools, handlers } = capture({ subagents: true });
+		const tool = toolbox(tools);
+		const ui = sessionUi();
+		ui.select.mockResolvedValue("true — yes");
+		const context = {
+			cwd: await parkingProject(),
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui,
+		};
+		const signal = new AbortController().signal;
+		try {
+			await handlers.get("session_start")?.({ reason: "startup" }, context);
+			// Pi's own prompt is open: a dialog now would clobber it.
+			await handlers.get("ui_prompt_start")?.(
+				{ type: "ui_prompt_start", reason: "ui_prompt", kind: "input" },
+				context,
+			);
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-decide", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			const parked = await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(parked.details).toMatchObject({
+				status: "waiting",
+				parked: true,
+			});
+			await settle();
+			expect(ui.select).not.toHaveBeenCalled();
+
+			// The foreign prompt closed: the checkpoint is asked next.
+			await handlers.get("ui_prompt_end")?.(
+				{ type: "ui_prompt_end", reason: "ui_prompt", kind: "input" },
+				context,
+			);
+			await vi.waitFor(() => expect(ui.select).toHaveBeenCalledTimes(1), {
+				timeout: 10_000,
+			});
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	}, 30_000);
 });
