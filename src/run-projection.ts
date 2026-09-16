@@ -4,6 +4,12 @@ import {
 	reservedWorkflowUsage,
 	settledWorkflowUsage,
 } from "./budget.js";
+import {
+	CHECKPOINT_DECIDE_INSTRUCTION,
+	checkpointSchemaSummary,
+	MAX_CHECKPOINT_RENDER_BYTES,
+	renderCheckpointInputs,
+} from "./checkpoint-render.js";
 import type {
 	TaskExecutionOutcome,
 	WorkflowArtifactId,
@@ -180,38 +186,96 @@ function checkpointTaskView(
 	});
 }
 
+export interface PendingCheckpointViewOptions {
+	/**
+	 * Verified checkpoint inputs by task id, taken from the artifact-backed
+	 * task views. Lease-free views pass none and carry no `inputsSummary`.
+	 */
+	readonly inputs?: ReadonlyMap<
+		WorkflowTaskId,
+		Readonly<Record<string, unknown>>
+	>;
+	/**
+	 * Cut prompts longer than this many characters and mark them
+	 * `promptTruncated`; artifact-backed views omit it and carry the whole
+	 * contract-bounded prompt.
+	 */
+	readonly promptLimit?: number;
+}
+
+/**
+ * `inputsSummary` is rendered only while a pending checkpoint's share of
+ * `MAX_CHECKPOINT_RENDER_BYTES` can carry a readable block, so a run parked on
+ * many checkpoints cannot inflate a view without bound.
+ */
+const MIN_CHECKPOINT_INPUTS_RENDER_BYTES = 512;
+
 /**
  * The run view's `pendingCheckpoints`: the tasks `pendingCheckpoints` (the
  * `decide` predicate) selects, in materialization order, bounded to
  * `MAX_WORKFLOW_INSPECTION_ITEMS`. Empty unless a checkpoint waits.
+ *
+ * Every entry carries what answering it takes: the task key `/workflow decide`
+ * accepts, the prompt, the answer shape, the fixed decide instruction, and -
+ * on artifact-backed views alone - the declared inputs as rendered text. The
+ * rendered inputs of the whole array share one `MAX_CHECKPOINT_RENDER_BYTES`
+ * budget.
  */
 export function pendingCheckpointViews(
 	state: WorkflowStateProjection,
+	options: PendingCheckpointViewOptions = {},
 ): readonly WorkflowPendingCheckpointView[] {
+	const selected = pendingCheckpoints(state).slice(
+		0,
+		MAX_WORKFLOW_INSPECTION_ITEMS,
+	);
+	const inputsBudget =
+		selected.length === 0
+			? 0
+			: Math.floor(MAX_CHECKPOINT_RENDER_BYTES / selected.length);
 	return Object.freeze(
-		pendingCheckpoints(state)
-			.slice(0, MAX_WORKFLOW_INSPECTION_ITEMS)
-			.flatMap((taskId) => {
-				const task = state.tasks[taskId];
-				const request = task
-					? currentExecution(state, task)?.checkpointRequest
-					: undefined;
-				if (!task || !request) return [];
-				const executionId = task.currentExecutionId;
-				if (executionId === undefined) return [];
-				return [
-					Object.freeze({
-						taskId,
-						namespace: Object.freeze([...task.task.namespace]),
-						key: task.task.spec.key,
-						executionId,
-						requestedAt: request.requestedAt,
-						...(request.expiresAt === undefined
-							? {}
-							: { expiresAt: request.expiresAt }),
-					}),
-				];
-			}),
+		selected.flatMap((taskId) => {
+			const task = state.tasks[taskId];
+			const request = task
+				? currentExecution(state, task)?.checkpointRequest
+				: undefined;
+			if (!task || !request) return [];
+			const executionId = task.currentExecutionId;
+			if (executionId === undefined) return [];
+			const spec = task.task.spec;
+			if (spec.kind !== "checkpoint") return [];
+			const { promptLimit } = options;
+			const truncated =
+				promptLimit !== undefined && spec.request.prompt.length > promptLimit;
+			const inputs = options.inputs?.get(taskId);
+			const inputsSummary =
+				inputs && inputsBudget >= MIN_CHECKPOINT_INPUTS_RENDER_BYTES
+					? renderCheckpointInputs(inputs, {
+							budget: inputsBudget,
+							run: state.runId,
+						})
+					: "";
+			return [
+				Object.freeze({
+					taskId,
+					namespace: Object.freeze([...task.task.namespace]),
+					key: spec.key,
+					executionId,
+					requestedAt: request.requestedAt,
+					...(request.expiresAt === undefined
+						? {}
+						: { expiresAt: request.expiresAt }),
+					taskKey: [...task.task.namespace, spec.key].join("/"),
+					prompt: truncated
+						? spec.request.prompt.slice(0, promptLimit)
+						: spec.request.prompt,
+					...(truncated ? { promptTruncated: true as const } : {}),
+					schemaSummary: checkpointSchemaSummary(spec.request.schema),
+					...(inputsSummary === "" ? {} : { inputsSummary }),
+					instruction: CHECKPOINT_DECIDE_INSTRUCTION,
+				}),
+			];
+		}),
 	);
 }
 

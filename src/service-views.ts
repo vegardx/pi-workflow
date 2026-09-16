@@ -1,5 +1,9 @@
 import { type Static, type TSchema, Type } from "typebox";
 import {
+	MAX_CHECKPOINT_RENDER_BYTES,
+	MAX_CHECKPOINT_SCHEMA_SUMMARY_LENGTH,
+} from "./checkpoint-render.js";
+import {
 	CheckpointDecisionSourceSchema,
 	CheckpointHeadlessPolicySchema,
 	JsonSchemaDocumentSchema,
@@ -69,6 +73,8 @@ export const MAX_WORKFLOW_WAIT_TIMEOUT_MS = 2_147_483_647;
  * wait, decide) carry the whole contract-bounded prompt.
  */
 export const MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH = 256;
+/** Bound of the fixed `instruction` a pending checkpoint view carries. */
+const MAX_CHECKPOINT_INSTRUCTION_LENGTH = 512;
 /**
  * `${namespace.join("/")}/${key}` at the contract bounds: every namespace
  * entry is followed by "/" and the key closes the path (4256).
@@ -342,6 +348,11 @@ export type WorkflowServiceTaskView = View<
 	typeof WorkflowServiceTaskViewSchema
 >;
 
+/**
+ * A checkpoint awaiting a decision. The identity fields are always present;
+ * the six optional fields below carry everything an approver needs to answer
+ * without a second call, and are additive under the 1.0 API freeze.
+ */
 export const WorkflowPendingCheckpointViewSchema = Type.Object(
 	{
 		taskId: WorkflowTaskIdSchema,
@@ -352,6 +363,32 @@ export const WorkflowPendingCheckpointViewSchema = Type.Object(
 		executionId: TaskExecutionIdSchema,
 		requestedAt: TimestampSchema,
 		expiresAt: Type.Optional(TimestampSchema),
+		/** `${namespace}/${key}`: the token `/workflow decide` accepts. */
+		taskKey: Type.Optional(
+			Type.String({ minLength: 1, maxLength: MAX_WORKFLOW_TASK_KEY_LENGTH }),
+		),
+		/** The checkpoint prompt, cut on the lease-free views. */
+		prompt: Type.Optional(FixedStringSchema),
+		/** The prompt was cut to `MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH` characters. */
+		promptTruncated: Type.Optional(Type.Literal(true)),
+		/** One-line answer shape derived from the decision schema. */
+		schemaSummary: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_CHECKPOINT_SCHEMA_SUMMARY_LENGTH,
+			}),
+		),
+		/** The declared inputs as rendered text; artifact-backed views only. */
+		inputsSummary: Type.Optional(
+			Type.String({ minLength: 1, maxLength: MAX_CHECKPOINT_RENDER_BYTES }),
+		),
+		/** `CHECKPOINT_DECIDE_INSTRUCTION`: a person answers, a model does not. */
+		instruction: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_CHECKPOINT_INSTRUCTION_LENGTH,
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );

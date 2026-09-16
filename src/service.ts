@@ -1524,8 +1524,25 @@ export async function createWorkflowService(
 				: {}),
 			...(output === undefined ? {} : { output }),
 			tasks,
-			pendingCheckpoints: pendingCheckpointViews(state),
+			pendingCheckpoints: pendingCheckpointViews(state, {
+				inputs: checkpointInputsByTask(tasks),
+			}),
 		});
+	}
+
+	/**
+	 * The verified checkpoint inputs the artifact-backed task views carry, by
+	 * task id, so the pending-checkpoint views render the same values the
+	 * approver reads. Lease-free views carry none and the map stays empty.
+	 */
+	function checkpointInputsByTask(
+		tasks: readonly WorkflowServiceTaskView[],
+	): ReadonlyMap<WorkflowTaskId, Readonly<Record<string, unknown>>> {
+		const inputs = new Map<WorkflowTaskId, Readonly<Record<string, unknown>>>();
+		for (const task of tasks) {
+			if (task.checkpoint?.inputs) inputs.set(task.id, task.checkpoint.inputs);
+		}
+		return inputs;
 	}
 
 	/**
