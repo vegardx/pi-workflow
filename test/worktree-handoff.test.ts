@@ -57,6 +57,9 @@ import {
 const PATCH_MEDIA_TYPE = "application/x-git-format-patch" as const;
 const HANDOFF_BOUND_BYTES = 16 * 1024 * 1024;
 const HANDOFF_ABSENT_MESSAGE = "Completed worktree task captured no handoff.";
+const HANDOFF_BOUND_MESSAGE = "Workflow handoff exceeds the import bound.";
+/** pi-subagent's fixed `WorktreeError` for an export above the bound (D7). */
+const HANDOFF_EXPORT_REFUSAL = "handoff export exceeds byte limit";
 const HANDOFF_UNVERIFIED_MESSAGE =
 	"Completed worktree task has no verified handoff artifact.";
 const BASELINE_HEAD = "b".repeat(40);
@@ -134,6 +137,13 @@ function unavailableClient(): SubagentClient {
 }
 
 type ChildFailure = NonNullable<RunResult["failure"]>;
+
+/** The refusal pi-subagent throws when the handoff is larger than `maxBytes`. */
+function boundRefusal(): Error {
+	const refusal = new Error(HANDOFF_EXPORT_REFUSAL);
+	refusal.name = "WorktreeError";
+	return refusal;
+}
 
 function backoffFailure(): ChildFailure {
 	return {
@@ -713,6 +723,8 @@ interface WorktreeWorkflowOptions {
 	readonly name: string;
 	/** Workflow-only handoff policy (D3); omitted means the "required" default. */
 	readonly policy?: "required" | "optional";
+	/** Task disposition; omitted means the "required" default. */
+	readonly disposition?: "required" | "optional";
 	readonly retries?: number;
 	readonly inputSchema?: string;
 	readonly outputSchema?: string;
@@ -737,6 +749,7 @@ function worktreeWorkflowSource(options: WorktreeWorkflowOptions): string {
       preloadSkills: [],
       contextScopes: ["project"],
       workspace: { mode: "worktree", cwd: ctx.cwd },
+      ${options.disposition ? `disposition: ${JSON.stringify(options.disposition)},` : ""}
       ${options.policy ? `handoff: ${JSON.stringify(options.policy)},` : ""}
       ${retries > 0 ? `retry: { attempts: ${retries} },` : ""}
       outputSchema: ${ANSWER_JSON_SCHEMA},
@@ -844,6 +857,17 @@ async function failedRequiredRun(name: string) {
 		writer,
 		child: delegated.state.child,
 	};
+}
+
+/** The operator legality table for one run, as `listRuns` reports it. */
+async function actionsOf(
+	service: WorkflowService,
+	runId: string,
+): Promise<readonly string[]> {
+	const page = await service.listRuns();
+	const summary = page.runs.find((candidate) => candidate.runId === runId);
+	if (!summary) throw new Error(`run ${runId} is not listed`);
+	return summary.availableActions;
 }
 
 function expectNoPrivateFacts(journal: string, state: WorkflowStateProjection) {
@@ -1336,6 +1360,228 @@ describe("worktree agent tasks end to end", () => {
 				"export pipe burst",
 			);
 		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("fails a required task whose handoff exceeds the import bound, keeps the child, and recovers on invalidate", async () => {
+		const name = "worktree-handoff-bound";
+		const fixture = await worktreeFixture({
+			name,
+			outputSchema: DESCRIPTOR_JSON_SCHEMA,
+			body: "return writer.handoff;",
+		});
+		const delegated = worktreeProvider({
+			launches: [
+				[{ status: "completed", handoff: "captured" }],
+				[{ status: "completed", handoff: "captured" }],
+			],
+			exportFailures: [boundRefusal()],
+		});
+		const service = await serviceFor(fixture, delegated);
+		try {
+			const receipt = await service.run(name, {});
+			const failed = await bounded(service.wait(receipt.runId), "wait");
+			expect(failed.status).toBe("failed");
+			expect(failed.output).toBeUndefined();
+			const firstChild = delegated.state.child;
+			const events = await journalEvents(fixture.storeRoot, receipt.runId);
+			const types = events.map((event) => event.type);
+			const settledIndex = types.indexOf("task-execution-child-settled");
+			// No release intent and no handoff evidence: the import bound refused
+			// the only handoff this execution will ever have.
+			expect(types.slice(settledIndex, settledIndex + 6)).toEqual([
+				"task-execution-child-settled",
+				"artifact-declared",
+				"task-execution-artifact-imported",
+				"task-execution-terminal",
+				"task-status-changed",
+				"run-status-changed",
+			]);
+			expect(dataOf(events[settledIndex + 3])).toMatchObject({
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "handoff-import",
+					message: HANDOFF_BOUND_MESSAGE,
+				},
+			});
+			expect(dataOf(events[settledIndex + 4])).toMatchObject({
+				to: "failed",
+				reason: HANDOFF_BOUND_MESSAGE,
+			});
+			expect(dataOf(events[settledIndex + 5])).toMatchObject({ to: "failed" });
+			expect(countOf(types, "task-execution-handoff-imported")).toBe(0);
+			expect(countOf(types, "task-execution-handoff-absent")).toBe(0);
+			expect(countOf(types, "task-execution-release-intended")).toBe(0);
+			expect(delegated.release).not.toHaveBeenCalled();
+			expect(delegated.exportHandoff).toHaveBeenCalledExactlyOnceWith(
+				firstChild.runId,
+				{ maxBytes: HANDOFF_BOUND_BYTES },
+			);
+			const blockedState = await stateOf(fixture.storeRoot, receipt.runId);
+			const blockedWriter = taskByKey(blockedState, "writer");
+			expect(blockedWriter.status).toBe("failed");
+			expect(executionOf(blockedState, blockedWriter)).toMatchObject({
+				phase: "terminal",
+				terminal: { outcome: "failed" },
+			});
+			expect(
+				(await readdir(artifactsDir(fixture.storeRoot, receipt.runId))).some(
+					(entry) => entry.endsWith(".patch"),
+				),
+			).toBe(false);
+			// The wedge is gone: the run is failed, so recovery is available.
+			expect(await actionsOf(service, receipt.runId)).toEqual([
+				"invalidate",
+				"retry",
+			]);
+
+			const invalidated = await bounded(
+				service.invalidate(
+					receipt.runId,
+					blockedWriter.task.id,
+					"export a smaller handoff",
+				),
+				"invalidate",
+			);
+			expect(["running", "waiting"]).toContain(invalidated.status);
+			const finished = await bounded(service.wait(receipt.runId), "wait");
+			expect(finished.status).toBe("completed");
+			const state = await stateOf(fixture.storeRoot, receipt.runId);
+			const writer = taskByKey(state, "writer");
+			expect(writer.status).toBe("completed");
+			expect(writer.currentExecutionId).toBe(
+				deriveTaskExecutionId(receipt.runId, writer.task.id, 2),
+			);
+			expect(finished.output).toEqual(
+				expectedDescriptor(state, writer, delegated.state.child),
+			);
+			expect(delegated.release).toHaveBeenCalledOnce();
+			expectNoPrivateFacts(
+				await journalText(fixture.storeRoot, receipt.runId),
+				state,
+			);
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("degrades the run when an optional task's handoff exceeds the import bound", async () => {
+		const name = "worktree-handoff-bound-optional";
+		const fixture = await worktreeFixture({
+			name,
+			disposition: "optional",
+			body: 'return { answer: "degraded" };',
+		});
+		const delegated = worktreeProvider({
+			launches: [[{ status: "completed", handoff: "captured" }]],
+			exportFailures: [boundRefusal()],
+		});
+		const service = await serviceFor(fixture, delegated);
+		try {
+			const receipt = await service.run(name, {});
+			const finished = await bounded(service.wait(receipt.runId), "wait");
+			expect(finished.status).toBe("completed-degraded");
+			expect(finished.output).toEqual({ answer: "degraded" });
+			const state = await stateOf(fixture.storeRoot, receipt.runId);
+			const writer = taskByKey(state, "writer");
+			expect(writer.status).toBe("failed");
+			expect(executionOf(state, writer)).toMatchObject({
+				phase: "terminal",
+				terminal: {
+					outcome: "failed",
+					evidence: {
+						kind: "workflow",
+						stage: "handoff-import",
+						message: HANDOFF_BOUND_MESSAGE,
+					},
+				},
+			});
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-release-intended")).toBe(0);
+			expect(delegated.release).not.toHaveBeenCalled();
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("converges a wedged handoff-import block to failed when reconcile proves the bound refusal", async () => {
+		const name = "worktree-handoff-bound-reconcile";
+		const fixture = await worktreeFixture({ name, body: "return writer;" });
+		const delegated = worktreeProvider({
+			launches: [[{ status: "completed", handoff: "captured" }]],
+			exportFailures: [new Error("export pipe burst")],
+		});
+		const service = await serviceFor(fixture, delegated);
+		let recovery: WorkflowService | undefined;
+		try {
+			const receipt = await service.run(name, {});
+			const blocked = await bounded(service.wait(receipt.runId), "wait");
+			// The shape this fix recovers: cleanup-blocked at handoff-import with
+			// reconcile as the only action.
+			expect(blocked.status).toBe("cleanup-blocked");
+			expect(await actionsOf(service, receipt.runId)).toEqual(["reconcile"]);
+			const child = delegated.state.child;
+			await bounded(service.shutdown(), "first shutdown");
+
+			// The export was never transient: every re-drive proves the bound.
+			const recovering = worktreeProvider({
+				launches: [],
+				children: delegated.state.children,
+				resettle: { status: "completed", handoff: "captured" },
+				exportFailures: [boundRefusal()],
+			});
+			recovery = await serviceFor(fixture, recovering);
+			const reconciled = await bounded(
+				recovery.reconcile(receipt.runId),
+				"reconcile",
+			);
+			expect(reconciled.status).toBe("failed");
+			expect(reconciled.reconciled).toHaveLength(1);
+			expect(reconciled.reconciled[0]).toMatchObject({
+				before: { phase: "terminal", outcome: "cleanup-blocked" },
+				after: { phase: "terminal", outcome: "failed" },
+			});
+			expect(recovering.reconcile).toHaveBeenCalledExactlyOnceWith(child.runId);
+			expect(recovering.exportHandoff).toHaveBeenCalledExactlyOnceWith(
+				child.runId,
+				{ maxBytes: HANDOFF_BOUND_BYTES },
+			);
+			expect(recovering.release).not.toHaveBeenCalled();
+			const state = await stateOf(fixture.storeRoot, receipt.runId);
+			expect(state.status).toBe("failed");
+			const writer = taskByKey(state, "writer");
+			expect(writer.status).toBe("failed");
+			expect(executionOf(state, writer)).toMatchObject({
+				phase: "terminal",
+				terminal: {
+					outcome: "failed",
+					evidence: {
+						kind: "workflow",
+						stage: "handoff-import",
+						message: HANDOFF_BOUND_MESSAGE,
+					},
+				},
+			});
+			const types = await eventTypes(fixture.storeRoot, receipt.runId);
+			expect(countOf(types, "task-execution-terminal")).toBe(2);
+			expect(countOf(types, "task-execution-release-intended")).toBe(0);
+			expect(await actionsOf(recovery, receipt.runId)).toEqual([
+				"invalidate",
+				"retry",
+			]);
+			// A second reconcile has nothing left to do: the run is no longer
+			// cleanup-blocked, so nothing is re-driven and nothing is appended.
+			const again = await bounded(
+				recovery.reconcile(receipt.runId),
+				"second reconcile",
+			);
+			expect(again).toMatchObject({ status: "failed", reconciled: [] });
+			expect(recovering.exportHandoff).toHaveBeenCalledOnce();
+			expect(await eventTypes(fixture.storeRoot, receipt.runId)).toEqual(types);
+		} finally {
+			await shutdownQuietly(recovery);
 			await shutdownQuietly(service);
 		}
 	});

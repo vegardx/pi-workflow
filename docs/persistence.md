@@ -344,6 +344,8 @@ previous generation's handoff artifact remains declared under its own
 | `artifact-declared`, no `task-execution-handoff-imported` | append the import event only, without another export call |
 | `task-execution-handoff-imported` or `task-execution-handoff-absent` | proceed to release intent |
 | terminal `cleanup-blocked` at stage `handoff-import` | explicit reconciliation reconciles the child, persists any replacement observation and settlement, and retries the import; the import event's recovery branch deletes the terminal |
+| terminal `cleanup-blocked` at stage `handoff-import` whose export is refused by the bound | the retried import proves the refusal again and supersedes the terminal with `failed` at the same stage ("Workflow handoff exceeds the import bound."), so the run leaves `cleanup-blocked` instead of looping; the child stays unreleased |
+| `artifact-imported`, export refused by the bound | append the `failed` terminal ("Workflow handoff exceeds the import bound.") and the task and run transitions; no release intent is ever persisted |
 | `released`, handoff absent, policy `required`, no terminal | append the fixed `failed` terminal ("Completed worktree task captured no handoff.") and the task and run transitions |
 | terminal `completed` whose handoff artifact is missing or unreadable | `WorkflowTaskFinalizationError` at `handoff-import` ("Completed worktree task has no durable handoff artifact."); the task status is not repaired |
 

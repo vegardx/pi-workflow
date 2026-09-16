@@ -28,6 +28,7 @@ import {
 	type SubagentHandoffEvidence,
 	type SubagentTerminalEvidence,
 	type TaskExecutionOutcome,
+	WORKFLOW_HANDOFF_BOUND_MESSAGE,
 	WORKFLOW_HANDOFF_FORMAT_SHA256,
 	type WorkflowArtifactRef,
 	type WorkflowRunStatus,
@@ -59,6 +60,8 @@ const HANDOFF_ABSENT_REQUIRED_MESSAGE =
 	"Completed worktree task captured no handoff.";
 const HANDOFF_ARTIFACT_MISSING_MESSAGE =
 	"Completed worktree task has no durable handoff artifact.";
+/** pi-subagent's fixed `WorktreeError` when an export exceeds its byte limit. */
+const SUBAGENT_HANDOFF_BOUND_REFUSAL = "handoff export exceeds byte limit";
 type SettledExecution = TaskExecutionProjection & {
 	settlement: NonNullable<TaskExecutionProjection["settlement"]>;
 };
@@ -94,6 +97,40 @@ export class WorkflowTaskFinalizationError extends Error {
 		super(message, options);
 		this.name = "WorkflowTaskFinalizationError";
 	}
+}
+
+/**
+ * The settled handoff is larger than the workflow import bound: pi-subagent
+ * refused the export, or the reference it returned proves the bytes exceed
+ * `MAX_WORKFLOW_HANDOFF_BYTES`. Nothing about that changes on a re-drive, so
+ * this is a permanent failure of the execution and never a cleanup block.
+ */
+export class WorkflowHandoffBoundError extends WorkflowTaskFinalizationError {
+	constructor(options?: ErrorOptions) {
+		super("handoff-import", WORKFLOW_HANDOFF_BOUND_MESSAGE, options);
+		this.name = "WorkflowHandoffBoundError";
+	}
+}
+
+/**
+ * pi-subagent refuses an export above the `maxBytes` the workflow passed, or
+ * above its own absolute cap, with one fixed `WorktreeError`; the owner client
+ * may deliver it wrapped, so the cause chain is walked. Only that refusal is a
+ * bound refusal: every other rejection stays reconcilable.
+ */
+function isHandoffBoundRefusal(error: unknown): boolean {
+	let cause: unknown = error;
+	for (let depth = 0; depth < 8; depth++) {
+		if (!(cause instanceof Error)) return false;
+		if (
+			cause.name === "WorktreeError" &&
+			cause.message === SUBAGENT_HANDOFF_BOUND_REFUSAL
+		) {
+			return true;
+		}
+		cause = cause.cause;
+	}
+	return false;
 }
 
 function outcome(status: string): TaskExecutionOutcome {
@@ -434,6 +471,9 @@ export function createWorkflowTaskFinalizer(
 				maxBytes: MAX_WORKFLOW_HANDOFF_BYTES,
 			});
 		} catch (error) {
+			if (isHandoffBoundRefusal(error)) {
+				throw new WorkflowHandoffBoundError({ cause: error });
+			}
 			throw handoffImportError("Subagent handoff export failed.", error);
 		}
 		const candidate = exported as { ref?: unknown; content?: unknown } | null;
@@ -473,10 +513,11 @@ export function createWorkflowTaskFinalizer(
 				"Exported handoff digest or size does not match its reference.",
 			);
 		}
-		if (ref.bytes < 1 || ref.bytes > MAX_WORKFLOW_HANDOFF_BYTES) {
-			throw handoffImportError(
-				"Exported handoff exceeds the workflow handoff bound.",
-			);
+		// The digest and length are already proved against the content above, so
+		// an oversize reference is the same permanent refusal as a subagent that
+		// declined the export outright.
+		if (ref.bytes > MAX_WORKFLOW_HANDOFF_BYTES) {
+			throw new WorkflowHandoffBoundError();
 		}
 		if (!handoffFirstLineMatches(content, ref.handoffCommit)) {
 			throw handoffImportError(
@@ -592,15 +633,25 @@ export function createWorkflowTaskFinalizer(
 	}
 
 	/**
-	 * A completed worktree child under a required handoff policy that captured
-	 * nothing is released first, then fails on workflow evidence.
+	 * Workflow evidence at stage `handoff-import` fails the execution: a
+	 * completed worktree child under a required handoff policy that captured
+	 * nothing (released first), or a settled handoff the import bound refuses
+	 * (never released, so pi-subagent keeps protecting the worktree). A blocked
+	 * import terminal from an earlier drive is superseded in place, so a
+	 * re-drive of the old wedged shape converges on the same outcome.
 	 */
-	async function failAbsentRequiredHandoff(
+	async function failHandoffImport(
 		taskId: WorkflowTaskId,
 		task: WorkflowTaskProjection,
 		execution: SettledExecution,
+		message: string,
 	): Promise<WorkflowTaskFinalizationOutcome> {
-		if (execution.phase !== "terminal") {
+		const supersedesBlockedImport =
+			execution.phase === "terminal" &&
+			execution.terminal?.outcome === "cleanup-blocked" &&
+			execution.terminal.evidence.kind === "workflow" &&
+			execution.terminal.evidence.stage === "handoff-import";
+		if (execution.phase !== "terminal" || supersedesBlockedImport) {
 			await append({
 				type: "task-execution-terminal",
 				data: {
@@ -611,9 +662,9 @@ export function createWorkflowTaskFinalizer(
 						stage: "handoff-import",
 						failureSha256: deriveWorkflowFailureSha256(
 							"handoff-import",
-							HANDOFF_ABSENT_REQUIRED_MESSAGE,
+							message,
 						),
-						message: HANDOFF_ABSENT_REQUIRED_MESSAGE,
+						message,
 					},
 				},
 			});
@@ -627,7 +678,7 @@ export function createWorkflowTaskFinalizer(
 					taskId,
 					from: projectedTask.status,
 					to: "failed",
-					reason: HANDOFF_ABSENT_REQUIRED_MESSAGE,
+					reason: message,
 				},
 			});
 		}
@@ -812,15 +863,17 @@ export function createWorkflowTaskFinalizer(
 	): Promise<WorkflowTaskFinalizationOutcome> {
 		let current = await state();
 		let { task, execution } = selected(current, taskId);
-		const absentRequiredTerminal =
+		// Workflow evidence at stage handoff-import with outcome failed is a
+		// settled terminal (absent required handoff, or a handoff the import
+		// bound refuses); every other workflow evidence is a cleanup block.
+		const failedHandoffTerminal =
 			execution.terminal?.outcome === "failed" &&
 			execution.terminal.evidence.kind === "workflow" &&
 			execution.terminal.evidence.stage === "handoff-import";
 		if (
 			execution.phase === "terminal" &&
 			execution.terminal &&
-			(execution.terminal.evidence.kind === "subagent" ||
-				absentRequiredTerminal)
+			(execution.terminal.evidence.kind === "subagent" || failedHandoffTerminal)
 		) {
 			if (task.status !== execution.terminal.outcome) {
 				await append({
@@ -907,6 +960,19 @@ export function createWorkflowTaskFinalizer(
 				try {
 					await importHandoff(task, execution);
 				} catch (error) {
+					if (error instanceof WorkflowHandoffBoundError) {
+						// The bound refusal is deterministic: reconciliation would
+						// re-export the same bytes forever. The execution fails here
+						// and the child is left unreleased, which keeps pi-subagent
+						// protecting its worktree and handoff ref from ordinary
+						// retention for the operator.
+						return await failHandoffImport(
+							taskId,
+							task,
+							execution,
+							WORKFLOW_HANDOFF_BOUND_MESSAGE,
+						);
+					}
 					await blockExecution(
 						task,
 						execution,
@@ -1041,7 +1107,12 @@ export function createWorkflowTaskFinalizer(
 			task.task.spec.kind === "agent" &&
 			task.task.spec.request.handoff === "required"
 		) {
-			return failAbsentRequiredHandoff(taskId, task, execution);
+			return failHandoffImport(
+				taskId,
+				task,
+				execution,
+				HANDOFF_ABSENT_REQUIRED_MESSAGE,
+			);
 		}
 
 		const terminalOutcome = outcome(execution.settlement.evidence.status);

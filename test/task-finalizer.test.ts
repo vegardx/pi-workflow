@@ -53,11 +53,13 @@ const leases = new Set<WorkflowRunLease>();
 
 type RequestOptions = {
 	readonly worktree?: HandoffPolicy;
+	readonly disposition?: "required" | "optional";
 };
 
 function request(options: RequestOptions = {}) {
 	return {
 		agent: "researcher",
+		...(options.disposition ? { disposition: options.disposition } : {}),
 		task: {
 			goal: "Answer",
 			context: [],
@@ -703,9 +705,14 @@ describe("worktree handoff import", () => {
 	async function worktreeFixture(
 		policy: HandoffPolicy = "required",
 		handoff: WorktreeRecord = record,
+		disposition: "required" | "optional" = "required",
 	) {
 		const result = runResult("completed");
-		const fx = await fixture(result, { worktree: policy, handoff });
+		const fx = await fixture(result, {
+			worktree: policy,
+			handoff,
+			disposition,
+		});
 		return { ...fx, result };
 	}
 
@@ -911,17 +918,6 @@ describe("worktree handoff import", () => {
 			message: "Exported handoff does not match the settled handoff identity.",
 		},
 		{
-			name: "an oversize handoff",
-			exported: () =>
-				handoffExport(
-					Buffer.concat([
-						patch(),
-						Buffer.alloc(MAX_WORKFLOW_HANDOFF_BYTES, 0x20),
-					]),
-				),
-			message: "Exported handoff exceeds the workflow handoff bound.",
-		},
-		{
 			name: "a malformed first line",
 			exported: () =>
 				handoffExport(Buffer.from("diff --git a/a.txt b/a.txt\n+change\n")),
@@ -1006,6 +1002,202 @@ describe("worktree handoff import", () => {
 		expect(await readdir(artifacts.root)).not.toContainEqual(
 			expect.stringMatching(/\.patch$/),
 		);
+		expect(ownerClient.release).not.toHaveBeenCalled();
+	});
+
+	/** pi-subagent's fixed refusal of an export above the bound it was given. */
+	function boundRefusal(): Error {
+		const refusal = new Error("handoff export exceeds byte limit");
+		refusal.name = "WorktreeError";
+		return refusal;
+	}
+
+	const HANDOFF_BOUND_MESSAGE = "Workflow handoff exceeds the import bound.";
+	const HANDOFF_BOUND_LADDER = [
+		"artifact-declared",
+		"task-execution-artifact-imported",
+		"task-execution-terminal",
+		"task-status-changed",
+		"run-status-changed",
+	] as const;
+
+	it.each([
+		{
+			name: "pi-subagent refuses the export",
+			exportHandoff: () =>
+				vi.fn(async () => {
+					throw boundRefusal();
+				}) as unknown as SubagentClient["exportHandoff"],
+		},
+		{
+			name: "pi-subagent returns an oversize reference",
+			exportHandoff: () =>
+				vi.fn(async () =>
+					handoffExport(
+						Buffer.concat([
+							patch(),
+							Buffer.alloc(MAX_WORKFLOW_HANDOFF_BYTES, 0x20),
+						]),
+					),
+				) as unknown as SubagentClient["exportHandoff"],
+		},
+		{
+			name: "the refusal arrives wrapped in another error",
+			exportHandoff: () =>
+				vi.fn(async () => {
+					throw new Error("owner client call failed", {
+						cause: boundRefusal(),
+					});
+				}) as unknown as SubagentClient["exportHandoff"],
+		},
+	])(
+		"fails a required task at handoff-import when $name",
+		async ({ exportHandoff }) => {
+			const { journal, artifacts, taskId, executionId, result } =
+				await worktreeFixture();
+			const ownerClient = worktreeClient(
+				{ exportHandoff: exportHandoff() },
+				result,
+			);
+			const finalizer = createWorkflowTaskFinalizer({
+				journal,
+				artifacts,
+				binding: binding(ownerClient),
+			});
+			const settledCount = (await eventTypes(journal)).length;
+
+			await expect(finalizer.finalize(taskId)).resolves.toMatchObject({
+				outcome: "failed",
+				runStatus: "failed",
+			});
+			expect((await eventTypes(journal)).slice(settledCount)).toEqual([
+				...HANDOFF_BOUND_LADDER,
+			]);
+			const state = await projection(journal);
+			expect(state.status).toBe("failed");
+			expect(state.tasks[taskId]?.status).toBe("failed");
+			expect(state.executions[executionId]).toMatchObject({
+				phase: "terminal",
+				artifactImport: {},
+				terminal: {
+					outcome: "failed",
+					evidence: {
+						kind: "workflow",
+						stage: "handoff-import",
+						message: HANDOFF_BOUND_MESSAGE,
+					},
+				},
+			});
+			expect(state.executions[executionId]?.handoffImport).toBeUndefined();
+			expect(state.executions[executionId]?.handoffAbsent).toBeUndefined();
+			// The child keeps its worktree: an unreleased worktree run is never an
+			// ordinary retention candidate, so the operator can still recover it.
+			expect(state.executions[executionId]?.releaseIntent).toBeUndefined();
+			expect(ownerClient.release).not.toHaveBeenCalled();
+			expect(await readdir(artifacts.root)).not.toContainEqual(
+				expect.stringMatching(/\.patch$/),
+			);
+			const events = await eventTypes(journal);
+
+			// Re-driving repairs the projection and calls nothing else.
+			await expect(finalizer.finalize(taskId)).resolves.toMatchObject({
+				outcome: "failed",
+				runStatus: "failed",
+			});
+			expect(await eventTypes(journal)).toEqual(events);
+			expect(ownerClient.release).not.toHaveBeenCalled();
+		},
+	);
+
+	it("degrades an optional task when the handoff exceeds the import bound", async () => {
+		const { journal, artifacts, taskId, executionId, result } =
+			await worktreeFixture("optional", record, "optional");
+		const ownerClient = worktreeClient(
+			{
+				exportHandoff: vi.fn(async () => {
+					throw boundRefusal();
+				}) as unknown as SubagentClient["exportHandoff"],
+			},
+			result,
+		);
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			artifacts,
+			binding: binding(ownerClient),
+		});
+		const settledCount = (await eventTypes(journal)).length;
+
+		// An optional task fails on its own evidence and leaves the run running;
+		// the scheduler concludes it `completed-degraded`.
+		await expect(finalizer.finalize(taskId)).resolves.toMatchObject({
+			outcome: "failed",
+			runStatus: "running",
+		});
+		expect((await eventTypes(journal)).slice(settledCount)).toEqual(
+			HANDOFF_BOUND_LADDER.filter((type) => type !== "run-status-changed"),
+		);
+		const state = await projection(journal);
+		expect(state.status).toBe("running");
+		expect(state.tasks[taskId]?.status).toBe("failed");
+		expect(state.executions[executionId]).toMatchObject({
+			terminal: {
+				outcome: "failed",
+				evidence: { stage: "handoff-import", message: HANDOFF_BOUND_MESSAGE },
+			},
+		});
+		expect(ownerClient.release).not.toHaveBeenCalled();
+	});
+
+	it("converges a handoff-import block on a bound refusal instead of looping", async () => {
+		const { journal, artifacts, taskId, executionId, result } =
+			await worktreeFixture();
+		const exportHandoff = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("export unavailable"))
+			.mockRejectedValue(boundRefusal());
+		const ownerClient = worktreeClient({ exportHandoff }, result);
+		const finalizer = createWorkflowTaskFinalizer({
+			journal,
+			artifacts,
+			binding: binding(ownerClient),
+		});
+
+		await expect(finalizer.finalize(taskId)).rejects.toMatchObject({
+			stage: "handoff-import",
+			message: "Subagent handoff export failed.",
+		});
+		let state = await projection(journal);
+		expect(state.status).toBe("cleanup-blocked");
+		expect(state.executions[executionId]?.terminal?.outcome).toBe(
+			"cleanup-blocked",
+		);
+
+		// The re-drive proves the bound refusal and supersedes the blocked
+		// terminal with the permanent failure of the same stage.
+		await expect(finalizer.finalize(taskId)).resolves.toMatchObject({
+			outcome: "failed",
+			runStatus: "failed",
+		});
+		expect((await eventTypes(journal)).slice(-3)).toEqual([
+			"task-execution-terminal",
+			"task-status-changed",
+			"run-status-changed",
+		]);
+		state = await projection(journal);
+		expect(state.status).toBe("failed");
+		expect(state.tasks[taskId]?.status).toBe("failed");
+		expect(state.executions[executionId]).toMatchObject({
+			phase: "terminal",
+			terminal: {
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "handoff-import",
+					message: HANDOFF_BOUND_MESSAGE,
+				},
+			},
+		});
+		expect(exportHandoff).toHaveBeenCalledTimes(2);
 		expect(ownerClient.release).not.toHaveBeenCalled();
 	});
 
