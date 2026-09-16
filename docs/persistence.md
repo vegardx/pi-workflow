@@ -7,10 +7,21 @@
   service.json
   run.json
   events.jsonl
-  definition/
+  definition/                      dynamic runs only:
+    source.workflow.ts               exact proposed source bytes
+    manifest.json                    canonical manifest + "\n"
+    proposal.json                    canonical proposal record + "\n"
+    approval.json                    canonical source-approval decision record + "\n"
   tasks/<task-id>/
   artifacts/
-  checkpoints/
+  decisions/                       checkpoint decision records
+<cwd>/.pi/workflow/dynamic/<sourceSha256>/
+  source.workflow.ts               exact proposed source bytes
+  current                          "<version>\n": the active record pair
+  records/<version>/               one manifest.json + proposal.json pair
+    manifest.json                    canonical manifest + "\n"
+    proposal.json                    canonical proposal record + "\n"
+  decisions/                       definition-level source-approval record
 ```
 
 A bounded global pointer index may live under:
@@ -41,10 +52,11 @@ ordinary diagnostics.
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-17 rejects revision-1 through revision-16 leases, journals, snapshots, and run
-records; no migration or dual-format reader is provided. Revision 17 accepts
-only the declared run, workflow phase/log effect, task, artifact, barrier,
-output-commit, and task-execution events. Agent task-execution evidence records
+18 rejects revision 1 through revision 17 leases, journals, snapshots, run
+records, decision records, and dynamic proposal records; no migration or
+dual-format reader is provided.
+Revision 18 accepts only the declared run, workflow phase/log effect, task,
+artifact, barrier, output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent (carrying the
 launch plan's `workspaceMode` and `workspaceBaselineSha256`), uncertain launch
 and reconciled absence or a launch receipt, child observation, bounded terminal
@@ -62,10 +74,15 @@ task-execution evidence records generation
 creation, support intent, output commit, and terminal outcome in that order.
 Nested workflow task-execution evidence records generation creation, nested
 intent, nested launch, nested settlement, nested output import, and terminal
-outcome in that order. Each event family is accepted only on an execution of
-its own kind: subagent-shaped events are rejected on support and workflow
-executions, support events on agent and workflow executions, and nested events
-on agent and support executions. An
+outcome in that order. Checkpoint task-execution evidence records generation
+creation, the durable request (`task-execution-checkpoint-requested`, phase
+`checkpoint-requested`), the decision (`task-execution-checkpoint-decided`,
+phase `checkpoint-decided`), and terminal outcome in that order. Each event
+family is accepted only on an execution of its own kind: subagent-shaped
+events are rejected on support, workflow, and checkpoint executions, support
+events on agent, workflow, and checkpoint executions, nested events on agent,
+support, and checkpoint executions, and checkpoint events on every other kind
+("checkpoint execution target is not a checkpoint task"). An
 expired preflight may be replaced only before launch intent is persisted. A
 preflight from an older workflow fencing generation is also replaced because
 pi-subagent preflight grants are intentionally process-local.
@@ -142,7 +159,7 @@ valid prefix fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 17 admits generations 1 through
+invalidation. Revision 18 admits generations 1 through
 `MAX_TASK_EXECUTION_GENERATIONS = 16`. `task-execution-created` requires the
 generation to equal one more than the executions already recorded for the
 task, the task to be `ready` and on-path, and no current execution:
@@ -151,8 +168,9 @@ execution becomes `currentExecutionId` while every prior execution keeps its
 evidence. The
 execution ID, subagent operation ID, and nested `childRunId` are derived per
 generation. The execution record
-is discriminated by `kind: "agent" | "support" | "workflow"`; all kinds share
-the derived execution ID, run, task, generation, and task identity digest.
+is discriminated by `kind: "agent" | "support" | "workflow" | "checkpoint"`;
+all kinds share the derived execution ID, run, task, generation, and task
+identity digest.
 
 An agent execution (`kind: "agent"`) owns one subagent run and contains:
 
@@ -364,6 +382,188 @@ model output, session paths, or JavaScript promises. Completed child settlement
 waits for workflow-owned artifact import; every terminal settlement waits for
 required child release before task terminalization.
 
+### Checkpoint execution recovery
+
+A checkpoint execution passes through `created -> checkpoint-requested ->
+checkpoint-decided -> terminal`. The immutable decision record in `decisions/`
+(see [Decision records](#decision-records)) is the durable evidence of the
+decision; the result artifact, the `task-execution-checkpoint-decided` event,
+the terminal evidence, and the `-> completed` status are projections of it.
+The scheduler's sweep on every pass, the executor's `request`, and the
+service's `decide` repair every prefix, so the human is never asked twice for
+one execution and every prefix converges on the same `decisionSha256`:
+
+| Durable prefix | Recovery |
+| --- | --- |
+| no current execution record | ordinary readiness; a fresh record for the task's next generation is created (`kind: "checkpoint"`) |
+| `task-execution-created` only | resolve and verify the inputs (`checkpoint-input` failure on a missing, ambiguous, or unverifiable input), compute `expiresAt = min(now + timeoutMs, deadlineAt)` when `timeoutMs` is set, append the request; under `checkpoints.headless` a `use-explicit-default` checkpoint records its default at once |
+| requested, no decision record | park again (a task left `ready` is repaired to `waiting`); an `expiresAt` that has passed expires it per its policy (`block`: `failed` at `checkpoint-expired`; `use-explicit-default`: default decision) |
+| requested, decision record on disk (crash after the record, before the event) | replay the record: the value is put as the result artifact (idempotent by content), declared if absent, the decided event, terminal evidence, and `-> completed` are appended; a record whose value fails the request schema is a persistence error ("Checkpoint decision record does not match its schema.") |
+| requested, result artifact declared, no decided event | `putJson` is idempotent; the decided event is appended from the record; a different `result` artifact for the same execution is a conflict ("Checkpoint decision conflicts with existing decision evidence.") |
+| decided, no terminal | verify the artifact's provenance, digest, canonical encoding, and schema ("Checkpoint decision artifact provenance is invalid.", "Checkpoint decision artifact could not be read and verified.", "Checkpoint decision artifact does not match its schema."), append terminal `completed` evidence and "Checkpoint decided."; a run-ending failure site reaching this prefix first commits it the same way from the projection (whose provenance and digest the reducer verified at the decided event) |
+| terminal evidence without the task status transition | repair the task status only |
+| completed | replay the result artifact, validated against the request schema; the approver is not consulted |
+
+A run that ends while a checkpoint is open cancels the checkpoint first
+(`task-execution-terminal` outcome `cancelled` at stage `stop`, reason
+"Workflow run ended before the checkpoint was decided.", then
+`waiting|ready -> cancelled`); a checkpoint already decided but not yet
+terminal is committed instead (terminal `completed`, then
+`waiting|ready -> completed` "Checkpoint decided."). The reducer rejects
+`-> failed`, `-> interrupted`, and `-> cleanup-blocked` while any checkpoint
+execution is non-terminal ("run failure leaves a checkpoint open"). The
+decided event carries the record's `decidedAt`, and the reducer judges an
+operator decision's timeliness by it (`decidedAt < expiresAt`) rather than by
+the append time, so a record fsynced moments before `expiresAt` still replays
+after the watchdog fired. A parked run that the service shut down is
+settled with its lease released; a later session resumes it through `wait`,
+`decide`, or `stop`, and the first drive re-parks or completes it from the
+ladder above. Journal, lease, artifact-store, and decision-store errors are
+thrown rather than converted into task failure.
+
+## Decision records
+
+`<run dir>/decisions/<bindingSha256>.json` holds one canonical JSON
+`WorkflowDecisionRecord` per binding:
+
+```ts
+interface WorkflowDecisionRecord {
+	schema: "pi-workflow-decision";
+	contractRevision: 18;
+	binding: { kind: "checkpoint"; runId; taskId; executionId; effectSha256 };
+	source: "operator" | "default";
+	decidedBy?: string; // 1..256; present iff source is "operator"
+	reason?: string; // 1..4096
+	decidedAt: string; // taken before the fsync; carried on the decided event
+	valueSchemaSha256: string; // digest of the request schema
+	valueSha256: string; // canonical digest of value; equals the result artifact sha256
+	value: unknown;
+}
+```
+
+The file is named by the digest of the binding, not of the value, so a second
+decision for the same binding meets an existing file: byte-identical content
+is idempotent, anything else is `WorkflowDecisionRecordError("decision record
+already exists for this binding")`. Records are written `wx` to a temporary
+name, fsynced, renamed, and the directory fsynced, mode `0600` under a `0700`
+directory whose real path must stay inside the run ("workflow decision
+directory escapes its run"). Reads refuse symlinks ("workflow decision record
+may not be a symlink"), bound the size (`MAX_WORKFLOW_DECISION_RECORD_BYTES`,
+1 MiB, "workflow decision record exceeds size limit"), require canonical bytes
+("workflow decision record is not canonical"), the schema and consistent
+provenance ("invalid workflow decision record"), the requested binding
+("workflow decision record does not match its binding"), and a matching value
+digest ("workflow decision record digest mismatch"); a record for another run
+is refused on put and read ("workflow decision record belongs to another
+run"). The store never scans the directory; records are addressed only by
+binding. The store is not artifact-backed because artifacts are
+content-addressed by value and cannot express "exactly one decision per
+binding" or carry approver, source, and timestamp evidence; the decision value
+is additionally the execution's JSON `result` artifact so dependents read it
+through the ordinary verified input path.
+
+The binding union is discriminated by `kind`. The second member is the
+definition-level `source-approval` binding of the dynamic-workflows half,
+`{ kind: "source-approval"; definitionIdentitySha256; sourceSha256;
+contractRevision: 18 }`, stored in the same record format under
+`<storeRoot>/dynamic/<sourceSha256>/decisions/<bindingSha256>.json` through
+`WorkflowDecisionRecordStore.openRoot({ directory })`: outside any run, with
+no journal and no lease fence, created owner-only if absent, and refusing a
+directory whose real path escapes its parent ("workflow decision directory
+escapes its root"). Each store admits only its own bindings: the run-scoped
+store refuses `source-approval` ("workflow decision record binding does not
+belong to a run") and the definition-level store refuses `checkpoint`
+("workflow decision record binding does not belong to a definition store").
+A `source-approval` record is always an operator decision by a human
+(`source: "operator"`, `decidedBy` starting with `human:`, `valueSchemaSha256
+= DYNAMIC_SOURCE_APPROVAL_SCHEMA_SHA256`, and a value whose `sourceSha256`
+and `definitionIdentitySha256` equal the binding), otherwise "invalid
+workflow decision record" on put and read. `deriveDecisionRecordSha256`
+(the digest of the whole canonical record) is the run record's
+`approvalSha256`. See [Dynamic proposals and run definition
+copies](#dynamic-proposals-and-run-definition-copies).
+
+## Dynamic proposals and run definition copies
+
+`<storeRoot>/dynamic/` (mode `0700`, real path checked against the store root:
+"dynamic workflow store escapes its root") holds one directory per proposed
+source digest. `source.workflow.ts` holds the exact UTF-8 bytes the digest
+names and is never rewritten. `manifest.json` and `proposal.json` are derived
+data in the canonical artifact JSON form plus a trailing newline
+(`canonicalDynamicDocument`), stored as one pair under
+`records/<version>/` (`version` is 32 hex characters) and selected by the
+pointer file `current` (`"<version>\n"`, mode `0600`); `proposal.json` is a
+`DynamicWorkflowProposalRecord` (`schema: "pi-workflow-dynamic-proposal"`,
+`contractRevision`, `sourceSha256`, `sourceBytes`, `manifest`,
+`manifestSha256`, `hostApiSha256`, `importPolicySha256`,
+`definitionIdentitySha256`, `transformer`, `proposer`, `proposedAt`,
+`projectRoot`). A new digest is written into a temporary directory
+`.<sha>.<pid>.<uuid>.tmp` (each file `wx`, mode `0600`, fsynced; the pair
+staged under `records/` and `current` written inside it), renamed to `<sha>`
+in one step, and the parent fsynced; a concurrent writer that wins the rename
+(`EEXIST`/`ENOTEMPTY`) is re-read instead of overwritten. Re-proposing a
+known digest under the same `hostApiSha256` writes nothing and returns the
+stored proposal (a differing manifest for the same bytes is "dynamic workflow
+proposal manifest differs from the stored manifest", surfaced as "Dynamic
+workflow proposal store is corrupt."); under a different `hostApiSha256` (a
+package upgrade) a new pair is staged as
+`records/.<version>.<pid>.<uuid>.tmp`, renamed to `records/<version>`, and
+`current` is replaced through a temporary file and one atomic rename, while
+the source bytes and `decisions/` stay. A reader therefore sees the previous
+pair up to that rename and the new pair from it, never `manifest.json` and
+`proposal.json` of different pairs, whatever the crash point; superseded
+pairs are removed before the next replacement, not right after the swap. A
+`put` of the same source bytes whose stored pair fails verification (a
+dangling or malformed `current`, an edited record) rebuilds the pair the same
+way instead of failing forever; source bytes are never repaired. Mutations
+are serialized per store root process-wide. The store holds
+at most `MAX_DYNAMIC_PROPOSALS` (1024) digests ("dynamic workflow proposal
+store is full", surfaced as `conflict` "Dynamic workflow proposal store is
+full."); nothing is evicted.
+
+Reads open each file with `O_NOFOLLOW` and refuse symlinked files or
+directories ("dynamic workflow record may not be a symlink"), read the pair
+`current` names (a missing file, a malformed pointer, or a missing version
+directory is "invalid dynamic workflow proposal record"), bound the sizes
+(`MAX_DYNAMIC_SOURCE_BYTES` 256 KiB, `MAX_DYNAMIC_MANIFEST_BYTES` 512 KiB,
+`MAX_DYNAMIC_PROPOSAL_RECORD_BYTES` 64 KiB: "dynamic workflow record exceeds
+size limit"), require fatal UTF-8 ("dynamic workflow record is not valid
+UTF-8") and canonical bytes ("dynamic workflow record is not canonical"),
+validate the record schema and `sourceBytes` ("invalid dynamic workflow
+proposal record"), and recompute the digests: the source bytes must hash to
+the record's `sourceSha256` and to the directory name ("dynamic workflow
+source digest mismatch"), both the stored and the embedded manifest must
+hash to `manifestSha256`, and `definitionIdentitySha256` must equal its
+derivation from the record's digests ("dynamic workflow manifest digest
+mismatch"). A
+missing directory reads as absent (`not-found` "Dynamic workflow proposal
+not found: dynamic:<sha>"). `proposals()` is the only directory scan in the
+dynamic track: sorted digests, at most 1024, each read verified, and a
+corrupt entry reported as `{ ref, issue }` rather than failing the listing.
+The decision store keeps its no-scan rule.
+
+`runs/<run-id>/definition/` is written by `run()` after the lease and journal
+are open and before the run record is created, so a run record implies the
+copies exist: `source.workflow.ts`, `manifest.json`, `proposal.json` (the
+proposal record at run time), and `approval.json` (the canonical decision
+record), each opened `wx` at mode `0600` ("Workflow run definition copy
+already exists." on `EEXIST`), fsynced, then the `definition/` directory and
+the run directory fsynced. On resume every file of the copy is verified,
+`proposal.json` included: its `sourceSha256`, `hostApiSha256`, and
+`importPolicySha256` must equal the run record's and the approval's, its
+`manifestSha256` and the digest of its embedded manifest must equal the
+approved `manifestSha256` together with the digest of `manifest.json`, and
+its `definitionIdentitySha256` is recomputed against the record; the
+definition is then built from the verified `manifest.json`. The run record carries `definitionKind:
+"dynamic"`, `approvalSha256` (the digest of the copied approval record), and
+`hostApiSha256`; static and nested records carry `definitionKind: "static"`
+and neither digest, and a record whose kind and digests disagree, or a
+dynamic record with `depth >= 1` or a `parent`, is rejected as an invalid run
+record. On resume the copy is read with the same `O_NOFOLLOW`, bound, UTF-8,
+and canonical discipline and is the only evidence consulted: the proposal
+store and the definition-level decision store are never read for an existing
+run (see [Resume](#resume)). Static runs write no `definition/` directory.
+
 ## Replay identity
 
 A completed task is reusable only when every relevant identity matches:
@@ -424,7 +624,9 @@ Default policy:
 The workflow service resolves run IDs only through existing regular run
 directories and never creates state while answering an unknown status request.
 It reacquires run fencing, validates `service.json`, rediscovers the exact
-trusted definition path and source identity, reacquires the shared subagent owner
+trusted definition path and source identity (for a static run) or rebuilds
+the definition from the run directory's verified `definition/` copy (for a
+dynamic run, without consulting the proposal or decision stores), reacquires the shared subagent owner
 client, and composes the same durable runtime. Provider binding happens before
 new run state is created. Completed status and output reads need no subagent
 acquisition. A linked child run is reconstructed by the same path from its own
@@ -448,6 +650,27 @@ Resume:
 
 Version 1 refuses resume after workflow source identity changes. It does not
 reinterpret prior model outputs or human decisions under changed code.
+
+For a dynamic run step 3 verifies the `definition/` copy in this order and
+refuses with the named message: a missing, oversized, non-canonical, or
+schema-invalid copy ("Workflow run definition copy is missing or corrupt.");
+copied source bytes whose digest differs from the record ("Dynamic workflow
+source changed since the run was created."); a copied approval that is not a
+valid `source-approval` record for the record's definition identity, whose
+digest differs from `approvalSha256`, or whose decision is not `approved`
+("Dynamic workflow approval record changed since the run was created."); a
+current host API digest different from the record's ("Dynamic workflow host
+API changed since the run was created."); a current import policy digest
+different from the approval's ("Dynamic workflow import policy changed since
+approval."); a copied manifest or proposal identity that disagrees with the
+approval or record ("Dynamic workflow manifest changed since approval."); and
+a different project directory ("Workflow definition, source, or project
+identity changed."). Steps 5 through 7 then boot a fresh worker-thread VM for
+this drive: the source is transformed and re-executed from entry, its
+synchronous declarations are matched against the journaled prefix by the
+same static runtime, and completed results replay through the asynchronous
+barrier replies. No VM state survives a drive; a checkpoint park terminates
+the worker, and the drive after the decision boots a new one.
 
 ## Retry versus resume
 

@@ -21,7 +21,8 @@
 | Support task | Unregistered or drifted implementation (`support-resolution`); missing input evidence, input digest mismatch, unreadable inputs, or parameters failing the registered schema (`support-input`); implementation exception (`support-execution`); non-JSON, oversized, schema-invalid, or conflicting output (`support-output`) | Task failure with a fixed message; a required task fails the run |
 | Nested workflow | Undiscovered name, depth bound, recursion, schema-invalid input without artifact inputs, non-object authored input or an authored key colliding with an input name when artifact inputs are declared, or an unknown, foreign, or undeclared input producer at declaration (materialization failure); missing or ambiguous producer artifact, unreadable or unverifiable input, or a merged input that is not lossless JSON, exceeds 900 KiB, or fails the child schema at launch (`nested-input`); child not resolvable by exact identity and source at launch (`nested-resolution`); no remaining time before the parent deadline, lease or record creation failure, or an existing child run whose lineage, definition, merged input, or injected artifacts do not match the intent (`nested-launch`); child output unreadable, unverifiable, or schema-invalid (`nested-import`) | Declaration failures fail the run closed; `nested-input`, `nested-resolution`, and `nested-launch` fail the task; `nested-import` leaves the task `cleanup-blocked` until reconciliation; a required task propagates to the run |
 | Handoff import | Owner client `exportHandoff` rejection, an invalid `HandoffRef`, an identity that differs from the settled `{ attemptId, baselineHead, handoffCommit }`, an unsupported format, a digest or size mismatch, bytes above `MAX_WORKFLOW_HANDOFF_BYTES` (16 MiB), or bytes that are not a single-commit `git format-patch`; a completed worktree child that captured no handoff under `handoff: "required"` | Import failures terminalize the execution `cleanup-blocked` at stage `handoff-import` before any release intent; the task and run become `cleanup-blocked` until `workflow_reconcile` reconciles the child and retries the import. The no-handoff case is released normally and then `failed` at stage `handoff-import` with "Completed worktree task captured no handoff."; under `handoff: "optional"` it completes without a handoff |
-| Checkpoint | No approver, expired, headless block | Waiting or blocked |
+| Checkpoint | Declaration errors (a checkpoint as a finalizer, invalid prompt, headless policy, timeout, default, or schema); missing, ambiguous, or unverifiable inputs before the request (`checkpoint-input`, "Checkpoint input artifact evidence is incomplete.", "Checkpoint inputs could not be read and verified."); no approver before `expiresAt` under `headless: "block"` (`checkpoint-expired`, "Checkpoint expired without a decision."); expiry under `use-explicit-default` (the default decision is recorded, `source: "default"`); stop, deadline, or a run failure while the checkpoint is open (cancelled at stage `stop`, "Workflow run ended before the checkpoint was decided." from `CHECKPOINT_RUN_ENDING_REASON` when the run fails, or the stop reason); a `decide` that conflicts with existing evidence ("Checkpoint decision conflicts with existing decision evidence."), repeats a decision ("Checkpoint is already decided."), arrives after expiry ("Checkpoint has expired."), fails the schema ("Checkpoint decision does not match its schema."), is not lossless JSON ("Checkpoint decision is not losslessly JSON serializable."), or exceeds the artifact bound ("Checkpoint decision exceeds the workflow artifact bound."); inputs that no longer hash to the durable request ("Checkpoint inputs do not match durable intent.") | Declaration errors fail the run closed; the run parks (`waiting`, `wait` returns `parked: true`) until decided, expired, stopped, or the run ends; a required checkpoint that fails or is cancelled fails the run; `decide` refusals are `validation` without a journal change; the input digest mismatch is `persistence` with its message, and any other decision failure (a stored record that fails verification, a reducer rejection, a fenced lease) is `persistence` ("Checkpoint decision could not be recorded.") carrying the cause; a run never reaches `failed`, `interrupted`, or `cleanup-blocked` with an open checkpoint |
+| Dynamic workflow | Intake refusal: a non-string, empty, oversized (`MAX_DYNAMIC_SOURCE_BYTES` = 262144), or non-UTF-8 source ("Dynamic workflow source must be a string.", "Dynamic workflow source is empty.", "Dynamic workflow source exceeds 262144 bytes.", "Dynamic workflow source is not valid UTF-8."), the static import gate's messages verbatim, `import.meta` ("dynamic workflow source may not use import.meta"), any export shape but one default export ("dynamic workflow source must have exactly one default export and no named exports"), a malformed proposer ("Invalid dynamic workflow proposer."), a full store ("Dynamic workflow proposal store is full."), or a corrupt store ("Dynamic workflow proposal store is corrupt."); manifest extraction failure ("Dynamic workflow manifest extraction failed: <bridge reason>", "Dynamic workflow manifest is invalid."); a proposal that is unapproved ("Dynamic workflow source is not approved for the current host API."), rejected ("Dynamic workflow source was rejected."), stale ("Dynamic workflow proposal predates the current host API; propose the source again.", "Dynamic workflow import policy changed since the proposal; propose the source again.", "Dynamic workflow import policy changed since approval."), from another project ("Dynamic workflow proposal belongs to another project.", "Dynamic workflow approval belongs to another project."), or whose approval disagrees with it ("Dynamic workflow approval does not match the proposal.", "Dynamic workflow approval record is invalid."); a second decision ("Dynamic workflow source is already approved."); run-copy tampering on resume ("Workflow run definition copy is missing or corrupt.", "Dynamic workflow source changed since the run was created.", "Dynamic workflow approval record changed since the run was created.", "Dynamic workflow host API changed since the run was created.", "Dynamic workflow manifest changed since approval."); VM boot, transform, protocol, compute, memory, and exit failures and a source exception (the exact reasons under [Dynamic workflow failure reasons](#dynamic-workflow-failure-reasons)) | Intake, approval, and stale-proposal refusals are service rejections (`validation`, `conflict`, `not-found`, or `persistence`) before a run exists; run-copy refusals refuse to resume without a journal change; VM failures end the run `failed` with the exact VM reason as the `run-status-changed` reason, after open checkpoints are cancelled; a checkpoint park terminates the VM without `-> failed`; an abort while the run is already `stopping` appends nothing |
 | Budget | Cost, optional total-token, or cumulative child-runtime cap reached; a nested child's declared budget does not fit the parent's remaining budget | Reserve before launch; block inadmissible task; fail post-settlement overage; incomplete child usage fails closed |
 | Deadline | Persisted workflow wall deadline reached | Stop and drain; abort in-process support work; stop linked child runs through their parent tasks; cleanup uncertainty remains cleanup-blocked |
 | Lease loss | Scheduler ownership lost | Interrupt and reconcile |
@@ -152,6 +153,110 @@ stays `cleanup-blocked` and the operator exports or pins it in pi-subagent.
 Journal, lease, and artifact-store uncertainty is thrown rather than converted
 into task failure. See the recovery ladder in
 [Persistence and recovery](persistence.md#worktree-handoff-recovery).
+
+## Checkpoint sequences
+
+A checkpoint execution never enters `running`, `cancelling`, `interrupted`, or
+`cleanup-blocked`, holds no lane, and reserves no budget. Its journal
+sequences are:
+
+```text
+decided:  task-status-changed pending→ready
+          → task-execution-created (kind checkpoint)
+          → task-execution-checkpoint-requested { inputsSha256, expiresAt? }
+          → task-status-changed ready→waiting ("Checkpoint awaits a decision.")
+          → run-status-changed running→waiting
+            ("Workflow run awaits a checkpoint decision.")   // drive parks
+          → [decide] decisions/<bindingSha256>.json written
+          → artifact-declared (output result, the decision value)
+          → task-execution-checkpoint-decided (source operator, decidedAt from
+            the record, decidedBy)
+          → task-execution-terminal (outcome completed, evidence kind checkpoint)
+          → task-status-changed waiting→completed ("Checkpoint decided.")
+          → run-status-changed waiting→running                // restarted drive
+
+expired,  … ready→waiting → [sweep or watchdog at expiresAt]
+block:    → task-execution-terminal (outcome failed, evidence kind workflow,
+            stage checkpoint-expired, "Checkpoint expired without a decision.")
+          → task-status-changed waiting→failed
+          → run-status-changed waiting→failed (required task)
+
+expired,  … ready→waiting → [sweep]
+default:  → artifact-declared → task-execution-checkpoint-decided
+            (source default, no decidedBy)
+          → task-execution-terminal (outcome completed)
+          → task-status-changed waiting→completed
+
+headless  pending→ready → task-execution-created
+default:  → task-execution-checkpoint-requested → artifact-declared
+          → task-execution-checkpoint-decided (source default)
+          → task-execution-terminal (outcome completed)
+          → task-status-changed ready→completed              // never waiting
+
+input:    pending→ready → task-execution-created
+          → task-execution-terminal (outcome failed, evidence kind workflow,
+            stage checkpoint-input)
+          → task-status-changed ready→failed
+
+stop /    run-status-changed waiting→stopping (reason)
+deadline: → task-execution-terminal (outcome cancelled, stage stop, reason)
+          → task-status-changed waiting→cancelled
+          → run-status-changed stopping→cancelled
+
+run       task-execution-terminal (outcome cancelled, stage stop,
+failure:    "Workflow run ended before the checkpoint was decided.")
+          → task-status-changed waiting→cancelled
+          → run-status-changed running|waiting→failed
+```
+
+The decision record is the durable evidence; the artifact, decided event,
+terminal, and status are repaired from it after a crash at any prefix (see
+[Persistence and recovery](persistence.md#checkpoint-execution-recovery)).
+Every failure site settles non-terminal checkpoints before it appends
+`-> failed`, `-> interrupted`, or `-> cleanup-blocked`: undecided executions
+are cancelled and a decided one without its terminal is committed ("Checkpoint
+decided."); the reducer rejects the append otherwise ("run failure leaves a
+checkpoint open"). A cancel that races a concurrent decision commits the
+decided execution instead of cancelling it. Failure messages are
+fixed strings; the operator's decision value never appears in a log entry and
+raw error text is never persisted.
+
+## Dynamic workflow failure reasons
+
+A dynamic run's source executes in a worker-thread VM; the host maps every
+VM failure to a `DynamicWorkflowExecutionError` whose `stage` and `message`
+are fixed, and the static runtime appends `run-status-changed <status> ->
+failed` with that message as the reason (after cancelling open checkpoints,
+like every other failure site). The static path appends the fixed
+"Static workflow source execution failed." instead; this is the one
+documented parity exception between the two frontends. Raw stacks never
+reach the journal: the message carries at most the error `name` and a
+bounded `message` (`MAX_DYNAMIC_VM_ERROR_CHARS` = 1024), and the whole
+reason is bounded to 4096 characters.
+
+| Stage | Reason | Cause |
+| --- | --- | --- |
+| `boot` | "Dynamic workflow VM did not boot within 10000 ms." (manifest mode: "Dynamic workflow VM did not boot within 5000 ms.") | no `ready` before `DYNAMIC_VM_BOOT_TIMEOUT_MS` / `DYNAMIC_VM_MANIFEST_TIMEOUT_MS` |
+| `boot` | "Dynamic workflow VM failed to boot: <message>" | a worker bootstrap failure before the transform (`DynamicBootError`: "Dynamic workflow worker data is invalid.", "Dynamic workflow worker did not receive start.", "dynamic workflow transformer version mismatch"); a host defect, not a source fault |
+| `transform` | "Dynamic workflow source failed to transform: <message>" | `amaro` rejected the TypeScript, the emitted JavaScript does not parse ("transformed dynamic workflow source does not parse"), an import is not in the module table ("dynamic workflow import <specifier> is not available"), or the export shape rule fails after the transform |
+| `manifest` | "Dynamic workflow manifest changed since approval." | the booted VM's `ready` manifest differs from the approved one |
+| `source` | "Dynamic workflow source execution failed: <name>: <message>" | the module body or `run` threw, the module has no valid default definition ("workflow module has no valid default definition"), the return value is not JSON ("Dynamic workflow return value is not JSON."), or the shim refused a host message ("Dynamic workflow host answered an unknown request.", "Dynamic workflow host sent an invalid message.") |
+| `protocol` | "Dynamic workflow VM sent an invalid message.", "Dynamic workflow VM message exceeds 17825792 bytes.", "Dynamic workflow VM exceeded 65536 messages.", "Dynamic workflow VM request ids are not contiguous.", "Dynamic workflow VM issued overlapping synchronous calls.", "Dynamic workflow returned an unknown task handle.", "Dynamic workflow bridge requires the static runtime context." | a VM message that fails the RPC schema or bounds, a second `ready`, anything but `failed` before `ready`, a `messageerror`, a returned handle the host never issued, or a context without the host bridge |
+| `watchdog` | "Dynamic workflow VM exceeded 30000 ms of compute between host messages." | no VM message for `DYNAMIC_VM_COMPUTE_TIMEOUT_MS` while no barrier is outstanding |
+| `memory` | "Dynamic workflow VM exceeded its memory limit." | the worker died with `ERR_WORKER_OUT_OF_MEMORY` under `DYNAMIC_VM_RESOURCE_LIMITS` |
+| `exit` | "Dynamic workflow VM exited unexpectedly with code <code>.", "Dynamic workflow VM crashed." | the worker exited before `done`/`failed`, its `error` event fired, or a host fault outside the bridge escaped; the fault's own message may name file system paths, so it travels only as the error's cause and never into the journal |
+| `abort` | "Dynamic workflow execution was aborted." | `ctx.signal` aborted and the VM did not finish within `DYNAMIC_VM_ABORT_GRACE_MS` (1000 ms), the context was already aborted before boot, or the worker saw the host's `abort` before `ready` and ended itself (a `failed` named `DynamicAbortError`, mapped to this stage only when the host did abort); the run is already `stopping`, so no `-> failed` is appended |
+
+Not failures: a host reply error is thrown into the source with its `name`
+and `message` preserved (`WorkflowMaterializationError`,
+`StaticWorkflowRuntimeError`, or `DynamicWorkflowHostError` for
+"Dynamic workflow call arguments are invalid.", "Dynamic workflow referenced
+an unknown task handle.", and "Dynamic workflow barrier result exceeds
+17825792 bytes."), where the source may catch it exactly as static source
+catches a materializer error; and a checkpoint park rejects the barrier with
+the static runtime's park signal, which the bridge never forwards: it
+terminates the VM and rethrows the same signal so the run parks `waiting`
+without a failure. The next drive boots a fresh VM.
 
 ## Support task sequences
 

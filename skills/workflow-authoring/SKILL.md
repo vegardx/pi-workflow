@@ -1,24 +1,38 @@
 ---
 name: workflow-authoring
-description: Use when creating, modifying, validating, or debugging a static pi-workflow *.workflow.ts definition; not for operating runs.
+description: Use when creating, modifying, validating, or debugging a pi-workflow *.workflow.ts definition, static or proposed as a dynamic workflow through workflow_propose; not for operating runs.
 ---
 
-# Authoring static pi-workflow definitions
+# Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` contract revision 17. Every rule
+This skill covers `@vegardx/pi-workflow` contract revision 18. Every rule
 below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
-`src/support.ts`, `src/service.ts`, and the pi-subagent launch contracts).
-Quoted strings are the exact messages the runtime throws. Worked examples that
-load through the real definition loader are in
-[references/examples.md](references/examples.md).
+`src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
+launch contracts). Quoted strings are the exact messages the runtime throws.
+Worked examples that load through the real definition loader and through the
+dynamic manifest VM are in [references/examples.md](references/examples.md).
 
-Not available in revision 17: `ctx.checkpoint`, `ctx.artifact`, dynamic
-workflows, fork context, and a Pi tool for handoff export. Do not author against
-them; a definition that calls them fails when its source runs. `ctx.finalize`
-is available since revision 16 (see [Finalizers](#finalizers)); worktree agent
-tasks with `ctx.handoff` are available since revision 17 (see
-[Worktree tasks and handoffs](#worktree-tasks-and-handoffs)).
+Not available in revision 18: `ctx.artifact`, fork context, a Pi tool for
+handoff export, a model-callable checkpoint decide tool (there is none by design: a model must
+never decide a checkpoint; only a human decides, through `/workflow decide`),
+and a model-callable dynamic-source approve, reject, or proposals tool (none
+exists by design: only a human approves a proposal, through
+`/workflow approve`). Do not author against them; a definition that calls
+them fails when its source runs. `ctx.finalize` is available since revision
+16 (see [Finalizers](#finalizers)); worktree agent tasks with `ctx.handoff`
+are available since revision 17 (see
+[Worktree tasks and handoffs](#worktree-tasks-and-handoffs)); human
+checkpoints with `ctx.checkpoint` and dynamic workflows are available since
+revision 18 (see [Checkpoints](#checkpoints) and
+[Dynamic workflows](#dynamic-workflows)).
+
+The same source is a static definition when it is saved as a `*.workflow.ts`
+file in a discovery root, and a dynamic workflow when it is proposed as text
+through `workflow_propose` and a human approves it with `/workflow approve
+dynamic:<sha256>`. Everything in this skill applies to both; the two
+dynamic-only source rules and the VM's determinism aids are under
+[Dynamic workflows](#dynamic-workflows).
 
 ## Validate, run, inspect
 
@@ -30,23 +44,33 @@ tasks with `ctx.handoff` are available since revision 17 (see
    `WorkflowDefinitionLoadError` naming the file.
 3. `workflow_validate { ref, input? }` resolves `ref` by definition name or
    absolute path ("Workflow not found: …", "Workflow reference is
-   ambiguous: …") and, when `input` is given, validates it against
+   ambiguous: …"), or accepts `dynamic:<sha256>` for an approved dynamic
+   proposal, and, when `input` is given, validates it against
    `inputSchema` ("Workflow input does not match its schema.") without
    creating a run.
 4. `workflow_run { ref, input }` validates the same way, then returns
-   `{ runId, status: "created" }` immediately.
+   `{ runId, status: "created" }` immediately. For a dynamic workflow, first
+   `workflow_propose { source }` returns the proposal as `dynamic:<sha256>`
+   with `runnable: false`; a human must approve it before `workflow_validate`
+   or `workflow_run` accept the reference ("Dynamic workflow source is not approved for the current host API."). Never state or assume a proposal is
+   approved (see [Dynamic workflows](#dynamic-workflows)).
 5. `workflow_wait { runId, timeoutMs? }` drives the run to a terminal status
    and returns the run view; with `timeoutMs` (1_000..3_600_000) it returns
    the current view marked `timedOut: true` when the run outlives the timeout
-   and the run keeps driving. `workflow_status { runId }` reads the durable
+   and the run keeps driving. A run parked at a checkpoint is not terminal:
+   `workflow_wait` returns its `waiting` view immediately, marked
+   `parked: true` and listing `pendingCheckpoints` (see
+   [Checkpoints](#checkpoints)). `workflow_status { runId }` reads the durable
    projection at any time. The view carries `status`, `definitionName`,
    `createdAt`, `deadlineAt`, `depth`, `output` and `outputArtifactId` once
    committed, and `tasks[]` (one entry per declared task in materialization
    order with `id`, `namespace`, `key`, `kind`, `role` (`"task"` or
    `"finalizer"`), `disposition`, `status`, `generation`, the current
    `executionId`, `attempts` (agent tasks), `settlement`, `outcome`,
-   `abandoned: true` for abandoned history, and `handoff` (the handoff
-   descriptor) on completed worktree tasks).
+   `abandoned: true` for abandoned history, `handoff` (the handoff
+   descriptor) on completed worktree tasks, and `checkpoint` (prompt, schema,
+   policy, request and decision facts) on checkpoint tasks), plus
+   `pendingCheckpoints[]`.
 6. `workflow_runs { statuses?, includeChildren?, limit?, cursor? }` lists
    durable runs newest first with `taskCounts`, `ownership`,
    `availableActions`, and `requiresAttention`; `workflow_inspect { runId,
@@ -69,7 +93,11 @@ tasks with `ctx.handoff` are available since revision 17 (see
    reason, taskId? }` re-attempts an `interrupted` agent task on its
    existing child run and attempt without invalidating anything. Use them
    only on a durably `failed` or `interrupted` root run, after
-   `workflow_inspect` shows the action in `availableActions`.
+   `workflow_inspect` shows the action in `availableActions`. A run parked
+   at a checkpoint is surfaced to the operator (the `/workflow` widget and
+   inspector show its pending checkpoints); only a human decides it, through
+   `/workflow decide <run> <task> <json> [reason…]`. There is no decide
+   tool: a model must never decide a checkpoint.
 8. Fix the definition and repeat. Definition identity covers the file's
    source, path, meta, and schemas; an existing run refuses a changed
    definition ("Workflow definition or input identity changed during
@@ -106,18 +134,37 @@ unique across all roots ("duplicate workflow name <name>: <path> and <path>").
 Static imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
 module specifiers of support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 17". Relative imports of helper files are therefore
+contract revision 18". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 17",
+"dynamic workflow imports are not supported by contract revision 18",
 "dynamic imports and CommonJS require are not supported by contract revision
-17", and "TypeScript import assignment is not supported by contract revision
-17". Import-like text inside strings and comments is fine. The loader
+18", and "TypeScript import assignment is not supported by contract revision
+18". Import-like text inside strings and comments is fine. The loader
 resolves imports from the definition file's location, so `@vegardx/pi-workflow`
 and `typebox` must be resolvable there.
 
 The module must default-export the definition; otherwise "workflow module has
 no valid default definition". An exception during module evaluation surfaces
 as "workflow definition module failed to load" with the cause attached.
+
+A dynamic source passes the same gate with the same messages and two more
+rules: it may not use `import.meta` ("dynamic workflow source may not use import.meta"), and it must have exactly one default export and no named
+exports or re-exports ("dynamic workflow source must have exactly one default export and no named exports"). Support helpers are importable in a
+dynamic source only when the embedder published them with an `exportName`
+(`helper.registration(execute, { exportName })`); import them as
+`import { <exportName> } from "<moduleSpecifier>"`.
+
+Import types with `import type` or a `type` specifier: `import {
+defineWorkflow, type WorkflowContext } from "@vegardx/pi-workflow"`. Names
+such as `WorkflowContext`, `TaskHandle`, and `WorkflowDefinition` are
+type-only exports. The static loader erases a plain `import { WorkflowContext }`
+of them, but the dynamic VM transforms with `verbatimModuleSyntax` and keeps
+it as a value import, so the same source fails at proposal time with
+"Dynamic workflow source execution failed: Error: Dynamic workflow import
+\"@vegardx/pi-workflow\" has no export \"WorkflowContext\"." (reported through
+"Dynamic workflow manifest extraction failed: <reason>"). Write the type
+imports the dynamic way in every definition so a static file can be proposed
+unchanged.
 
 ## `defineWorkflow`
 
@@ -180,6 +227,7 @@ export default defineWorkflow({
 | `ctx.agent(key, request)` | Declares an agent task; returns `TaskHandle<Static<outputSchema>>`, or `WorktreeTaskHandle` (same plus `handle.handoff`) when the request's `workspace.mode` is `"worktree"`. |
 | `ctx.support(key, descriptor)` | Declares a deterministic in-process support task from a `defineSupportTask` helper call. |
 | `ctx.workflow<TOutput>(key, request)` | Declares a nested workflow task that runs another discovered definition as a linked child run. |
+| `ctx.checkpoint(key, request)` | Declares a human decision the run parks on; returns `TaskHandle<Static<schema>>` whose value is the recorded decision. See [Checkpoints](#checkpoints). |
 | `ctx.fanOut(namespace, items, { key, task })` | Declares at most 64 agent tasks in namespace `[namespace]`; returns handles in item order. "Workflow fan-out namespace is invalid.", "Workflow fan-out exceeds 64 items.", "Workflow fan-out options are invalid." |
 | `ctx.fanIn(key, sources, { inputKey, task })` | Declares one agent task whose `inputs` are the 1..64 source outputs under the names `inputKey(source, index)` returns. `task` may not carry its own `inputs`. "Workflow fan-in requires 1 to 64 sources.", "Workflow fan-in options are invalid.", "Workflow fan-in input keys must be unique." |
 | `ctx.pipeline(namespace, build)` | Runs a synchronous builder whose `stage.agent(key, request)` declares at most 64 agent tasks in namespace `[namespace]`; the builder must return one of them. "Workflow pipeline definition is invalid.", "Workflow pipeline exceeds 64 stages.", "Workflow pipeline must return one of its stage handles." |
@@ -479,6 +527,112 @@ not influence the output.
   ("invalidation after output commit may only cover finalizers"); the
   finalizer re-executes as its next generation against the existing output.
 
+## Checkpoints
+
+Use a checkpoint when a human must decide before the run may continue: to
+approve a plan before a worktree writer runs, to accept or reject a handoff,
+or to pick between options the workflow cannot choose on its own. Do not use
+one for choices a schema-validated agent result or a support task can make; a
+checkpoint stops the run until a person answers.
+
+```ts
+const approve = ctx.checkpoint("approve", {
+	schema: Type.Object({ proceed: Type.Boolean() }, { additionalProperties: false }),
+	prompt: "Approve the plan before the writer runs?", // 1..4096 characters
+	headless: "block", // or "use-explicit-default" with a `default`
+	timeoutMs: 3_600_000, // optional, 1_000 .. 365 days, capped by the run deadline
+	inputs: { plan: plan.output }, // what the approver is shown
+});
+const decision = await ctx.result(approve); // parks here until decided
+```
+
+The exact request shape is
+`ctx.checkpoint(key, { schema, prompt, default?, headless, timeoutMs?, disposition?, after?, inputs?, replay? })`:
+
+- `schema` is the JSON Schema of the decision value (the same rules as an
+  agent `outputSchema`; the message names it "checkpoint decision schema").
+  The handle is typed `TaskHandle<Static<typeof schema>>`; `ctx.result`
+  returns the recorded decision re-read from its artifact and validated
+  against `schema`.
+- `prompt` is what the approver reads: 1..4096 characters ("invalid checkpoint prompt").
+- `headless` is required: `"block"` waits for a human until `timeoutMs` or
+  the run deadline; `"use-explicit-default"` requires `default` ("checkpoint headless default requires an explicit default") and uses it when the
+  checkpoint expires or when the embedder runs the service with
+  `checkpoints: { headless: true }` (then it never waits). Anything else:
+  "invalid checkpoint headless policy".
+- `default`, when given, must be lossless JSON ("checkpoint default is not JSON") and satisfy `schema` ("checkpoint default does not match its schema"). It is part of task identity.
+- `timeoutMs` is relative to the moment the request is persisted; the
+  absolute `expiresAt` is `min(now + timeoutMs, deadlineAt)`. Out of bounds:
+  "invalid checkpoint timeout". Without it, only the run deadline bounds the
+  wait. An expired `"block"` checkpoint fails at stage `checkpoint-expired`
+  with "Checkpoint expired without a decision." (`settled` reports
+  `code: "checkpoint-expired"`); an expired `"use-explicit-default"`
+  checkpoint completes with its default.
+- `after`, `inputs`, `disposition`, and `replay` follow the ordinary rules.
+  `inputs` may name result handles and worktree handoff handles; the approver
+  sees the verified values (a handoff as its descriptor, never patch bytes).
+  Use `after: [approve.ref]` on the task the decision gates.
+- A checkpoint handle is a legal target of `ctx.result`, `ctx.results`,
+  `ctx.settled`, and the return value. It never has `handle.handoff`.
+- A checkpoint cannot be a finalizer: `ctx.finalize` has no `checkpoint`
+  member ("finalizer requires exactly one of support, agent, or workflow"),
+  and the materializer refuses the role ("a checkpoint cannot be a finalizer"). Finalizers may depend on checkpoints.
+- A request that is not an object fails with "Workflow checkpoint request is invalid."; a lowered request or task that fails its schema fails with
+  "invalid checkpoint task request" or "invalid materialized checkpoint task".
+
+Examples of `headless` policies:
+
+```ts
+// Must be answered by a person; the run fails if nobody answers within an hour.
+ctx.checkpoint("release-gate", {
+	schema: Type.Object({ proceed: Type.Boolean() }, { additionalProperties: false }),
+	prompt: "Publish the digest?",
+	headless: "block",
+	timeoutMs: 3_600_000,
+});
+
+// Asks a person when one is around; unattended runs and expiry take the default.
+ctx.checkpoint("tone", {
+	schema: Type.Union([Type.Literal("formal"), Type.Literal("casual")]),
+	prompt: "Which tone should the summary use?",
+	headless: "use-explicit-default",
+	default: "formal",
+	timeoutMs: 600_000,
+});
+```
+
+How a checkpoint runs, for authors:
+
+- Declaring it starts nothing. At the barrier that selects it, the runtime
+  persists the request with the exact input digests and moves the task
+  `ready -> waiting` ("Checkpoint awaits a decision."). It holds no
+  concurrency lane and no budget. When no lane has anything else to do the
+  run becomes `waiting` ("Workflow run awaits a checkpoint decision.") and
+  the drive parks: `workflow_wait` returns immediately with `parked: true`
+  and `pendingCheckpoints`. Do not poll; wait returns immediately when
+  parked, and nothing changes until a person decides, the checkpoint expires,
+  the run is stopped, or the deadline passes.
+- Only a human decides. The operator sees the parked run in the `/workflow`
+  widget and inspector and answers through `/workflow decide <run> <task>
+  <json> [reason…]` (a follow-up in the `/workflow` command), whose approver
+  is the Pi session user; embedders call `service.decide(runId, taskId,
+  { decision, approver, reason? })`. There is no model-callable decide tool by
+  design: a model must never decide a checkpoint, not even its own work.
+  Surface the parked run and stop. The decision is
+  validated against `schema`, recorded once and immutably, stored as the
+  task's result artifact, and the run continues ("Checkpoint decided.").
+  A second decision for the same checkpoint is refused ("Checkpoint is already decided."), as is one that arrives after expiry ("Checkpoint has expired.") or fails the schema ("Checkpoint decision does not match its schema.").
+- After `workflow_stop`, the deadline, or a failure elsewhere in the run, an
+  open checkpoint ends `cancelled` ("Workflow run ended before the checkpoint was decided." when the run fails); a `result` barrier on it then throws
+  like any other non-completed task. A required checkpoint that fails or is
+  cancelled fails the run; make it `disposition: "optional"` and read it with
+  `ctx.settled` when the run should continue without an answer.
+- Replay: a decided checkpoint replays from its artifact and the person is
+  never asked twice for the same execution. Invalidation that covers the
+  checkpoint creates a new generation and asks again.
+- Checkpoint tasks use the statuses `pending`, `ready`, `waiting`,
+  `completed`, `failed`, `cancelled`, `blocked`, and `invalidated`.
+
 ## Failure semantics for authors
 
 - Required task (the default) that ends `failed`, `cancelled`, `interrupted`,
@@ -491,9 +645,11 @@ not influence the output.
   `completed-degraded` instead of `completed`.
 - Dependents of a failed task become `blocked`.
 - An exception thrown by `run` (including a rejected barrier) ends the run
-  `failed` with reason "Static workflow source execution failed."; an output
-  that fails validation ends it `failed` with "Workflow output finalization
-  failed.".
+  `failed` with reason "Static workflow source execution failed."; in a
+  dynamic workflow the reason is "Dynamic workflow source execution failed:
+  <name>: <message>" (the only journal difference between the frontends),
+  and a VM bound ends it with the exact VM reason (for example "Dynamic workflow VM exceeded its memory limit."). An output that fails validation
+  ends it `failed` with "Workflow output finalization failed.".
 - `cleanup-blocked` means a child's cleanup, release, output import, or
   handoff import could not be proved; the run waits for `workflow_reconcile`,
   which retries the import or reconciles the child.
@@ -515,11 +671,82 @@ not influence the output.
   run. `workflow_invalidate` does the same for any settled task.
 - `cancelled` is the result of `workflow_stop`, session shutdown, or the
   deadline. Trusted source awaiting `ctx.signal` should unwind when it aborts.
+  A checkpoint open at that moment ends `cancelled` too; session shutdown
+  alone leaves a parked run `waiting` and resumable by a later `workflow_wait`.
+- `waiting` with `parked: true` on `workflow_wait` means a checkpoint awaits
+  a human; the run is not stuck and must not be polled (see
+  [Checkpoints](#checkpoints)).
 - Run statuses: `created`, `running`, `waiting`, `finalizing`, `stopping`,
   `completed`, `completed-degraded`, `failed`, `cancelled`, `interrupted`,
   `cleanup-blocked`. Task statuses: `pending`, `ready`, `running`, `waiting`,
   `completed`, `failed`, `interrupted`, `blocked`, `cancelling`, `cancelled`,
   `cleanup-blocked`, `invalidated`.
+
+## Dynamic workflows
+
+A dynamic workflow is the same `defineWorkflow` source proposed as text and
+executed in a worker-thread VM after a human approved it. Author it exactly
+like a static definition, then:
+
+1. `workflow_propose { source }` (1..262144 UTF-8 bytes) applies the import
+   gate and the two dynamic-only rules, extracts the manifest (`meta`,
+   `inputSchema`, `outputSchema`) in a manifest-only VM, and returns the
+   proposal: `{ ref: "dynamic:<sha256>", sourceSha256, sourceBytes, manifest,
+   manifestSha256, hostApiSha256, importPolicySha256,
+   definitionIdentitySha256, transformer, proposer, proposedAt, decision?,
+   runnable, path }`. `ref` is the SHA-256 of the exact source bytes; the
+   same bytes always yield the same proposal, and a changed byte is a new
+   proposal. Refusals: "Dynamic workflows require project trust.", "Dynamic
+   workflow source is empty.", "Dynamic workflow source exceeds 262144 bytes.", "Dynamic workflow source is not valid UTF-8.", the import gate
+   messages, "dynamic workflow source may not use import.meta", "dynamic workflow source must have exactly one default export and no named exports", "Dynamic workflow manifest extraction failed: <reason>", and
+   "Dynamic workflow proposal store is full.".
+2. Stop and surface the `ref`. Approval is a human decision: a person reads
+   the source and approves or rejects it with `/workflow approve
+   dynamic:<sha256>` or `/workflow reject dynamic:<sha256> [reason…]` (an
+   explicit confirmation in an interactive Pi session; these commands are a
+   follow-up in the `/workflow` command, and until then the embedder calls
+   `service.decideSource`). There is no approve, reject, or proposals tool,
+   by design; never state or assume a proposal is approved. A rejection is
+   final ("Dynamic workflow source was rejected."): fix the source and
+   propose again, which yields a new digest. A second decision is refused
+   ("Dynamic workflow source is already approved.").
+3. Once `runnable` is true, `workflow_validate` and `workflow_run` accept the
+   `ref`; before that they refuse "Dynamic workflow source is not approved for the current host API.". A package upgrade (a changed `hostApiSha256`) or a
+   change to the embedder's published support helpers (a changed
+   `importPolicySha256`) invalidates the approval: "Dynamic workflow proposal predates the current host API; propose the source again." and "Dynamic workflow import policy changed since approval.". Propose again and ask for
+   a new approval.
+
+How the source runs:
+
+- `ctx` is exactly the `WorkflowContext` described above, with the same
+  messages. Declarations are synchronous calls to the host; `ctx.result`,
+  `ctx.results`, `ctx.settled`, and `ctx.handoff` are the only awaits. A
+  request that contains a function is refused before it is sent ("Workflow request contains a function.").
+- The VM boots fresh on every drive: after `workflow_wait` following a
+  restart, after a checkpoint decision, and after invalidation the source is
+  transformed and re-executed from entry in a new worker, and the persisted
+  prefix must replay exactly as for static source. Keep everything before a
+  barrier deterministic.
+- Determinism aids, not security: `Date.now()` and `new Date()` return the
+  run's creation time, `Math.random()` is a fixed sequence per run id,
+  `console.*` are no-ops, `eval`/`new Function` throw `EvalError`,
+  `import()` rejects, and there is no `process`, `require`, `fetch`,
+  `setTimeout`, `structuredClone`, or `TextEncoder`; assigning a new global
+  throws "Cannot add property <name>, object is not extensible". The
+  worker-thread VM is a determinism and API boundary, not an OS security boundary, and dynamic source is admitted only because a human approved it
+  under Pi project trust.
+- Bounds: full TypeScript through `amaro` 1.2.0 (enums, namespaces,
+  parameter properties, and `satisfies` work; `module Foo {}` is refused),
+  256 MiB heap, 30 s of compute between host messages (barriers pause the
+  clock), 65536 messages and 17 MiB per message per drive, and a 10 s boot.
+  A bound ends the run `failed` with its exact reason, for example "Dynamic workflow VM exceeded 30000 ms of compute between host messages." or
+  "Dynamic workflow VM exceeded its memory limit.".
+- `defineSupportTask` works for describing a support task, but
+  `helper.registration()` throws ("Dynamic workflow source may not register support implementations."); implementations always come from the embedder.
+- A dynamic run is always a root run. It may declare nested static children
+  with `ctx.workflow`; a dynamic definition can never be a nested child.
+- `workflow_list` does not list proposals; a run view of a dynamic run
+  carries `dynamic: { ref, sourceSha256, approvalSha256, hostApiSha256 }`.
 
 ## Invalidation and re-execution
 

@@ -104,8 +104,18 @@ Delivered:
   with no admissible resume terminalizes the execution directly, and the
   reducer admits operator `resume` intents (`origin: "operator"`) that reopen
   such an execution (runtime contract feature `operatorAttempts: true`,
-  contract revision 16).
-
+  contract revision 16);
+- checkpoints and immutable decisions: `ctx.checkpoint` declarations lowered
+  into `kind: "checkpoint"` tasks that hold no lane and no budget, a parked
+  `waiting` drive that `wait` returns at once with `parked: true` and
+  `pendingCheckpoints`, relative `timeoutMs` capped by the run deadline with
+  `block` and `use-explicit-default` expiry policies, the service
+  `checkpoints.headless` option, `WorkflowService.decide` with the `decide`
+  action, a run-scoped immutable binding-addressed decision record store
+  (`decisions/`) whose records the journal converges on, and fail-closed run
+  failure while a checkpoint is open (runtime contract feature
+  `checkpoints: true`, contract revision 18, checkpoints half; the revision
+  is shared with the dynamic-workflows half);
 - operator-triggered retry and resume over the service: `retry(runId,
   taskId, reason)` as invalidation restricted to a failed or interrupted
   cause task, and `resume(runId, reason, { taskId })` appending the operator
@@ -116,7 +126,6 @@ Delivered:
 
 Remaining:
 
-- checkpoints and immutable decisions;
 - richer logs and reconciliation controls;
 - retention and pin coordination.
 
@@ -125,15 +134,17 @@ Remaining:
 Delivered:
 
 - tool declaration table with output schemas: `WORKFLOW_TOOL_DECLARATIONS`
-  binds all thirteen tools to typed service results, the extension registers
-  from it, every declared output schema is validated against a real service
-  result, and each entry carries its one-line call and result rendering;
+  binds all fourteen tools (including `workflow_propose`) to typed service
+  results, the extension registers from it, every declared output schema is
+  validated against a real service result, and each entry carries its
+  one-line call and result rendering;
 - complete workflow command surface: the unified `/workflow` command, the
   `pi-workflow` widget below the editor, and the `alt+w` inspector as
   projections of the service read surface (`availableActions`,
   `requiresAttention`, ownership), with the read tools `workflow_runs`,
-  `workflow_inspect`, `workflow_logs` and the operator tools
-  `workflow_invalidate`, `workflow_retry`, `workflow_resume`;
+  `workflow_inspect`, `workflow_logs`, the operator tools
+  `workflow_invalidate`, `workflow_retry`, `workflow_resume`, and the
+  proposal tool `workflow_propose`;
 - workflow authoring skill shipped under `skills/` and declared through
   `pi.skills`, with loader-tested examples;
 - compatibility matrix (`compatibility.json`, `docs/compatibility.md`) checked
@@ -142,22 +153,57 @@ Delivered:
 
 Remaining:
 
+- the human-only `/workflow decide <run> <task> <json> [reason…]` command
+  (approver: the Pi session user) over `WorkflowService.decide`, a follow-up
+  in `src/ui/commands.ts`; there is no model-callable decide tool, by design;
+- the human-only `/workflow approve dynamic:<sha256>` and `/workflow reject
+  dynamic:<sha256> [reason…]` commands over `WorkflowService.decideSource`
+  (explicit `ctx.ui.confirm`, approver `{ kind: "human", via, sessionId }`),
+  the same follow-up; there is no model-callable approve, reject, or
+  proposals tool, by design;
 - a handoff export tool over `WorkflowService.exportHandoff` that writes the
   handoff bytes to a caller path; deferred because a tool result of up to
   16 MiB returned to a model is wrong and writing caller paths needs its own
   authority text;
-- `decide` tool once checkpoints ship;
 - first stable static-workflow API.
 
 ## Phase 5 — dynamic workflows
 
-- worker-thread VM and bounded RPC host API;
-- shared TaskSpec materializer, including dynamic `ctx.support` declarations
-  that lower into the same `SupportTaskSpec` and constructor registry;
-- generated-source review and approval;
-- stable key, dependency, and budget enforcement;
-- incremental graph materialization from concrete results;
-- fresh-VM recovery through source re-execution and effect replay.
+Delivered (revision 18, dynamic-workflows half; runtime contract feature
+`dynamicWorkflows: true`, sharing the revision with the checkpoints half,
+whose generic decision record store holds the source approvals):
+
+- worker-thread VM and bounded RPC host API: one worker per drive, full
+  TypeScript through the pinned `amaro` 1.2.0 transformer, synchronous
+  declarations over an `Atomics.wait` bridge, asynchronous barriers, message,
+  size, compute, memory, and boot bounds, abort mirroring, and exact failure
+  reasons;
+- shared TaskSpec materializer: the VM exposes `WorkflowContext` verbatim and
+  every declaration, including dynamic `ctx.support` declarations from helpers
+  published with `exportName`, lowers into the same task specs, constructor
+  registry, scheduler, and executors as static source;
+- generated-source review and approval: `service.propose` /
+  `workflow_propose` (proposal only), the digest-keyed proposal store with a
+  manifest-only VM, `service.decideSource` writing an immutable
+  `source-approval` decision record, and `run`/`validate` accepting
+  `dynamic:<sha256>` only for an approved proposal;
+- human approval bound to source and host-API identity: the binding covers the
+  source digest, manifest, `hostApiSha256`, and `importPolicySha256`, so a
+  changed source, package upgrade, or support registry refuses to run or
+  resume until a human approves again, and a rejection is final;
+- stable key, dependency, and budget enforcement through the unchanged host
+  materializer and scheduler;
+- incremental graph materialization from concrete results across async
+  barriers;
+- fresh-VM recovery through source re-execution and effect replay on every
+  restart, checkpoint park, and invalidation recovery, verified from the run
+  directory's `definition/` copy alone.
+
+Remaining:
+
+- the `/workflow approve|reject` Pi commands (Phase 4 above); until they land
+  embedders call `service.decideSource` directly, and no model surface can
+  approve.
 
 ## Non-goals
 

@@ -865,3 +865,210 @@ export default defineWorkflow({
 	},
 });
 ```
+
+## Checkpoint gating a worktree writer
+
+The `approve` checkpoint shows the approver the plan and parks the run until a
+person decides (`headless: "block"`, one hour). Only after a `proceed: true`
+decision does the worktree writer run; a rejection returns without writing.
+Only a person decides it: a model must never decide a checkpoint, and the
+operator answers through `/workflow decide` once the operator surface lands.
+The optional `tone` checkpoint takes its default when nobody answers within
+ten minutes or when the embedder runs the service headless.
+
+```ts
+import { defineWorkflow } from "@vegardx/pi-workflow";
+import { Type } from "typebox";
+
+const InputSchema = Type.Object(
+	{ change: Type.String({ minLength: 1 }) },
+	{ additionalProperties: false },
+);
+const PlanSchema = Type.Object(
+	{ steps: Type.Array(Type.String()), risk: Type.String() },
+	{ additionalProperties: false },
+);
+const ApprovalSchema = Type.Object(
+	{ proceed: Type.Boolean(), note: Type.Optional(Type.String()) },
+	{ additionalProperties: false },
+);
+const ToneSchema = Type.Union([Type.Literal("formal"), Type.Literal("casual")]);
+const SummarySchema = Type.Object(
+	{ summary: Type.String() },
+	{ additionalProperties: false },
+);
+const OutputSchema = Type.Object(
+	{ approved: Type.Boolean(), summary: Type.Optional(Type.String()) },
+	{ additionalProperties: false },
+);
+const readOnly = {
+	cumulativeRuntimeMs: 600_000,
+	attemptTimeoutMs: 300_000,
+	cost: 2,
+	outputBytes: 65_536,
+	workspaceWriteBytes: 0,
+	retries: 0,
+	resumes: 0,
+};
+
+export default defineWorkflow({
+	meta: {
+		name: "approved-implement",
+		description: "Plan, ask a human, then implement in a worktree",
+		version: 1,
+		budget: { cost: 8, childRuntimeMs: 1_800_000 },
+		timeoutMs: 7_200_000,
+	},
+	inputSchema: InputSchema,
+	outputSchema: OutputSchema,
+	async run(ctx) {
+		const plan = ctx.agent("plan", {
+			agent: "researcher",
+			task: {
+				goal: `Plan the change: ${ctx.input.change}`,
+				context: [],
+				instructions: ["List the steps and the main risk."],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: ctx.cwd },
+			outputSchema: PlanSchema,
+			limits: readOnly,
+		});
+		const approve = ctx.checkpoint("approve", {
+			schema: ApprovalSchema,
+			prompt: "Approve the plan before the writer runs?",
+			headless: "block",
+			timeoutMs: 3_600_000,
+			inputs: { plan: plan.output },
+		});
+		const tone = ctx.checkpoint("tone", {
+			schema: ToneSchema,
+			prompt: "Which tone should the summary use?",
+			headless: "use-explicit-default",
+			default: "formal",
+			timeoutMs: 600_000,
+			disposition: "optional",
+		});
+		const decision = await ctx.result(approve);
+		if (!decision.proceed) return { approved: false };
+		const implement = ctx.agent("implement", {
+			agent: "implementer",
+			task: {
+				goal: "Implement the approved plan supplied as the `plan` input",
+				context: [],
+				instructions: ["Follow the plan; do not widen the change."],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep", "edit", "write"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "worktree", cwd: ctx.cwd },
+			handoff: "required",
+			limits: { ...readOnly, workspaceWriteBytes: 64 * 1024 * 1024 },
+			outputSchema: SummarySchema,
+			after: [approve.ref],
+			inputs: { plan: plan.output, tone: tone.output },
+		});
+		const result = await ctx.result(implement);
+		return { approved: true, summary: result.summary };
+	},
+});
+```
+
+## Dynamic workflow: the same source proposed through `workflow_propose`
+
+Nothing in the source says "dynamic". Saved as a `*.workflow.ts` file it is a
+static definition; passed as the `source` of `workflow_propose` it becomes the
+proposal `dynamic:<sha256>` that a human approves with `/workflow approve`
+before `workflow_run` accepts the reference. It obeys the two dynamic-only
+rules (no `import.meta`, exactly one default export and no named exports)
+and reads neither the clock nor the environment before its barrier, so the
+fresh VM that boots on every drive replays it exactly. The optional `deep`
+task is declared only after the triage result is known.
+
+```ts
+import { defineWorkflow } from "@vegardx/pi-workflow";
+import { Type } from "typebox";
+
+const InputSchema = Type.Object(
+	{ issue: Type.String({ minLength: 1 }) },
+	{ additionalProperties: false },
+);
+const TriageSchema = Type.Object(
+	{
+		severity: Type.Union([
+			Type.Literal("low"),
+			Type.Literal("high"),
+		]),
+		summary: Type.String(),
+	},
+	{ additionalProperties: false },
+);
+const ReportSchema = Type.Object(
+	{ severity: Type.String(), summary: Type.String(), files: Type.Array(Type.String()) },
+	{ additionalProperties: false },
+);
+const limits = {
+	cumulativeRuntimeMs: 600_000,
+	attemptTimeoutMs: 300_000,
+	cost: 2,
+	outputBytes: 65_536,
+	workspaceWriteBytes: 0,
+	retries: 0,
+	resumes: 0,
+};
+
+export default defineWorkflow({
+	meta: {
+		name: "dynamic-triage",
+		description: "Triage an issue and investigate it further when it is severe",
+		version: 1,
+		budget: { cost: 6, childRuntimeMs: 1_800_000 },
+		timeoutMs: 3_600_000,
+	},
+	inputSchema: InputSchema,
+	outputSchema: ReportSchema,
+	async run(ctx) {
+		ctx.phase("triage");
+		const triage = ctx.agent("triage", {
+			agent: "researcher",
+			task: {
+				goal: `Triage this issue against the repository: ${ctx.input.issue}`,
+				context: [],
+				instructions: ["Classify the severity as low or high and summarize why."],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: ctx.cwd },
+			outputSchema: TriageSchema,
+			limits,
+		});
+		const result = await ctx.result(triage);
+		if (result.severity === "low") {
+			return { severity: result.severity, summary: result.summary, files: [] };
+		}
+		ctx.phase("investigate");
+		return ctx.agent("deep", {
+			agent: "researcher",
+			task: {
+				goal: "List the files involved in the issue summarized by the `triage` input",
+				context: [],
+				instructions: ["Return relative paths only; keep the summary unchanged."],
+			},
+			contextMode: "fresh",
+			tools: ["read", "grep", "find"],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: ctx.cwd },
+			outputSchema: ReportSchema,
+			limits,
+			inputs: { triage: triage.output },
+		});
+	},
+});
+```
