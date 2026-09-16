@@ -761,15 +761,19 @@ describe("project", () => {
 	it("sums the declared reservations of the whole graph", async () => {
 		const service = await realService();
 		const projection = await service.project("plan-to-ship", planInput(1));
-		// refine + implement + one lens + the receipt finalizer, and the two
-		// gates, which reserve nothing.
-		expect(projection.tasks).toBe(6);
+		// refine + implement + one verifier + one lens + the review synthesis +
+		// the receipt finalizer, and the two gates, which reserve nothing. The
+		// verifier is one because a barrier synthesizes a boolean as `true`, so
+		// the projected check passes in round 1 and declares no fixer.
+		expect(projection.tasks).toBe(8);
 		expect(projection.cost).toBeGreaterThan(0);
 		expect(projection.totalTokens).toBeGreaterThan(0);
 		expect(projection.childRuntimeMs).toBeGreaterThan(0);
+		// plan-to-ship's budget is the worst case its input schema admits, with
+		// the cost clamped to the service's own ceiling.
 		expect(projection.budget).toEqual({
-			cost: 900,
-			childRuntimeMs: 172_800_000,
+			cost: 1_000,
+			childRuntimeMs: 553_500_000,
 		});
 		expect(projection.fits).toBe(true);
 		expect(Object.isFrozen(projection)).toBe(true);
