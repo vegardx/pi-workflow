@@ -8,6 +8,7 @@
 		"dist",
 		"docs",
 		"skills",
+		"workflows",
 		"compatibility.json",
 		"README.md",
 		"CHANGELOG.md",
@@ -36,6 +37,9 @@
 		],
 		"skills": [
 			"./skills"
+		],
+		"workflows": [
+			"./workflows"
 		]
 	},
 	"scripts": {

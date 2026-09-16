@@ -417,6 +417,15 @@ export interface WorkflowServiceOptions {
 	readonly storeRoot: string;
 	readonly projectTrusted: () => boolean;
 	readonly subagents: WorkflowSubagentProvider;
+	/**
+	 * Package-provided definition roots present from the first discovery, the
+	 * constructor form of `registerRoot`. Each root must use `package` or
+	 * `builtin` scope; those roots are trusted by their installation source and
+	 * load without Pi project trust. Unlike `registerRoot` this does not
+	 * discover eagerly, so an embedder can register its own definitions without
+	 * a trust prompt for the project's roots.
+	 */
+	readonly registeredRoots?: readonly WorkflowRoot[];
 	readonly maxConcurrency?: number;
 	readonly maxWorkflowCost?: number;
 	readonly maxWorkflowTotalTokens?: number;
@@ -839,6 +848,15 @@ export async function createWorkflowService(
 	const storeRoot = path.resolve(options.storeRoot);
 	let proposalStore: Promise<DynamicWorkflowProposalStore> | undefined;
 	const roots: WorkflowRoot[] = [];
+	for (const root of options.registeredRoots ?? []) {
+		if (root.scope !== "package" && root.scope !== "builtin") {
+			throw new WorkflowServiceError(
+				"validation",
+				"Registered roots must be package or builtin scope.",
+			);
+		}
+		roots.push(Object.freeze({ ...root }));
+	}
 	const owned = new Map<WorkflowRunId, OwnedRun>();
 	const instanceId = randomUUID();
 	const listeners = new Set<WorkflowRunListener>();

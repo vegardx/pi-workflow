@@ -115,3 +115,57 @@ describe("service project discovery", () => {
 		expect(discoveries).toHaveBeenCalledTimes(2);
 	});
 });
+
+// F1: a package contributes definitions through the constructor, the form the
+// shipped extension uses for the package's own builtin root.
+describe("service registered roots", () => {
+	it("lists and runs a constructor-registered builtin root without project trust", async () => {
+		const base = path.resolve(".pi", "test-service-discovery", randomUUID());
+		const cwd = path.join(base, "project");
+		const agentDir = path.join(base, "agent");
+		const packageRoot = path.join(base, "package", "workflows");
+		await mkdir(cwd, { recursive: true });
+		await mkdir(packageRoot, { recursive: true });
+		await writeFile(
+			path.join(packageRoot, "shipped.workflow.ts"),
+			definition("shipped", "shipped "),
+		);
+		const service = await createWorkflowService({
+			cwd,
+			agentDir,
+			storeRoot: path.join(cwd, ".pi", "workflow"),
+			projectTrusted: () => false,
+			subagents: provider(),
+			registeredRoots: [
+				{ path: packageRoot, scope: "builtin", source: "package" },
+			],
+		});
+		services.push(service);
+		// The constructor registers; it does not discover.
+		expect(discoveries).toHaveBeenCalledTimes(0);
+		expect(await service.list()).toMatchObject([
+			{ name: "shipped", scope: "builtin", source: "package" },
+		]);
+		const run = await service.run("shipped", { value: "z" });
+		expect(await service.wait(run.runId)).toMatchObject({
+			status: "completed",
+			output: { answer: "shipped z" },
+		});
+	});
+
+	it("refuses a constructor-registered root outside package or builtin scope", async () => {
+		const base = path.resolve(".pi", "test-service-discovery", randomUUID());
+		const cwd = path.join(base, "project");
+		await mkdir(cwd, { recursive: true });
+		await expect(
+			createWorkflowService({
+				cwd,
+				agentDir: path.join(base, "agent"),
+				storeRoot: path.join(cwd, ".pi", "workflow"),
+				projectTrusted: () => true,
+				subagents: provider(),
+				registeredRoots: [{ path: cwd, scope: "project", source: "test" }],
+			}),
+		).rejects.toThrow("Registered roots must be package or builtin scope.");
+	});
+});

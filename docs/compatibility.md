@@ -15,12 +15,12 @@ disagree.
 | Component | Value | Source |
 | --- | --- | --- |
 | `@vegardx/pi-workflow` | 1.1.0 | `package.json` `version` |
-| API version | 1.1.0 | `compatibility.json` `piWorkflow.api.version` |
+| API version | 1.1.0 | `compatibility.json` `piWorkflow.api.version`; 1.1.0 is additive over 1.0.0: the optional checkpoint prompt view fields, the optional `WorkflowServiceOptions.registeredRoots`, and the package's own builtin workflow root |
 | Frozen surfaces | authoring, service, contract, extension | [`docs/contracts.md` "Public API and stability"](contracts.md#public-api-and-stability); `compatibility.json` `piWorkflow.api.frozenSurfaces` |
 | Entry points | `.` frozen, `./extension` frozen, `./runtime` unfrozen (engine internals; may change in any minor release); `./package.json` is the manifest, not an API surface | `package.json` `exports`; `compatibility.json` `piWorkflow.api.entryPoints` |
 | Pinned export lists | `.`: 182 value exports, `./runtime`: 127 value exports; the two sets are disjoint and deep `dist/` paths are not importable | `test/fixtures/public-api/root-exports.json`, `runtime-exports.json` (`test/public-api.test.ts`, `scripts/check-pack.mjs`) |
 | TypeScript module resolution | `node16`, `nodenext`, or `bundler` (types are resolved through the `exports` map; no `typesVersions`; the package itself compiles with `module`/`moduleResolution` `NodeNext`, and `engines.node >=23.6.0` excludes toolchains that need `node10` fallbacks) | `package.json` `exports`, `tsconfig.json` |
-| `WORKFLOW_CONTRACT_REVISION` | 18 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`); unchanged by 1.0.0 and 1.1.0: neither changes a schema, event, identity, or handshake (1.1.0 adds optional view fields only) |
+| `WORKFLOW_CONTRACT_REVISION` | 18 | `src/contracts-core.ts` (re-exported by `src/contracts.ts`); unchanged by 1.0.0 and 1.1.0: neither the freeze, the checkpoint prompt, nor the builtin root changes a schema, event, identity, or handshake (1.1.0 adds optional view fields only) |
 | `WORKFLOW_RUNTIME_CONTRACT.features.checkpoints` | `true` | `src/contracts.ts` |
 | `WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows` | `true` (proposed `dynamic:<sha256>` sources run only after a human approval bound to their digest, manifest, host API, and import policy) | `src/contracts.ts` |
 | Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0 and 1.1.0) | `package.json` `peerDependencies` |
@@ -31,6 +31,7 @@ disagree.
 | Node.js in CI | 24.16.0 | `.github/workflows/ci.yml` |
 | `typebox` | `>=1.3.14 <2` | `package.json` `peerDependencies` |
 | Dynamic source transformer (`amaro`) | `1.2.0` (exact) | `package.json` `dependencies`, `DYNAMIC_TRANSFORMER_VERSION` |
+| Builtin workflow root | `workflows/` in the tarball, registered by the shipped extension as scope `builtin`, source `package`; trusted package code that loads without Pi project trust | `package.json` `files` and `pi.workflows`, `src/extension.ts`, `scripts/check-pack.mjs` |
 
 ## Required pi-subagent features
 

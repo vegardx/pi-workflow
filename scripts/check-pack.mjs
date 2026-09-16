@@ -64,6 +64,19 @@ try {
 		"skills/workflow-authoring/SKILL.md",
 		"skills/workflow-authoring/references/examples.md",
 		"skills/workflows/SKILL.md",
+		// The package-provided (`builtin` scope) definitions: shipped as
+		// `.workflow.ts` sources, loaded by the same jiti loader that reads a
+		// project definition, and resolved from their own location inside the
+		// installed package.
+		"workflows/plan-to-ship.workflow.ts",
+		// W3: the three agent definitions plan-to-ship names. pi-subagent
+		// discovers agents only from `<agentDir>/agents` and a trusted
+		// `<cwd>/.pi/agents`, so a builtin workflow cannot ship them into place;
+		// they travel as templates a person copies. Packing them is what makes
+		// "copy these three files" an instruction a consumer can follow.
+		"workflows/agents/implementer.md",
+		"workflows/agents/planner.md",
+		"workflows/agents/reviewer.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
 		"dist/checkpoint-executor.d.ts",
@@ -149,13 +162,18 @@ try {
 			}
 		}
 	}
-	// Release 1.0.0 (contract revision 18) adds dist/runtime/index.*,
-	// docs/qualification.md, and CHANGELOG.md: measured 145 entries and
-	// 2009 KiB unpacked when the comment was refreshed (revision 18 before the
-	// freeze: 125 entries and 1762 KiB; before that 100 entries and 1536 KiB).
-	// Bounds: 160 entries (10% headroom) and 2560 KiB (about 27% headroom;
-	// 2048 KiB would have left 39 KiB, less than one docs revision). amaro is
-	// a dependency and is not packed.
+	// Release 1.1.0 adds the skills/workflows operating skill,
+	// workflows/plan-to-ship.workflow.ts, and the three workflows/agents/*.md
+	// templates: measured 156 entries and 2182 KiB unpacked. Release 1.0.0
+	// (contract revision 18) added dist/runtime/index.*, docs/qualification.md,
+	// and CHANGELOG.md: 145 entries and 2009 KiB unpacked (revision 18 before
+	// the freeze: 125 entries and 1762 KiB; before that 100 entries and
+	// 1536 KiB).
+	// Bounds: 160 entries and 2560 KiB. The size still has about 17% headroom,
+	// but the entry count is down to 4 spare files after 1.1.0; the next
+	// release that ships more than a handful of new files raises the entry
+	// bound deliberately rather than by reflex. amaro is a dependency and is
+	// not packed.
 	if (workflow.entryCount > 160 || workflow.unpackedSize > 2560 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
@@ -324,6 +342,11 @@ if (
 	!/^---\\nname: workflows\\n/.test(operatingSkill)
 ) throw new Error("packed authoring and operating skills are not declared in the pi manifest");
 if (
+	!Array.isArray(manifest.pi?.workflows) ||
+	manifest.pi.workflows.length !== 1 ||
+	manifest.pi.workflows[0] !== "./workflows"
+) throw new Error("packed builtin workflow root is not declared in the pi manifest");
+if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piWorkflow.version !== manifest.version ||
 	compatibility.piWorkflow.version !== "1.1.0" ||
@@ -341,6 +364,58 @@ if (
 	compatibility.piSubagent.peerRange !== manifest.peerDependencies?.["@vegardx/pi-subagent"] ||
 	compatibility.piSubagent.peerRange !== subagentManifest.version
 ) throw new Error("packed compatibility matrix disagrees with the packed contracts");
+// F1 smoke: the packed extension registers the package's own workflows/ as a
+// builtin root, so workflow_list and workflow_validate reach the shipped
+// definition from an untrusted project, and the definition's
+// "@vegardx/pi-workflow" import resolves from its own location inside the
+// installed package.
+const path = (await import("node:path")).default;
+const builtinRoot = path.resolve("node_modules/@vegardx/pi-workflow/workflows");
+const tools = [];
+const hooks = new Map();
+extension.default({
+	events: { on() {}, emit() {} },
+	registerTool(tool) { tools.push(tool); },
+	registerCommand() {},
+	registerShortcut() {},
+	on(event, handler) { hooks.set(event, handler); },
+});
+const toolContext = { cwd: process.cwd(), isProjectTrusted: () => false, ui: { notify() {} } };
+const callTool = async (name, params) => {
+	const tool = tools.find((candidate) => candidate.name === name);
+	if (!tool) throw new Error("packed extension did not register " + name);
+	const result = await tool.execute(name, params, new AbortController().signal, undefined, toolContext);
+	return JSON.parse(result.content[0].text);
+};
+try {
+	const listed = await callTool("workflow_list", {});
+	const builtin = listed.find((entry) => entry.name === "plan-to-ship");
+	if (!builtin || builtin.scope !== "builtin" || builtin.source !== "package" || path.dirname(builtin.path) !== builtinRoot) {
+		throw new Error("packed workflow_list did not discover the builtin root: " + JSON.stringify(listed));
+	}
+	const validated = await callTool("workflow_validate", { ref: "plan-to-ship" });
+	if (validated.valid !== true || validated.workflow?.scope !== "builtin") {
+		throw new Error("packed workflow_validate refused the builtin definition: " + JSON.stringify(validated));
+	}
+	process.stdout.write("builtin workflow root: " + builtin.name + " (" + builtin.scope + "/" + builtin.source + ") discovered from the packed install without project trust\\n");
+} finally {
+	await hooks.get("session_shutdown")?.({ reason: "quit" }, toolContext);
+}
+// W3 smoke: the packed agent templates parse under the packed pi-subagent's
+// own discovery, so "copy these three files into <agentDir>/agents" is an
+// instruction that works against the tarball a consumer installed. The
+// workflow cannot ship them into place; only a person can.
+const packedAgents = await subagent.discoverAgents([
+	{ scope: "package", directory: path.resolve("node_modules/@vegardx/pi-workflow/workflows/agents"), trusted: true },
+]);
+for (const required of ["implementer", "planner", "reviewer"]) {
+	const agent = packedAgents.get(required);
+	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
+	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {
+		throw new Error("packed implementer template no longer covers the workflow's worktree request");
+	}
+}
+process.stdout.write("agent templates: " + [...packedAgents.keys()].sort().join(", ") + " parse from the packed install\\n");
 // Live smoke: the packed dist/dynamic/vm-host.js must resolve and boot the
 // packed dist/dynamic/worker.js (spec 12.3); the production manifest watchdog
 // (DYNAMIC_VM_MANIFEST_TIMEOUT_MS) bounds the boot.
