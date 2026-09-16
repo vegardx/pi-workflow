@@ -28,6 +28,12 @@ interface Compatibility {
 		version: string;
 		contractRevision: number;
 		features: { checkpoints: boolean; dynamicWorkflows: boolean };
+		api: {
+			version: string;
+			frozenSurfaces: string[];
+			entryPoints: Record<string, string>;
+			exportList: string;
+		};
 	};
 	piSubagent: {
 		package: string;
@@ -54,10 +60,10 @@ async function readJson<T>(relative: string): Promise<T> {
 }
 
 describe("package contract", () => {
-	it("ships one public runtime entry", async () => {
+	it("ships the frozen root, extension, and runtime entries", async () => {
 		const packageJson = await readJson<PackageJson>("../package.json");
 		expect(packageJson.name).toBe("@vegardx/pi-workflow");
-		expect(packageJson.version).toBe("0.1.0");
+		expect(packageJson.version).toBe("1.0.0");
 		expect(packageJson.private).not.toBe(true);
 		expect(packageJson.main).toBe("./dist/index.js");
 		expect(packageJson.types).toBe("./dist/index.d.ts");
@@ -79,9 +85,17 @@ describe("package contract", () => {
 			"0.10.0",
 		);
 		expect(packageJson.peerDependencies?.typebox).toBe(">=1.3.14 <2");
-		expect(packageJson.exports?.["."]).toEqual({
-			types: "./dist/index.d.ts",
-			import: "./dist/index.js",
+		expect(packageJson.exports).toEqual({
+			".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
+			"./extension": {
+				types: "./dist/extension.d.ts",
+				import: "./dist/extension.js",
+			},
+			"./runtime": {
+				types: "./dist/runtime/index.d.ts",
+				import: "./dist/runtime/index.js",
+			},
+			"./package.json": "./package.json",
 		});
 	});
 
@@ -107,31 +121,6 @@ describe("package contract", () => {
 				),
 			),
 		).resolves.toBeUndefined();
-	});
-
-	it("loads the public module", async () => {
-		const publicApi = await import("../src/index.js");
-		expect(publicApi.WORKFLOW_RUNTIME_CONTRACT.schema).toBe(
-			"pi-workflow-runtime",
-		);
-		expect(
-			publicApi.WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name),
-		).toEqual([
-			"workflow_list",
-			"workflow_validate",
-			"workflow_run",
-			"workflow_status",
-			"workflow_wait",
-			"workflow_stop",
-			"workflow_reconcile",
-			"workflow_runs",
-			"workflow_inspect",
-			"workflow_logs",
-			"workflow_invalidate",
-			"workflow_retry",
-			"workflow_resume",
-			"workflow_propose",
-		]);
 	});
 });
 
@@ -162,7 +151,27 @@ describe("compatibility matrix", () => {
 				checkpoints: WORKFLOW_RUNTIME_CONTRACT.features.checkpoints,
 				dynamicWorkflows: WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows,
 			},
+			api: {
+				version: "1.0.0",
+				frozenSurfaces: ["authoring", "service", "contract", "extension"],
+				entryPoints: {
+					".": "frozen",
+					"./extension": "frozen",
+					"./runtime": "unfrozen",
+				},
+				exportList: "test/fixtures/public-api/root-exports.json",
+			},
 		});
+		expect(compatibility.piWorkflow.version).toBe("1.0.0");
+		expect(compatibility.piWorkflow.api.version).toBe(packageJson.version);
+		await expect(
+			access(
+				new URL(
+					`../${compatibility.piWorkflow.api.exportList}`,
+					import.meta.url,
+				),
+			),
+		).resolves.toBeUndefined();
 		expect(WORKFLOW_CONTRACT_REVISION).toBe(18);
 		expect(compatibility.piWorkflow.features).toEqual({
 			checkpoints: true,
@@ -231,7 +240,99 @@ describe("compatibility matrix", () => {
 		expect(doc).toContain("| Linux x64 | Build-only |");
 		expect(doc).toContain(`\`${compatibility.piSubagent.ciCommit}\``);
 		expect(doc).toContain(
-			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} |`,
+			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION}`,
 		);
+	});
+});
+
+// B2 (1.0 API freeze): matrix rows for the api block and docs/compatibility.md.
+describe("compatibility matrix 1.0", () => {
+	interface CompatibilityApi {
+		piWorkflow: {
+			version: string;
+			api?: {
+				version: string;
+				frozenSurfaces: string[];
+				entryPoints: Record<string, string>;
+				exportList: string;
+			};
+		};
+		hosts: Array<{ platform: string; evidence: string[] }>;
+	}
+
+	it("records the API version, frozen surfaces, and entry-point status", async () => {
+		const compatibility = await readJson<CompatibilityApi>(
+			"../compatibility.json",
+		);
+		const packageJson = await readJson<PackageJson>("../package.json");
+		expect(compatibility.piWorkflow.version).toBe("1.0.0");
+		expect(compatibility.piWorkflow.api).toEqual({
+			version: "1.0.0",
+			frozenSurfaces: ["authoring", "service", "contract", "extension"],
+			entryPoints: {
+				".": "frozen",
+				"./extension": "frozen",
+				"./runtime": "unfrozen",
+			},
+			exportList: "test/fixtures/public-api/root-exports.json",
+		});
+		expect(compatibility.piWorkflow.api?.version).toBe(packageJson.version);
+		// Every entry point with a status is exported; ./package.json is the
+		// manifest and carries no status.
+		expect(
+			Object.keys(packageJson.exports ?? {}).filter(
+				(entry) => entry !== "./package.json",
+			),
+		).toEqual(Object.keys(compatibility.piWorkflow.api?.entryPoints ?? {}));
+		expect(packageJson.exports?.["./package.json"]).toBe("./package.json");
+		expect(packageJson).not.toHaveProperty("typesVersions");
+		const exportList = await readJson<string[]>(
+			`../${compatibility.piWorkflow.api?.exportList}`,
+		);
+		expect(exportList).toEqual([...exportList].sort());
+		expect(
+			compatibility.hosts.find((host) => host.platform === "macos-arm64")
+				?.evidence,
+		).toContain("docs/qualification.md");
+	});
+
+	it("states the 1.0.0 rows in docs/compatibility.md", async () => {
+		const compatibility = await readJson<CompatibilityApi>(
+			"../compatibility.json",
+		);
+		const rootExports = await readJson<string[]>(
+			"../test/fixtures/public-api/root-exports.json",
+		);
+		const runtimeExports = await readJson<string[]>(
+			"../test/fixtures/public-api/runtime-exports.json",
+		);
+		const doc = await readFile(
+			new URL("../docs/compatibility.md", import.meta.url),
+			"utf8",
+		);
+		expect(doc).toContain("| `@vegardx/pi-workflow` | 1.0.0 |");
+		expect(doc).toContain(
+			`| API version | ${compatibility.piWorkflow.api?.version} |`,
+		);
+		expect(doc).toContain(
+			`| Frozen surfaces | ${compatibility.piWorkflow.api?.frozenSurfaces.join(", ")} |`,
+		);
+		expect(doc).toContain(
+			"| Entry points | `.` frozen, `./extension` frozen, `./runtime` unfrozen",
+		);
+		expect(doc).toContain(
+			`| Pinned export lists | \`.\`: ${rootExports.length} value exports, \`./runtime\`: ${runtimeExports.length} value exports;`,
+		);
+		expect(doc).toContain(
+			"| TypeScript module resolution | `node16`, `nodenext`, or `bundler`",
+		);
+		expect(doc).toContain("no `typesVersions`");
+		expect(doc).toContain(
+			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); unchanged by 1.0.0`,
+		);
+		expect(doc).toContain(
+			"| Required `@vegardx/pi-subagent` | `0.10.0` (exact; unchanged by 1.0.0) |",
+		);
+		expect(doc).toContain("[`docs/qualification.md`](qualification.md)");
 	});
 });
