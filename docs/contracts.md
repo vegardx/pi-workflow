@@ -111,8 +111,10 @@ identity derivation and no `AgentTaskRequestSchema` field changes;
 `WorkflowRunRecordSchema` gains the optional `modelRouting`, which is
 revision-19 additive (every record written before it still validates, a reader
 that does not know the field ignores it, and nothing derives identity from it).
-The package ships a second builtin workflow, `deep-review`, from the same
-`workflows/` builtin root. No frozen export was removed, renamed, or retyped,
+The package ships two more builtin workflows, `deep-review` and `plan-review`,
+from the same `workflows/` builtin root; `plan-review` is the only name on
+`BUILTIN_HEADLESS_WORKFLOWS`, and declares no checkpoint, worktree or handoff.
+No frozen export was removed, renamed, or retyped,
 no returned union widened, and no tool name, parameter, or output schema
 changed.
 

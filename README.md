@@ -315,6 +315,16 @@ proposed through `workflow_propose`), failure semantics, invalidation, and the
 validate-run-inspect loop, with examples that a test loads through the real
 definition loader and through the dynamic manifest VM.
 
+Two short **reference** skills ship beside them, `plan-schema` and
+`workflow-components` under `skills/`, each a directory with its own `SKILL.md`
+because Pi discovers a skill only from a directory containing that file. They
+are tables, not prose: the pi-maestro plan document (deliverables, tasks, stage
+kinds, policy dials, the default stage list, and what a stored plan has already
+been validated for) and the component library (what each component lowers to,
+its key rule and refusals, the effort envelope, the shared `Finding`, and the
+compiled stage document). `plan-review` preloads both by name, and a preloaded
+skill costs a context entry rather than bytes, which is why they stay short.
+
 The companion `workflows` skill under `skills/workflows/` covers the other
 side: operating existing runs — the fourteen `workflow_*` tools and their
 bounds, the run statuses, why a parked run is surfaced to the human instead
@@ -483,6 +493,54 @@ lenses that reported. It is therefore declared optional and read through
 `ctx.settled`, and a run that loses a lens ends `completed-degraded` with the
 verdict, the findings and the coverage all committed — never failed.
 
+### `plan-review`
+
+`workflows/plan-review.workflow.ts` is the **blind reviewer**: the one
+definition a service consumer may start without a model turn, through
+`runBuiltin` and the runtime's own `BUILTIN_HEADLESS_WORKFLOWS` allowlist.
+
+```text
+provider.runBuiltin("plan-review", { plan, planDigest, intent, compiled, projection, effort })
+```
+
+`plan` is a pi-maestro plan document verbatim, `planDigest` its sha256,
+`intent` the human's one line (≤512), `compiled` the stage document
+`plan-to-ship` compiled it into (`CompiledStageDocumentSchema`), and
+`projection` the lease-free `project()` result — `{cost, totalTokens,
+childRuntimeMs, tasks, budget, fits}`. The output is `{verdict: "ready" |
+"gaps" | "blocked", findings (≤32), notes?}`, in the same shared `Finding`
+shape every reviewer here reports, with `patch` RFC 6902-shaped so accepting a
+finding is a mechanical apply against the stored plan followed by that
+document's own validation — never a re-prompt.
+
+**Blind means declared, not asked for.** The graph is exactly one read-only
+`plan-reviewer` with `contextMode: "fresh"` and **no context scopes**, so
+pi-subagent projects no `AGENTS.md` and no other project context file; the
+planning conversation and the session transcript are not reachable from a
+headless run at all. That is the point: a reviewer reached through the model
+would have read the conversation and would only ever agree with it. It preloads
+five short reference skills — `workflows`, `subagents`, `workflow-authoring`,
+`plan-schema`, and `workflow-components`.
+
+**No checkpoint, no worktree, no handoff.** That is what makes it legal on the
+allowlist, and it is a structural property rather than a promise:
+`headlessBuiltinViolations(definition, input)` dry-materializes the graph and
+names any of the three, and the test suite runs that against the shipped file
+at every effort. Nothing here writes, decides or parks — the findings go back
+to the human who asked, and every accept, dismissal and re-plan happens in
+pi-maestro.
+
+The verdict is **computed, not asserted**: the reviewer reports findings and
+its own verdict, and the definition takes the more severe of that verdict and
+the one the findings' severities imply. A blocking finding under a `ready`
+verdict is recorded as `blocked`, because the human's findings walk asks per
+blocking finding and would otherwise ask about nothing.
+
+One agent template, `plan-reviewer`, and its `contextScopes` is empty for the
+same reason the workflow's is: pi-subagent unions the agent's scopes with the
+request's, so a `project` scope in the template would hand the blind reviewer
+`AGENTS.md`.
+
 ## Component library
 
 `@vegardx/pi-workflow/components` is the library the builtins are assembled
@@ -490,7 +548,10 @@ from, and the one package subpath besides the root that the definition import
 gate accepts. It exports `gate` (a checkpoint plus the branch it decides),
 `envelope` (the `(effort, stage)` table that fixes a task's model, thinking
 level, and limits), `forEach` and `reviewFanOut` (bounded fan-out and its
-deterministic fan-in), and `verifyAndFix`.
+deterministic fan-in), and `verifyAndFix`. It also carries the two shapes the
+builtins share rather than copy: the `Finding` every reviewer reports, and
+`CompiledStageDocumentSchema` — the compiled stage document `plan-to-ship`
+produces and `plan-review` reads, so neither builtin has to import the other.
 
 ### `verifyAndFix`
 

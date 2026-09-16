@@ -9,9 +9,9 @@ surfaces described in
 ## Unreleased
 
 Additive since 2.0.0, so the next release is the minor 2.1.0: two new entry
-points — a component library and a service-provider seam — a second builtin
-workflow built out of the first, a model-routing port the host installs, and a
-support-task wiring fix in the extension. No frozen export, shape, schema,
+points — a component library and a service-provider seam — two more builtin
+workflows built out of the first, two short reference skills, a model-routing
+port the host installs, and a support-task wiring fix in the extension. No frozen export, shape, schema,
 message, or tool changed; `WORKFLOW_CONTRACT_REVISION` stays 19 and the
 required pi-subagent contract stays revision 7 (`0.11.0`).
 
@@ -37,6 +37,36 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
   (`envelope` for the effort dial, `reviewFanOut` for the graph), which is what
   makes it an executable example of the patterns rather than a second
   implementation of them.
+- **The builtin `plan-review` workflow.** `workflows/plan-review.workflow.ts`
+  and the `plan-reviewer` agent template it names: the **blind reviewer**, and
+  the one definition a service consumer may start without a model turn, through
+  `runBuiltin` and the frozen `BUILTIN_HEADLESS_WORKFLOWS` allowlist. In:
+  `{ plan, planDigest, intent, compiled, projection, effort }` — a pi-maestro
+  plan verbatim, the graph it compiled into, and the lease-free projection of
+  that graph. Out: `{ verdict: "ready" | "gaps" | "blocked", findings (≤32),
+  notes? }` in the shared `Finding` shape, with `patch` RFC 6902-shaped so
+  accepting a finding is a mechanical apply against the stored plan rather than
+  a re-prompt. The graph is exactly one read-only agent with
+  `contextMode: "fresh"` and **no context scopes**, so no `AGENTS.md` and no
+  project context file is projected into it — blindness is declared, not asked
+  for in prose, and a reviewer that had read the planning conversation would
+  only ever agree with it. **No checkpoint, no worktree and no handoff**, which
+  is what makes it legal on the allowlist; `headlessBuiltinViolations` checks
+  that structurally against the shipped file. The verdict is recomputed from the
+  findings' severities and the more severe of the two is recorded, so a blocking
+  finding can never be filed under `ready`.
+- **`CompiledStageDocumentSchema`,** exported from
+  `@vegardx/pi-workflow/components`. The compiled stage document — `{
+  deliverables: [{ id, stages }], effort, gates }` over the `implement`,
+  `verify-and-fix`, `review-fan-out` and `gate` kinds — shared by the compiler
+  that produces it and the blind reviewer that reads it, so neither builtin has
+  to import the other and neither carries a copy that can drift.
+- **Two reference skills, `plan-schema` and `workflow-components`.** Short
+  tables under `skills/`, each its own directory with a `SKILL.md` because Pi
+  discovers a skill only from a directory containing that file. They document
+  the pi-maestro plan document and the component library respectively, and
+  `plan-review` preloads both by name. A preloaded skill costs a context entry
+  rather than bytes, which is why they are tables and not prose.
 - **`@vegardx/pi-workflow/service-provider`.** A fifth entry point: the seam
   another Pi extension in the same process acquires the workflow runtime
   through, structurally identical to pi-subagent's — a lazy, frozen
