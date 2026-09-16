@@ -73,15 +73,19 @@ import { WorkflowComponentError } from "./errors.js";
  * - `maxRounds: 1` — `verify-1`. A failing check is evidence at the gate, not
  *   a fix round.
  * - `maxRounds: 2` — `verify-1`, `fix-1`, `verify-2`.
+ * - `maxRounds: 3` — `verify-1`, `fix-1`, `verify-2`, `fix-2`, `verify-3`.
  *
- * The cap is 2 (spec §2.3 and §7 R6), and it is now measured rather than
- * assumed: `docs/research.md` "Replay cost of a bounded loop", with
- * `test/replay-cost.test.ts` behind it, finds a bounded loop affordable at
- * this size — a worst-case resume of a few seconds against agents that cost
- * minutes — and an unbounded `loopUntil` not, which is why that component
- * stays deferred. `maxRounds` counts **verify** rounds, so a cap of 2 admits
- * one fix round; the measurement would allow another, and raising the cap is
- * a decision for the spec rather than for this module.
+ * The cap is 3 VERIFY rounds, which is 2 FIX rounds — the plan vocabulary's
+ * own `maxFixRounds: 0 | 1 | 2` (spec §2.1), compiled as `maxRounds =
+ * maxFixRounds + 1` by `workflows/plan-to-ship.workflow.ts` so that a fix is
+ * never left unchecked. It is measured rather than assumed: `docs/research.md`
+ * "Replay cost of a bounded loop", with `test/replay-cost.test.ts` behind it,
+ * finds **3 the highest cap that is still comfortable** (a worst-case resume of
+ * 6.5 s at 25 % of the projection bound, against agents that cost minutes) and
+ * an unbounded `loopUntil` not affordable at all, which is why that component
+ * stays deferred. Past 4 the resume cost doubles every two rounds while the
+ * marginal value of another fix round falls, so raising the cap again is a
+ * decision for the spec and for a new measurement, not for this module.
  *
  * ## The replay cost this cap is paying for
  *
@@ -149,8 +153,13 @@ import { WorkflowComponentError } from "./errors.js";
  * otherwise.
  */
 
-/** The hard cap on verify rounds; spec §2.3 and §7 R6. */
-export const MAX_VERIFY_ROUNDS = 2;
+/**
+ * The hard cap on verify rounds; spec §2.3 and §7 R6, widened to 3 by the
+ * wave-2 decision of 2026-09-16. Three verify rounds are two fix rounds, which
+ * is the plan vocabulary's own `maxFixRounds: 0 | 1 | 2`, and `docs/research.md`
+ * measures 3 as the highest cap that is still comfortable.
+ */
+export const MAX_VERIFY_ROUNDS = 3;
 /** Rounds declared when the caller names none. */
 export const DEFAULT_VERIFY_ROUNDS = 1;
 /** The longest check tail a report may carry, as `plan-to-ship` already bounds it. */
@@ -238,8 +247,8 @@ export interface VerifyAndFixOptions<TFixSchema extends TSchema> {
 	readonly check: VerifyAndFixCheck;
 	/** The effort dial; every model and limit in the loop is a lookup on it. */
 	readonly effort: Effort;
-	/** Verify rounds, 0..2. Default 1. At most `maxRounds - 1` fixers follow. */
-	readonly maxRounds?: 0 | 1 | 2;
+	/** Verify rounds, 0..3. Default 1. At most `maxRounds - 1` fixers follow. */
+	readonly maxRounds?: 0 | 1 | 2 | 3;
 	/** `"thinking"` runs a fixer one rung up the ladder. Default `"none"`. */
 	readonly escalate?: "thinking" | "none";
 	/** The verifier of round `n`; `previous` is the round before it, if any. */
@@ -354,7 +363,7 @@ function mergeInputs(
  *
  * Refuses at declaration when:
  * - `key` is not a task key, or a derived round key would not be one;
- * - `maxRounds` is outside 0..2 (the cap the replay cost pays for);
+ * - `maxRounds` is outside 0..3 (the cap the replay cost pays for);
  * - `check.command` is missing or blank - a loop with nothing to run is not a
  *   verification, and its "green" would be a guess;
  * - `implementation` is not a worktree task handle, so there is no handoff to

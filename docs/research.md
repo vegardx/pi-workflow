@@ -238,6 +238,16 @@ projection bound on fix rounds nobody reviewed. There is no measurement-driven
 reason to raise the cap above 2 today; the spec's default of 0 at `cheap`,
 1 at `standard` and 2 at `deep` is on the right side of every curve.
 
+**Two units, one bound.** The rows above count FIX rounds, which is the plan
+vocabulary's `maxFixRounds`; `verifyAndFix.maxRounds` counts VERIFY rounds, and
+`plan-to-ship` compiles one into the other as `maxRounds = maxFixRounds + 1` so
+that a fix is never left unchecked. The component's cap of **3 verify rounds is
+this table's `maxFixRounds: 2` row** — the 4.4 s resume at 21 % of the bound,
+not the 6.5 s row — and the highest cap the measurement calls comfortable, 3
+fix rounds, is still the one nobody is asking for. Widening `maxRounds` to
+`0 | 1 | 2 | 3` therefore buys the plan vocabulary its full range without
+moving past a single number measured here.
+
 ### Unresolved (spec §7 Q1)
 
 Whether AgwaB's `compiled.json` binds to the spec digest on resume is still
