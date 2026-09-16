@@ -116,6 +116,7 @@ when the package deviates from them.
 - [Compatibility matrix](docs/compatibility.md)
 - [Changelog](CHANGELOG.md)
 - [Workflow authoring skill](skills/workflow-authoring/SKILL.md)
+- [Workflow operating skill](skills/workflows/SKILL.md)
 - [1.0.0 qualification](docs/qualification.md)
 - [macOS arm64 Phase 1 qualification](docs/qualification/macos-arm64-phase1.md)
 - [macOS arm64 artifact pipeline qualification](docs/qualification/macos-arm64-artifact-pipeline.md)
@@ -238,7 +239,7 @@ TUI a two-line `pi-workflow` widget below the editor shows
 applies, marks runs leased by another Pi process as `(n elsewhere)`, refreshes
 from `subscribe`, and polls only while nonterminal runs exist.
 
-## Authoring skill
+## Bundled skills
 
 The package ships the model-invoked `workflow-authoring` skill under
 `skills/` (declared through `pi.skills`). It documents definition roots and
@@ -248,6 +249,13 @@ tasks, nested workflows, checkpoints, dynamic workflows (the same source
 proposed through `workflow_propose`), failure semantics, invalidation, and the
 validate-run-inspect loop, with examples that a test loads through the real
 definition loader and through the dynamic manifest VM.
+
+The companion `workflows` skill under `skills/workflows/` covers the other
+side: operating existing runs — the fourteen `workflow_*` tools and their
+bounds, the run statuses, why a parked run is surfaced to the human instead
+of polled, the human-only approval and decision acts, the `/workflow` command
+grammar, and the `availableActions` legality table — pinned to the runtime in
+both directions by `test/skill-operating.test.ts`.
 
 ## Support tasks
 

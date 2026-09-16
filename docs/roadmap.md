@@ -147,6 +147,10 @@ Delivered:
   proposal tool `workflow_propose`;
 - workflow authoring skill shipped under `skills/` and declared through
   `pi.skills`, with loader-tested examples;
+- workflow operating skill (`skills/workflows/`) shipped alongside it,
+  describing the tool table, the `/workflow` surface, and the recovery
+  legality rules, pinned bidirectionally to the runtime by
+  `test/skill-operating.test.ts`;
 - compatibility matrix (`compatibility.json`, `docs/compatibility.md`) checked
   against the manifest, the contract constants, CI, and the packed
   pi-subagent contract;
