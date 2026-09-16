@@ -115,7 +115,7 @@ function records(
 	];
 	return all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 18,
+		contractRevision: 19,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-08-20T00:00:00.000Z",
@@ -855,6 +855,75 @@ describe("worktree agent task materialization", () => {
 		expect(projected.tasks[first.id]?.task).toEqual(first);
 		expect(projected.tasks[second.id]?.task).toEqual(second);
 		expect(projected.tasks[third.id]?.task).toEqual(third);
+	});
+
+	// Revision 19: the guest memory grant. The ceiling lives in the agent
+	// definition, which the workflow cannot read; the materializer only proves
+	// the value is well formed and that it reaches the spec unchanged.
+	it("admits a well-formed memoryBytes and carries it into task identity", () => {
+		const runtime = materializer();
+		const granted = runtime.agent("granted", {
+			...request(),
+			memoryBytes: 2 * 1024 * 1024 * 1024,
+		});
+		const omitted = runtime.agent("omitted", request());
+		const commit = runtime.closeEpoch("final", [granted, omitted]);
+		const [withGrant, withoutGrant] = commit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		);
+		if (
+			withGrant?.spec.kind !== "agent" ||
+			withoutGrant?.spec.kind !== "agent"
+		) {
+			throw new Error("missing agent declarations");
+		}
+		expect(withGrant.spec.request.memoryBytes).toBe(2 * 1024 * 1024 * 1024);
+		// Absent, not undefined: the lowered request must not carry the key.
+		expect(Object.hasOwn(withoutGrant.spec.request, "memoryBytes")).toBe(false);
+		// The grant is part of the request, so it is part of task identity.
+		// (`taskId` is derived from the key; the request digest is
+		// `spec.identitySha256`, which is what invalidation compares.)
+		expect(withGrant.spec.identitySha256).not.toBe(
+			withoutGrant.spec.identitySha256,
+		);
+		const other = materializer();
+		const raised = other.agent("granted", {
+			...request(),
+			memoryBytes: 4 * 1024 * 1024 * 1024,
+		});
+		const [rebuilt] = other
+			.closeEpoch("final", [raised])
+			.events.flatMap((event) =>
+				event.type === "task-declared" ? [event.data.task] : [],
+			);
+		expect(rebuilt?.spec.identitySha256).not.toBe(
+			withGrant.spec.identitySha256,
+		);
+	});
+
+	it("rejects a memoryBytes that is not a 64 MiB multiple within 4 GiB", () => {
+		const message =
+			"agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB";
+		for (const memoryBytes of [
+			0,
+			-(64 * 1024 * 1024),
+			100 * 1024 * 1024,
+			5 * 1024 * 1024 * 1024,
+			64 * 1024 * 1024 + 1,
+			1.5 * 64 * 1024 * 1024,
+		]) {
+			const runtime = materializer();
+			expect(() =>
+				runtime.agent("memory", { ...request(), memoryBytes }),
+			).toThrow(message);
+		}
+		// The bounds themselves are admitted.
+		for (const memoryBytes of [64 * 1024 * 1024, 4 * 1024 * 1024 * 1024]) {
+			const runtime = materializer();
+			expect(() =>
+				runtime.agent("memory", { ...request(), memoryBytes }),
+			).not.toThrow();
+		}
 	});
 
 	it("rejects the fixed worktree and handoff request errors", () => {

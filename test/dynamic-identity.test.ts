@@ -52,7 +52,7 @@ import { installedDynamicTransformerVersion } from "../src/dynamic/transformer-i
  * `DYNAMIC_REF_PATTERN`.
  */
 const HOST_API_SHA256 =
-	"2fdeca257a809491fda574ff75f275b195dc770f6310aed9046142288c326f54";
+	"7bfd62636553197b4897d475e89ddf7e5cb0f0217bee0c1de0a092151d199eba";
 
 /** `deriveDynamicImportPolicySha256([])`: builtin modules only. */
 const IMPORT_POLICY_EMPTY_SHA256 =

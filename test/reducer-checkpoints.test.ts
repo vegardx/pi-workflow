@@ -164,7 +164,7 @@ function records(steps: readonly Step[]): WorkflowJournalEvent[] {
 		if ("at" in step) timestamp = step.at;
 		return {
 			schema: "pi-workflow-event",
-			contractRevision: 18,
+			contractRevision: 19,
 			sequence: index + 1,
 			eventId: `event-${index + 1}`,
 			timestamp,

@@ -242,7 +242,7 @@ function scripted(options: { readonly failReview?: boolean } = {}) {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
-				memoryBytes: 536_870_912,
+				memoryBytes: request.memoryBytes ?? 536_870_912,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: request.limits.workspaceWriteBytes,
 			},
@@ -320,7 +320,7 @@ function scripted(options: { readonly failReview?: boolean } = {}) {
 			handoff: worktree
 				? {
 						schema: "pi-subagent-worktree",
-						contractRevision: 6,
+						contractRevision: 7,
 						runId,
 						attemptId: child.attemptId,
 						repositoryRoot: "/private/repo",
@@ -801,6 +801,45 @@ describe("plan-to-ship: the input contract", () => {
 	});
 });
 
+describe("plan-to-ship: the memory dial", () => {
+	it.each([
+		["cheap", 1 * 1024 * 1024 * 1024],
+		["standard", 2 * 1024 * 1024 * 1024],
+		["deep", 4 * 1024 * 1024 * 1024],
+	] as const)(
+		"asks for %s memory on every implement task and says so in the instructions",
+		async (effort, memoryBytes) => {
+			const delegated = scripted();
+			const service = await serviceFor(delegated);
+			const run = await service.run("plan-to-ship", input({ effort }));
+			const gate = await park(service, run.runId, "approve-plan");
+			await decide(service, gate, "approve-plan", { proceed: true });
+			const ship = await park(service, run.runId, "ship");
+			await decide(service, ship, "ship", { ship: true });
+			await bounded(service.wait(run.runId), "wait");
+
+			const implementers = delegated.requests.filter(
+				(request) => request.agent === "implementer",
+			);
+			expect(implementers.length).toBeGreaterThan(0);
+			for (const request of implementers) {
+				expect(request.memoryBytes).toBe(memoryBytes);
+				// The agent is told the same number it was granted; a fixed
+				// "512 MiB" line would make it misreport a killed install.
+				const said = request.task.instructions.filter((line) =>
+					line.includes(`${memoryBytes / 1024 ** 3} GiB of memory`),
+				);
+				expect(said).toHaveLength(1);
+			}
+			// Read-only stages never ask for a grant; they take the agent ceiling.
+			for (const request of delegated.requests) {
+				if (request.agent === "implementer") continue;
+				expect("memoryBytes" in request).toBe(false);
+			}
+		},
+	);
+});
+
 describe("plan-to-ship: the agent templates", () => {
 	it("parses all three through pi-subagent's own discovery", async () => {
 		const agents = await discoverAgents([
@@ -826,6 +865,9 @@ describe("plan-to-ship: the agent templates", () => {
 		expect(
 			implementer?.limitCeiling.workspaceWriteBytes,
 		).toBeGreaterThanOrEqual(W1.workspaceWriteBytes);
+		// Revision 19: the raised memory ceiling, which the deep column spends
+		// in full. It is a ceiling, so it must be at least the deepest request.
+		expect(implementer?.memoryCeilingBytes).toBe(4 * 1024 * 1024 * 1024);
 		expect(agents.get("planner")?.workspaceModes).toEqual(["read-only"]);
 		expect(agents.get("reviewer")?.workspaceModes).toEqual(["read-only"]);
 	});
@@ -864,6 +906,12 @@ describe("plan-to-ship: the agent templates", () => {
 			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
 				request.limits.cumulativeRuntimeMs,
 			);
+			// A request may narrow the agent's memory ceiling, never widen it.
+			if (request.memoryBytes !== undefined) {
+				expect(request.memoryBytes).toBeLessThanOrEqual(
+					agent.memoryCeilingBytes,
+				);
+			}
 			for (const key of Object.keys(request.limits) as Array<
 				keyof typeof request.limits
 			>) {

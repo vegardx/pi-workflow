@@ -226,7 +226,7 @@ function agentProvider() {
 					mountPolicySha256: "a".repeat(64),
 					networkPolicySha256: "a".repeat(64),
 					capacityPolicySha256: "a".repeat(64),
-					memoryBytes: 536870912,
+					memoryBytes: request.memoryBytes ?? 536_870_912,
 					guestDiskBytes: 1024,
 					workspaceWriteBytes: 0,
 				},

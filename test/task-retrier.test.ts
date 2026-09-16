@@ -365,6 +365,42 @@ describe("workflow task retrier", () => {
 			}
 		});
 
+		// Revision 19 regression: pi-subagent's `workspace-budget` is a declared
+		// bound, classified `retry: "never"` with workspace origin. A retry would
+		// hit the same bound with the same budget, so the retrier must decline it
+		// no matter what the task's retry policy says.
+		it("does not retry a workspace-budget failure", async () => {
+			const budgetFailure: RunResult = {
+				...failedResult("never"),
+				failure: {
+					code: "workspace-budget",
+					origin: "workspace",
+					retry: "never",
+					message: "workspace write budget exhausted",
+					guidance: "Launch a new run with a larger budget.",
+				},
+			};
+			for (const policies of [
+				{},
+				{ retry: { attempts: 3, on: ["backoff", "manual"] as const } },
+				{
+					retry: { attempts: 3, on: ["backoff", "manual"] as const },
+					resume: { attempts: 3 },
+				},
+			]) {
+				const { journal, taskId } = await fixture(budgetFailure, policies);
+				const ownerClient = client();
+				const before = await eventCount(journal);
+				await expect(
+					retrier(journal, ownerClient).consider(taskId),
+				).resolves.toEqual({ kind: "none" });
+				// No retry intent is journaled, so no attempt is ever owed.
+				expect(await eventCount(journal)).toBe(before);
+				expect(ownerClient.retry).not.toHaveBeenCalled();
+				expect(ownerClient.resume).not.toHaveBeenCalled();
+			}
+		});
+
 		it("honours retry.on for manual failures", async () => {
 			const backoffOnly = await fixture(failedResult("manual"), {
 				retry: { attempts: 1, on: ["backoff"] },

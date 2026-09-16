@@ -981,7 +981,7 @@ describe("dynamic proposal store", () => {
 		);
 		await writeFile(
 			proposalPath,
-			canonicalDynamicDocument({ ...record, contractRevision: 17 }),
+			canonicalDynamicDocument({ ...record, contractRevision: 18 }),
 		);
 		await expect(store.read(sha)).rejects.toThrow(
 			"invalid dynamic workflow proposal record",

@@ -101,7 +101,7 @@ describe("workflow authoring skill", () => {
 		expect(skill).toContain("references/examples.md");
 		const unavailable = skill
 			.match(
-				/Not available in revision 18:([\s\S]*?)\. Do not author against/,
+				/Not available in revision 19:([\s\S]*?)\. Do not author against/,
 			)?.[1]
 			?.replace(/\s+/g, " ");
 		if (!unavailable) throw new Error("no unavailable-API statement");
@@ -130,6 +130,13 @@ describe("workflow authoring skill", () => {
 		]) {
 			expect(skill).toContain(message);
 		}
+		// Revision 19: the guest memory grant and the bound that is never retried.
+		expect(skill).toContain("memory request exceeds agent ceiling");
+		expect(skill).toContain(
+			"agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB",
+		);
+		expect(skill).toContain("| `memoryBytes` |");
+		expect(skill).toContain("`workspace-budget`");
 		expect(skill).toContain(
 			"a determinism and API boundary, not an OS security boundary",
 		);
@@ -308,7 +315,7 @@ describe("workflow authoring skill", () => {
 		await expect(
 			discoverWorkflows({ ...project, projectTrusted: true }),
 		).rejects.toThrow(
-			"workflow import node:fs is not identity-bound by contract revision 18",
+			"workflow import node:fs is not identity-bound by contract revision 19",
 		);
 	});
 });

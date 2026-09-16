@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import {
+	canonicalSha256,
 	HANDOFF_EXPORT_MEDIA_TYPE,
 	SUBAGENT_RUNTIME_CONTRACT,
 } from "@vegardx/pi-subagent";
@@ -31,6 +32,7 @@ import {
 	TaskExecutionRecordSchema,
 	TaskExecutionTerminalEvidenceSchema,
 	WORKFLOW_CONTRACT_REVISION,
+	WORKFLOW_HANDOFF_FORMAT,
 	WORKFLOW_HANDOFF_FORMAT_SHA256,
 	WORKFLOW_RUNTIME_CONTRACT,
 	WorkflowArtifactOutputSchema,
@@ -143,9 +145,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 18 and rejects revision 17", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(18);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(18);
+	it("publishes revision 19 and rejects revision 18", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(19);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(19);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -160,7 +162,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 18,
+			contractRevision: 19,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -175,12 +177,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 17,
+				contractRevision: 18,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 18,
+			contractRevision: 19,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -204,9 +206,88 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 17,
+				contractRevision: 18,
 			}),
 		).toBe(false);
+		// The persisted-state claim in docs/compatibility.md and
+		// docs/acceptance.md: every earlier revision is refused, not just 18,
+		// and no migration turns one into a revision-19 record.
+		for (let revision = 1; revision <= 18; revision += 1) {
+			expect(
+				Value.Check(WorkflowJournalEventSchema, {
+					...event,
+					contractRevision: revision,
+				}),
+			).toBe(false);
+			expect(
+				Value.Check(WorkflowRunSnapshotSchema, {
+					...snapshot,
+					contractRevision: revision,
+				}),
+			).toBe(false);
+		}
+	});
+
+	// Revision 19: the optional guest memory grant on the agent task request.
+	it("admits an optional memoryBytes bounded by pi-subagent's schema", () => {
+		const base = {
+			agent: "researcher",
+			task: { goal: "Answer", context: [], instructions: ["Report."] },
+			contextMode: "fresh",
+			tools: [],
+			preloadSkills: [],
+			contextScopes: ["project"],
+			workspace: { mode: "read-only", cwd: "/repo" },
+			outputSchema: { type: "object" },
+			limits: {
+				cumulativeRuntimeMs: 300_000,
+				attemptTimeoutMs: 300_000,
+				cost: 1,
+				outputBytes: 1024,
+				workspaceWriteBytes: 0,
+				retries: 0,
+				resumes: 0,
+			},
+		};
+		// Optional: the field may be absent entirely.
+		expect(Value.Check(AgentTaskRequestSchema, base)).toBe(true);
+		for (const memoryBytes of [
+			64 * 1024 * 1024,
+			512 * 1024 * 1024,
+			4 * 1024 * 1024 * 1024,
+		]) {
+			expect(
+				Value.Check(AgentTaskRequestSchema, { ...base, memoryBytes }),
+			).toBe(true);
+		}
+		for (const memoryBytes of [
+			0,
+			-(64 * 1024 * 1024),
+			32 * 1024 * 1024,
+			100 * 1024 * 1024,
+			4 * 1024 * 1024 * 1024 + 64 * 1024 * 1024,
+			"512MiB",
+		]) {
+			expect(
+				Value.Check(AgentTaskRequestSchema, { ...base, memoryBytes }),
+			).toBe(false);
+		}
+	});
+
+	it("binds the handoff format digest to pi-subagent revision 7", () => {
+		expect(WORKFLOW_HANDOFF_FORMAT).toEqual({
+			format: "git-format-patch",
+			mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+			revision: 7,
+		});
+		expect(WORKFLOW_HANDOFF_FORMAT_SHA256).toBe(
+			canonicalSha256(WORKFLOW_HANDOFF_FORMAT),
+		);
+		// The revision is an input, so a revision-18 handoff artifact's
+		// schemaSha256 does not verify here.
+		expect(WORKFLOW_HANDOFF_FORMAT_SHA256).not.toBe(
+			canonicalSha256({ ...WORKFLOW_HANDOFF_FORMAT, revision: 6 }),
+		);
 	});
 
 	it("publishes the attempt features, policies, and evidence ordinal", () => {
@@ -715,26 +796,40 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 	});
 
-	it("requires pi-subagent revision 6 with handoff export", () => {
-		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(6);
+	it("requires pi-subagent revision 7 with handoff export, the memory ceiling, and budget refusal", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(7);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.handoffExport,
 		).toBe(true);
 		expect(
-			isCompatibleSubagentContract({
-				...SUBAGENT_RUNTIME_CONTRACT,
-				contractRevision: 5,
-			}),
-		).toBe(false);
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.vmMemoryCeiling,
+		).toBe(true);
+		expect(
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features
+				.workspaceBudgetRefusal,
+		).toBe(true);
+		expect(isCompatibleSubagentContract(SUBAGENT_RUNTIME_CONTRACT)).toBe(true);
 		expect(
 			isCompatibleSubagentContract({
 				...SUBAGENT_RUNTIME_CONTRACT,
-				features: {
-					...SUBAGENT_RUNTIME_CONTRACT.features,
-					handoffExport: false,
-				},
+				contractRevision: 6,
 			}),
 		).toBe(false);
+		for (const feature of [
+			"handoffExport",
+			"vmMemoryCeiling",
+			"workspaceBudgetRefusal",
+		] as const) {
+			expect(
+				isCompatibleSubagentContract({
+					...SUBAGENT_RUNTIME_CONTRACT,
+					features: {
+						...SUBAGENT_RUNTIME_CONTRACT.features,
+						[feature]: false,
+					},
+				}),
+			).toBe(false);
+		}
 	});
 
 	it("publishes the handoff artifact output, evidence, and descriptor", () => {
