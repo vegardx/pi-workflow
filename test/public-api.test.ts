@@ -36,6 +36,7 @@ const WORKFLOW_SERVICE_METHODS = [
 	"listRuns",
 	"logs",
 	"previewInvalidation",
+	"project",
 	"proposals",
 	"propose",
 	"reconcile",
@@ -127,6 +128,13 @@ const PACKAGE_EXPORTS = {
 	"./components": {
 		types: "./dist/components/index.d.ts",
 		import: "./dist/components/index.js",
+	},
+	// W1-PROVIDER: the service-provider seam. A fifth built entry, additive
+	// under the freeze: it re-exports only view types, so neither fixture
+	// above moves.
+	"./service-provider": {
+		types: "./dist/service-provider.d.ts",
+		import: "./dist/service-provider.js",
 	},
 	"./package.json": "./package.json",
 } as const;
@@ -228,7 +236,7 @@ describe("public API export lists", () => {
 		const actual = exportNames(root);
 		expect(diff(actual, pinned)).toEqual({ added: [], removed: [] });
 		expect(actual).toEqual(pinned);
-		expect(pinned).toHaveLength(182);
+		expect(pinned).toHaveLength(184);
 	});
 
 	it("pins the runtime entry to runtime-exports.json", async () => {
@@ -236,7 +244,7 @@ describe("public API export lists", () => {
 		const actual = exportNames(runtime);
 		expect(diff(actual, pinned)).toEqual({ added: [], removed: [] });
 		expect(actual).toEqual(pinned);
-		expect(pinned).toHaveLength(127);
+		expect(pinned).toHaveLength(135);
 	});
 
 	it("exports every name from exactly one entry point", async () => {
@@ -293,7 +301,7 @@ describe("frozen service surface", () => {
 		});
 		try {
 			expect(methodNames(service)).toEqual([...WORKFLOW_SERVICE_METHODS]);
-			expect(WORKFLOW_SERVICE_METHODS).toHaveLength(23);
+			expect(WORKFLOW_SERVICE_METHODS).toHaveLength(24);
 		} finally {
 			await service.shutdown();
 			await rm(base, { recursive: true, force: true });
@@ -404,6 +412,7 @@ describe("package entry points", () => {
 			"./extension",
 			"./runtime",
 			"./components",
+			"./service-provider",
 			"./package.json",
 		]);
 		expect(packageJson.main).toBe(PACKAGE_EXPORTS["."].import);
@@ -472,6 +481,7 @@ describe("package entry points", () => {
 			"./extension": "frozen",
 			"./runtime": "unfrozen",
 			"./components": "unfrozen",
+			"./service-provider": "unfrozen",
 		});
 		expect(Object.keys(api.entryPoints)).toEqual(
 			Object.keys(PACKAGE_EXPORTS).filter((key) => key !== "./package.json"),

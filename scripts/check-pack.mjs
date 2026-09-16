@@ -69,6 +69,7 @@ try {
 		// project definition, and resolved from their own location inside the
 		// installed package.
 		"workflows/plan-to-ship.workflow.ts",
+		"workflows/deep-review.workflow.ts",
 		// W3: the three agent definitions plan-to-ship names. pi-subagent
 		// discovers agents only from `<agentDir>/agents` and a trusted
 		// `<cwd>/.pi/agents`, so a builtin workflow cannot ship them into place;
@@ -77,6 +78,7 @@ try {
 		"workflows/agents/implementer.md",
 		"workflows/agents/planner.md",
 		"workflows/agents/reviewer.md",
+		"workflows/agents/lens-reviewer.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
 		"dist/checkpoint-executor.d.ts",
@@ -126,6 +128,8 @@ try {
 		// W0-COMP-A: the component library's own entry point.
 		"dist/components/index.d.ts",
 		"dist/components/index.js",
+		"dist/service-provider.d.ts",
+		"dist/service-provider.js",
 		"dist/support-executor.d.ts",
 		"dist/support-executor.js",
 		"dist/support.d.ts",
@@ -215,6 +219,7 @@ try {
 const workflow = await import("@vegardx/pi-workflow");
 const runtime = await import("@vegardx/pi-workflow/runtime");
 const components = await import("@vegardx/pi-workflow/components");
+const workflowProvider = await import("@vegardx/pi-workflow/service-provider");
 const extension = await import("@vegardx/pi-workflow/extension");
 const subagent = await import("@vegardx/pi-subagent");
 const provider = await import("@vegardx/pi-subagent/service-provider");
@@ -245,12 +250,29 @@ if (typeof components.gate !== "function" || typeof components.envelope !== "fun
 }
 const sharedComponents = componentNames.filter((name) => pinned.root.actual.includes(name) || pinned.runtime.actual.includes(name));
 if (sharedComponents.length > 0) throw new Error("./components may not repeat a pinned export: " + sharedComponents.join(", "));
-for (const deep of ["@vegardx/pi-workflow/dist/index.js", "@vegardx/pi-workflow/dist/reducer.js", "@vegardx/pi-workflow/dist/runtime/index.js", "@vegardx/pi-workflow/runtime/index.js", "@vegardx/pi-workflow/dist/components/index.js", "@vegardx/pi-workflow/components/index.js", "@vegardx/pi-workflow/compatibility.json"]) {
+// W1-PROVIDER: the fifth entry carries the seam, the allowlist is frozen, and
+// it repeats no pinned export. Its own list is not pinned; ./service-provider
+// is unfrozen.
+const providerNames = Object.keys(workflowProvider).sort();
+if (
+	typeof workflowProvider.registerWorkflowServiceProvider !== "function" ||
+	typeof workflowProvider.acquireWorkflowService !== "function" ||
+	typeof workflowProvider.isCompatibleWorkflowProvider !== "function" ||
+	typeof workflowProvider.headlessBuiltinViolations !== "function" ||
+	typeof workflowProvider.WorkflowServiceProviderError !== "function" ||
+	!Object.isFrozen(workflowProvider.BUILTIN_HEADLESS_WORKFLOWS) ||
+	workflowProvider.BUILTIN_HEADLESS_WORKFLOWS.join(",") !== "plan-review"
+) {
+	throw new Error("packed ./service-provider entry does not export the provider seam");
+}
+const sharedProvider = providerNames.filter((name) => pinned.root.actual.includes(name) || pinned.runtime.actual.includes(name) || componentNames.includes(name));
+if (sharedProvider.length > 0) throw new Error("./service-provider may not repeat a pinned export: " + sharedProvider.join(", "));
+for (const deep of ["@vegardx/pi-workflow/dist/index.js", "@vegardx/pi-workflow/dist/reducer.js", "@vegardx/pi-workflow/dist/runtime/index.js", "@vegardx/pi-workflow/runtime/index.js", "@vegardx/pi-workflow/dist/components/index.js", "@vegardx/pi-workflow/components/index.js", "@vegardx/pi-workflow/dist/service-provider.js", "@vegardx/pi-workflow/compatibility.json"]) {
 	let code = "resolved";
 	try { await import(deep); } catch (error) { code = error?.code ?? String(error); }
 	if (code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw new Error("deep import " + deep + " must reject with ERR_PACKAGE_PATH_NOT_EXPORTED, got " + code);
 }
-process.stdout.write("packed exports: root " + pinned.root.actual.length + ", runtime " + pinned.runtime.actual.length + ", components " + componentNames.length + ", disjoint\\n");
+process.stdout.write("packed exports: root " + pinned.root.actual.length + ", runtime " + pinned.runtime.actual.length + ", components " + componentNames.length + ", service-provider " + providerNames.length + ", disjoint\\n");
 const compatibility = JSON.parse(await readFile("node_modules/@vegardx/pi-workflow/compatibility.json", "utf8"));
 const subagentManifest = JSON.parse(await readFile("node_modules/@vegardx/pi-subagent/package.json", "utf8"));
 const skill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflow-authoring/SKILL.md", "utf8");
@@ -370,7 +392,7 @@ if (
 	compatibility.piWorkflow.version !== "2.0.0" ||
 	compatibility.piWorkflow.api?.version !== "2.0.0" ||
 	JSON.stringify(compatibility.piWorkflow.api.frozenSurfaces) !== JSON.stringify(["authoring", "service", "contract", "extension"]) ||
-	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen", "./components": "unfrozen" }) ||
+	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen", "./components": "unfrozen", "./service-provider": "unfrozen" }) ||
 	compatibility.piWorkflow.api.exportList !== ${JSON.stringify(rootExportList)} ||
 	!compatibility.hosts?.find((host) => host.platform === "macos-arm64")?.evidence?.includes(${JSON.stringify(qualificationNote)}) ||
 	compatibility.piWorkflow.contractRevision !== workflow.WORKFLOW_CONTRACT_REVISION ||
@@ -413,9 +435,11 @@ try {
 	if (!builtin || builtin.scope !== "builtin" || builtin.source !== "package" || path.dirname(builtin.path) !== builtinRoot) {
 		throw new Error("packed workflow_list did not discover the builtin root: " + JSON.stringify(listed));
 	}
-	const validated = await callTool("workflow_validate", { ref: "plan-to-ship" });
-	if (validated.valid !== true || validated.workflow?.scope !== "builtin") {
-		throw new Error("packed workflow_validate refused the builtin definition: " + JSON.stringify(validated));
+	for (const ref of ["plan-to-ship", "deep-review"]) {
+		const validated = await callTool("workflow_validate", { ref });
+		if (validated.valid !== true || validated.workflow?.scope !== "builtin") {
+			throw new Error("packed workflow_validate refused the builtin definition " + ref + ": " + JSON.stringify(validated));
+		}
 	}
 	process.stdout.write("builtin workflow root: " + builtin.name + " (" + builtin.scope + "/" + builtin.source + ") discovered from the packed install without project trust\\n");
 } finally {
@@ -428,7 +452,7 @@ try {
 const packedAgents = await subagent.discoverAgents([
 	{ scope: "package", directory: path.resolve("node_modules/@vegardx/pi-workflow/workflows/agents"), trusted: true },
 ]);
-for (const required of ["implementer", "planner", "reviewer"]) {
+for (const required of ["implementer", "lens-reviewer", "planner", "reviewer"]) {
 	const agent = packedAgents.get(required);
 	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
 	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {

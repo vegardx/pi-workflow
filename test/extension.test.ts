@@ -244,7 +244,14 @@ describe("workflow Pi extension", () => {
 			false,
 		);
 		await handlers.get("session_shutdown")?.({}, {});
-		expect(api.events.on).not.toHaveBeenCalled();
+		// W1-PROVIDER: the only bus subscription the extension makes is the
+		// service-provider discovery channel, and it is made once, at load,
+		// for the whole life of the extension - not per session.
+		expect(
+			vi
+				.mocked(api.events.on)
+				.mock.calls.map((call: readonly unknown[]) => call[0]),
+		).toEqual(["@vegardx/pi-workflow/service-provider/request/v1"]);
 	});
 
 	it("renders one-line calls and collapsed results from the declaration table", () => {
