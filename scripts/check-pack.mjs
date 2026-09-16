@@ -64,12 +64,20 @@ try {
 		"skills/workflow-authoring/SKILL.md",
 		"skills/workflow-authoring/references/examples.md",
 		"skills/workflows/SKILL.md",
+		// W2-PLANREVIEW: the two short reference skills `plan-review` preloads
+		// by NAME. Pi discovers a skill only from a directory containing
+		// SKILL.md - a loose `.md` under a subdirectory is not discovered - so
+		// each reference is its own directory or the blind reviewer fails
+		// preflight with "preload skill not found".
+		"skills/plan-schema/SKILL.md",
+		"skills/workflow-components/SKILL.md",
 		// The package-provided (`builtin` scope) definitions: shipped as
 		// `.workflow.ts` sources, loaded by the same jiti loader that reads a
 		// project definition, and resolved from their own location inside the
 		// installed package.
 		"workflows/plan-to-ship.workflow.ts",
 		"workflows/deep-review.workflow.ts",
+		"workflows/plan-review.workflow.ts",
 		// W3: the three agent definitions plan-to-ship names. pi-subagent
 		// discovers agents only from `<agentDir>/agents` and a trusted
 		// `<cwd>/.pi/agents`, so a builtin workflow cannot ship them into place;
@@ -79,6 +87,7 @@ try {
 		"workflows/agents/planner.md",
 		"workflows/agents/reviewer.md",
 		"workflows/agents/lens-reviewer.md",
+		"workflows/agents/plan-reviewer.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
 		"dist/checkpoint-executor.d.ts",
@@ -128,6 +137,10 @@ try {
 		// W0-COMP-A: the component library's own entry point.
 		"dist/components/index.d.ts",
 		"dist/components/index.js",
+		// W2-PLANREVIEW: the compiled stage document, shared by the compiler
+		// that produces it and the reviewer that reads it.
+		"dist/components/compiled-stages.d.ts",
+		"dist/components/compiled-stages.js",
 		"dist/service-provider.d.ts",
 		"dist/service-provider.js",
 		"dist/support-executor.d.ts",
@@ -180,7 +193,11 @@ try {
 	// (builtin workflow, three agent templates and two skills added since the
 	// 145 / 2009 KiB freeze measurement); 160 entries left four spare, so the
 	// entry bound was raised deliberately. amaro is a dependency and is not
-	// packed.
+	// packed. Unreleased at W2-PLANREVIEW: 186 entries / 2486 KiB, after the
+	// component library, the service-provider entry, deep-review, plan-review,
+	// two agent templates and two reference skills - 14 entries and 74 KiB
+	// spare, so the next thing this package ships raises the bounds and records
+	// its own measurement here rather than nudging them silently.
 	if (workflow.entryCount > 200 || workflow.unpackedSize > 2560 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
@@ -245,7 +262,7 @@ if (shared.length > 0) throw new Error("no export may appear in both entry point
 // W0-COMP-A: the third entry exists, carries the library, and is disjoint from
 // the two pinned entries. Its own list is not pinned; ./components is unfrozen.
 const componentNames = Object.keys(components).sort();
-if (typeof components.gate !== "function" || typeof components.envelope !== "function") {
+if (typeof components.gate !== "function" || typeof components.envelope !== "function" || !components.CompiledStageDocumentSchema || !components.FindingSchema) {
 	throw new Error("packed ./components entry does not export the component library");
 }
 const sharedComponents = componentNames.filter((name) => pinned.root.actual.includes(name) || pinned.runtime.actual.includes(name));
@@ -277,6 +294,8 @@ const compatibility = JSON.parse(await readFile("node_modules/@vegardx/pi-workfl
 const subagentManifest = JSON.parse(await readFile("node_modules/@vegardx/pi-subagent/package.json", "utf8"));
 const skill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflow-authoring/SKILL.md", "utf8");
 const operatingSkill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflows/SKILL.md", "utf8");
+const planSchemaSkill = await readFile("node_modules/@vegardx/pi-workflow/skills/plan-schema/SKILL.md", "utf8");
+const componentsSkill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflow-components/SKILL.md", "utf8");
 if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.schema !== "pi-workflow-runtime" ||
 	!workflow.isCompatibleSubagentContract(subagent.SUBAGENT_RUNTIME_CONTRACT) ||
@@ -379,7 +398,11 @@ if (
 	manifest.pi.skills.length !== 1 ||
 	manifest.pi.skills[0] !== "./skills" ||
 	!/^---\\nname: workflow-authoring\\n/.test(skill) ||
-	!/^---\\nname: workflows\\n/.test(operatingSkill)
+	!/^---\\nname: workflows\\n/.test(operatingSkill) ||
+	// W2-PLANREVIEW: the two preloaded references, whose frontmatter name is
+	// the name plan-review asks for by preloadSkills.
+	!/^---\\nname: plan-schema\\n/.test(planSchemaSkill) ||
+	!/^---\\nname: workflow-components\\n/.test(componentsSkill)
 ) throw new Error("packed authoring and operating skills are not declared in the pi manifest");
 if (
 	!Array.isArray(manifest.pi?.workflows) ||
@@ -435,7 +458,7 @@ try {
 	if (!builtin || builtin.scope !== "builtin" || builtin.source !== "package" || path.dirname(builtin.path) !== builtinRoot) {
 		throw new Error("packed workflow_list did not discover the builtin root: " + JSON.stringify(listed));
 	}
-	for (const ref of ["plan-to-ship", "deep-review"]) {
+	for (const ref of ["plan-to-ship", "deep-review", "plan-review"]) {
 		const validated = await callTool("workflow_validate", { ref });
 		if (validated.valid !== true || validated.workflow?.scope !== "builtin") {
 			throw new Error("packed workflow_validate refused the builtin definition " + ref + ": " + JSON.stringify(validated));
@@ -452,7 +475,7 @@ try {
 const packedAgents = await subagent.discoverAgents([
 	{ scope: "package", directory: path.resolve("node_modules/@vegardx/pi-workflow/workflows/agents"), trusted: true },
 ]);
-for (const required of ["implementer", "lens-reviewer", "planner", "reviewer"]) {
+for (const required of ["implementer", "lens-reviewer", "plan-reviewer", "planner", "reviewer"]) {
 	const agent = packedAgents.get(required);
 	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
 	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {
