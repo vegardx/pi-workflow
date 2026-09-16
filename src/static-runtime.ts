@@ -70,9 +70,10 @@ import {
 	isReopenedTask,
 	OPERATOR_RESUME_REASON,
 } from "./run-actions.js";
-import type {
-	WorkflowSchedulerOutcome,
-	WorkflowSequentialScheduler,
+import {
+	WorkflowSchedulerError,
+	type WorkflowSchedulerOutcome,
+	type WorkflowSequentialScheduler,
 } from "./scheduler.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -1606,6 +1607,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			// made progress before failing, must still end the run durably: the
 			// finalizer's own `-> failed` may have lost the race against a
 			// concurrently driving lane, so this path is the fail-closed backstop.
+			// A scheduler refusal (an operator re-attempt receipt that is already
+			// terminal) carries its own fixed message and is recorded verbatim so
+			// the operator reads the refusal, never a generic reason.
 			const failed = await state();
 			if (isFailable(failed.status)) {
 				// `-> failed` fails closed on an open checkpoint (spec C1).
@@ -1615,7 +1619,8 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				);
 				await failRun(
 					failed.status,
-					error instanceof StaticWorkflowRuntimeError
+					error instanceof StaticWorkflowRuntimeError ||
+						error instanceof WorkflowSchedulerError
 						? error.message
 						: FINAL_GRAPH_FAILURE_REASON,
 				);
