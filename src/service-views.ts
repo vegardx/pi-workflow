@@ -908,3 +908,33 @@ export const DynamicWorkflowProposalViewSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+
+/**
+ * W1-PROVIDER (spec 2.4): the lease-free budget projection of a definition
+ * against one input. It is a compile-time answer - "would this graph fit?" -
+ * and never touches a run, a lease, or the journal.
+ *
+ * `cost`, `totalTokens` and `childRuntimeMs` are the sum of the declared
+ * reservations of every task the definition declares for this input, in the
+ * same units and by the same rule the scheduler reserves with
+ * (`src/budget.ts`): an agent task reserves its `limits`, a nested workflow
+ * task reserves the child definition's `meta.budget`, and a checkpoint or
+ * support task reserves nothing. `budget` is the run's effective budget (the
+ * definition's `meta.budget` clamped by the service's own maxima) and `fits`
+ * is true when the whole projection stays inside it.
+ */
+export const WorkflowBudgetProjectionSchema = Type.Object(
+	{
+		cost: Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+		totalTokens: CountSchema,
+		childRuntimeMs: CountSchema,
+		/** Declared tasks, finalizers included. */
+		tasks: CountSchema,
+		budget: WorkflowBudgetSchema,
+		fits: Type.Boolean(),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowBudgetProjection = View<
+	typeof WorkflowBudgetProjectionSchema
+>;

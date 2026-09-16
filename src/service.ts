@@ -3,6 +3,7 @@ import type { Dirent, Stats } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
@@ -34,8 +35,15 @@ import {
 	WorkflowDecisionRecordStore,
 } from "./decision-store.js";
 import {
+	type AgentTaskAuthoringRequest,
+	createTaskHandle,
+	type FinalizeRequest,
+	type NestedWorkflowRequest,
+	type TaskHandle,
 	validateJsonSchemaDocument,
 	type WorkflowBudget,
+	type WorkflowContext,
+	type WorkflowDefinition,
 } from "./definition.js";
 import {
 	assertDynamicSourceRunnable,
@@ -161,6 +169,7 @@ import {
 } from "./scheduler.js";
 import {
 	MAX_WORKFLOW_RUN_LIST_ISSUES,
+	type WorkflowBudgetProjection,
 	type WorkflowDecideOptions,
 	WorkflowDecideOptionsSchema,
 	type WorkflowInspectOptions,
@@ -287,6 +296,15 @@ export interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
 	list(): Promise<readonly WorkflowDefinitionSummary[]>;
 	validate(ref: string, input?: unknown): Promise<WorkflowValidationResult>;
+	/**
+	 * Lease-free budget projection of `ref` against `input` (spec 2.4): the
+	 * definition is dry-materialized - its `run(ctx)` walks a context that
+	 * declares nothing durable - and the declared reservations are summed and
+	 * compared to the run's effective budget. No run, no lease, no journal
+	 * append, so it is safe while other runs are live. Static refs only: a
+	 * dynamic proposal's source is VM code and is never executed here.
+	 */
+	project(ref: string, input: unknown): Promise<WorkflowBudgetProjection>;
 	run(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;
 	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	/**
@@ -2115,6 +2133,38 @@ export async function createWorkflowService(
 				workflow: summary(workflow),
 			});
 		},
+		async project(ref: string, input: unknown) {
+			assertOpen();
+			if (isDynamicRef(ref)) {
+				throw new WorkflowServiceError(
+					"validation",
+					WORKFLOW_PROJECTION_DYNAMIC_MESSAGE,
+				);
+			}
+			const discovered = await discover();
+			const workflow = resolveAmong(discovered, ref);
+			validateInput(workflow, input);
+			const byName = new Map(
+				discovered.map((candidate) => [
+					candidate.definition.meta.name,
+					candidate.definition.meta.budget,
+				]),
+			);
+			const projection = await projectWorkflowGraph(
+				workflow.definition,
+				input,
+				{ cwd, childBudget: (name) => byName.get(name) },
+			);
+			const budget = effectiveLimits(workflow).effectiveBudget;
+			return Object.freeze({
+				cost: projection.cost,
+				totalTokens: projection.totalTokens,
+				childRuntimeMs: projection.childRuntimeMs,
+				tasks: projection.tasks,
+				budget: Object.freeze({ ...budget }),
+				fits: projectionFits(projection, budget),
+			});
+		},
 		run(ref: string, input: unknown) {
 			return exclusive(async () => {
 				assertOpen();
@@ -3444,4 +3494,318 @@ export async function createWorkflowService(
 		}
 		return Object.freeze({ ...view, reconciled: Object.freeze(reconciled) });
 	}
+}
+
+/**
+ * W1-PROVIDER (spec 2.4): the lease-free dry materialization behind
+ * `WorkflowService.project`.
+ *
+ * A definition's graph is a function of its input, so the only honest way to
+ * answer "what does this run reserve?" before starting it is to run the
+ * definition's `run(ctx)` against a context that declares nothing durable.
+ * Every `ctx` member here records the declaration and returns immediately:
+ * no journal, no lease, no task identity, no subagent, no filesystem. A
+ * barrier (`result`, `results`, `settled`, `handoff`) resolves with a value
+ * synthesized from the declared output schema so the definition walks its own
+ * graph to the end instead of stopping at the first await.
+ *
+ * The projection is therefore a *worst case*: a boolean decision synthesizes
+ * as `true`, which is the branch that declares the most work (an approval
+ * gate that is answered "no" declares nothing after it). Nothing outside this
+ * module observes the synthesized values.
+ */
+const PROJECTION_RUN_ID = "workflow_projection" as WorkflowRunId;
+const MAX_PROJECTED_TASKS = 1_024;
+const MAX_PROJECTION_DEPTH = 12;
+const MAX_PROJECTED_ARRAY_ITEMS = 16;
+const PROJECTION_TIMESTAMP = "1970-01-01T00:00:00.000Z";
+
+export const WORKFLOW_PROJECTION_TOO_LARGE_MESSAGE = `Workflow projection exceeded ${MAX_PROJECTED_TASKS} declared tasks.`;
+export const WORKFLOW_PROJECTION_DYNAMIC_MESSAGE =
+	"Workflow projection is static-definition only; a dynamic proposal is not projected.";
+export const WORKFLOW_PROJECTION_FAILED_MESSAGE =
+	"Workflow definition could not be projected for this input.";
+
+/** The stand-in a projected worktree task's handoff barrier resolves to. */
+const PROJECTION_HANDOFF: WorkflowHandoffDescriptor = Object.freeze({
+	artifactId: `artifact_${"0".repeat(64)}`,
+	runId: PROJECTION_RUN_ID,
+	producerTaskId: "task_projection",
+	producerExecutionId: "exec_projection",
+	subagentRunId: "run_projection",
+	subagentAttemptId: "attempt_projection",
+	baselineHead: "0".repeat(40),
+	handoffCommit: "0".repeat(40),
+	format: "git-format-patch",
+	mediaType: HANDOFF_EXPORT_MEDIA_TYPE,
+	sha256: "0".repeat(64),
+	bytes: 1,
+});
+
+/**
+ * A deterministic value for a JSON Schema document, used only to unblock a
+ * projected barrier. It never validates and never leaves this module: it
+ * exists so `run(ctx)` can read `.checkRan` or `.findings` without throwing.
+ */
+function synthesizeValue(schema: unknown, depth = 0): unknown {
+	if (
+		depth > MAX_PROJECTION_DEPTH ||
+		typeof schema !== "object" ||
+		schema === null
+	) {
+		return {};
+	}
+	const node = schema as Record<string, unknown>;
+	if ("const" in node) return node.const;
+	if (Array.isArray(node.enum) && node.enum.length > 0) return node.enum[0];
+	for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+		const branches = node[key];
+		if (Array.isArray(branches) && branches.length > 0) {
+			return synthesizeValue(branches[0], depth + 1);
+		}
+	}
+	const type = Array.isArray(node.type) ? node.type[0] : node.type;
+	switch (type) {
+		case "boolean":
+			return true;
+		case "integer":
+		case "number": {
+			const minimum = typeof node.minimum === "number" ? node.minimum : 0;
+			const maximum = typeof node.maximum === "number" ? node.maximum : minimum;
+			return Math.min(minimum, maximum);
+		}
+		case "string": {
+			if (node.format === "date-time") return PROJECTION_TIMESTAMP;
+			const minLength = typeof node.minLength === "number" ? node.minLength : 0;
+			return "x".repeat(Math.min(Math.max(minLength, 0), 64));
+		}
+		case "array": {
+			const minItems = typeof node.minItems === "number" ? node.minItems : 0;
+			const count = Math.min(Math.max(minItems, 0), MAX_PROJECTED_ARRAY_ITEMS);
+			return Array.from({ length: count }, () =>
+				synthesizeValue(node.items, depth + 1),
+			);
+		}
+		case "null":
+			return null;
+		case "object": {
+			const properties = node.properties;
+			if (typeof properties !== "object" || properties === null) return {};
+			const value: Record<string, unknown> = {};
+			for (const [name, child] of Object.entries(
+				properties as Record<string, unknown>,
+			)) {
+				value[name] = synthesizeValue(child, depth + 1);
+			}
+			return value;
+		}
+		default:
+			return {};
+	}
+}
+
+/** Everything one dry materialization observed about a declared graph. */
+export interface WorkflowGraphProjection {
+	readonly cost: number;
+	readonly totalTokens: number;
+	readonly childRuntimeMs: number;
+	/** Declared tasks, finalizers included. */
+	readonly tasks: number;
+	/** Declared `ctx.checkpoint` tasks. */
+	readonly checkpoints: number;
+	/** Declared agent tasks whose workspace is a worktree. */
+	readonly worktrees: number;
+	/** Declared agent tasks that capture a handoff. */
+	readonly handoffs: number;
+}
+
+export interface WorkflowGraphProjectionOptions {
+	readonly cwd?: string;
+	/** The `meta.budget` a nested workflow reserves, by definition name. */
+	readonly childBudget?: (workflow: string) => WorkflowBudget | undefined;
+}
+
+/**
+ * Dry-materializes `definition` against `input` and sums what the declared
+ * graph reserves, by the same rule the scheduler reserves with
+ * (`src/budget.ts`): an agent task reserves its `limits`, a nested workflow
+ * task reserves the child definition's `meta.budget`, and a checkpoint or
+ * support task reserves nothing.
+ */
+export async function projectWorkflowGraph(
+	definition: WorkflowDefinition,
+	input: unknown,
+	options: WorkflowGraphProjectionOptions = {},
+): Promise<WorkflowGraphProjection> {
+	let cost = 0;
+	let totalTokens = 0;
+	let childRuntimeMs = 0;
+	let tasks = 0;
+	let checkpoints = 0;
+	let worktrees = 0;
+	let handoffs = 0;
+	const schemas = new Map<string, unknown>();
+
+	function nextTaskId(): string {
+		tasks += 1;
+		if (tasks > MAX_PROJECTED_TASKS) {
+			throw new WorkflowServiceError(
+				"validation",
+				WORKFLOW_PROJECTION_TOO_LARGE_MESSAGE,
+			);
+		}
+		return `task_p${tasks}`;
+	}
+
+	function handleFor(
+		taskId: string,
+		outputSchema: unknown,
+		worktree: boolean,
+	): TaskHandle<unknown> {
+		schemas.set(taskId, outputSchema);
+		const ref = { runId: PROJECTION_RUN_ID, taskId: taskId as WorkflowTaskId };
+		const outputRef = {
+			runId: PROJECTION_RUN_ID,
+			producerTaskId: taskId as WorkflowTaskId,
+			output: "result" as const,
+		};
+		return worktree
+			? createTaskHandle(ref, outputRef, {
+					runId: PROJECTION_RUN_ID,
+					producerTaskId: taskId as WorkflowTaskId,
+					output: "handoff" as const,
+				})
+			: createTaskHandle(ref, outputRef);
+	}
+
+	function declareAgent(
+		request: AgentTaskAuthoringRequest<never>,
+	): TaskHandle<unknown> {
+		const taskId = nextTaskId();
+		const limits = request.limits;
+		cost += limits.cost;
+		totalTokens += limits.totalTokens ?? 0;
+		childRuntimeMs += limits.cumulativeRuntimeMs;
+		const worktree = request.workspace?.mode === "worktree";
+		if (worktree) worktrees += 1;
+		if (worktree || request.handoff !== undefined) handoffs += 1;
+		return handleFor(taskId, request.outputSchema, worktree);
+	}
+
+	function declareNested(request: NestedWorkflowRequest): TaskHandle<unknown> {
+		const taskId = nextTaskId();
+		const budget = options.childBudget?.(request.workflow);
+		if (budget) {
+			cost += budget.cost;
+			totalTokens += budget.totalTokens ?? 0;
+			childRuntimeMs += budget.childRuntimeMs;
+		}
+		return handleFor(taskId, undefined, false);
+	}
+
+	async function resolve(task: TaskHandle<unknown>): Promise<unknown> {
+		return synthesizeValue(schemas.get(task.ref.taskId));
+	}
+
+	const context = {
+		input,
+		runId: PROJECTION_RUN_ID,
+		cwd: options.cwd ?? process.cwd(),
+		signal: new AbortController().signal,
+		phase: () => undefined,
+		log: () => undefined,
+		agent: (_key: string, request: AgentTaskAuthoringRequest<never>) =>
+			declareAgent(request),
+		support: (_key: string, descriptor: { outputSchema?: unknown }) =>
+			handleFor(nextTaskId(), descriptor.outputSchema, false),
+		workflow: (_key: string, request: NestedWorkflowRequest) =>
+			declareNested(request),
+		checkpoint: (_key: string, request: { schema: unknown }) => {
+			checkpoints += 1;
+			return handleFor(nextTaskId(), request.schema, false);
+		},
+		fanOut: (
+			_namespace: string,
+			items: readonly unknown[],
+			fanOptions: {
+				task: (
+					item: unknown,
+					index: number,
+				) => AgentTaskAuthoringRequest<never>;
+			},
+		) => items.map((item, index) => declareAgent(fanOptions.task(item, index))),
+		fanIn: (
+			_key: string,
+			_sources: readonly TaskHandle<unknown>[],
+			fanOptions: { task: AgentTaskAuthoringRequest<never> },
+		) => declareAgent(fanOptions.task),
+		pipeline: (
+			_namespace: string,
+			build: (stage: {
+				agent: (
+					key: string,
+					request: AgentTaskAuthoringRequest<never>,
+				) => TaskHandle<unknown>;
+			}) => TaskHandle<unknown>,
+		) => build({ agent: (_key, request) => declareAgent(request) }),
+		finalize: (_key: string, request: FinalizeRequest<never>) => {
+			if (request.agent) {
+				return declareAgent(
+					request.agent as unknown as AgentTaskAuthoringRequest<never>,
+				);
+			}
+			if (request.workflow) return declareNested(request.workflow);
+			return handleFor(nextTaskId(), request.support?.outputSchema, false);
+		},
+		result: resolve,
+		results: (handles: readonly TaskHandle<unknown>[]) =>
+			Promise.all(handles.map(resolve)),
+		settled: async (handles: readonly TaskHandle<unknown>[]) =>
+			Promise.all(
+				handles.map(async (handle) => ({
+					status: "fulfilled" as const,
+					value: await resolve(handle),
+				})),
+			),
+		handoff: async (task: TaskHandle<unknown>) =>
+			task.handoff === undefined ? undefined : PROJECTION_HANDOFF,
+	} as unknown as WorkflowContext<unknown>;
+
+	try {
+		await definition.run(context);
+	} catch (error) {
+		if (error instanceof WorkflowServiceError) throw error;
+		throw new WorkflowServiceError(
+			"validation",
+			error instanceof Error
+				? error.message
+				: WORKFLOW_PROJECTION_FAILED_MESSAGE,
+			{ cause: error },
+		);
+	}
+	return Object.freeze({
+		cost,
+		totalTokens,
+		childRuntimeMs,
+		tasks,
+		checkpoints,
+		worktrees,
+		handoffs,
+	});
+}
+
+/** True when the projected totals stay inside `budget`. */
+export function projectionFits(
+	projection: WorkflowGraphProjection,
+	budget: WorkflowBudget,
+): boolean {
+	if (projection.cost > budget.cost) return false;
+	if (projection.childRuntimeMs > budget.childRuntimeMs) return false;
+	if (
+		budget.totalTokens !== undefined &&
+		projection.totalTokens > budget.totalTokens
+	) {
+		return false;
+	}
+	return true;
 }

@@ -9,6 +9,7 @@ import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
 import type { WorkflowRoot } from "./registry.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
+import { registerWorkflowServiceProvider } from "./service-provider.js";
 import type {
 	WorkflowRunSummary,
 	WorkflowServiceTaskView,
@@ -237,6 +238,13 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		});
 		return service;
 	}
+
+	// W1-PROVIDER (spec 1.1, 2.4): the workflow runtime answers the discovery
+	// request for the whole life of the extension, exactly as pi-subagent does.
+	// `getService` is the same lazily-constructed, cwd-pinned service the tools
+	// and the observer use, and the provider narrows it to the read client at
+	// `acquire`, so a consumer can never reach `run`, `decide`, or `stop`.
+	registerWorkflowServiceProvider(pi.events, (ctx) => getService(ctx));
 
 	// The widget lives only in the TUI. `session_start` fires again on reload,
 	// new, resume, and fork, so the previous controller is stopped first, and
