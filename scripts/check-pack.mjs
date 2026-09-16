@@ -217,7 +217,7 @@ const provider = await import("@vegardx/pi-subagent/service-provider");
 const { readFile } = await import("node:fs/promises");
 // D4: the manifest is an exported entry, read through the exports map.
 const manifest = (await import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })).default;
-if (manifest?.name !== "@vegardx/pi-workflow" || manifest.version !== "1.1.0") throw new Error("packed ./package.json export did not return the 1.1.0 manifest");
+if (manifest?.name !== "@vegardx/pi-workflow" || manifest.version !== "2.0.0") throw new Error("packed ./package.json export did not return the 2.0.0 manifest");
 // Spec 2.4 items 2-4: both entry points export exactly the pinned lists, the
 // lists are disjoint, and deep dist/ paths are not reachable.
 const pinned = {
@@ -269,7 +269,7 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 18 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 19 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows !== true ||
@@ -304,7 +304,13 @@ if (
 	workflow.MAX_WORKFLOW_HANDOFF_BYTES !== 16 * 1024 * 1024 ||
 	typeof runtime.verifyWorkflowHandoffEvidence !== "function" ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
-	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 6 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.vmMemoryCeiling !== true ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 7 ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.vmMemoryCeiling !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.workspaceBudgetRefusal !== true ||
+	workflow.WORKFLOW_HANDOFF_FORMAT_SHA256 !== subagent.canonicalSha256({ format: "git-format-patch", mediaType: subagent.HANDOFF_EXPORT_MEDIA_TYPE, revision: 7 }) ||
+	workflow.AgentTaskRequestSchema.properties?.memoryBytes === undefined ||
 	workflow.MAX_NESTED_WORKFLOW_DEPTH !== 4 ||
 	workflow.MAX_TASK_EXECUTION_GENERATIONS !== 16 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution !== true ||
@@ -349,8 +355,8 @@ if (
 if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piWorkflow.version !== manifest.version ||
-	compatibility.piWorkflow.version !== "1.1.0" ||
-	compatibility.piWorkflow.api?.version !== "1.1.0" ||
+	compatibility.piWorkflow.version !== "2.0.0" ||
+	compatibility.piWorkflow.api?.version !== "2.0.0" ||
 	JSON.stringify(compatibility.piWorkflow.api.frozenSurfaces) !== JSON.stringify(["authoring", "service", "contract", "extension"]) ||
 	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen" }) ||
 	compatibility.piWorkflow.api.exportList !== ${JSON.stringify(rootExportList)} ||
@@ -362,7 +368,9 @@ if (
 	compatibility.transformer?.version !== manifest.dependencies?.amaro ||
 	compatibility.piSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piSubagent.peerRange !== manifest.peerDependencies?.["@vegardx/pi-subagent"] ||
-	compatibility.piSubagent.peerRange !== subagentManifest.version
+	compatibility.piSubagent.peerRange !== subagentManifest.version ||
+	compatibility.piSubagent.requiredFeatures?.vmMemoryCeiling !== true ||
+	compatibility.piSubagent.requiredFeatures?.workspaceBudgetRefusal !== true
 ) throw new Error("packed compatibility matrix disagrees with the packed contracts");
 // F1 smoke: the packed extension registers the package's own workflows/ as a
 // builtin root, so workflow_list and workflow_validate reach the shipped
