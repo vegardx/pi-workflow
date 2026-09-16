@@ -54,13 +54,22 @@ command run and the observed result next to each item when it is checked.
       Gondolin VM, the output artifact was imported, the child was released,
       and no QEMU process remained. Record the run id and output.
 - [ ] **Checkpoint decide.** A workflow with a `headless: "block"` checkpoint
-      parks: `workflow_wait` returns the `waiting` view at once with
-      `parked: true` and one entry in `pendingCheckpoints`, and
-      `availableActions` lists `decide`. `/workflow decide <run> <task> <json>`
-      asks for confirmation; cancelling the confirm records nothing (the run
-      stays parked); confirming records the decision with the session
-      approver, the task completes with "Checkpoint decided.", and the run
-      completes.
+      that declares `inputs` parks: `workflow_wait` returns the `waiting` view
+      at once with `parked: true` and one entry in `pendingCheckpoints`
+      carrying `taskKey`, `prompt`, `schemaSummary`, `inputsSummary`, and
+      `instruction`, and `availableActions` lists `decide`. Pi prompts in the
+      session within a moment, showing the prompt, the run, the expiry, the
+      declared inputs, and the answer shape, and asks the decision field by
+      field; the widget's first line reads `waiting for you: <prompt>`.
+      Dismissing a dialog (escape) records nothing: the run stays parked, the
+      widget line and `/workflow decide` still offer it, and the same
+      execution is not asked again. Answering and confirming records one
+      decision with `decidedBy: "pi-session"`, the task completes with
+      "Checkpoint decided.", and the run completes. On a second parked run,
+      `/workflow decide <run> <task>` without JSON opens the same form, the
+      inspector's "Decide a checkpoint" entry opens it too, and `/workflow
+      decide <run> <task> <json>` still asks for the fixed confirmation and
+      records the decision.
 - [ ] **Propose / approve / reject / run.** `workflow_propose { source }`
       returns `dynamic:<sha256>` with `runnable: false`; `workflow_run` on
       that reference is refused with "Dynamic workflow source is not approved

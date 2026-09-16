@@ -207,6 +207,19 @@ An in-memory-only successful drive does not satisfy the first slice.
   views add verified `inputs` (handoffs as descriptors) and `decision.value`;
   `inspect` omits both and truncates long prompts; log entries never carry the
   value or approver;
+- every `pendingCheckpoints` entry additionally carries `taskKey`, the
+  `prompt` (truncated with `promptTruncated: true` on the lease-free views),
+  `schemaSummary`, `instruction`, and, on artifact-backed views alone,
+  `inputsSummary`, all bounded by `MAX_CHECKPOINT_RENDER_BYTES`;
+- a parked run this session owns is asked in the session: one guided form per
+  checkpoint execution shows the prompt, the declared inputs, and the answer
+  shape, asks the decision field by field (JSON editor for shapes no field
+  rendering fits), validates only through the service, records nothing on
+  dismissal or a declined confirm, and records exactly one decision with the
+  session approver otherwise; `/workflow decide` without `<json>` and the
+  inspector's decide entry open the same form, and no prompt is opened
+  without a dialog-capable UI, for a run leased elsewhere, for a nested
+  child, or twice for one execution;
 - a parked nested child holds its parent's lane, `decide` on a nested run is
   refused, and the `decide` action is not offered for it;
 - the runtime contract publishes `checkpoints: true`; `dynamicWorkflows:
@@ -430,7 +443,12 @@ An in-memory-only successful drive does not satisfy the first slice.
   from `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`;
 - the widget lists depth-0 runs that are ongoing or need action, hides when
   neither applies, marks runs leased elsewhere, refreshes from `subscribe`,
-  and polls only while a listed run is nonterminal or awaits recovery.
+  and polls only while a listed run is nonterminal or awaits recovery;
+- the widget stays at two lines while a run this session owns waits for a
+  decision: `waiting for you: <prompt>` cut to the widget width takes the
+  first line, the ongoing and attention counts collapse into the second, and
+  the prompt is read from one lease-free `inspect` per parked run and cached
+  across polls.
 
 ## Structured output and support tasks
 

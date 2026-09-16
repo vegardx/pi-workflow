@@ -70,7 +70,10 @@ dynamic-only source rules and the VM's determinism aids are under
    `abandoned: true` for abandoned history, `handoff` (the handoff
    descriptor) on completed worktree tasks, and `checkpoint` (prompt, schema,
    policy, request and decision facts) on checkpoint tasks), plus
-   `pendingCheckpoints[]`.
+   `pendingCheckpoints[]`, whose entries carry `taskKey`, the checkpoint
+   `prompt`, the answer shape (`schemaSummary`), the declared inputs
+   (`inputsSummary`, artifact-backed views only), and `instruction`: show the
+   person the question and stop.
 6. `workflow_runs { statuses?, includeChildren?, limit?, cursor? }` lists
    durable runs newest first with `taskCounts`, `ownership`,
    `availableActions`, and `requiresAttention`; `workflow_inspect { runId,
@@ -94,10 +97,11 @@ dynamic-only source rules and the VM's determinism aids are under
    existing child run and attempt without invalidating anything. Use them
    only on a durably `failed` or `interrupted` root run, after
    `workflow_inspect` shows the action in `availableActions`. A run parked
-   at a checkpoint is surfaced to the operator (the `/workflow` widget and
-   inspector show its pending checkpoints); only a human decides it, through
-   `/workflow decide <run> <task> <json> [reason…]`. There is no decide
-   tool: a model must never decide a checkpoint.
+   at a checkpoint is surfaced to the operator (Pi prompts the session user
+   itself; the `/workflow` widget shows `waiting for you: <prompt>` and the
+   inspector offers the decide entry); only a human decides it, through
+   `/workflow decide <run> <task> [json] [reason…]` or the prompt. There is no
+   decide tool: a model must never decide a checkpoint.
 8. Fix the definition and repeat. Definition identity covers the file's
    source, path, meta, and schemas; an existing run refuses a changed
    definition ("Workflow definition or input identity changed during
@@ -539,6 +543,28 @@ or to pick between options the workflow cannot choose on its own. Do not use
 one for choices a schema-validated agent result or a support task can make; a
 checkpoint stops the run until a person answers.
 
+Write it so a person can answer it without leaving the session; Pi shows the
+prompt, the declared inputs, and the answer shape in one dialog and asks the
+decision field by field:
+
+- **The prompt is a question**, in full words, that the declared `inputs`
+  alone are enough to answer ("Approve this plan before the writer runs?",
+  "Which tone should the summary use?"). Not a label ("approval"), not an
+  instruction to go read something else. It is the only text the approver is
+  guaranteed to see.
+- **Declare `inputs` for every artifact the decider must read**: the draft,
+  the diff summary, the handoff descriptor. The approver sees the verified
+  values, so an input is how the material reaches them; without it the
+  question is unanswerable in the dialog.
+- **Keep the decision schema small and flat**: a boolean, an enum of short
+  literals, a string, a bounded number, or an object of at most eight such
+  properties. Those are asked one dialog per field; arrays, nested objects,
+  and unions of objects fall back to a single JSON editor, which asks the
+  person to hand-write JSON.
+- **Name the options the way the person thinks about them.** An enum of
+  `"ship" | "hold"` reads better in the dialog than `0 | 1`, and required
+  properties are asked before optional ones.
+
 ```ts
 const approve = ctx.checkpoint("approve", {
 	schema: Type.Object({ proceed: Type.Boolean() }, { additionalProperties: false }),
@@ -616,10 +642,14 @@ How a checkpoint runs, for authors:
   and `pendingCheckpoints`. Do not poll; wait returns immediately when
   parked, and nothing changes until a person decides, the checkpoint expires,
   the run is stopped, or the deadline passes.
-- Only a human decides. The operator sees the parked run in the `/workflow`
-  widget and inspector and answers through `/workflow decide <run> <task>
-  <json> [reason…]` (an explicit confirmation in an interactive Pi session),
-  whose approver is the Pi session identity; embedders call `service.decide(runId, taskId,
+- Only a human decides. In a session with UI, Pi asks the person as soon as
+  the run parks: one guided form showing the prompt, the declared inputs, and
+  the answer shape, then a dialog per decision field and a final confirm.
+  Dismissing it records nothing and leaves the run parked; the `/workflow`
+  widget (`waiting for you: <prompt>`), the inspector's decide entry, and
+  `/workflow decide <run> <task> [json] [reason…]` (an explicit confirmation
+  in an interactive Pi session) keep offering it. The approver is always the
+  Pi session identity; embedders call `service.decide(runId, taskId,
   { decision, approver, reason? })`. There is no model-callable decide tool by
   design: a model must never decide a checkpoint, not even its own work.
   Surface the parked run and stop. The decision is

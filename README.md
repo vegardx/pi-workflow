@@ -187,11 +187,15 @@ one-line call and collapsed result in the TUI from the table's
 `summarizeCall`/`summarizeResult`.
 
 `workflow_wait` on a run parked at a checkpoint returns its `waiting` view
-immediately, marked `parked: true` and listing `pendingCheckpoints`; do not
-poll it. Checkpoint decisions are human-only: there is no model-callable
-decide tool, by design, and a model must never decide a checkpoint. A parked
-run is surfaced to the operator, and only a human decides it through
-`/workflow decide <run> <task> <json> [reason…]`, which requires an
+immediately, marked `parked: true` and listing `pendingCheckpoints` — each
+with the prompt, the task key, the answer shape, the declared inputs, and the
+instruction to surface the question and stop; do not poll it. Checkpoint
+decisions are human-only: there is no model-callable decide tool, by design,
+and a model must never decide a checkpoint. A parked run is surfaced to the
+operator: in a session with UI, Pi asks the person itself with a guided form
+(the prompt, the inputs, and one dialog per decision field), and `/workflow
+decide <run> <task> [json] [reason…]` and the inspector's decide entry open
+the same form; passing `<json>` keeps the direct path. Every route requires an
 interactive Pi session and an explicit confirmation, records the Pi session
 identity as approver (never an argument), and is the pass-through for
 `service.decide(runId, taskId, { decision, approver, reason? })`.
@@ -230,14 +234,18 @@ prefix is refused with the candidates; task keys are paths
 (`phase-1/report`) or full task ids and never address abandoned tasks. The
 action subcommands are derived from `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, so
 the grammar, completions, and inspector palette only ever offer service
-methods that exist; `decide`, `approve`, and `reject` follow as human-only
-subcommands. `stop`, `invalidate`, `retry`, and `resume` ask for
+methods that exist; `decide`
+(`/workflow decide <run-prefix> <task-key> [json] [reason…]`, which prompts
+for the decision when `json` is omitted), `approve`, and `reject` follow as
+human-only subcommands. `stop`, `invalidate`, `retry`, and `resume` ask for
 confirmation when a UI is present; `print` mode executes directly and writes
 to stdout. `alt+w` opens the inspector without interrupting input. In the
 TUI a two-line `pi-workflow` widget below the editor shows
 `workflows ongoing: …` and `workflows need action: …`, is hidden when neither
 applies, marks runs leased by another Pi process as `(n elsewhere)`, refreshes
-from `subscribe`, and polls only while nonterminal runs exist.
+from `subscribe`, and polls only while nonterminal runs exist. While a run
+this session owns waits for a decision, its first line becomes
+`waiting for you: <prompt>` and the counts collapse into the second.
 
 ## Bundled skills
 
