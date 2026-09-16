@@ -1,5 +1,6 @@
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import { CHECKPOINT_DECIDE_INSTRUCTION } from "./checkpoint-render.js";
 import {
 	MAX_WORKFLOW_CONCURRENCY,
 	WorkflowBudgetSchema,
@@ -275,6 +276,48 @@ function runStatusSummary(value: {
 	return `${value.runId} ${value.status}`;
 }
 
+/** A collapsed-result line fits this many characters. */
+const MAX_TOOL_SUMMARY_LENGTH = 120;
+
+/**
+ * What a run view carrying a parked checkpoint says, told once and shared by
+ * `workflow_status` and `workflow_wait`: the question the person must answer.
+ */
+const PENDING_CHECKPOINTS_GUIDELINE =
+	"A parked run (parked: true, or status waiting) returns pendingCheckpoints[], each with the checkpoint prompt, its taskKey, the answer shape (schemaSummary), the declared inputs (inputsSummary), and instruction; show the prompt and its inputs summary to the person and stop.";
+
+/** The two guidelines every tool that can return a parked run view carries. */
+const PARKED_RUN_GUIDELINES: readonly string[] = [
+	PENDING_CHECKPOINTS_GUIDELINE,
+	CHECKPOINT_DECIDE_INSTRUCTION,
+];
+
+/** Appended to the description of every tool that can return a parked run. */
+const PARKED_RUN_DESCRIPTION =
+	"A run parked at a checkpoint returns pendingCheckpoints with the prompt, task key, answer shape, and inputs summary; Pi asks the person in the session, so surface the question and stop.";
+
+/**
+ * The collapsed-result line of a parked run view: the question, not the
+ * status. Absent for every other view.
+ */
+function parkedCheckpointSummary(value: {
+	readonly status: string;
+	readonly parked?: true | undefined;
+	readonly pendingCheckpoints?:
+		| readonly { readonly prompt?: string | undefined }[]
+		| undefined;
+}): string | undefined {
+	if (value.parked !== true && value.status !== "waiting") return undefined;
+	const prompt = value.pendingCheckpoints?.find(
+		(checkpoint) => checkpoint.prompt !== undefined,
+	)?.prompt;
+	if (prompt === undefined) return undefined;
+	const line = `waiting for you: ${prompt.replace(/\s+/g, " ").trim()}`;
+	return line.length <= MAX_TOOL_SUMMARY_LENGTH
+		? line
+		: `${line.slice(0, MAX_TOOL_SUMMARY_LENGTH - 1)}…`;
+}
+
 function declare<TParams extends TSchema, TOutput extends TSchema>(
 	declaration: WorkflowToolDeclaration<TParams, TOutput>,
 ): WorkflowToolDeclaration<TParams, TOutput> {
@@ -350,22 +393,22 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 		declare({
 			name: "workflow_status",
 			label: "Workflow Status",
-			description: "Read durable status for a workflow run.",
-			promptGuidelines: [],
+			description: `Read durable status for a workflow run. ${PARKED_RUN_DESCRIPTION}`,
+			promptGuidelines: PARKED_RUN_GUIDELINES,
 			parameters: RunParametersSchema,
 			output: WorkflowServiceRunViewSchema,
 			execute(service, params) {
 				return service.status(params.runId);
 			},
 			summarizeCall: (params) => params.runId,
-			summarizeResult: runStatusSummary,
+			summarizeResult: (value) =>
+				parkedCheckpointSummary(value) ?? runStatusSummary(value),
 		}),
 		declare({
 			name: "workflow_wait",
 			label: "Wait for Workflow",
-			description:
-				"Wait for an active workflow run and return its durable terminal status and bounded output. With timeoutMs, return the current view marked timedOut when the run outlives the timeout; the run keeps driving.",
-			promptGuidelines: [],
+			description: `Wait for an active workflow run and return its durable terminal status and bounded output. With timeoutMs, return the current view marked timedOut when the run outlives the timeout; the run keeps driving. ${PARKED_RUN_DESCRIPTION} Never poll a parked run: wait returns immediately while it waits for a person.`,
+			promptGuidelines: PARKED_RUN_GUIDELINES,
 			parameters: Type.Object(
 				{
 					runId: RunId,
@@ -385,6 +428,7 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 					? `${params.runId} · ${params.timeoutMs} ms`
 					: params.runId,
 			summarizeResult: (value) =>
+				parkedCheckpointSummary(value) ??
 				`${runStatusSummary(value)}${value.timedOut ? " (timed out)" : ""}`,
 		}),
 		declare({

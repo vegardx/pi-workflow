@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Value } from "typebox/value";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { CHECKPOINT_DECIDE_INSTRUCTION } from "../src/checkpoint-render.js";
 import { MAX_DYNAMIC_SOURCE_BYTES } from "../src/dynamic/constants.js";
 import { DynamicWorkflowProposerSchema } from "../src/dynamic/contracts.js";
 import { deriveDynamicSourceSha256 } from "../src/dynamic/source.js";
@@ -18,6 +19,7 @@ import {
 	type WorkflowRunInspection,
 	type WorkflowRunPage,
 	WorkflowServiceRunViewSchema,
+	WorkflowServiceWaitViewSchema,
 } from "../src/service-views.js";
 import type {
 	WorkflowSubagentBinding,
@@ -832,6 +834,126 @@ describe("workflow tool declarations", () => {
 				extra: true,
 			}),
 		).toThrow("workflow tool output violates its schema");
+	});
+
+	describe("parked runs", () => {
+		const view = {
+			runId: "workflow_abcdefghij",
+			status: "waiting",
+			definitionName: "gated",
+			createdAt: "2026-09-15T00:00:00.000Z",
+			deadlineAt: "2026-09-15T01:00:00.000Z",
+			depth: 0,
+			tasks: [],
+			pendingCheckpoints: [
+				{
+					taskId:
+						"task_0000000000000000000000000000000000000000000000000000000000000001",
+					namespace: ["phase-1"],
+					key: "approve",
+					executionId:
+						"execution_0000000000000000000000000000000000000000000000000000000001",
+					requestedAt: "2026-09-15T00:10:00.000Z",
+					taskKey: "phase-1/approve",
+					prompt: "Approve the plan before the writer runs?",
+					schemaSummary: "{ proceed: boolean }",
+					inputsSummary: "plan:\n  Rewrite the digest.",
+					instruction: CHECKPOINT_DECIDE_INSTRUCTION,
+				},
+			],
+		};
+
+		it("tells the model what a parked result carries and that a person answers it", () => {
+			for (const name of ["workflow_wait", "workflow_status"] as const) {
+				const tool = declaration(name);
+				// The instruction is the one in the views: one wording, one rule.
+				expect(tool.promptGuidelines).toEqual([
+					expect.stringContaining("pendingCheckpoints"),
+					CHECKPOINT_DECIDE_INSTRUCTION,
+				]);
+				const [guideline] = tool.promptGuidelines;
+				for (const field of [
+					"prompt",
+					"taskKey",
+					"schemaSummary",
+					"inputsSummary",
+					"instruction",
+				]) {
+					expect(guideline).toContain(field);
+				}
+				expect(guideline).toContain("stop");
+				expect(tool.description).toContain("pendingCheckpoints");
+				expect(tool.description).toContain("Pi asks the person in the session");
+			}
+			expect(CHECKPOINT_DECIDE_INSTRUCTION).toContain(
+				"Never decide it yourself",
+			);
+			expect(declaration("workflow_wait").description).toContain(
+				"Never poll a parked run",
+			);
+			// Still no decide tool: the guidelines are the whole model surface.
+			expect(WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name)).not.toContain(
+				"workflow_decide",
+			);
+		});
+
+		it("summarizes a parked result as the question, not the status", () => {
+			const parked = { ...view, parked: true as const };
+			expect(Value.Check(WorkflowServiceWaitViewSchema, parked)).toBe(true);
+			expect(Value.Check(WorkflowServiceRunViewSchema, view)).toBe(true);
+			expect(declaration("workflow_wait").summarizeResult(parked)).toBe(
+				"waiting for you: Approve the plan before the writer runs?",
+			);
+			expect(declaration("workflow_status").summarizeResult(view)).toBe(
+				"waiting for you: Approve the plan before the writer runs?",
+			);
+			// Bounded, whitespace collapsed, and ellipsized.
+			const long = {
+				...view,
+				pendingCheckpoints: [
+					{
+						...view.pendingCheckpoints[0],
+						prompt: `Approve\n${"the plan ".repeat(40)}?`,
+					},
+				],
+			};
+			const line = declaration("workflow_status").summarizeResult(long);
+			expect(line).toMatch(/^waiting for you: Approve the plan /);
+			expect(line).not.toContain("\n");
+			expect((line as string).length).toBeLessThanOrEqual(120);
+			expect(line).toMatch(/…$/);
+			// A run with no readable prompt, and every unparked run, keep the
+			// run-status line.
+			expect(
+				declaration("workflow_status").summarizeResult({
+					...view,
+					pendingCheckpoints: [
+						{
+							taskId: view.pendingCheckpoints[0]?.taskId,
+							namespace: [],
+							key: "approve",
+							executionId: view.pendingCheckpoints[0]?.executionId,
+							requestedAt: "2026-09-15T00:10:00.000Z",
+						},
+					],
+				}),
+			).toBe(`${view.runId} waiting`);
+			expect(
+				declaration("workflow_status").summarizeResult({
+					...view,
+					status: "completed",
+					pendingCheckpoints: [],
+				}),
+			).toBe(`${view.runId} completed`);
+			expect(
+				declaration("workflow_wait").summarizeResult({
+					...view,
+					status: "running",
+					pendingCheckpoints: [],
+					timedOut: true,
+				}),
+			).toBe(`${view.runId} running (timed out)`);
+		});
 	});
 
 	describe("text bounding", () => {
