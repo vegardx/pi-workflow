@@ -845,11 +845,12 @@ describe("plan-to-ship: the agent templates", () => {
 		const agents = await discoverAgents([
 			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
 		]);
-		expect([...agents.keys()].sort()).toEqual([
-			"implementer",
-			"planner",
-			"reviewer",
-		]);
+		// The templates directory is shared by every builtin definition, so this
+		// asserts the three THIS one names are there and parse, not that they are
+		// the only templates the package ships.
+		for (const name of ["implementer", "planner", "reviewer"]) {
+			expect([...agents.keys()]).toContain(name);
+		}
 		const implementer = agents.get("implementer");
 		expect(implementer?.workspaceModes).toEqual(["worktree"]);
 		expect(implementer?.tools).toEqual([
