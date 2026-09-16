@@ -749,6 +749,10 @@ Dynamic acceptance (contract revision 18, `dynamicWorkflows: true`) must prove:
   id when it is accepted; the packed `dist/dynamic/worker.js` resolves from
   the packed host and extracts a manifest;
 - package contents contain compiled ESM, declarations, license, and bounded docs;
+- both bundled skills (`skills/workflow-authoring/`, `skills/workflows/`) are
+  packed and declared through `pi.skills`, and the operating skill's tool
+  names, `/workflow` subcommands, run statuses, quoted runtime messages, and
+  recovery legality table are pinned to the runtime in both directions;
 - the root entry exports exactly the pinned frozen list
   (`test/fixtures/public-api/root-exports.json`) and the runtime entry
   exactly the pinned runtime list (`runtime-exports.json`), both asserted
