@@ -8,11 +8,12 @@ surfaces described in
 
 ## Unreleased
 
-Additive since 2.0.0, so the next release is the minor 2.1.0: a fourth entry
-point carrying a component library, and a support-task wiring fix in the
-extension. No frozen export, shape, schema, message, or tool changed;
-`WORKFLOW_CONTRACT_REVISION` stays 19 and the required pi-subagent contract
-stays revision 7 (`0.11.0`).
+Additive since 2.0.0, so the next release is the minor 2.1.0: two new entry
+points — a component library and a service-provider seam — a second builtin
+workflow built out of the first, a model-routing port the host installs, and a
+support-task wiring fix in the extension. No frozen export, shape, schema,
+message, or tool changed; `WORKFLOW_CONTRACT_REVISION` stays 19 and the
+required pi-subagent contract stays revision 7 (`0.11.0`).
 
 ### Added
 
@@ -25,6 +26,74 @@ stays revision 7 (`0.11.0`).
   [docs/compatibility.md](docs/compatibility.md). Its export list is not
   pinned, but it is checked to be disjoint from the two pinned lists, so no
   frozen surface moves with it.
+- **The builtin `deep-review` workflow.** `workflows/deep-review.workflow.ts`
+  and the `lens-reviewer` agent template it names, discovered from the same
+  `workflows/` builtin root as `plan-to-ship` and needing no project trust. It
+  reviews one subject — a worktree handoff's descriptor, the working tree, or a
+  document — through 1 to 16 read-only lenses at once, merges what came back on
+  a deterministic rail, and reports `{ verdict, findings, coverage, synthesis? }`
+  with one coverage row per lens. No gate, no worktree, nothing written. It is
+  the first definition assembled entirely from the component library
+  (`envelope` for the effort dial, `reviewFanOut` for the graph), which is what
+  makes it an executable example of the patterns rather than a second
+  implementation of them.
+- **`@vegardx/pi-workflow/service-provider`.** A fifth entry point: the seam
+  another Pi extension in the same process acquires the workflow runtime
+  through, structurally identical to pi-subagent's — a lazy, frozen
+  `{ contract, acquire(context) }` answering a request event on a versioned
+  channel, discovered twice so a provider swapped during acquisition is refused
+  rather than used. What crosses it is narrowed to a `WorkflowReadClient`:
+  `list`, `validate`, `project`, `inspect`, `runs`, `observe`, `runBuiltin`,
+  and `awaitRun`. There is no `decide`, `stop`, `invalidate`, or general `run`
+  — starting a workflow that writes stays the model's own `workflow_run` call,
+  in the open, in the transcript. `runBuiltin` is gated by the frozen
+  `BUILTIN_HEADLESS_WORKFLOWS` allowlist, which belongs to the runtime rather
+  than the caller and whose members must declare no checkpoint, no worktree and
+  no handoff — the property `headlessBuiltinViolations` checks, since
+  `workflow_validate` cannot. The extension registers the provider for its own
+  lifetime. The entry is **unfrozen** and recorded as such in
+  `compatibility.json` and [docs/compatibility.md](docs/compatibility.md).
+- **`WorkflowService.project(ref, input)` and `WorkflowBudgetProjection`.** A
+  lease-free budget projection: the definition's `run(ctx)` is executed against
+  a context that declares nothing durable — no journal, no lease, no task
+  identity, no subagent, no filesystem — and the declared reservations of every
+  task the graph would declare are summed and compared against the run's
+  effective budget. Barriers resolve from values synthesized out of the
+  declared output schemas, and a boolean synthesizes as `true`, so the answer
+  is the worst-case branch. Adding a service method and a view is a minor
+  release under the stability policy.
+- **Model roles.** `AgentTaskAuthoringRequest` gains the optional `modelRole`
+  (`{ persona, tier?, effort?, family? }`), mutually exclusive with `model`.
+  The materializer resolves it to an exact `{ provider, id, thinking }`
+  **before hashing**, so `AgentTaskRequestSchema`, task identity, and
+  pi-subagent's contract are unchanged, and a role that resolves to the model a
+  hand-written task named produces the identical task identity. The resolution
+  is persisted with the task and re-used verbatim on every replay, only
+  re-authorized. The router is a port — `WorkflowServiceOptions.modelRouting`,
+  typed `ModelRoutingPort` — never a dependency: nothing in this package
+  imports a router. With no port installed a `modelRole` fails materialization
+  with "No model routing is installed; declare an exact model."; the runtime
+  never guesses. `staticModelRouting(table)` on
+  `@vegardx/pi-workflow/runtime` is the constant-table stand-in, and every
+  resolution it returns reports `source: "static"` with a `fallbackReason`
+  saying so.
+- **`WorkflowRunRecordSchema.modelRouting`.** Optional, revision-19 additive:
+  `{ router }`, the id of the routing port the run was created with, so a run
+  says which router answered for it. Every record written before this still
+  validates, a reader that does not know the field ignores it, and nothing
+  derives identity from it.
+- **`verifyAndFix`.** A component: a bounded verify-then-fix loop over one
+  implementer's worktree handoff, unrolled at declaration into
+  `<key>-verify-<n>` and `<key>-fix-<n>` — a pure function of the caller's key
+  and the round ordinal. `maxRounds` bounds the **verify** rounds, capped at 2,
+  so at most one fix round follows and the component never returns a fix nobody
+  checked. The cap is a cap on replay: every round awaits a barrier, and a
+  resume re-declares every epoch already crossed. A verifier always runs at
+  `envelope(effort, "verify")`; a fixer is a retry, so `escalate: "thinking"`
+  runs it one rung up the ladder, and escalating from `deep` is refused rather
+  than silently ignored. `checkRan: false` stops the loop instead of starting a
+  fix round — unverified is not broken — and returns
+  `{ passed: false, checkRan: false }` for the caller's gate.
 - **Authored definitions may import `@vegardx/pi-workflow/components`.** The
   definition import gate now accepts that specifier alongside
   `@vegardx/pi-workflow`, `typebox`, and registered support modules. It is

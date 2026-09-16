@@ -369,6 +369,7 @@ request fails with "invalid agent task request".
 | `task.instructions` | 1..64 strings, each at most 16 KiB. |
 | `contextMode` | `"fresh"` only. |
 | `model` | Optional `{ provider, id, thinking }`; `thinking` is `off | minimal | low | medium | high | xhigh`. |
+| `modelRole` | Optional `{ persona, tier?, effort?, family? }` — ask the host's router instead of naming a model. Mutually exclusive with `model` ("agent task declares both model and modelRole; they are mutually exclusive"). `tier` is `light \| standard \| heavy`, `effort` the thinking ladder plus `max` (mapped to `xhigh`), `family` is `same \| other`. Resolved to an exact `{ provider, id, thinking }` BEFORE hashing, so a role that resolves to the model a hand-written task named has the identical task identity; the resolution is persisted with the task and re-used on every replay. With no router installed: "No model routing is installed; declare an exact model." |
 | `tools` | 0..64 unique resource names, brokered by pi-subagent. |
 | `preloadSkills` | 0..64 unique skill names. |
 | `contextScopes` | Unique subset of `"global"`, `"project"`. |
@@ -741,6 +742,18 @@ How a checkpoint runs, for authors:
   `cleanup-blocked`. Task statuses: `pending`, `ready`, `running`, `waiting`,
   `completed`, `failed`, `interrupted`, `blocked`, `cancelling`, `cancelled`,
   `cleanup-blocked`, `invalidated`.
+
+The package's `workflows/deep-review.workflow.ts` is the shipped worked example
+of those last two rules together. It declares one optional read-only reviewer
+per lens over one subject, closes them with `ctx.settled`, computes the verdict
+and the de-duplicated findings from the lenses that reported, and reports a
+`coverage` row per lens so a review that lost one reads as three of four rather
+than as a complete one. Its reducer is optional and read through `ctx.settled`
+as well, because a barrier's control edge covers **every** task the barrier
+closed over: anything declared after `ctx.settled` is `blocked` when any of
+those tasks failed, however carefully its `inputs` avoid the dead one. Declare
+such a follow-on task optional and a lost lens degrades the run
+(`completed-degraded`) instead of failing it.
 
 ## Dynamic workflows
 
