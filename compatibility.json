@@ -14,7 +14,8 @@
 			"entryPoints": {
 				".": "frozen",
 				"./extension": "frozen",
-				"./runtime": "unfrozen"
+				"./runtime": "unfrozen",
+				"./components": "unfrozen"
 			},
 			"exportList": "test/fixtures/public-api/root-exports.json"
 		}

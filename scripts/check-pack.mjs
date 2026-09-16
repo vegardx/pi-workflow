@@ -123,6 +123,9 @@ try {
 		"dist/nested-run-executor.js",
 		"dist/runtime/index.d.ts",
 		"dist/runtime/index.js",
+		// W0-COMP-A: the component library's own entry point.
+		"dist/components/index.d.ts",
+		"dist/components/index.js",
 		"dist/support-executor.d.ts",
 		"dist/support-executor.js",
 		"dist/support.d.ts",
@@ -211,6 +214,7 @@ try {
 			`
 const workflow = await import("@vegardx/pi-workflow");
 const runtime = await import("@vegardx/pi-workflow/runtime");
+const components = await import("@vegardx/pi-workflow/components");
 const extension = await import("@vegardx/pi-workflow/extension");
 const subagent = await import("@vegardx/pi-subagent");
 const provider = await import("@vegardx/pi-subagent/service-provider");
@@ -233,12 +237,20 @@ for (const [entry, { list, expected, actual }] of Object.entries(pinned)) {
 }
 const shared = pinned.root.actual.filter((name) => pinned.runtime.actual.includes(name));
 if (shared.length > 0) throw new Error("no export may appear in both entry points: " + shared.join(", "));
-for (const deep of ["@vegardx/pi-workflow/dist/index.js", "@vegardx/pi-workflow/dist/reducer.js", "@vegardx/pi-workflow/dist/runtime/index.js", "@vegardx/pi-workflow/runtime/index.js", "@vegardx/pi-workflow/compatibility.json"]) {
+// W0-COMP-A: the third entry exists, carries the library, and is disjoint from
+// the two pinned entries. Its own list is not pinned; ./components is unfrozen.
+const componentNames = Object.keys(components).sort();
+if (typeof components.gate !== "function" || typeof components.envelope !== "function") {
+	throw new Error("packed ./components entry does not export the component library");
+}
+const sharedComponents = componentNames.filter((name) => pinned.root.actual.includes(name) || pinned.runtime.actual.includes(name));
+if (sharedComponents.length > 0) throw new Error("./components may not repeat a pinned export: " + sharedComponents.join(", "));
+for (const deep of ["@vegardx/pi-workflow/dist/index.js", "@vegardx/pi-workflow/dist/reducer.js", "@vegardx/pi-workflow/dist/runtime/index.js", "@vegardx/pi-workflow/runtime/index.js", "@vegardx/pi-workflow/dist/components/index.js", "@vegardx/pi-workflow/components/index.js", "@vegardx/pi-workflow/compatibility.json"]) {
 	let code = "resolved";
 	try { await import(deep); } catch (error) { code = error?.code ?? String(error); }
 	if (code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw new Error("deep import " + deep + " must reject with ERR_PACKAGE_PATH_NOT_EXPORTED, got " + code);
 }
-process.stdout.write("packed exports: root " + pinned.root.actual.length + ", runtime " + pinned.runtime.actual.length + ", disjoint\\n");
+process.stdout.write("packed exports: root " + pinned.root.actual.length + ", runtime " + pinned.runtime.actual.length + ", components " + componentNames.length + ", disjoint\\n");
 const compatibility = JSON.parse(await readFile("node_modules/@vegardx/pi-workflow/compatibility.json", "utf8"));
 const subagentManifest = JSON.parse(await readFile("node_modules/@vegardx/pi-subagent/package.json", "utf8"));
 const skill = await readFile("node_modules/@vegardx/pi-workflow/skills/workflow-authoring/SKILL.md", "utf8");
@@ -358,7 +370,7 @@ if (
 	compatibility.piWorkflow.version !== "2.0.0" ||
 	compatibility.piWorkflow.api?.version !== "2.0.0" ||
 	JSON.stringify(compatibility.piWorkflow.api.frozenSurfaces) !== JSON.stringify(["authoring", "service", "contract", "extension"]) ||
-	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen" }) ||
+	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen", "./components": "unfrozen" }) ||
 	compatibility.piWorkflow.api.exportList !== ${JSON.stringify(rootExportList)} ||
 	!compatibility.hosts?.find((host) => host.platform === "macos-arm64")?.evidence?.includes(${JSON.stringify(qualificationNote)}) ||
 	compatibility.piWorkflow.contractRevision !== workflow.WORKFLOW_CONTRACT_REVISION ||
