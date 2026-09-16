@@ -59,14 +59,19 @@ import {
  * (materializer.ts), so identity digests are normalised by first appearance
  * rather than compared literally, and the divergence is asserted explicitly.
  *
- * Budget: every static `run` re-discovers the project (jiti transpiles this
- * checkout behind the package shim), a dynamic drive boots a tsx worker, and
- * each drive is fsync-bound. Each fixture therefore has its own project and
- * service (one workflow file to load) and three tests: propose/approve,
- * static drive, dynamic drive plus comparison.
+ * Budget: every static `run` re-discovers the project, a dynamic drive boots a
+ * tsx worker, and each drive is fsync-bound. Each fixture therefore has its
+ * own project and service (one workflow file to load) and three tests:
+ * propose/approve, static drive, dynamic drive plus comparison.
+ *
+ * The package shims below resolve to the built `dist/` entry, as the package
+ * self-reference does (CI builds before testing). Pointed at `src/index.ts`,
+ * jiti cannot import the checkout natively behind the support shim and
+ * transpiles the whole tree on every discovery: 3.4 s per static `run` for
+ * the fixtures importing the helper, against 20 ms through `dist/`.
  */
 
-const publicEntry = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+const publicEntry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const parityRoot = path.resolve(".pi", "test-dynamic-parity", randomUUID());
 
 const TOOLS_MODULE = "@vegardx/parity-tools";
