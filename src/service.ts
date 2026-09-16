@@ -31,6 +31,8 @@ import {
 } from "./contracts.js";
 import {
 	deriveDecisionRecordSha256,
+	type WorkflowDecisionBinding,
+	type WorkflowDecisionRecord,
 	WorkflowDecisionRecordError,
 	WorkflowDecisionRecordStore,
 } from "./decision-store.js";
@@ -100,7 +102,10 @@ import type {
 	TaskExecutionProjection,
 	WorkflowStateProjection,
 } from "./events.js";
-import { deriveWorkflowHandoffDescriptor } from "./execution.js";
+import {
+	deriveCheckpointEffectSha256,
+	deriveWorkflowHandoffDescriptor,
+} from "./execution.js";
 import {
 	verifyWorkflowHandoffEvidence,
 	WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
@@ -147,6 +152,7 @@ import {
 } from "./run-actions.js";
 import {
 	compareRunSummaries,
+	DEFAULT_INSPECT_SECTIONS,
 	decodeWorkflowRunCursor,
 	encodeWorkflowRunCursor,
 	invalidationPreview,
@@ -175,6 +181,7 @@ import {
 	WorkflowDecideOptionsSchema,
 	type WorkflowInspectOptions,
 	WorkflowInspectOptionsSchema,
+	type WorkflowInspectSection,
 	type WorkflowInvalidationPreview,
 	type WorkflowLogOptions,
 	WorkflowLogOptionsSchema,
@@ -292,6 +299,13 @@ export type WorkflowServiceHandoffExport = {
 };
 
 const NO_HANDOFF_ARTIFACT_MESSAGE = "Workflow task has no handoff artifact.";
+
+/**
+ * The one refusal a lease-free inspection raises for a decision record that
+ * cannot be read, or whose value disagrees with the journalled digest.
+ */
+const CHECKPOINT_DECISION_UNVERIFIED_MESSAGE =
+	"Checkpoint decision could not be read and verified.";
 
 export interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
@@ -3068,6 +3082,12 @@ export async function createWorkflowService(
 				);
 			}
 			const source = await readCurrent(runIdValue);
+			const include = selector.include ?? DEFAULT_INSPECT_SECTIONS;
+			const evidence = await inspectionEvidence(
+				runIdValue,
+				source.state,
+				include,
+			);
 			return runInspection(
 				source.record,
 				source.state,
@@ -3078,6 +3098,7 @@ export async function createWorkflowService(
 				{
 					...(selector.include ? { include: selector.include } : {}),
 					...(taskId === undefined ? {} : { taskId }),
+					...evidence,
 				},
 			);
 		},
@@ -3167,6 +3188,168 @@ export async function createWorkflowService(
 			throw error;
 		}
 		return probe.state === "free" ? "inactive" : "leased-elsewhere";
+	}
+
+	/**
+	 * The artifact and decision stores of a run for a lease-free read: an
+	 * owned run's own stores, or read-only ones opened over its durable
+	 * directory. Neither can write.
+	 */
+	async function readOnlyStores(runIdValue: WorkflowRunId): Promise<{
+		artifacts: WorkflowArtifactStore;
+		decisions: WorkflowDecisionRecordStore;
+	}> {
+		const current = owned.get(runIdValue);
+		if (current) {
+			return { artifacts: current.artifacts, decisions: current.decisions };
+		}
+		return {
+			artifacts: await WorkflowArtifactStore.openUnleased({
+				storeRoot,
+				runId: runIdValue,
+			}),
+			decisions: await WorkflowDecisionRecordStore.openUnleased({
+				storeRoot,
+				runId: runIdValue,
+			}),
+		};
+	}
+
+	/**
+	 * The two durable values the lease-free inspection cannot project from the
+	 * journal alone: a terminal run's committed output (only when `include`
+	 * asks for it) and the decided value of every on-path checkpoint (whenever
+	 * `tasks` are projected). Both are read through the read-only stores and
+	 * verified against the journal before they are shown; nothing is read when
+	 * the run has neither.
+	 */
+	async function inspectionEvidence(
+		runIdValue: WorkflowRunId,
+		state: WorkflowStateProjection | undefined,
+		include: readonly WorkflowInspectSection[],
+	): Promise<{
+		output?: unknown;
+		decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
+	}> {
+		if (!state) return {};
+		const wantsOutput =
+			include.includes("output") &&
+			state.outputArtifactId !== undefined &&
+			isTerminalWorkflowRunStatus(state.status);
+		const decided = include.includes("tasks") ? decidedCheckpoints(state) : [];
+		if (!wantsOutput && decided.length === 0) return {};
+		const stores = await readOnlyStores(runIdValue);
+		return {
+			...(wantsOutput
+				? { output: await committedOutput(state, stores.artifacts) }
+				: {}),
+			...(decided.length > 0
+				? {
+						decisionValues: await decidedValues(decided, stores.decisions),
+					}
+				: {}),
+		};
+	}
+
+	/** The run's committed output value, digest-verified by the store. */
+	async function committedOutput(
+		state: WorkflowStateProjection,
+		artifacts: WorkflowArtifactStore,
+	): Promise<unknown> {
+		const artifact = state.outputArtifactId
+			? state.artifacts[state.outputArtifactId]
+			: undefined;
+		if (!artifact) {
+			throw new WorkflowServiceError(
+				"persistence",
+				"Workflow output artifact metadata is missing.",
+			);
+		}
+		try {
+			return await artifacts.readJson(artifact);
+		} catch (error) {
+			throw new WorkflowServiceError(
+				"persistence",
+				"Workflow output could not be read and verified.",
+				{ cause: error },
+			);
+		}
+	}
+
+	/**
+	 * Every on-path checkpoint task whose current execution carries a durable
+	 * request and decision, with the binding its decision record is filed
+	 * under.
+	 */
+	function decidedCheckpoints(state: WorkflowStateProjection): readonly {
+		taskId: WorkflowTaskId;
+		decisionSha256: string;
+		binding: WorkflowDecisionBinding;
+	}[] {
+		const decided: {
+			taskId: WorkflowTaskId;
+			decisionSha256: string;
+			binding: WorkflowDecisionBinding;
+		}[] = [];
+		for (const task of Object.values(state.tasks)) {
+			const spec = task.task.spec;
+			if (spec.kind !== "checkpoint" || task.abandoned === true) continue;
+			const execution = task.currentExecutionId
+				? state.executions[task.currentExecutionId]
+				: undefined;
+			const request = execution?.checkpointRequest;
+			const decision = execution?.checkpointDecision;
+			if (!execution || !request || !decision) continue;
+			decided.push({
+				taskId: task.task.id,
+				decisionSha256: decision.decisionSha256,
+				binding: {
+					kind: "checkpoint",
+					runId: state.runId,
+					taskId: task.task.id,
+					executionId: execution.execution.id,
+					effectSha256: deriveCheckpointEffectSha256({
+						taskIdentitySha256: spec.identitySha256,
+						inputsSha256: request.inputsSha256,
+					}),
+				},
+			});
+		}
+		return decided;
+	}
+
+	/**
+	 * The decided value of each checkpoint, from its durable decision record.
+	 * The journal is authoritative: a record whose value digest differs from
+	 * the journalled decision digest is refused rather than shown, and a run
+	 * that has no record for a binding simply carries no value.
+	 */
+	async function decidedValues(
+		decided: ReturnType<typeof decidedCheckpoints>,
+		decisions: WorkflowDecisionRecordStore,
+	): Promise<ReadonlyMap<WorkflowTaskId, unknown>> {
+		const values = new Map<WorkflowTaskId, unknown>();
+		for (const checkpoint of decided) {
+			let record: WorkflowDecisionRecord | undefined;
+			try {
+				record = await decisions.read(checkpoint.binding);
+			} catch (error) {
+				throw new WorkflowServiceError(
+					"persistence",
+					CHECKPOINT_DECISION_UNVERIFIED_MESSAGE,
+					{ cause: error },
+				);
+			}
+			if (!record) continue;
+			if (record.valueSha256 !== checkpoint.decisionSha256) {
+				throw new WorkflowServiceError(
+					"persistence",
+					CHECKPOINT_DECISION_UNVERIFIED_MESSAGE,
+				);
+			}
+			values.set(checkpoint.taskId, record.value);
+		}
+		return values;
 	}
 
 	/**

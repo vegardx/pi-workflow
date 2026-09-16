@@ -588,6 +588,7 @@ type ReadService = Omit<
 			availableActions: readonly string[];
 			requiresAttention: boolean;
 			outputArtifactId?: string;
+			output?: unknown;
 			parent?: unknown;
 		};
 		budget?: {
@@ -1325,6 +1326,80 @@ describe("inspect and logs", () => {
 				afterSequence = page.nextAfterSequence;
 			}
 			expect(collected).toEqual(logs.entries);
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("carries a terminal run's output only when include asks for it", async () => {
+		const fixture = await projectFixture("output");
+		const seed = await serviceFor(fixture);
+		const runId = await completedRun(seed, "example", { value: "receipt" });
+		const owned = asRead(seed);
+		try {
+			// The default selection is unchanged: no output, no artifact read.
+			const lean = await owned.inspect(runId);
+			expect(lean.run).not.toHaveProperty("output");
+
+			const withOutput = await owned.inspect(runId, {
+				include: ["run", "output"],
+			});
+			expect(Value.Check(WorkflowRunInspectionSchema, withOutput)).toBe(true);
+			expect(Object.keys(withOutput).sort()).toEqual(["run", "truncated"]);
+			expect(withOutput.run.output).toEqual({ answer: "receipt" });
+			// The output the inspection carries is the one the artifact-backed
+			// wait view carries, read through the same bound.
+			const waited = await bounded(owned.wait(runId), "wait");
+			expect(withOutput.run.output).toEqual(
+				(waited as { output?: unknown }).output,
+			);
+			expect(withOutput.run.outputArtifactId).toEqual(expect.any(String));
+		} finally {
+			await shutdownQuietly(owned);
+		}
+
+		// The same run, read lease-free by a service that does not own it.
+		const reader = asRead(await serviceFor(fixture));
+		try {
+			const inspection = await reader.inspect(runId, {
+				include: ["run", "output"],
+			});
+			expect(inspection.run.ownership).toBe("inactive");
+			expect(inspection.run.output).toEqual({ answer: "receipt" });
+		} finally {
+			await shutdownQuietly(reader);
+		}
+	});
+
+	it("omits the output of a run that has not committed one", async () => {
+		const fixture = await projectFixture("output-running");
+		const delegated = attemptProvider([{ status: "completed" }]);
+		const gate = deferred<Awaited<ReturnType<SubagentClient["wait"]>>>();
+		vi.mocked(delegated.ownerClient.wait).mockImplementation(
+			async () => gate.promise,
+		);
+		const raw = await serviceFor(fixture, delegated.provider);
+		const service = asRead(raw);
+		try {
+			const receipt = await raw.run("attempts", { value: "x" });
+			await until(
+				() => vi.mocked(delegated.ownerClient.wait).mock.calls.length > 0,
+			);
+			const running = await service.inspect(receipt.runId, {
+				include: ["run", "output"],
+			});
+			expect(Value.Check(WorkflowRunInspectionSchema, running)).toBe(true);
+			expect(["running", "waiting"]).toContain(running.run.status);
+			expect(running.run).not.toHaveProperty("output");
+			expect(running.run).not.toHaveProperty("outputArtifactId");
+
+			gate.resolve(childResult({ status: "completed" }, delegated.child.runId));
+			await bounded(service.wait(receipt.runId), "wait");
+			const completed = await service.inspect(receipt.runId, {
+				include: ["run", "output"],
+			});
+			expect(completed.run.status).toBe("completed");
+			expect(completed.run.output).toEqual({ answer: "from child" });
 		} finally {
 			await shutdownQuietly(service);
 		}
