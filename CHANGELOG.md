@@ -11,9 +11,11 @@ surfaces described in
 Additive since 2.0.0, so the next release is the minor 2.1.0: two new entry
 points — a component library and a service-provider seam — two more builtin
 workflows built out of the first, two short reference skills, a model-routing
-port the host installs, and a support-task wiring fix in the extension. No frozen export, shape, schema,
-message, or tool changed; `WORKFLOW_CONTRACT_REVISION` stays 19 and the
-required pi-subagent contract stays revision 7 (`0.11.0`).
+port the host installs, a lease-free read of a settled run's output and of a
+checkpoint's decided value, and a support-task wiring fix in the extension. No
+frozen export, shape or message was removed or retyped, no returned union was
+widened, and nothing persisted changed; `WORKFLOW_CONTRACT_REVISION` stays 19
+and the required pi-subagent contract stays revision 7 (`0.11.0`).
 
 ### Added
 
@@ -128,6 +130,38 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
   than silently ignored. `checkRan: false` stops the loop instead of starting a
   fix round — unverified is not broken — and returns
   `{ passed: false, checkRan: false }` for the caller's gate.
+- **`inspect(runId, { include: ["output"] })` carries a settled run's output.**
+  A new `include` member puts the run's committed output value on
+  `run.output` of the inspection, read from the output artifact and verified
+  against the digest the journal records — the same value, through the same
+  bound, that the artifact-backed `status` and `wait` views carry. It is
+  absent unless the run is terminal *and* committed an output, and absent
+  from every inspection that did not ask for it, so the default selection
+  reads no artifact at all. The bound is the artifact bound,
+  `MAX_WORKFLOW_ARTIFACT_BYTES` (16 MiB): the store refuses to write a larger
+  artifact and re-checks the recorded size on the read, so an output that
+  would not fit cannot exist. Adding an `include` member widens an accepted
+  input and adding an optional view field is additive, so
+  `workflow_inspect`'s parameter and output schemas both still accept
+  everything they accepted before.
+- **Checkpoint decision views carry the decided value without an artifact.**
+  `tasks[].checkpoint.decision.value` is now present on the lease-free
+  inspection too, read from the run's durable decision record rather than
+  from the decision result artifact. The journal stays authoritative: a value
+  is shown only when the record's `valueSha256` equals the `sha256` the
+  journalled decision names, and a record that disagrees is refused with
+  `Checkpoint decision could not be read and verified.` rather than
+  displayed. The artifact-backed path (`status`, `wait`, `decide`) is
+  unchanged, and the lease-free inspection still reads no checkpoint
+  `inputs`. A host can therefore prove a gate's answer — `{ "ship": true }` —
+  without taking the run's lease and without `decide`.
+- **`WorkflowArtifactStore.openUnleased` and
+  `WorkflowDecisionRecordStore.openUnleased`.** Read-only stores over a run's
+  `artifacts/` and `decisions/` directories, opened without the run's lease
+  for the two reads above. Every reader verifies exactly what an owned
+  store's does; every writer refuses with `… is read-only`; neither creates a
+  directory. Both are `@vegardx/pi-workflow/runtime` internals, and neither
+  entry point's pinned export list changed.
 - **Authored definitions may import `@vegardx/pi-workflow/components`.** The
   definition import gate now accepts that specifier alongside
   `@vegardx/pi-workflow`, `typebox`, and registered support modules. It is
