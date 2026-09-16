@@ -75,8 +75,14 @@ import { WorkflowComponentError } from "./errors.js";
  *   a fix round.
  * - `maxRounds: 2` — `verify-1`, `fix-1`, `verify-2`.
  *
- * The cap is 2 (spec §2.3 and §7 R6) and the module keeps it until
- * W0-MEASURE's replay-cost section lands in `docs/research.md`.
+ * The cap is 2 (spec §2.3 and §7 R6), and it is now measured rather than
+ * assumed: `docs/research.md` "Replay cost of a bounded loop", with
+ * `test/replay-cost.test.ts` behind it, finds a bounded loop affordable at
+ * this size — a worst-case resume of a few seconds against agents that cost
+ * minutes — and an unbounded `loopUntil` not, which is why that component
+ * stays deferred. `maxRounds` counts **verify** rounds, so a cap of 2 admits
+ * one fix round; the measurement would allow another, and raising the cap is
+ * a decision for the spec rather than for this module.
  *
  * ## The replay cost this cap is paying for
  *
