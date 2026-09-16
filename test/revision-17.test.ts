@@ -84,6 +84,8 @@ const HANDOFF_BYTES = 4096;
 const NO_HANDOFF_MESSAGE = "Completed worktree task captured no handoff.";
 const BLOCKED_HANDOFF_MESSAGE =
 	"Workflow handoff artifact import requires reconciliation.";
+/** The fixed message of a handoff the workflow import bound refuses. */
+const BOUND_HANDOFF_MESSAGE = "Workflow handoff exceeds the import bound.";
 const outputSchema = Type.Object({ answer: Type.String() });
 const supportHelper = defineSupportTask({
 	name: "@vegardx/workflow-tools/summarize",
@@ -1950,6 +1952,184 @@ describe("revision 17 terminal evidence", () => {
 					"failed",
 					"handoff-import",
 					NO_HANDOFF_MESSAGE,
+				),
+			]),
+		).toThrow("workflow terminal evidence is inconsistent");
+	});
+
+	it.each(["required", "optional"] as const)(
+		"accepts failed handoff-import evidence for a %s-policy handoff the import bound refuses",
+		(policy) => {
+			const graph = worktreeGraph(policy);
+			const events: WorkflowEventInput[] = [
+				...graph.events,
+				...importedWithHandoff(graph),
+				workflowTerminal(
+					graph.execution.id,
+					"failed",
+					"handoff-import",
+					BOUND_HANDOFF_MESSAGE,
+				),
+				taskStatus(graph.task.id, "running", "failed", BOUND_HANDOFF_MESSAGE),
+			];
+			const state = reduce(events);
+			const projection = projectionOf(state, graph.execution);
+			expect(projection.phase).toBe("terminal");
+			expect(projection.terminal).toStrictEqual({
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "handoff-import",
+					failureSha256: deriveWorkflowFailureSha256(
+						"handoff-import",
+						BOUND_HANDOFF_MESSAGE,
+					),
+					message: BOUND_HANDOFF_MESSAGE,
+				},
+				sequence: events.length - 1,
+			});
+			// The child is never released: an unreleased worktree run keeps
+			// pi-subagent protecting the handoff for the operator.
+			expect(projection.releaseIntent).toBeUndefined();
+			expect(projection.release).toBeUndefined();
+			expect(projection.handoffImport).toBeUndefined();
+			expect(state.tasks[graph.task.id]?.status).toBe("failed");
+		},
+	);
+
+	it("supersedes a blocked handoff import with the bound refusal exactly once", () => {
+		const graph = worktreeGraph();
+		const blocked: WorkflowEventInput[] = [
+			...graph.events,
+			...importedWithHandoff(graph),
+			workflowTerminal(
+				graph.execution.id,
+				"cleanup-blocked",
+				"handoff-import",
+				BLOCKED_HANDOFF_MESSAGE,
+			),
+			taskStatus(graph.task.id, "running", "cleanup-blocked"),
+			runStatus("running", "cleanup-blocked"),
+		];
+		const refused = workflowTerminal(
+			graph.execution.id,
+			"failed",
+			"handoff-import",
+			BOUND_HANDOFF_MESSAGE,
+		);
+		const state = reduce([
+			...blocked,
+			refused,
+			taskStatus(
+				graph.task.id,
+				"cleanup-blocked",
+				"failed",
+				BOUND_HANDOFF_MESSAGE,
+			),
+			runStatus("cleanup-blocked", "failed"),
+		]);
+		expect(projectionOf(state, graph.execution).terminal).toMatchObject({
+			outcome: "failed",
+			evidence: { stage: "handoff-import", message: BOUND_HANDOFF_MESSAGE },
+		});
+		expect(state.tasks[graph.task.id]?.status).toBe("failed");
+		expect(state.status).toBe("failed");
+		// Only that one supersession: the failed terminal is itself final.
+		expect(() => reduce([...blocked, refused, refused])).toThrow(
+			"task execution terminal evidence is duplicate",
+		);
+		// The blocked terminal of another stage is never superseded.
+		expect(() =>
+			reduce([
+				...graph.events,
+				...settledCompleted(
+					graph,
+					completedEvidence(handoffEvidence(graph.execution)),
+				),
+				workflowTerminal(
+					graph.execution.id,
+					"cleanup-blocked",
+					"artifact-import",
+					"Workflow result artifact import requires reconciliation.",
+				),
+				taskStatus(graph.task.id, "running", "cleanup-blocked"),
+				refused,
+			]),
+		).toThrow("task execution terminal evidence is duplicate");
+	});
+
+	it("rejects a bound refusal without a captured handoff, off the import point, or after release", () => {
+		const refused = (executionId: string) =>
+			workflowTerminal(
+				executionId,
+				"failed",
+				"handoff-import",
+				BOUND_HANDOFF_MESSAGE,
+			);
+		// The settlement captured no handoff: the absence path owns that case.
+		const absent = worktreeGraph("required");
+		expect(() =>
+			reduce([
+				...absent.events,
+				...importedWithoutHandoff(absent),
+				refused(absent.execution.id),
+			]),
+		).toThrow("workflow terminal evidence is inconsistent");
+		// Before the result import.
+		const settledOnly = worktreeGraph();
+		expect(() =>
+			reduce([
+				...settledOnly.events,
+				...settledCompleted(
+					settledOnly,
+					completedEvidence(handoffEvidence(settledOnly.execution)),
+				),
+				refused(settledOnly.execution.id),
+			]),
+		).toThrow("workflow terminal evidence is inconsistent");
+		// After the handoff imported: there is nothing the bound refused.
+		const imported = worktreeGraph();
+		expect(() =>
+			reduce([
+				...imported.events,
+				...importedWithHandoff(imported),
+				...handoffImport(imported),
+				refused(imported.execution.id),
+			]),
+		).toThrow("workflow terminal evidence is inconsistent");
+		// After release.
+		const releasedGraph = worktreeGraph();
+		expect(() =>
+			reduce([
+				...releasedGraph.events,
+				...importedWithHandoff(releasedGraph),
+				...handoffImport(releasedGraph),
+				releaseIntended(releasedGraph.execution),
+				released(releasedGraph.execution, "completed"),
+				refused(releasedGraph.execution.id),
+			]),
+		).toThrow("workflow terminal evidence is inconsistent");
+		// On a read-only task.
+		const readOnly = readOnlyGraph();
+		expect(() =>
+			reduce([
+				...readOnly.events,
+				...settledCompleted(readOnly, completedEvidence()),
+				...resultImport(readOnly),
+				refused(readOnly.execution.id),
+			]),
+		).toThrow("workflow terminal evidence is inconsistent");
+		// Another message from the import point.
+		const other = worktreeGraph();
+		expect(() =>
+			reduce([
+				...other.events,
+				...importedWithHandoff(other),
+				workflowTerminal(
+					other.execution.id,
+					"failed",
+					"handoff-import",
+					"Workflow handoff exceeds the import bound",
 				),
 			]),
 		).toThrow("workflow terminal evidence is inconsistent");

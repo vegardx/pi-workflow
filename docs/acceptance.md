@@ -369,10 +369,17 @@ An in-memory-only successful drive does not satisfy the first slice.
   the settlement carries `handoff { attemptId, baselineHead, handoffCommit }`
   and nothing else about the worktree, and the import's identity equals the
   settlement's;
-- export failure, identity mismatch, unsupported format, digest or size
-  mismatch, oversize, or a malformed patch leaves the task and run
-  `cleanup-blocked` at stage `handoff-import`, and explicit reconciliation
-  reconciles the child and retries the import;
+- export failure, identity mismatch, unsupported format, a digest or size
+  mismatch, or a malformed patch leaves the task and run `cleanup-blocked` at
+  stage `handoff-import`, and explicit reconciliation reconciles the child and
+  retries the import;
+- a handoff the import bound refuses (pi-subagent's byte-limit refusal or a
+  reference proved larger than `MAX_WORKFLOW_HANDOFF_BYTES`) fails the
+  execution at stage `handoff-import` with "Workflow handoff exceeds the
+  import bound." under either handoff policy without releasing the child, a
+  required task fails the run and an optional one degrades it, and a re-drive
+  of an execution already blocked at that stage supersedes the block with the
+  same failure instead of looping through reconciliation;
 - a completed child that captured no handoff under `handoff: "required"` is
   released and then fails with "Completed worktree task captured no
   handoff."; under `"optional"` it completes and `ctx.handoff` resolves

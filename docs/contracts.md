@@ -958,21 +958,46 @@ worktree producer") and the fixed media type and format digest ("handoff
 artifact format is invalid"); one result and one handoff artifact coexist per
 execution.
 
-Any export, reference, identity, format, digest, size, or store failure during
-the import terminalizes the execution `cleanup-blocked` with workflow evidence
-at stage `handoff-import` (message "Workflow handoff artifact import requires
-reconciliation."), the task and run become `cleanup-blocked`, and explicit
-reconciliation reconciles the child and retries the import exactly as for
-`artifact-import`. A completed child that captured no handoff is released
-normally; under `handoff: "required"` it is then terminalized `failed` at
-stage `handoff-import` with the fixed message "Completed worktree task
-captured no handoff." (admitted only from phase `released` with absence
-recorded), while under `"optional"` it completes and `ctx.handoff` resolves
-`undefined`. Terminal `completed` evidence for a worktree task requires the
-imported handoff artifact to match the settlement handoff ("subagent terminal
-handoff does not match"). A handoff larger than 16 MiB is not importable:
-the task stays `cleanup-blocked` and the handoff remains exportable from
-pi-subagent by the operator.
+Any reference, identity, format, digest, or store failure during the import,
+and any export rejection that is not a bound refusal, terminalizes the
+execution `cleanup-blocked` with workflow evidence at stage `handoff-import`
+(message "Workflow handoff artifact import requires reconciliation."), the
+task and run become `cleanup-blocked`, and explicit reconciliation reconciles
+the child and retries the import exactly as for `artifact-import`.
+
+A handoff larger than `MAX_WORKFLOW_HANDOFF_BYTES` is different: pi-subagent
+refuses the export with its fixed byte-limit error, or returns a reference
+whose proved length exceeds the bound, and neither fact changes on a re-drive.
+That refusal is a deterministic, permanent failure of the execution, not a
+cleanup problem. The finalizer terminalizes the execution `failed` with
+workflow evidence at stage `handoff-import` and the fixed message "Workflow
+handoff exceeds the import bound." under either handoff policy, and the task
+fails with the same reason; a required task fails the run, an optional one
+degrades it. The reducer admits that evidence only on a worktree task whose
+current execution is at phase `artifact-imported` (or holds the
+`cleanup-blocked` handoff-import terminal it supersedes), whose settlement is
+`completed` and carries a handoff, and which has neither handoff evidence nor
+a release intent or receipt; a superseding terminal replaces the blocked one
+in place so a re-drive of an already blocked execution converges instead of
+looping ("task execution terminal evidence is duplicate" for every other
+replacement, "workflow terminal evidence is inconsistent" otherwise). The
+child is deliberately **not** released: an unreleased worktree run is never an
+ordinary pi-subagent retention candidate, so its worktree, reservation branch,
+and handoff ref stay protected and the operator can still export, pin, or
+release the handoff through pi-subagent's own surface. Releasing it would make
+the run ordinary prune history with an unexported handoff, which is the one
+outcome that loses the work. Once the run is `failed`, `retry` and
+`invalidate` are legal again (see [Action legality](#action-legality)), and a
+new generation gets a fresh worktree.
+
+A completed child that captured no handoff is released normally; under
+`handoff: "required"` it is then terminalized `failed` at stage
+`handoff-import` with the fixed message "Completed worktree task captured no
+handoff." (admitted only from phase `released` with absence recorded), while
+under `"optional"` it completes and `ctx.handoff` resolves `undefined`.
+Terminal `completed` evidence for a worktree task requires the imported
+handoff artifact to match the settlement handoff ("subagent terminal handoff
+does not match").
 
 The workflow exposes a handoff only as identity:
 
@@ -1452,7 +1477,8 @@ Subagent terminal outcomes map using both primary status and cleanup evidence:
 | `completed` and required artifacts imported, with cleanup proved/not-needed | `completed` |
 | `completed` worktree child with its handoff imported, or its absence recorded under an `optional` policy, with cleanup proved/not-needed | `completed` |
 | `completed` worktree child released after recording handoff absence under a `required` policy | `failed` (workflow evidence, stage `handoff-import`) |
-| `completed` worktree child whose handoff export, identity, format, digest, or size verification failed | `cleanup-blocked` at stage `handoff-import`; reconciliation retries the import |
+| `completed` worktree child whose handoff export, identity, format, or digest verification failed | `cleanup-blocked` at stage `handoff-import`; reconciliation retries the import |
+| `completed` worktree child whose handoff exceeds `MAX_WORKFLOW_HANDOFF_BYTES` (refused by pi-subagent or proved oversize) | `failed` (workflow evidence, stage `handoff-import`, "Workflow handoff exceeds the import bound."); the child is not released |
 | `failed` with cleanup proved/not-needed | `failed` |
 | `cancelled` with cleanup proved/not-needed | `cancelled` |
 | `interrupted` with cleanup proved/not-needed | `interrupted` |

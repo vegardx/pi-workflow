@@ -13,6 +13,13 @@ import { type Static, type TSchema, Type } from "typebox";
 export const WORKFLOW_CONTRACT_REVISION = 18 as const;
 /** Upper bound of one imported handoff; equals the artifact byte bound. */
 export const MAX_WORKFLOW_HANDOFF_BYTES = 16 * 1024 * 1024;
+/**
+ * Fixed terminal evidence message of a settled handoff the import bound
+ * refuses. The refusal is a proved, permanent property of the settled commit
+ * pair, so the execution fails on it instead of blocking for reconciliation.
+ */
+export const WORKFLOW_HANDOFF_BOUND_MESSAGE =
+	"Workflow handoff exceeds the import bound.";
 /** Generations per task: the initial execution plus re-executions after invalidation. */
 export const MAX_TASK_EXECUTION_GENERATIONS = 16;
 // Initial attempt plus up to 10 retries and up to 10 resumes (pi-subagent caps).

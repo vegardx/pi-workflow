@@ -410,8 +410,11 @@ single-commit `git format-patch` shape, stores the bytes as a
 content-addressed `.patch` artifact (`output: "handoff"`), and records
 `task-execution-handoff-imported` before it persists release intent. Import
 failure leaves the task `cleanup-blocked` at stage `handoff-import` until
-reconciliation; a completed child that captured no handoff completes under
-`"optional"` and fails after release under `"required"`. The handle's
+reconciliation, except a handoff above the bound: that refusal is permanent,
+so the task fails at stage `handoff-import` with "Workflow handoff exceeds the
+import bound." and the child is left unreleased for the operator. A completed
+child that captured no handoff completes under `"optional"` and fails after
+release under `"required"`. The handle's
 `handoff` may be named in a later task's `inputs` (the child receives the
 descriptor, not patch bytes) or returned as the workflow output;
 `WorkflowService.exportHandoff(runId, taskId)` returns the descriptor and the

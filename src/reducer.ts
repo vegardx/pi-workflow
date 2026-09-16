@@ -20,6 +20,7 @@ import {
 	type SupportTaskSpec,
 	type TaskExecutionId,
 	type TaskExecutionOutcome,
+	WORKFLOW_HANDOFF_BOUND_MESSAGE,
 	WORKFLOW_HANDOFF_FORMAT_SHA256,
 	type WorkflowArtifactOutput,
 	type WorkflowArtifactRef,
@@ -2223,7 +2224,19 @@ function applyEvent(
 				input.data.executionId,
 				event.sequence,
 			);
-			if (projection.phase === "terminal") {
+			// A blocked handoff import is superseded in place by the permanent
+			// failure of the same stage: the bound refusal proves the import can
+			// never succeed, so the wedged terminal converges instead of looping
+			// through reconciliation. Nothing else may replace a terminal.
+			const supersedesBlockedHandoffImport =
+				projection.terminal?.outcome === "cleanup-blocked" &&
+				projection.terminal.evidence.kind === "workflow" &&
+				projection.terminal.evidence.stage === "handoff-import" &&
+				input.data.outcome === "failed" &&
+				input.data.evidence.kind === "workflow" &&
+				input.data.evidence.stage === "handoff-import" &&
+				input.data.evidence.message === WORKFLOW_HANDOFF_BOUND_MESSAGE;
+			if (projection.phase === "terminal" && !supersedesBlockedHandoffImport) {
 				fail("task execution terminal evidence is duplicate", event.sequence);
 			}
 			const task = state.tasks[projection.execution.taskId];
@@ -2541,10 +2554,27 @@ function applyEvent(
 					projection.handoffAbsent !== undefined &&
 					task.task.spec.request.handoff === "required" &&
 					evidence.message === "Completed worktree task captured no handoff.";
+				// A captured handoff the import bound refuses fails the execution
+				// under either handoff policy, from the import point or from the
+				// blocked terminal it supersedes. The child is never released, so
+				// pi-subagent keeps protecting its worktree and handoff ref.
+				const refusedHandoffImport =
+					input.data.outcome === "failed" &&
+					worktreeTask &&
+					(projection.phase === "artifact-imported" ||
+						supersedesBlockedHandoffImport) &&
+					projection.handoffImport === undefined &&
+					projection.handoffAbsent === undefined &&
+					projection.releaseIntent === undefined &&
+					projection.release === undefined &&
+					projection.settlement?.evidence.status === "completed" &&
+					projection.settlement.evidence.handoff !== undefined &&
+					evidence.message === WORKFLOW_HANDOFF_BOUND_MESSAGE;
 				if (
 					evidence.stage === "handoff-import" &&
 					!blockedHandoffImport &&
-					!absentRequiredHandoff
+					!absentRequiredHandoff &&
+					!refusedHandoffImport
 				) {
 					fail("workflow terminal evidence is inconsistent", event.sequence);
 				}
