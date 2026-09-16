@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type {
-	ExtensionAPI,
-	ToolDefinition,
+import {
+	createEventBus,
+	type ExtensionAPI,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { SubagentService } from "@vegardx/pi-subagent";
+import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import workflowExtension from "../src/extension.js";
@@ -17,13 +20,66 @@ type Command = {
 	handler: (args: string, ctx: unknown) => Promise<void>;
 };
 
-function capture() {
+/**
+ * A shared pi-subagent service that never launches anything: checkpoint-only
+ * workflows bind an owner client and then never call it.
+ */
+function idleSubagentService(): SubagentService {
+	const refuse = () =>
+		vi.fn(async () => {
+			throw new Error("unexpected subagent call");
+		});
+	const client = Object.fromEntries(
+		[
+			"preflight",
+			"launch",
+			"findByOperation",
+			"status",
+			"listRuns",
+			"logs",
+			"wait",
+			"interrupt",
+			"steer",
+			"followUp",
+			"retry",
+			"resume",
+			"reconcile",
+			"release",
+			"abandon",
+			"pin",
+			"unpin",
+			"exportArtifact",
+			"exportHandoff",
+		].map((method) => [method, refuse()]),
+	);
+	return {
+		forOwner: vi.fn(() => client),
+		listRuns: refuse(),
+		inspectRun: refuse(),
+		runLogs: refuse(),
+		subscribe: vi.fn(() => () => {}),
+		prune: refuse(),
+		shutdown: vi.fn(async () => {}),
+	} as unknown as SubagentService;
+}
+
+function capture(options: { subagents?: boolean } = {}) {
 	const tools: ToolDefinition[] = [];
 	const commands = new Map<string, Command>();
 	const shortcuts: string[] = [];
 	const handlers = new Map<string, Handler>();
+	let events: ExtensionAPI["events"];
+	if (options.subagents) {
+		events = createEventBus();
+		registerSubagentServiceProvider(events, async () => idleSubagentService());
+	} else {
+		events = {
+			on: vi.fn(),
+			emit: vi.fn(),
+		} as unknown as ExtensionAPI["events"];
+	}
 	const api = {
-		events: { on: vi.fn(), emit: vi.fn() },
+		events,
 		registerTool(tool: ToolDefinition) {
 			tools.push(tool);
 		},
@@ -66,6 +122,11 @@ describe("workflow Pi extension", () => {
 		expect(tools.map((tool) => tool.name)).toEqual(
 			WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name),
 		);
+		// Checkpoint decisions and source approvals are human-only commands.
+		expect(WORKFLOW_TOOL_DECLARATIONS).toHaveLength(14);
+		expect(
+			tools.filter((tool) => /decide|approve|reject|proposals/.test(tool.name)),
+		).toEqual([]);
 		expect(tools.map((tool) => tool.name)).toEqual([
 			"workflow_list",
 			"workflow_validate",
@@ -328,7 +389,7 @@ describe("workflow Pi extension", () => {
 		await command.handler("bogus", rpc);
 		expect(notify).toHaveBeenLastCalledWith(
 			expect.stringMatching(
-				/^Unknown workflow command: bogus\. Expected one of list, runs, validate, run, show, status, logs, wait, stop, reconcile, invalidate/,
+				/^Unknown workflow command: bogus\. Expected one of list, runs, validate, run, approve, reject, show, status, logs, wait, stop, reconcile, invalidate, retry, resume, decide\.$/,
 			),
 			"warning",
 		);
@@ -349,10 +410,295 @@ describe("workflow Pi extension", () => {
 		);
 		await command.handler("validate missing-workflow", rpc);
 		expect(notify.mock.calls.at(-1)?.[1]).toBe("error");
-		expect(command.getArgumentCompletions?.("sh")).toEqual([
+		await expect(command.getArgumentCompletions?.("sh")).resolves.toEqual([
 			{ value: "show", label: "show" },
 		]);
-		expect(command.getArgumentCompletions?.("show ")).toBeNull();
+		await expect(command.getArgumentCompletions?.("show ")).resolves.toBeNull();
+		await expect(command.getArgumentCompletions?.("approve ")).resolves.toEqual(
+			[{ value: "approve dynamic:", label: "dynamic:" }],
+		);
 		await handlers.get("session_shutdown")?.({ reason: "quit" }, rpc);
+	});
+
+	it("refuses decide, approve, and reject without a dialog-capable session", async () => {
+		const { commands, handlers } = capture();
+		const command = commands.get("workflow");
+		if (!command) throw new Error("/workflow missing");
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const notify = vi.fn();
+		const confirm = vi.fn(async () => true);
+		const cwd = await emptyProject();
+		const print = {
+			cwd,
+			mode: "print",
+			hasUI: false,
+			isProjectTrusted: () => true,
+			ui: { notify, confirm },
+		};
+		const ref = `dynamic:${"a".repeat(64)}`;
+		await command.handler(`approve ${ref}`, print);
+		expect(log).toHaveBeenLastCalledWith(
+			"Dynamic workflow approval requires an interactive Pi session.",
+		);
+		await command.handler(`reject ${ref} unsafe`, print);
+		expect(log).toHaveBeenLastCalledWith(
+			"Dynamic workflow approval requires an interactive Pi session.",
+		);
+		// Grammar errors come first and name the usage.
+		await command.handler("approve nope", print);
+		expect(log).toHaveBeenLastCalledWith(
+			"Dynamic workflow reference must be dynamic:<64 hex characters>.",
+		);
+		await command.handler("decide workflow_ab approve {bad", print);
+		expect(log).toHaveBeenLastCalledWith(
+			"Checkpoint decision is not valid JSON.",
+		);
+		expect(confirm).not.toHaveBeenCalled();
+		expect(notify).not.toHaveBeenCalled();
+		await handlers.get("session_shutdown")?.({ reason: "quit" }, print);
+	});
+
+	it("records source decisions only after an explicit confirm with the session approver", async () => {
+		const { tools, commands, handlers } = capture();
+		const command = commands.get("workflow");
+		if (!command) throw new Error("/workflow missing");
+		const propose = tools.find((tool) => tool.name === "workflow_propose");
+		if (!propose) throw new Error("workflow_propose missing");
+		const notify = vi.fn();
+		const confirm = vi.fn<(title: string, body: string) => Promise<boolean>>();
+		const cwd = await emptyProject();
+		const context = {
+			cwd,
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui: { notify, confirm, setWidget: vi.fn() },
+			sessionManager: { getSessionId: () => "session-7" },
+		};
+		try {
+			const source = `import { defineWorkflow } from "@vegardx/pi-workflow";
+
+export default defineWorkflow({
+	meta: { name: "ui-approve", description: "Approval fixture", version: 1, budget: { cost: 10, childRuntimeMs: 600000 }, timeoutMs: 600000, concurrency: 1 },
+	inputSchema: { type: "object", properties: {}, additionalProperties: false },
+	outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+	async run(ctx) {
+		ctx.phase("answer");
+		return { answer: "fixed" };
+	},
+});
+`;
+			const proposed = await propose.execute(
+				"call-1",
+				{ source },
+				new AbortController().signal,
+				undefined,
+				context as never,
+			);
+			const { ref } = proposed.details as { ref: string };
+			expect(ref).toMatch(/^dynamic:[a-f0-9]{64}$/);
+
+			// Cancelled: rendered, asked, nothing recorded.
+			confirm.mockResolvedValueOnce(false);
+			await command.handler(`approve ${ref}`, context);
+			expect(confirm).toHaveBeenCalledTimes(1);
+			const [title, body] = confirm.mock.calls[0] ?? [];
+			expect(title).toBe(`Approve dynamic workflow ${ref.slice(8, 20)}…?`);
+			expect(body).toContain(`Dynamic workflow ${ref}`);
+			expect(body).toContain("name: ui-approve v1");
+			expect(body).toContain("decision: none (awaiting a human decision)");
+			expect(body).toContain("   1 │ import { defineWorkflow }");
+			expect(notify).toHaveBeenLastCalledWith("No decision recorded.", "info");
+			await expect(
+				command.getArgumentCompletions?.("approve dyn"),
+			).resolves.toEqual([{ value: `approve ${ref}`, label: ref }]);
+
+			// Confirmed: recorded with the session id, never an argument.
+			confirm.mockResolvedValueOnce(true);
+			await command.handler(`approve ${ref} sessionId: mallory`, context);
+			expect(notify).toHaveBeenLastCalledWith(
+				`Approved ${ref}. Run it with workflow_run or /workflow run ${ref}.`,
+				"info",
+			);
+			await expect(
+				command.getArgumentCompletions?.("approve dyn"),
+			).resolves.toEqual([{ value: "approve dynamic:", label: "dynamic:" }]);
+			const inspect = tools.find((tool) => tool.name === "workflow_validate");
+			if (!inspect) throw new Error("workflow_validate missing");
+			await expect(
+				inspect.execute(
+					"call-2",
+					{ ref, input: {} },
+					new AbortController().signal,
+					undefined,
+					context as never,
+				),
+			).resolves.toMatchObject({
+				details: { workflow: { name: "ui-approve" } },
+			});
+
+			// Decided: refused from the view before any confirm.
+			await command.handler(`reject ${ref}`, context);
+			expect(confirm).toHaveBeenCalledTimes(2);
+			expect(notify).toHaveBeenLastCalledWith(
+				`reject is unavailable: ${ref} is already approved.`,
+				"warning",
+			);
+			// Unknown digest: the service refusal is surfaced verbatim.
+			const missing = `dynamic:${"0".repeat(64)}`;
+			await command.handler(`approve ${missing}`, context);
+			expect(notify).toHaveBeenLastCalledWith(
+				`Dynamic workflow proposal not found: ${missing}`,
+				"error",
+			);
+			expect(confirm).toHaveBeenCalledTimes(2);
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	});
+
+	it("decides a parked checkpoint only after an explicit confirm and records the session approver", async () => {
+		const { tools, commands, handlers } = capture({ subagents: true });
+		const command = commands.get("workflow");
+		if (!command) throw new Error("/workflow missing");
+		const tool = (name: string) => {
+			const found = tools.find((candidate) => candidate.name === name);
+			if (!found) throw new Error(`${name} missing`);
+			return found;
+		};
+		const notify = vi.fn();
+		const confirm = vi.fn<(title: string, body: string) => Promise<boolean>>();
+		const cwd = await emptyProject();
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "ui-decide.workflow.ts"),
+			`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "ui-decide", description: "Checkpoint workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  async run(ctx) {
+    ctx.phase("review");
+    const approve = ctx.checkpoint("approve", { schema: { type: "object", properties: { proceed: { type: "boolean" } }, required: ["proceed"], additionalProperties: false }, prompt: "Approve the plan?", headless: "block", timeoutMs: 60000 });
+    const decision = await ctx.result(approve);
+    return { answer: decision.proceed ? "approved" : "declined" };
+  }
+};
+`,
+		);
+		const context = {
+			cwd,
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui: { notify, confirm, setWidget: vi.fn() },
+			sessionManager: { getSessionId: () => "session-7" },
+		};
+		const signal = new AbortController().signal;
+		try {
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-decide", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			const parked = await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(parked.details).toMatchObject({ status: "waiting", parked: true });
+
+			// Print mode never records a decision, even for a legal one.
+			const print = { ...context, mode: "print", hasUI: false };
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			await command.handler(
+				`decide ${runId} approve '{"proceed": true}'`,
+				print,
+			);
+			expect(log).toHaveBeenLastCalledWith(
+				"Checkpoint decisions require an interactive Pi session.",
+			);
+			expect(confirm).not.toHaveBeenCalled();
+
+			// Cancelled: the prompt and the parsed decision were shown; nothing recorded.
+			confirm.mockResolvedValueOnce(false);
+			await command.handler(
+				`decide ${runId.slice(0, 14)} approve '{"proceed": true}' Reviewed the plan`,
+				context,
+			);
+			expect(confirm).toHaveBeenCalledTimes(1);
+			expect(confirm.mock.calls[0]).toEqual([
+				`decide ${runId.slice(0, 12)}…?`,
+				'Checkpoint approve: Approve the plan?\nDecision: {"proceed":true}\nThe decision is recorded once, immutably, and the run continues from it.',
+			]);
+			expect(notify).not.toHaveBeenCalled();
+			const still = await tool("workflow_wait").execute(
+				"call-3",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(still.details).toMatchObject({ status: "waiting", parked: true });
+
+			// A missing task and a non-checkpoint refusal are surfaced verbatim.
+			await command.handler(`decide ${runId} nope true`, context);
+			expect(notify).toHaveBeenLastCalledWith(
+				"Task not found: nope",
+				"warning",
+			);
+
+			// Confirmed: recorded under the session approver, never an argument.
+			confirm.mockResolvedValueOnce(true);
+			await command.handler(
+				`decide ${runId} approve '{"proceed": true}' approver: mallory`,
+				context,
+			);
+			expect(notify.mock.calls.at(-1)?.[0]).toMatch(
+				new RegExp(
+					`^decide accepted for ${runId}: approve decided; run is (waiting|running|finalizing|completed)\\.$`,
+				),
+			);
+			expect(notify.mock.calls.at(-1)?.[1]).toBe("info");
+			const final = await tool("workflow_wait").execute(
+				"call-4",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			const view = final.details as {
+				status: string;
+				output?: unknown;
+				tasks?: { key: string; checkpoint?: { decision?: unknown } }[];
+			};
+			expect(view).toMatchObject({
+				status: "completed",
+				output: { answer: "approved" },
+			});
+			expect(
+				view.tasks?.find((entry) => entry.key === "approve")?.checkpoint
+					?.decision,
+			).toMatchObject({
+				source: "operator",
+				decidedBy: "pi-session",
+				reason: "approver: mallory",
+				value: { proceed: true },
+			});
+			// A completed run no longer offers decide.
+			await command.handler(`decide ${runId} approve true`, context);
+			expect(notify).toHaveBeenLastCalledWith(
+				"decide is unavailable while the run is completed.",
+				"warning",
+			);
+			expect(confirm).toHaveBeenCalledTimes(2);
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
 	});
 });

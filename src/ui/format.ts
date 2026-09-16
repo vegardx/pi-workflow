@@ -3,6 +3,8 @@ import {
 	type WorkflowRunStatus,
 	type WorkflowTaskStatus,
 } from "../contracts.js";
+import { MAX_DYNAMIC_APPROVAL_RENDER_BYTES } from "../dynamic/constants.js";
+import type { DynamicWorkflowProposalInspection } from "../service.js";
 import type {
 	WorkflowLogEntry,
 	WorkflowRunSummary,
@@ -171,4 +173,65 @@ export function logLine(entry: WorkflowLogEntry): string {
 	const task = entry.taskKey ? `${normalizeTaskKey(entry.taskKey)} ` : "";
 	const abandoned = entry.abandoned ? " (abandoned)" : "";
 	return `${String(entry.sequence).padStart(5)} ${entry.timestamp} ${entry.kind.padEnd(12)} ${task}${entry.message}${abandoned}`;
+}
+
+/** JSON with object keys sorted at every level; arrays keep their order. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, entry: unknown) => {
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+			return entry;
+		}
+		return Object.fromEntries(
+			Object.entries(entry as Record<string, unknown>).sort(
+				([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+			),
+		);
+	});
+}
+
+/**
+ * The body of the approve/reject confirmation: identity, budget, digests,
+ * schemas, the current decision state, and the numbered source. The result
+ * never exceeds `MAX_DYNAMIC_APPROVAL_RENDER_BYTES`: source lines are cut and
+ * the last line points the approver at the stored source file.
+ */
+export function renderDynamicProposal(
+	view: DynamicWorkflowProposalInspection,
+): string {
+	const { meta } = view.manifest;
+	const tokens = meta.budget.totalTokens
+		? ` · ${formatTokens(meta.budget.totalTokens)} tok`
+		: "";
+	const decision = view.decision
+		? `${view.decision.decision} at ${view.decision.approvedAt} by ${view.decision.approver.kind}:${view.decision.approver.via}${view.decision.reason ? ` (${view.decision.reason})` : ""}`
+		: "none (awaiting a human decision)";
+	const header = [
+		`Dynamic workflow ${view.ref}`,
+		`name: ${meta.name} v${meta.version} · concurrency ${meta.concurrency} · budget ${formatCost(meta.budget.cost)}${tokens} · ${formatDurationMs(meta.budget.childRuntimeMs)} child runtime · timeout ${formatDurationMs(meta.timeoutMs)}`,
+		`description: ${meta.description}`,
+		`proposed: ${view.proposedAt} by ${view.proposer.kind}:${view.proposer.via}`,
+		`decision: ${decision}`,
+		`runnable: ${view.runnable ? "yes" : "no"}`,
+		`host API: ${view.hostApiSha256}`,
+		`import policy: ${view.importPolicySha256}`,
+		`identity: ${view.definitionIdentitySha256}`,
+		`input schema: ${canonicalJson(view.manifest.inputSchema)}`,
+		`output schema: ${canonicalJson(view.manifest.outputSchema)}`,
+		`source (${view.sourceBytes} bytes, sha256 ${view.sourceSha256}):`,
+	];
+	const sourceLines = view.source
+		.split("\n")
+		.map((line, index) => `${String(index + 1).padStart(4)} │ ${line}`);
+	const full = [...header, ...sourceLines].join("\n");
+	if (Buffer.byteLength(full) <= MAX_DYNAMIC_APPROVAL_RENDER_BYTES) return full;
+	const notice = `… source truncated at ${MAX_DYNAMIC_APPROVAL_RENDER_BYTES} bytes; read ${view.path} before approving.`;
+	const kept: string[] = [];
+	let bytes = Buffer.byteLength([...header, notice].join("\n"));
+	for (const line of sourceLines) {
+		const cost = Buffer.byteLength(line) + 1;
+		if (bytes + cost > MAX_DYNAMIC_APPROVAL_RENDER_BYTES) break;
+		kept.push(line);
+		bytes += cost;
+	}
+	return [...header, ...kept, notice].join("\n");
 }
