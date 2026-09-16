@@ -29,6 +29,10 @@
 			"types": "./dist/runtime/index.d.ts",
 			"import": "./dist/runtime/index.js"
 		},
+		"./components": {
+			"types": "./dist/components/index.d.ts",
+			"import": "./dist/components/index.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"pi": {

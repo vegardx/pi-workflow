@@ -61,8 +61,8 @@ discovery, stores, projections, predicates, identity derivations, and the
 dynamic VM host. It is not frozen: its exports may change in any minor release
 without notice beyond this document and the changelog. Authored workflows
 cannot import it (the import gate accepts exactly `@vegardx/pi-workflow`,
-`typebox`, and registered support modules). Embedders that import it accept
-that cost.
+`@vegardx/pi-workflow/components`, `typebox`, and registered support
+modules). Embedders that import it accept that cost.
 
 **Contract revision.** `WORKFLOW_CONTRACT_REVISION` is independent of the
 package version. It increments when persisted records, event data, identity
@@ -190,12 +190,13 @@ rewriting the output.
 
 Contract revision 17 identities cover the complete definition module but not a
 helper dependency graph. Static imports are limited to `@vegardx/pi-workflow`,
-`typebox`, and the module specifiers present in the constructor-injected
-support registry; every other static import, dynamic import, CommonJS require,
+`@vegardx/pi-workflow/components`, `typebox`, and the module specifiers present
+in the constructor-injected support registry; every other static import, dynamic import, CommonJS require,
 and TypeScript import assignment is rejected rather than silently omitted from
-source identity. The `@vegardx/pi-workflow/runtime` subpath is not an allowed
-import: the gate matches specifiers exactly, so a definition that imports it
-fails with
+source identity. The `@vegardx/pi-workflow/components` subpath is an allowed
+import (trusted package code, the same trade the root import makes); the
+`@vegardx/pi-workflow/runtime` subpath is not: the gate matches specifiers
+exactly, so a definition that imports it fails with
 "workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 19". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,

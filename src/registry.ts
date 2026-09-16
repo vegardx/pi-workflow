@@ -17,7 +17,18 @@ const MAX_DISCOVERY_ENTRIES = 4096;
 const MAX_DISCOVERY_DEPTH = 8;
 const MAX_REGISTERED_ROOTS = 32;
 const DEFINITION_FILE = /\.workflow\.(?:ts|mts|js|mjs)$/;
-const ALLOWED_STATIC_IMPORTS = new Set(["@vegardx/pi-workflow", "typebox"]);
+/**
+ * Specifiers a definition may import. The package root and the component
+ * library are trusted package code (the same trade the root import already
+ * makes: a definition's source identity covers its own bytes, not the
+ * package's); the runtime subpath stays excluded because its exports are
+ * unfrozen engine internals.
+ */
+const ALLOWED_STATIC_IMPORTS = new Set([
+	"@vegardx/pi-workflow",
+	"@vegardx/pi-workflow/components",
+	"typebox",
+]);
 
 /**
  * `"dynamic"` names a proposal-backed definition (dynamic-workflow spec 5.4);
