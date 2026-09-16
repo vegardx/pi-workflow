@@ -175,6 +175,76 @@ describe("workflow artifact store", () => {
 		);
 	});
 
+	it("reads a stored artifact without the run's lease and never writes", async () => {
+		const { root, lease, journal } = await fixture();
+		const store = await WorkflowArtifactStore.open({ journal });
+		const ref = await store.putJson({ answer: "yes" }, resultMetadata);
+		await lease.release();
+		leases.delete(lease);
+
+		const reader = await WorkflowArtifactStore.openUnleased({
+			storeRoot: root,
+			runId: "workflow_artifacts",
+		});
+		expect(reader.root).toBe(store.root);
+		expect(await reader.readJson(ref)).toEqual({ answer: "yes" });
+		// The reader owns no lease, so every writer refuses before touching
+		// the directory.
+		await expect(
+			reader.putJson({ answer: "no" }, resultMetadata),
+		).rejects.toThrow("read-only");
+		expect(await readdir(reader.root)).toEqual([`${ref.sha256}.json`]);
+		// It is still a store of its own run and of no other.
+		await expect(
+			reader.readJson({ ...ref, runId: "workflow_elsewhere" }),
+		).rejects.toThrow("invalid workflow artifact reference");
+	});
+
+	it("bounds a lease-free read by the artifact byte limit", async () => {
+		const { root, lease, journal } = await fixture();
+		const store = await WorkflowArtifactStore.open({ journal });
+		const ref = await store.putJson({ answer: "too large" }, resultMetadata);
+		await lease.release();
+		leases.delete(lease);
+
+		const bounded = await WorkflowArtifactStore.openUnleased({
+			storeRoot: root,
+			runId: "workflow_artifacts",
+			maxArtifactBytes: ref.bytes - 1,
+			maxTotalBytes: ref.bytes - 1,
+		});
+		await expect(bounded.readJson(ref)).rejects.toThrow(
+			"read exceeds byte limit",
+		);
+		const whole = await WorkflowArtifactStore.openUnleased({
+			storeRoot: root,
+			runId: "workflow_artifacts",
+			maxArtifactBytes: ref.bytes,
+			maxTotalBytes: ref.bytes,
+		});
+		expect(await whole.readJson(ref)).toEqual({ answer: "too large" });
+		await expect(
+			WorkflowArtifactStore.openUnleased({
+				storeRoot: root,
+				runId: "workflow_artifacts",
+				maxArtifactBytes: -1,
+			}),
+		).rejects.toThrow("invalid workflow artifact bounds");
+	});
+
+	it("refuses a lease-free reader whose artifact directory is a symlink", async () => {
+		const { root, journal } = await fixture();
+		const outside = path.join(journal.directory, "outside");
+		await mkdir(outside);
+		await symlink(outside, path.join(journal.directory, "artifacts"));
+		await expect(
+			WorkflowArtifactStore.openUnleased({
+				storeRoot: root,
+				runId: "workflow_artifacts",
+			}),
+		).rejects.toThrow("escapes its run");
+	});
+
 	it("fences writes after lease replacement", async () => {
 		const { root, lease, journal } = await fixture();
 		const store = await WorkflowArtifactStore.open({ journal });

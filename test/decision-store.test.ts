@@ -475,6 +475,50 @@ describe("workflow decision record store", () => {
 		expect(await store.read(binding)).toEqual(record);
 	});
 
+	it("reads a record without the run's lease and never writes one", async () => {
+		const { root, lease, store } = await openStore();
+		await store.put(record);
+		await lease.release();
+		leases.delete(lease);
+
+		const reader = await WorkflowDecisionRecordStore.openUnleased({
+			storeRoot: root,
+			runId,
+		});
+		expect(reader.root).toBe(store.root);
+		expect(await reader.read(binding)).toEqual(record);
+		const other: WorkflowDecisionBinding = {
+			...binding,
+			executionId: `execution_${"e".repeat(64)}`,
+		};
+		expect(await reader.read(other)).toBeUndefined();
+		// A read-only store is still run-scoped: it writes nothing and it
+		// answers for no other run and for no definition-level binding.
+		await expect(reader.put(recordWith({ binding: other }))).rejects.toThrow(
+			"read-only",
+		);
+		expect(await reader.read(other)).toBeUndefined();
+		await expect(
+			reader.read({ ...binding, runId: `workflow_${"f".repeat(32)}` }),
+		).rejects.toThrow("belongs to another run");
+		await expect(
+			WorkflowDecisionRecordStore.openUnleased({
+				storeRoot: root,
+				runId: "no",
+			}),
+		).rejects.toThrow("invalid workflow run ID");
+	});
+
+	it("rejects a lease-free decisions directory that escapes its run", async () => {
+		const { root, journal } = await fixture();
+		const outside = path.join(journal.directory, "outside");
+		await mkdir(outside);
+		await symlink(outside, path.join(journal.directory, "decisions"));
+		await expect(
+			WorkflowDecisionRecordStore.openUnleased({ storeRoot: root, runId }),
+		).rejects.toThrow("escapes its run");
+	});
+
 	it("names its errors", async () => {
 		const { store } = await openStore();
 		const error = await store
