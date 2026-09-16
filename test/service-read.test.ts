@@ -1103,6 +1103,11 @@ describe("listRuns", () => {
 				"workflow journal append outcome is uncertain",
 			);
 		const readEvents = vi.spyOn(WorkflowRunJournal.prototype, "readEvents");
+		// inspect and logs read events and state in one coordinated read.
+		const readProjected = vi.spyOn(
+			WorkflowRunJournal.prototype,
+			"readProjected",
+		);
 		try {
 			// Only the owned run reads through its journal object; the unleased
 			// reader is a free function, so the rejection lands on the owned run.
@@ -1135,7 +1140,7 @@ describe("listRuns", () => {
 				[owned, unreadable].sort(),
 			);
 
-			readEvents.mockRejectedValueOnce(corruption());
+			readProjected.mockRejectedValueOnce(corruption());
 			const inspected = await expectServiceError(
 				service.inspect(owned),
 				"persistence",
@@ -1144,7 +1149,7 @@ describe("listRuns", () => {
 			expect(inspected.cause).toBeInstanceOf(
 				WorkflowPersistenceCorruptionError,
 			);
-			readEvents.mockRejectedValueOnce(corruption());
+			readProjected.mockRejectedValueOnce(corruption());
 			const logged = await expectServiceError(
 				service.logs(owned),
 				"persistence",
@@ -1154,6 +1159,7 @@ describe("listRuns", () => {
 			expect((await service.inspect(owned)).run.status).toBe("completed");
 		} finally {
 			readEvents.mockRestore();
+			readProjected.mockRestore();
 			await chmod(record, 0o600);
 			await shutdownQuietly(service);
 		}
