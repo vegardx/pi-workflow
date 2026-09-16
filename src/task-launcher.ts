@@ -101,6 +101,26 @@ function isRunReceipt(value: unknown): value is RunReceipt {
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
+/** Fixed prefix of every pre-launch preflight failure. */
+const PREFLIGHT_FAILURE_MESSAGE = "Subagent preflight failed before launch.";
+/**
+ * How much of a relayed pi-subagent refusal is journaled. The evidence message
+ * is bounded at 4096 characters and pi-subagent's own messages share that
+ * bound, so the relay is cut rather than allowed to fail the append.
+ */
+const MAX_RELAYED_REFUSAL_CHARS = 1024;
+
+/**
+ * The preflight failure message for a refusal raised by pi-subagent itself.
+ * The refusal text is relayed unchanged after the fixed prefix; a refusal with
+ * no message degrades to the prefix alone.
+ */
+function preflightFailureMessage(error: unknown): string {
+	const relayed = error instanceof Error ? error.message.trim() : "";
+	if (relayed.length === 0) return PREFLIGHT_FAILURE_MESSAGE;
+	return `${PREFLIGHT_FAILURE_MESSAGE} ${relayed.slice(0, MAX_RELAYED_REFUSAL_CHARS)}`;
+}
+
 function sameStringSet(
 	left: readonly string[],
 	right: readonly string[],
@@ -142,6 +162,11 @@ function validatePreflight(
 			request.outputSchema,
 		) ||
 		!isDeepStrictEqual(preflight.launchPlan.limits, request.limits) ||
+		// The plan always carries a resolved grant. A request that named one
+		// must get exactly it; a request that named none inherits the agent
+		// definition's ceiling, which the workflow cannot predict.
+		(request.memoryBytes !== undefined &&
+			preflight.launchPlan.sandbox.memoryBytes !== request.memoryBytes) ||
 		(request.model !== undefined &&
 			!isDeepStrictEqual(preflight.launchPlan.model, request.model))
 	) {
@@ -188,6 +213,9 @@ async function lowerRequest(
 		preloadSkills: [...task.spec.request.preloadSkills],
 		contextScopes: [...task.spec.request.contextScopes],
 		workspace: structuredClone(task.spec.request.workspace),
+		...(task.spec.request.memoryBytes === undefined
+			? {}
+			: { memoryBytes: task.spec.request.memoryBytes }),
 		outputSchema: structuredClone(task.spec.request.outputSchema),
 		limits: structuredClone(task.spec.request.limits),
 	};
@@ -557,11 +585,16 @@ export function createWorkflowTaskLauncher(
 			execution.preflight.fencingGeneration === journal.fencingGeneration &&
 			Date.parse(execution.preflight.expiresAt) > Date.now();
 		if (!preflightIsReusable) {
+			let resolved: SubagentPreflight;
 			try {
-				freshPreflight = await binding.client.preflight(request);
-				validatePreflight(freshPreflight, request, binding.ownerId);
+				resolved = await binding.client.preflight(request);
 			} catch (error) {
-				const message = "Subagent preflight failed before launch.";
+				// pi-subagent's refusal is the only account of why the plan was
+				// refused (an over-ceiling `memoryBytes` reads "memory request
+				// exceeds agent ceiling"), and the workflow cannot restate it:
+				// agent frontmatter is not readable from here. Relay it verbatim
+				// after the fixed prefix so an operator sees the cause.
+				const message = preflightFailureMessage(error);
 				await terminalizeWorkflowFailure(
 					journal,
 					execution,
@@ -572,6 +605,21 @@ export function createWorkflowTaskLauncher(
 					cause: error,
 				});
 			}
+			try {
+				validatePreflight(resolved, request, binding.ownerId);
+			} catch (error) {
+				const message = PREFLIGHT_FAILURE_MESSAGE;
+				await terminalizeWorkflowFailure(
+					journal,
+					execution,
+					"preflight",
+					message,
+				);
+				throw new WorkflowTaskLaunchError("preflight", message, {
+					cause: error,
+				});
+			}
+			freshPreflight = resolved;
 			await append(journal, {
 				type: "task-execution-preflighted",
 				data: {
