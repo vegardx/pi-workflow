@@ -254,6 +254,15 @@ export {
 } from "./run-actions.js";
 export { DEFAULT_INSPECT_SECTIONS } from "./run-projection.js";
 export {
+	MODEL_ROLE_THINKING_LEVELS,
+	MODEL_ROLE_TIERS,
+	type ModelResolution,
+	type ModelRoleRequest,
+	type ModelRoleThinkingLevel,
+	type ModelRoleTier,
+	type ModelRoutingPort,
+} from "./runtime/model-routing.js";
+export {
 	createWorkflowService,
 	DEFAULT_MAX_WORKFLOW_COST,
 	type DynamicSourceDecisionOptions,

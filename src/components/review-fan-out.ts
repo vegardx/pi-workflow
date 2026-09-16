@@ -70,13 +70,15 @@ import {
  *
  * ## Diversity
  *
- * `lens.diverse` asks for a reviewer of a different model family. The runtime
- * has no routing port yet (W1-ROUTING), so today that is expressed as the
- * exact `model` the caller supplies through `diversity` — the stand-in the
+ * `lens.diverse` asks for a reviewer of a different model family. The routing
+ * port now exists (`ModelRoutingPort`, `runtime/model-routing.ts`), but this
+ * component has not been moved onto it, so today that is still expressed as
+ * the exact `model` the caller supplies through `diversity` — the stand-in the
  * library ships is `envelope.ts`'s `DIVERSE_MODEL_ID` — and the component
- * logs once that the answer is a stand-in. DELETE THE SEAM WHEN ROUTING LANDS:
- * `diversity` becomes `modelRole: { family: "other" }` and the resolution
- * moves behind `ModelRoutingPort`. A `diverse` lens with neither a pinned
+ * logs once that the answer is a stand-in. DELETE THE SEAM: `diversity`
+ * becomes `modelRole: { family: "other" }` and the resolution moves behind
+ * `ModelRoutingPort`, which a host installs as
+ * `WorkflowServiceOptions.modelRouting`. A `diverse` lens with neither a pinned
  * `model` nor a configured seam is refused at declaration — the component
  * never silently reviews with the same model twice and calls it diverse.
  */

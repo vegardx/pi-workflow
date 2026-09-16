@@ -70,6 +70,7 @@ import {
 	isReopenedTask,
 	OPERATOR_RESUME_REASON,
 } from "./run-actions.js";
+import type { ModelRoutingPort } from "./runtime/model-routing.js";
 import {
 	WorkflowSchedulerError,
 	type WorkflowSchedulerOutcome,
@@ -265,6 +266,12 @@ export interface StaticWorkflowRuntimeOptions<TInput, TOutput> {
 	readonly artifacts: WorkflowArtifactStore;
 	readonly scheduler: WorkflowSequentialScheduler;
 	readonly signal?: AbortSignal;
+	/**
+	 * The host's model router, handed to every materializer this runtime makes.
+	 * Absent means a `modelRole` declaration fails materialization rather than
+	 * resolving to a guess.
+	 */
+	readonly modelRouting?: ModelRoutingPort;
 	readonly nesting?: {
 		readonly depth: number;
 		readonly ancestorDefinitionIdentities: readonly string[];
@@ -1088,6 +1095,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			definitionIdentitySha256,
 			inputSha256,
 			previousState: previous,
+			...(options.modelRouting === undefined
+				? {}
+				: { modelRouting: options.modelRouting }),
 		});
 		const handles = new Map<WorkflowTaskId, TaskHandle<unknown>>();
 		// Only on-path effects replay; abandoned effects remain history but

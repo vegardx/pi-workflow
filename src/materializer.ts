@@ -61,6 +61,14 @@ import {
 	type WorkflowTaskProjection,
 } from "./events.js";
 import { deriveJsonValueSha256 } from "./execution.js";
+import {
+	exactModelRequest,
+	isModelResolution,
+	MODEL_ROLE_EXCLUSIVE_MESSAGE,
+	MODEL_ROUTING_MISSING_MESSAGE,
+	type ModelRoleRequest,
+	type ModelRoutingPort,
+} from "./runtime/model-routing.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -184,6 +192,11 @@ export interface WorkflowTaskMaterializerOptions {
 	readonly inputSha256: string;
 	readonly namespace?: readonly TaskKey[];
 	readonly previousState?: WorkflowStateProjection;
+	/**
+	 * The host's model router. Absent means a `modelRole` declaration fails with
+	 * {@link MODEL_ROUTING_MISSING_MESSAGE} — the runtime never guesses a model.
+	 */
+	readonly modelRouting?: ModelRoutingPort;
 }
 
 export interface NestedWorkflowDeclaration {
@@ -236,6 +249,17 @@ export class WorkflowTaskMaterializer {
 	private readonly inputSha256: string;
 	private readonly namespace: readonly TaskKey[];
 	private readonly runId: WorkflowRunId;
+	private readonly modelRouting?: ModelRoutingPort;
+	/**
+	 * Every persisted agent task's resolved model, by namespaced key: the
+	 * routing evidence a replay re-uses instead of re-resolving. Covers
+	 * abandoned tasks too, because a readopted key must carry the identical
+	 * request.
+	 */
+	private readonly persistedModelByKey = new Map<
+		string,
+		NonNullable<AgentTaskRequest["model"]>
+	>();
 	private readonly seen = new Map<string, MaterializedWorkflowTask>();
 	private projectedState: WorkflowStateProjection;
 	private readonly replayOnly: boolean;
@@ -256,6 +280,9 @@ export class WorkflowTaskMaterializer {
 		this.definitionIdentitySha256 = options.definitionIdentitySha256;
 		this.inputSha256 = options.inputSha256;
 		this.namespace = Object.freeze([...(options.namespace ?? [])]);
+		if (options.modelRouting !== undefined) {
+			this.modelRouting = options.modelRouting;
+		}
 		if (
 			!this.definitionIdentitySha256.match(/^[a-f0-9]{64}$/) ||
 			!this.inputSha256.match(/^[a-f0-9]{64}$/) ||
@@ -284,6 +311,14 @@ export class WorkflowTaskMaterializer {
 			previous?.status === "completed" ||
 			previous?.status === "completed-degraded";
 		const previousTasks = previous ? Object.values(previous.tasks) : [];
+		for (const projection of previousTasks) {
+			const spec = projection.task.spec;
+			if (spec.kind !== "agent" || spec.request.model === undefined) continue;
+			this.persistedModelByKey.set(
+				taskNamespaceKey(projection.task.namespace, spec.key),
+				spec.request.model,
+			);
+		}
 		this.expectedTasks = previousTasks
 			.filter((projection) => projection.abandoned !== true)
 			.map((projection) => projection.task)
@@ -509,6 +544,63 @@ export class WorkflowTaskMaterializer {
 		) as AgentTaskHandle<TOutputSchema, TWorkspace>;
 	}
 
+	/**
+	 * The exact model an agent declaration carries into its identity hash.
+	 *
+	 * `model` and `modelRole` are mutually exclusive, and a `modelRole` is
+	 * resolved HERE — before the request is assembled, validated or hashed — so
+	 * the materialized `AgentTaskRequestSchema` never learns that routing exists
+	 * and a role that resolves to the model a hand-written task named produces
+	 * the identical task identity.
+	 *
+	 * Resolution is host-dependent, so replay does not re-resolve: the model the
+	 * first materialization persisted is re-used verbatim and only
+	 * re-authorized. A model that has become unauthorized fails by name here,
+	 * rather than rerouting into an identity the persisted path cannot match.
+	 */
+	private resolveAgentModel(
+		namespace: readonly TaskKey[],
+		key: TaskKey,
+		request: {
+			readonly model?: AgentTaskRequest["model"];
+			readonly modelRole?: ModelRoleRequest;
+		},
+	): AgentTaskRequest["model"] {
+		if (request.modelRole === undefined) return request.model;
+		if (request.model !== undefined) {
+			throw new WorkflowMaterializationError(MODEL_ROLE_EXCLUSIVE_MESSAGE);
+		}
+		const role = request.modelRole;
+		const persisted = this.persistedModelByKey.get(
+			taskNamespaceKey(namespace, key),
+		);
+		if (persisted !== undefined) {
+			if (this.modelRouting?.authorized?.(persisted) === false) {
+				throw new WorkflowMaterializationError(
+					`model ${persisted.provider}/${persisted.id} stored for role ${JSON.stringify(role.persona)} is no longer authorized`,
+				);
+			}
+			return persisted;
+		}
+		if (this.modelRouting === undefined) {
+			throw new WorkflowMaterializationError(MODEL_ROUTING_MISSING_MESSAGE);
+		}
+		let resolution: unknown;
+		try {
+			resolution = this.modelRouting.resolve(role);
+		} catch (error) {
+			throw new WorkflowMaterializationError(
+				`model role ${JSON.stringify(role.persona)} did not resolve: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (!isModelResolution(resolution)) {
+			throw new WorkflowMaterializationError(
+				`model role ${JSON.stringify(role.persona)} did not resolve to a model; declare an exact model.`,
+			);
+		}
+		return exactModelRequest(resolution);
+	}
+
 	/** Ordinary tasks may only depend on ordinary tasks; finalizers may depend on either role. */
 	private assertRoleDependencies(
 		role: TaskRole,
@@ -570,11 +662,15 @@ export class WorkflowTaskMaterializer {
 			"agent task output schema",
 		);
 		const workspace: WorkspaceAuthoringRequest = request.workspace;
+		// Before the request is assembled: a `modelRole` becomes an exact model
+		// here, so nothing downstream — validation, the spec, the identity hash —
+		// can tell a routed declaration from a hand-written one.
+		const model = this.resolveAgentModel(namespace, key, request);
 		const agentRequest: AgentTaskRequest = {
 			agent: request.agent,
 			task: request.task,
 			contextMode: request.contextMode,
-			...(request.model === undefined ? {} : { model: request.model }),
+			...(model === undefined ? {} : { model }),
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
 			contextScopes: [...request.contextScopes],

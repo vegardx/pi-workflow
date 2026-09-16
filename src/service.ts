@@ -162,6 +162,7 @@ import {
 	WorkflowRunRecordError,
 	WorkflowRunRecordStore,
 } from "./run-record.js";
+import type { ModelRoutingPort } from "./runtime/model-routing.js";
 import {
 	createWorkflowSequentialScheduler,
 	WorkflowSchedulerError,
@@ -450,6 +451,14 @@ export interface WorkflowServiceOptions {
 	readonly maxWorkflowChildRuntimeMs?: number;
 	readonly maxWorkflowTimeoutMs?: number;
 	readonly supportTasks?: readonly SupportTaskRegistration[];
+	/**
+	 * The host's router; a `modelRole` declaration resolves through it before
+	 * hashing; without a router such a declaration fails materialization with
+	 * "No model routing is installed; declare an exact model."
+	 * `staticModelRouting(table)` from the runtime entry is the constant-table
+	 * stand-in.
+	 */
+	readonly modelRouting?: ModelRoutingPort;
 	/**
 	 * Checkpoint policy: with `headless`, `use-explicit-default` checkpoints
 	 * are decided from their default immediately and never park; `block`
@@ -1241,6 +1250,9 @@ export async function createWorkflowService(
 				artifacts,
 				scheduler,
 				signal: controller.signal,
+				...(options.modelRouting === undefined
+					? {}
+					: { modelRouting: options.modelRouting }),
 				nesting: {
 					depth: nesting.depth,
 					ancestorDefinitionIdentities: nesting.ancestorDefinitionIdentities,
@@ -1948,6 +1960,9 @@ export async function createWorkflowService(
 						],
 						inputArtifacts: structuredClone(request.inputArtifacts),
 					},
+					...(options.modelRouting?.id
+						? { modelRouting: { router: options.modelRouting.id } }
+						: {}),
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);
 				const run = await compose(record, workflow, lease, binding, discovered);
@@ -2235,6 +2250,9 @@ export async function createWorkflowService(
 						cwd,
 						input: JSON.parse(JSON.stringify(input)) as unknown,
 						createdAt: createdAt.toISOString(),
+						...(options.modelRouting?.id
+							? { modelRouting: { router: options.modelRouting.id } }
+							: {}),
 					};
 					await WorkflowRunRecordStore.open(journal).create(record);
 					const run = await compose(
