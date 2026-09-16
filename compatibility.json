@@ -2,11 +2,21 @@
 	"schema": "pi-workflow-compatibility",
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
-		"version": "0.1.0",
+		"version": "1.0.0",
 		"contractRevision": 18,
 		"features": {
 			"checkpoints": true,
 			"dynamicWorkflows": true
+		},
+		"api": {
+			"version": "1.0.0",
+			"frozenSurfaces": ["authoring", "service", "contract", "extension"],
+			"entryPoints": {
+				".": "frozen",
+				"./extension": "frozen",
+				"./runtime": "unfrozen"
+			},
+			"exportList": "test/fixtures/public-api/root-exports.json"
 		}
 	},
 	"piSubagent": {
@@ -65,6 +75,7 @@
 			"node": "24.16.0",
 			"piSubagentCommit": "55e84bd731e2017510ee85b2df898e7f2d3679f2",
 			"evidence": [
+				"docs/qualification.md",
 				"docs/qualification/macos-arm64-phase1.md",
 				"docs/qualification/macos-arm64-artifact-pipeline.md",
 				"docs/qualification/macos-arm64-parallel.md",
