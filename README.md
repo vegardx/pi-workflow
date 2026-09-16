@@ -98,6 +98,15 @@ it from a workflow definition. Embedders that import it accept that cost:
 import { WorkflowRunJournal, reduceWorkflowEvents } from "@vegardx/pi-workflow/runtime";
 ```
 
+Two further subpaths are exported and also **not frozen**, each until a later
+minor pins it: `@vegardx/pi-workflow/components`, the component library
+authored definitions may import (see [Component library](#component-library)),
+and `@vegardx/pi-workflow/service-provider`, the seam another Pi extension
+acquires a narrowed workflow client through (see
+[Service provider](#service-provider)). Neither export list is pinned; both are
+checked to be disjoint from the two pinned lists, so no frozen surface can move
+with them.
+
 `@vegardx/pi-workflow/package.json` is exported so an embedder can read the
 installed `version` without knowing the install path
 (`import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })`).
@@ -144,6 +153,48 @@ qualification status, are recorded in
 [`compatibility.json`](compatibility.json) and explained in the
 [compatibility matrix](docs/compatibility.md); tests and the pack check keep
 them in step with `package.json`, `src/contracts.ts`, and CI.
+
+## Service provider
+
+The extension publishes the workflow runtime the same way pi-subagent
+publishes its own: a lazy, frozen `{ contract, acquire(context) }` answering a
+request event on a versioned channel, discovered twice so a provider swapped
+during acquisition is refused rather than used. Another extension in the same
+Pi process acquires it with
+
+```ts
+import { acquireWorkflowService } from "@vegardx/pi-workflow/service-provider";
+
+const workflows = await acquireWorkflowService(pi.events, context);
+```
+
+and receives a `WorkflowReadClient`, not the `WorkflowService`. What crosses
+the seam is **read, validate, project, observe, and start one allowlisted
+headless builtin**: `list`, `validate`, `project`, `inspect`, `runs`,
+`observe`, `runBuiltin`, and `awaitRun`. There is no `decide`, no `stop`, no
+`invalidate`, and no general `run` — starting a workflow that writes stays the
+model's own `workflow_run` call, in the open, in the transcript
+([Authority model](docs/authority.md)). A run this client did not start cannot
+be awaited through it either.
+
+`runBuiltin` is gated by `BUILTIN_HEADLESS_WORKFLOWS`, a frozen allowlist that
+belongs to this package rather than to the caller; anything else is refused
+with "Workflow `<ref>` may not be started by a service consumer; use
+`workflow_run`." Every name on it must declare no checkpoint, no worktree, and
+no handoff — a structural property `workflow_validate` cannot check, which is
+why `headlessBuiltinViolations` exists and the package's own tests run it over
+the allowlist. Failures that are not a `WorkflowServiceError` are flattened to
+one fixed message, so a consumer never sees an internal error string or a
+stack.
+
+`project(ref, input)` is the lease-free half of the seam: it runs the
+definition's `run(ctx)` against a context that declares nothing durable — no
+journal, no lease, no task identity, no subagent, no filesystem — and returns
+the summed declared reservations of every task the graph would declare for
+that input, the run's effective budget, and whether the one fits inside the
+other. Barriers resolve from values synthesized out of the declared output
+schemas, and a boolean synthesizes as `true`, so the projection is the
+worst-case branch rather than an average one.
 
 ## Pi tools
 
@@ -304,7 +355,7 @@ mistaken for a definition.
 
 ### `plan-to-ship`
 
-`workflows/plan-to-ship.workflow.ts` is the current builtin: **plan ->
+`workflows/plan-to-ship.workflow.ts` is the first builtin: **plan ->
 approve -> implement -> ship**, with two human gates and no publication at the
 end. Its input is a pi-maestro plan document by value, the sha256 digest of
 that document's canonical JSON, and an effort dial:
@@ -375,6 +426,158 @@ allowed `workspaceModes: [worktree]`, and carries a 2 GiB
 `workspaceWriteBytes` ceiling so a real install and build fit. Pinning
 `by.model` to a route outside a template's `allowedModels` fails preflight with
 `model exceeds ceiling`; add the route to the template you copied.
+
+### `deep-review`
+
+`workflows/deep-review.workflow.ts` is the shared review stage, so every caller
+declares a reviewed subject the same way. It is also the smallest definition
+built entirely out of the `@vegardx/pi-workflow/components` entry point:
+`envelope` is the whole effort dial and `reviewFanOut` is the whole graph.
+
+```text
+workflow_run { ref: "deep-review", input: { subject, lenses?, effort, synthesis?, maxFindings? } }
+```
+
+`subject` is one of three closed shapes, so a subject with nothing to read is
+refused by `workflow_validate` rather than discovered by a reviewer:
+`{ kind: "worktree-handoff", title, summary, handoff }` (the patch's identity —
+baseline, commit, digest, size — never its bytes),
+`{ kind: "tree", title, summary }` (the working tree the run can read), or
+`{ kind: "document", title, summary, document }` (up to 256 KiB, delivered
+whole across context entries). `lenses` is 1 to 16 of
+`{ id, tier?, diverse?, skill?, model?, brief? }` and defaults to
+`correctness`, `contracts`, and `risk`. `synthesis` is `required` (the
+default), `optional`, or `none`.
+
+The stages, in order:
+
+1. **`review/<lens>`** — one read-only `lens-reviewer` per lens over the one
+   subject, all at once, `disposition: "optional"`. The task key *is* the lens
+   id; a repeated id takes `-2`, `-3`, … by declaration ordinal, never by a
+   counter over runtime data.
+2. **the barrier** — `ctx.settled` inside `reviewFanOut`. The verdict and the
+   findings are computed from the lenses that reported, on a deterministic rail:
+   two lenses that say the same thing about the same place say it once, the
+   most severe wins, and a blocking finding forces `request-changes` even from
+   a lens that approved.
+3. **`review-synthesis`** — a reducer over the reports that arrived, declared
+   only when `synthesis` is not `none` and at least one lens reported. It
+   writes prose; it never decides the verdict.
+
+The output is `{ verdict, findings, coverage, synthesis? }`. `coverage` carries
+one row per declared lens — `{ lens, reported, verdict? }` — so a review that
+lost a lens reads as three of four rather than as a complete one. **There is no
+gate and no worktree**: nothing here writes, decides, or parks, which is why it
+is safe to run while planning.
+
+One agent template, `lens-reviewer`, covers both the lens reviewers and the
+reducer; copy it alongside the others. Its ceiling covers the component
+library's `review` and `synthesis` rows at every effort, and its
+`allowedModels` covers both model families, so a `diverse` lens has somewhere
+to route.
+
+A dead lens costs one thing today, stated rather than hidden: a materialization
+barrier's control edge covers every task the barrier closed over, so the
+reducer declared after it is blocked even though its inputs name only the
+lenses that reported. It is therefore declared optional and read through
+`ctx.settled`, and a run that loses a lens ends `completed-degraded` with the
+verdict, the findings and the coverage all committed — never failed.
+
+## Component library
+
+`@vegardx/pi-workflow/components` is the library the builtins are assembled
+from, and the one package subpath besides the root that the definition import
+gate accepts. It exports `gate` (a checkpoint plus the branch it decides),
+`envelope` (the `(effort, stage)` table that fixes a task's model, thinking
+level, and limits), `forEach` and `reviewFanOut` (bounded fan-out and its
+deterministic fan-in), and `verifyAndFix`.
+
+### `verifyAndFix`
+
+A bounded verify-then-fix loop over one implementer's worktree handoff,
+**unrolled at declaration** into named tasks — `<key>-verify-<n>` and
+`<key>-fix-<n>`, a pure function of the caller's key and the round ordinal:
+
+```text
+round 1   ctx.agent(`<key>-verify-1`, …)    the check, reported honestly
+          await ctx.result(verify-1)         barrier
+          ctx.agent(`<key>-fix-1`, …)        worktree, handoff "required"
+round 2   ctx.agent(`<key>-verify-2`, …)
+```
+
+`maxRounds` bounds the **verify** rounds, so at most `maxRounds - 1` fix rounds
+follow and the component never returns a fix nobody checked: `0` declares
+nothing (the implementer's own patch, unverified), `1` is one check whose
+failure is evidence at the caller's gate, `2` is verify, fix, verify. The cap
+is 2, and it is a cap on replay rather than on ambition: every round awaits a
+barrier, a resume re-executes the definition from the top and re-declares every
+epoch already crossed, so the replay work of a resume grows with the number of
+barriers the source has crossed. That is the cost a generic `loopUntil` cannot
+bound, which is why this component is unrolled and that one is deferred.
+
+A verifier always runs at `envelope(effort, "verify")` — its job is to run a
+command and report the exit code, and thinking harder does not change it. A
+fixer is a retry of an implementer that already failed its own check, so with
+`escalate: "thinking"` it runs one rung up the ladder,
+`envelope(nextRung(effort), "fix")`. There is no rung above `deep`, so asking
+to escalate from `deep` is refused rather than silently ignored.
+
+`checkRan: false` — the check never completed, because an install or a build
+was killed inside the agent's own VM — stops the loop rather than starting a
+fix round: that is **unverified**, not **broken**, and fixing code nobody
+proved was broken is how a loop burns a budget on a machine problem. The
+component returns `{ passed: false, checkRan: false }` for the caller's gate to
+put in front of a person.
+
+The caller owns the prose, the tools, the workspace, and the agent name; the
+component owns the keys, a verifier's output schema, both roles' models and
+limits, the fixer's `handoff: "required"`, and the input wiring that makes the
+rounds depend on each other. A request that declares one of the component's own
+fields is refused rather than overwritten. Rounds depend on each other through
+**data**, never a bare `after`: `verify-<n>` names the current patch's handoff
+handle, and `fix-<n>` names that handoff plus the failing verifier's report.
+
+## Model roles
+
+An agent task may name an exact `model`, or ask for one by role:
+
+```ts
+ctx.agent("review", {
+	agent: "lens-reviewer",
+	modelRole: { persona: "code-review", tier: "heavy", family: "other" },
+	// …
+});
+```
+
+`tier` is `light | standard | heavy`, `effort` is the thinking ladder plus
+`max` (mapped to pi-subagent's `xhigh`), and `family: "other"` is the diversity
+request a reviewer makes so it never marks its own homework. `model` and
+`modelRole` are mutually exclusive.
+
+The materializer resolves a role to an exact `{ provider, id, thinking }`
+**before hashing**, so `AgentTaskRequestSchema`, task identity, and
+pi-subagent's contract are unchanged: a role that resolves to the model a
+hand-written task named produces the identical task identity. The resolution is
+persisted with the task and re-used verbatim on every replay — only
+re-authorized — because resolution is host-dependent and re-rolling it would
+change identity mid-run; a model that has become unauthorized fails the task by
+name rather than rerouting it.
+
+The router itself is a **port**, never a dependency. The host implements
+`ModelRoutingPort` (`resolve`, an optional `authorized`, and an optional `id`)
+and passes it as `WorkflowServiceOptions.modelRouting`; nothing in this package
+imports a router, so the tier tables a router owns can change without touching
+the runtime. A port with an `id` is recorded in the run record as
+`modelRouting.router`, so a run says which router answered for it.
+
+**No port installed is not a default.** With no `modelRouting`, a `modelRole`
+declaration fails materialization with "No model routing is installed; declare
+an exact model." — the runtime never guesses a model. `staticModelRouting(table)`
+from `@vegardx/pi-workflow/runtime` is the constant-table stand-in a test or an
+embedder installs when it wants routing without a router; every resolution it
+returns reports `source: "static"` and says so in `fallbackReason`, because a
+table that answers every tier with one model must not be mistaken for a tier
+walk.
 
 ## Support tasks
 

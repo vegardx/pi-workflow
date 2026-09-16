@@ -98,6 +98,24 @@ optional `memoryBytes`, which is lowered unchanged to pi-subagent and enters
 agent task identity. No export was removed, renamed, or retyped, no returned
 union widened, and no tool name, parameter, or output schema changed.
 
+**2.1.0 (unreleased).** Additive only; `WORKFLOW_CONTRACT_REVISION` stays 19.
+Two entry points are added, both **unfrozen** until a later minor pins them:
+`@vegardx/pi-workflow/components`, the component library, which the definition
+import gate now accepts alongside `@vegardx/pi-workflow` and `typebox`; and
+`@vegardx/pi-workflow/service-provider`, the seam another extension acquires a
+narrowed read client through. Neither export list is pinned, and both are
+checked to be disjoint from the two pinned lists. `WorkflowServiceOptions`
+gains the optional `modelRouting` port; `AgentTaskAuthoringRequest` gains the
+optional `modelRole`, which is resolved to an exact model before hashing so no
+identity derivation and no `AgentTaskRequestSchema` field changes;
+`WorkflowRunRecordSchema` gains the optional `modelRouting`, which is
+revision-19 additive (every record written before it still validates, a reader
+that does not know the field ignores it, and nothing derives identity from it).
+The package ships a second builtin workflow, `deep-review`, from the same
+`workflows/` builtin root. No frozen export was removed, renamed, or retyped,
+no returned union widened, and no tool name, parameter, or output schema
+changed.
+
 ## Static definition
 
 A saved workflow uses a `.workflow.ts`, `.workflow.mts`, `.workflow.js`, or
