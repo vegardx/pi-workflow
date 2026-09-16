@@ -3,8 +3,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { SubagentClient } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
+import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowArtifactStore } from "../src/artifact-store.js";
+import { CHECKPOINT_DECIDE_INSTRUCTION } from "../src/checkpoint-render.js";
 import {
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowArtifactRef,
@@ -40,6 +42,7 @@ import type {
 	WorkflowServiceRunView,
 	WorkflowServiceTaskView,
 } from "../src/service-views.js";
+import { WorkflowPendingCheckpointViewSchema } from "../src/service-views.js";
 import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
@@ -543,8 +546,19 @@ describe("checkpoint parking", () => {
 					executionId: task.executionId,
 					requestedAt: task.checkpoint?.requestedAt,
 					expiresAt: task.checkpoint?.expiresAt,
+					taskKey: "approve",
+					prompt: "Approve the plan?",
+					schemaSummary: "{ proceed: boolean, note?: string }",
+					instruction: CHECKPOINT_DECIDE_INSTRUCTION,
 				},
 			]);
+			// The checkpoint declares no inputs, so there is nothing to render.
+			expect(view.pendingCheckpoints?.[0]).not.toHaveProperty("inputsSummary");
+			for (const pending of view.pendingCheckpoints ?? []) {
+				expect(Value.Check(WorkflowPendingCheckpointViewSchema, pending)).toBe(
+					true,
+				);
+			}
 			// A second wait does not block on the human: the parked view returns
 			// at once, without a timeout marker.
 			const again = await bounded(
@@ -612,6 +626,21 @@ describe("checkpoint parking", () => {
 			expect(checkpointView(view).checkpoint?.inputs).toEqual({
 				plan: { answer: "PLAN" },
 			});
+			// The artifact-backed view renders the same verified inputs the
+			// approver reads, so a parked run is answerable from one call.
+			const pending = view.pendingCheckpoints?.[0];
+			expect(pending).toMatchObject({
+				taskKey: "approve",
+				prompt: "Approve the plan?",
+				schemaSummary: "{ proceed: boolean, note?: string }",
+				inputsSummary: ["plan:", "  {", '    "answer": "PLAN"', "  }"].join(
+					"\n",
+				),
+				instruction: CHECKPOINT_DECIDE_INSTRUCTION,
+			});
+			expect(Value.Check(WorkflowPendingCheckpointViewSchema, pending)).toBe(
+				true,
+			);
 			const support = (view.tasks ?? []).find(
 				(task) => task.kind === "support",
 			);
@@ -624,6 +653,9 @@ describe("checkpoint parking", () => {
 				(task) => task.kind === "checkpoint",
 			);
 			expect(inspected?.checkpoint?.inputs).toBeUndefined();
+			// The lease-free inspection carries no pending checkpoint views at
+			// all, so it can carry no rendered inputs either.
+			expect(inspection).not.toHaveProperty("pendingCheckpoints");
 			await expect(
 				service.decide(runId, support?.id ?? "", {
 					decision: APPROVE,

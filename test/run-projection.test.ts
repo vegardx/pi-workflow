@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
+import { CHECKPOINT_DECIDE_INSTRUCTION } from "../src/checkpoint-render.js";
 import type {
 	MaterializedAgentTask,
 	MaterializedCheckpointTask,
@@ -2487,8 +2488,15 @@ describe("pendingCheckpointViews and run views", () => {
 				executionId: approveExecutionId,
 				requestedAt: REQUESTED_AT,
 				expiresAt: EXPIRES_AT,
+				taskKey: "approve",
+				prompt: CHECKPOINT_PROMPT,
+				schemaSummary: "{ proceed: boolean }",
+				instruction: CHECKPOINT_DECIDE_INSTRUCTION,
 			},
 		]);
+		// No lease, no verified inputs: the summary is omitted, never guessed.
+		expect(pending[0]).not.toHaveProperty("inputsSummary");
+		expect(pending[0]).not.toHaveProperty("promptTruncated");
 		expect(Object.isFrozen(pending)).toBe(true);
 		for (const entry of pending) {
 			expect(Value.Check(WorkflowPendingCheckpointViewSchema, entry)).toBe(
@@ -2517,8 +2525,86 @@ describe("pendingCheckpointViews and run views", () => {
 			key: "open",
 			executionId: deriveTaskExecutionId(RUN_ID, open.id, 1),
 			requestedAt: REQUESTED_AT,
+			taskKey: "open",
+			prompt: CHECKPOINT_PROMPT,
+			schemaSummary: "{ proceed: boolean }",
+			instruction: CHECKPOINT_DECIDE_INSTRUCTION,
 		});
 		expect(Value.Check(WorkflowPendingCheckpointViewSchema, entry)).toBe(true);
+	});
+
+	it("carries the decide fields, with the rendered inputs only when the caller has them", () => {
+		const nested = checkpointTask("review", 1, { namespace: ["release"] });
+		const state = stateOf({
+			status: "waiting",
+			entries: [
+				{
+					task: nested,
+					status: "waiting",
+					executions: [requestedExecution(nested, { expiresAt: EXPIRES_AT })],
+				},
+			],
+		});
+		const [bare] = pendingCheckpointViews(state);
+		expect(bare?.taskKey).toBe("release/review");
+		expect(bare).not.toHaveProperty("inputsSummary");
+		const [rich] = pendingCheckpointViews(state, {
+			inputs: new Map([[nested.id, { plan: "Ship on Friday.", rows: [1, 2] }]]),
+		});
+		expect(rich?.inputsSummary).toBe(
+			[
+				"plan:",
+				"  Ship on Friday.",
+				"",
+				"rows:",
+				"  [",
+				"    1,",
+				"    2",
+				"  ]",
+			].join("\n"),
+		);
+		expect(rich?.prompt).toBe(CHECKPOINT_PROMPT);
+		expect(rich?.instruction).toBe(CHECKPOINT_DECIDE_INSTRUCTION);
+		for (const entry of [bare, rich]) {
+			expect(Value.Check(WorkflowPendingCheckpointViewSchema, entry)).toBe(
+				true,
+			);
+		}
+		// An input of a task the caller passed nothing for stays unrendered.
+		const [other] = pendingCheckpointViews(state, {
+			inputs: new Map([["task_elsewhere", { plan: "x" }]]),
+		});
+		expect(other).not.toHaveProperty("inputsSummary");
+	});
+
+	it("cuts the pending prompt on the lease-free views and marks the cut", () => {
+		const longPrompt = "p".repeat(4096);
+		const wordy = checkpointTask("wordy", 1, { prompt: longPrompt });
+		const state = stateOf({
+			status: "waiting",
+			entries: [
+				{
+					task: wordy,
+					status: "waiting",
+					executions: [requestedExecution(wordy)],
+				},
+			],
+		});
+		const [cut] = pendingCheckpointViews(state, {
+			promptLimit: MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
+		});
+		expect(cut?.prompt).toBe("p".repeat(MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH));
+		expect(cut?.promptTruncated).toBe(true);
+		expect(Value.Check(WorkflowPendingCheckpointViewSchema, cut)).toBe(true);
+		// Artifact-backed views keep the whole contract-bounded prompt.
+		const [full] = pendingCheckpointViews(state);
+		expect(full?.prompt).toBe(longPrompt);
+		expect(full).not.toHaveProperty("promptTruncated");
+		// A prompt at the limit is not cut.
+		const [exact] = pendingCheckpointViews(state, {
+			promptLimit: longPrompt.length,
+		});
+		expect(exact).not.toHaveProperty("promptTruncated");
 	});
 
 	it("validates a run view and a parked wait view carrying pending checkpoints", () => {
