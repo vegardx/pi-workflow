@@ -18,8 +18,9 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
 ### Added
 
 - **`@vegardx/pi-workflow/components`.** A fourth entry point exporting the
-  component library: `gate`, `envelope`, `forEach`, and `reviewFanOut`, with
-  their error and finding types. Adding an entry point and its exports is a
+  component library: `gate`, `envelope`, `forEach`, `reviewFanOut` and
+  `verifyAndFix`, with their error and finding types and the compiled-stage
+  document `plan-to-ship` produces (`CompiledStageDocumentSchema`). Adding an entry point and its exports is a
   minor release under the stability policy. The entry is **unfrozen** — its
   exports may change in any minor release — and it is recorded as such in
   `compatibility.json` `piWorkflow.api.entryPoints` and
@@ -115,9 +116,12 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
 - **`verifyAndFix`.** A component: a bounded verify-then-fix loop over one
   implementer's worktree handoff, unrolled at declaration into
   `<key>-verify-<n>` and `<key>-fix-<n>` — a pure function of the caller's key
-  and the round ordinal. `maxRounds` bounds the **verify** rounds, capped at 2,
-  so at most one fix round follows and the component never returns a fix nobody
-  checked. The cap is a cap on replay: every round awaits a barrier, and a
+  and the round ordinal. `maxRounds` bounds the **verify** rounds, capped at 3,
+  so at most two fix rounds follow and the component never returns a fix nobody
+  checked. Three verify rounds are the plan vocabulary's two fix rounds, and
+  [docs/research.md](docs/research.md) measures that as the same graph its
+  `maxFixRounds: 2` row measured — 4.4 s of worst-case resume at 21 % of the
+  projection bound. The cap is a cap on replay: every round awaits a barrier, and a
   resume re-declares every epoch already crossed. A verifier always runs at
   `envelope(effort, "verify")`; a fixer is a retry, so `escalate: "thinking"`
   runs it one rung up the ladder, and escalating from `deep` is refused rather
@@ -131,8 +135,57 @@ required pi-subagent contract stays revision 7 (`0.11.0`).
   already makes: a definition's source identity covers its own bytes, not the
   package's. `@vegardx/pi-workflow/runtime` remains rejected.
 
+### Changed
+
+- **`plan-to-ship` compiles a plan's stages.** The builtin is now a compiler
+  over `plan.deliverables[].stages` and `plan.policy` rather than a fixed
+  five-stage pipeline, lowered entirely onto the component library — `gate` for
+  every human decision, `envelope` for the whole effort dial, `verifyAndFix` for
+  the bounded check-and-fix loop, `reviewFanOut` for the review stage. A
+  deliverable that declares no `stages` gets the default list derived from
+  `policy`, so **every plan written before stages existed compiles to what it
+  always compiled to** and keeps the task key `implement-<deliverable>`. What is
+  new for such a plan is a `verify-and-fix` stage: `policy.maxFixRounds`
+  defaults to 0 at `cheap`, 1 at `standard` and 2 at `deep`, and the compiler
+  maps a plan's FIX rounds to the component's VERIFY rounds as
+  `maxRounds = fixRounds + 1`, so a fix is never left unchecked.
+  - `input.effort` is now **optional**, falling back to `plan.policy.effort` and
+    then to `standard`; `{ plan, planDigest, effort }` keeps working unchanged.
+  - The gates come from `policy.gates` alone: `approve-plan` (no ship gate, so
+    nothing ships and the receipt names no ref), `approve-plan+ship` (the
+    default), or `every-deliverable` (a gate after each deliverable but the
+    last, whose gate is `ship`). A `gate` stage the plan declares is compiled
+    where it stands. A gate answered `{"proceed":false}` stops the walk and
+    declares nothing after it.
+  - The effort dial no longer selects review lenses — it ran the first lens at
+    `cheap` and every lens twice at `deep` — because the plan's stages and
+    `policy.reviewDefault` now say which lenses run and what each is worth.
+    A `deep` run of a two-lens plan therefore declares two reviewers, not four.
+  - Reviewers report the shared `Finding` shape (`ReviewReportSchema`) instead
+    of the definition's own `{severity, summary}`, so findings merge on the
+    component's deterministic rail and reach the output. A dead lens now
+    degrades the run instead of blocking the ship gate: the gate names only a
+    synthesis that ran.
+  - `compileStages(plan, policy)` is exported from the definition and returns
+    `{ deliverables: [{ id, stages }], effort, gates }` — every task key the run
+    will declare, before it declares one. Every rule it enforces is refused
+    there, including `use: "dynamic"` ("dynamic stages are not compiled yet"),
+    `use: "sub-workflow"` ("sub-workflows are not part of this slice"), and a
+    non-empty `reads` between deliverables, which was silently dropped before.
+  - The run output gains `deliverables[].verifyRounds`, `reviews[].deliverable`
+    and a merged `findings` array. `meta.version` becomes 2.
+
 ### Fixed
 
+- **A handle is recognized across two copies of the package.** The task,
+  artifact and handoff handle brands moved from module-local symbols to the
+  global registry (`Symbol.for`). A builtin definition imports the component
+  library through the package's own `./components` entry while the runtime that
+  made the handles may be a second copy of the module; a module-local brand made
+  `isTaskHandle` answer false for a handle that is one, so `gate` and
+  `verifyAndFix` refused a correct declaration with "pass handle.output … never
+  the task handle itself". Nothing about a handle changed, and no frozen shape
+  moved.
 - **Support task registrations reach the workflow service.** The extension
   built its service without passing `supportTasks`, so the host-process
   support implementations in `src/support-registry.ts` were never registered

@@ -131,16 +131,21 @@ trusted package code, installed with the package, and their imports
 resolve from inside the installed package. Do not add a definition there
 for one project; use a project root for that.
 
-The shipped builtin is `plan-to-ship`: `refine` (read-only agent) ->
-`approve-plan` (checkpoint, `headless: "block"`) -> one `implement-<id>`
-worktree agent per deliverable (`handoff: "required"`, which attempts the
-repository's check in its own worktree and reports `checkRan`/`checkPassed`
-honestly) -> optional read-only reviewers fed each handoff's descriptor ->
-`ship` (checkpoint) -> a required `receipt` finalizer. It takes a pi-maestro
-plan by value with its sha256 digest and an effort dial, and returns a receipt
-naming each durable handoff ref plus the approved digest; it never pushes,
-merges, or applies anything. Read it as the worked example of checkpoints,
-worktree handoffs, fan-out and finalizers in one definition. It names the
+The shipped builtin that writes is `plan-to-ship`, and it is a **compiler**:
+`refine` (read-only agent) -> `approve-plan` (checkpoint, `headless: "block"`)
+-> each deliverable's `stages`, in plan order -> `ship` (checkpoint) -> a
+required `receipt` finalizer. A deliverable's stages lower one-for-one onto the
+component library — `implement` to one worktree agent
+(`<stage>-<deliverable>`, `handoff: "required"`), `verify-and-fix` to
+`verifyAndFix`'s bounded `-verify-<n>`/`-fix-<n>` rounds, `review-fan-out` to
+`reviewFanOut`, `gate` to `gate` — and a deliverable that declares none gets
+the default list derived from the plan's `policy`. `policy.gates` decides which
+gates exist and nothing else does. It takes a pi-maestro plan by value with its
+sha256 digest and an effort dial, and returns a receipt naming each durable
+handoff ref plus the approved digest; it never pushes, merges, or applies
+anything. Read it as the worked example of compiling a document into a graph:
+checkpoints, worktree handoffs, a bounded loop, fan-out and finalizers in one
+definition, with `compileStages` showing the whole graph as data first. It names the
 agents `planner`, `implementer`, and `reviewer`, which a person must copy from
 `workflows/agents/*.md` into `<agentDir>/agents` or a trusted project's
 `.pi/agents` first: a definition can name an agent but never install one, and a
