@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
@@ -14,12 +13,17 @@ import {
 	type TaskInputHandle,
 	validateJsonSchemaDocument,
 } from "./definition.js";
-import { deriveSupportImplementationIdentitySha256 } from "./execution.js";
+import { deriveSupportImplementationIdentitySha256 } from "./digest.js";
+import { isLosslessJsonRoundTrip } from "./json-equal.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
 const SUPPORT_NAME = /^[a-zA-Z0-9@][a-zA-Z0-9@._/-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+/** Named export under which dynamic sources import a helper; `default` is refused separately. */
+export const SUPPORT_EXPORT_NAME = /^[A-Za-z_$][A-Za-z0-9_$]{0,127}$/;
+export const SUPPORT_EXPORT_NAME_INVALID_MESSAGE =
+	"Support task export name is invalid.";
 
 export interface SupportTaskDescriptor<TOutputSchema extends TSchema> {
 	readonly schema: "pi-workflow-support-task-descriptor";
@@ -74,7 +78,13 @@ export interface SupportTaskHelper<
 			TParametersSchema,
 			TOutputSchema
 		>["execute"],
+		options?: SupportTaskRegistrationOptions,
 	): SupportTaskRegistration<TParametersSchema, TOutputSchema>;
+}
+
+export interface SupportTaskRegistrationOptions {
+	/** Named export under which dynamic sources import this helper from `moduleSpecifier`; omitted = not importable by dynamic sources. */
+	readonly exportName?: string;
 }
 
 export interface SupportTaskExecutionContext<TParameters = unknown> {
@@ -87,6 +97,8 @@ export interface SupportTaskRegistration<
 	TParametersSchema extends TSchema = TSchema,
 	TOutputSchema extends TSchema = TSchema,
 > extends SupportTaskHelperOptions<TParametersSchema, TOutputSchema> {
+	/** Named export under which dynamic sources import this helper from `moduleSpecifier`; omitted = not importable by dynamic sources. */
+	readonly exportName?: string;
 	execute(
 		context: SupportTaskExecutionContext<Static<TParametersSchema>>,
 	): Promise<Static<TOutputSchema>> | Static<TOutputSchema>;
@@ -101,7 +113,7 @@ function cloneFrozen<T>(value: T, label: string): T {
 	}
 	if (json === undefined) throw new Error(`${label} is not JSON-serializable`);
 	const cloned = JSON.parse(json) as T;
-	if (!isDeepStrictEqual(value, cloned)) {
+	if (!isLosslessJsonRoundTrip(value, cloned)) {
 		throw new Error(`${label} is not losslessly JSON-serializable`);
 	}
 	const freeze = (entry: unknown): void => {
@@ -113,6 +125,11 @@ function cloneFrozen<T>(value: T, label: string): T {
 	};
 	freeze(cloned);
 	return cloned;
+}
+
+/** `SUPPORT_EXPORT_NAME` match that is not the reserved `default` export. */
+export function isValidSupportExportName(exportName: string): boolean {
+	return SUPPORT_EXPORT_NAME.test(exportName) && exportName !== "default";
 }
 
 function validateIdentity(
@@ -180,7 +197,12 @@ export function defineSupportTask<
 					TParametersSchema,
 					TOutputSchema
 				>["execute"],
+				registrationOptions?: SupportTaskRegistrationOptions,
 			) {
+				const exportName = registrationOptions?.exportName;
+				if (exportName !== undefined && !isValidSupportExportName(exportName)) {
+					throw new Error(SUPPORT_EXPORT_NAME_INVALID_MESSAGE);
+				}
 				return Object.freeze({
 					name: options.name,
 					moduleSpecifier: options.moduleSpecifier,
@@ -188,6 +210,7 @@ export function defineSupportTask<
 					implementationSha256: options.implementationSha256,
 					parametersSchema,
 					outputSchema,
+					...(exportName === undefined ? {} : { exportName }),
 					execute,
 				});
 			},

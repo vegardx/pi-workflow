@@ -224,6 +224,7 @@ export {
 	type WorkflowDefinitionOptions,
 	type WorkflowMeta,
 	type WorkflowMetaInput,
+	WorkflowMetaSchema,
 	type WorkflowReturn,
 	type WorkspaceAuthoringRequest,
 	type WorktreeTaskHandle,

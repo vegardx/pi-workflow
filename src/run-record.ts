@@ -8,6 +8,7 @@ import {
 	MAX_NESTED_WORKFLOW_DEPTH,
 	MAX_WORKFLOW_CONCURRENCY,
 	NestedWorkflowInputArtifactsSchema,
+	Sha256Schema,
 	TaskExecutionIdSchema,
 	TaskKeySchema,
 	WORKFLOW_CONTRACT_REVISION,
@@ -46,6 +47,12 @@ export const WorkflowRunRecordSchema = Type.Object(
 		definitionPath: Type.String({ minLength: 1, maxLength: 4096 }),
 		definitionIdentitySha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
 		definitionSourceSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+		definitionKind: Type.Union([
+			Type.Literal("static"),
+			Type.Literal("dynamic"),
+		]),
+		approvalSha256: Type.Optional(Sha256Schema),
+		hostApiSha256: Type.Optional(Sha256Schema),
 		concurrency: Type.Integer({
 			minimum: 1,
 			maximum: MAX_WORKFLOW_CONCURRENCY,
@@ -90,11 +97,28 @@ function hasValidLineage(record: WorkflowRunRecord): boolean {
 	);
 }
 
+/**
+ * `definitionKind === "dynamic"` iff both dynamic digests are present; a
+ * dynamic record is always a root (depth 0, no parent). Static records must
+ * not carry the digests.
+ */
+function hasValidDefinitionKind(record: WorkflowRunRecord): boolean {
+	const dynamic =
+		record.approvalSha256 !== undefined && record.hostApiSha256 !== undefined;
+	if (record.definitionKind === "dynamic") {
+		return dynamic && record.depth === 0 && record.parent === undefined;
+	}
+	return (
+		record.approvalSha256 === undefined && record.hostApiSha256 === undefined
+	);
+}
+
 function hasValidLimits(record: WorkflowRunRecord): boolean {
 	const createdAt = Date.parse(record.createdAt);
 	const deadlineAt = Date.parse(record.deadlineAt);
 	return (
 		hasValidLineage(record) &&
+		hasValidDefinitionKind(record) &&
 		Number.isFinite(createdAt) &&
 		Number.isFinite(deadlineAt) &&
 		deadlineAt - createdAt === record.effectiveTimeoutMs &&

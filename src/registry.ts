@@ -19,7 +19,16 @@ const MAX_REGISTERED_ROOTS = 32;
 const DEFINITION_FILE = /\.workflow\.(?:ts|mts|js|mjs)$/;
 const ALLOWED_STATIC_IMPORTS = new Set(["@vegardx/pi-workflow", "typebox"]);
 
-export type WorkflowRootScope = "project" | "global" | "package" | "builtin";
+/**
+ * `"dynamic"` names a proposal-backed definition (dynamic-workflow spec 5.4);
+ * it is never a registered root and `discoverWorkflows` never yields it.
+ */
+export type WorkflowRootScope =
+	| "project"
+	| "global"
+	| "package"
+	| "builtin"
+	| "dynamic";
 
 export interface WorkflowRoot {
 	readonly path: string;
@@ -155,7 +164,7 @@ async function readDefinitionSource(filePath: string): Promise<string> {
 	}
 }
 
-function assertSupportedImports(
+export function assertSupportedImports(
 	source: string,
 	filePath: string,
 	allowedSupportImports: ReadonlySet<string>,
