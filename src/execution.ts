@@ -13,7 +13,6 @@ import {
 	type SubagentHandoffEvidence,
 	type SubagentOperationId,
 	type SubagentTerminalEvidence,
-	type SupportImplementation,
 	type TaskExecutionGeneration,
 	type TaskExecutionId,
 	WORKFLOW_HANDOFF_FORMAT_SHA256,
@@ -24,7 +23,13 @@ import {
 	type WorkflowRunId,
 	type WorkflowTaskId,
 } from "./contracts.js";
+import {
+	deriveJsonValueSha256,
+	deriveSupportImplementationIdentitySha256,
+} from "./digest.js";
 import type { TaskExecutionProjection } from "./events.js";
+
+export { deriveJsonValueSha256, deriveSupportImplementationIdentitySha256 };
 
 function sha256(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -62,10 +67,6 @@ export function deriveNestedWorkflowRunId(
 		parentRunId,
 		taskId,
 	})}`;
-}
-
-export function deriveJsonValueSha256(value: unknown): string {
-	return canonicalSha256(value);
 }
 
 export function deriveSubagentResultSha256(result: RunResult): string {
@@ -167,19 +168,6 @@ export function deriveWorkflowArtifactId(input: {
 		schemaSha256: input.schemaSha256,
 		sha256: input.sha256,
 	})}`;
-}
-
-export function deriveSupportImplementationIdentitySha256(
-	implementation: SupportImplementation,
-): string {
-	return deriveJsonValueSha256({
-		implementationSha256: implementation.implementationSha256,
-		moduleSpecifier: implementation.moduleSpecifier,
-		name: implementation.name,
-		outputSchema: implementation.outputSchema,
-		parametersSchema: implementation.parametersSchema,
-		revision: implementation.revision,
-	});
 }
 
 export function deriveWorkflowFailureSha256(
