@@ -5,11 +5,14 @@ import type {
 } from "../src/service-views.js";
 import {
 	createWidgetController,
+	firstParkedOwnedRun,
 	WORKFLOW_WIDGET_DEBOUNCE_MS,
 	WORKFLOW_WIDGET_KEY,
 	WORKFLOW_WIDGET_LIMIT,
+	WORKFLOW_WIDGET_PARKED_PREFIX,
 	WORKFLOW_WIDGET_POLL_MS,
 	WORKFLOW_WIDGET_STATUSES,
+	WORKFLOW_WIDGET_WIDTH,
 	widgetNeedsPolling,
 	workflowWidgetLines,
 } from "../src/ui/widget.js";
@@ -55,6 +58,50 @@ function summary(
 			status === "cleanup-blocked",
 		...overrides,
 		availableActions: overrides.availableActions ?? [],
+	};
+}
+
+/** A run this session owns, waiting for a decision it may record. */
+function parked(
+	overrides: Partial<WorkflowRunSummary> = {},
+): WorkflowRunSummary {
+	return summary("waiting", {
+		ownership: "owned",
+		pendingCheckpointCount: 1,
+		availableActions: ["decide"],
+		...overrides,
+	});
+}
+
+/** The `include: ["tasks"]` inspection of a run parked at one checkpoint. */
+function inspection(prompt: string, executionId = "execution-1"): unknown {
+	return {
+		run: parked(),
+		tasks: [
+			{
+				id: "task-done",
+				namespace: [],
+				key: "plan",
+				kind: "agent",
+				role: "task",
+				disposition: "required",
+				status: "completed",
+				generation: 1,
+			},
+			{
+				id: "task-checkpoint",
+				namespace: ["phase-1"],
+				key: "approve",
+				kind: "checkpoint",
+				role: "task",
+				disposition: "required",
+				status: "waiting",
+				generation: 1,
+				executionId,
+				checkpoint: { prompt, schema: { type: "boolean" }, headless: "block" },
+			},
+		],
+		truncated: {},
 	};
 }
 
@@ -145,6 +192,63 @@ describe("workflow widget lines", () => {
 		).toEqual(["workflows ongoing: 1 recovering · alt+w"]);
 	});
 
+	it("puts a parked owned run's question first and collapses the counts", () => {
+		const runs = [
+			summary("running"),
+			parked(),
+			summary("failed"),
+			summary("interrupted"),
+		];
+		expect(firstParkedOwnedRun(runs)).toBe(runs[1]);
+		const lines = workflowWidgetLines(runs, "Approve the plan?");
+		expect(lines).toEqual([
+			"waiting for you: Approve the plan?",
+			"workflows ongoing: 1 running · 1 waiting · workflows need action: 1 failed · 1 interrupted · alt+w",
+		]);
+		expect(lines?.length).toBeLessThanOrEqual(2);
+		// Without the prompt the widget is exactly what it was before.
+		expect(workflowWidgetLines(runs)).toEqual([
+			"workflows ongoing: 1 running · 1 waiting",
+			"workflows need action: 1 failed · 1 interrupted · alt+w",
+		]);
+	});
+
+	it("selects only an owned run the service offers decide on", () => {
+		expect(firstParkedOwnedRun([])).toBeUndefined();
+		expect(
+			firstParkedOwnedRun([summary("waiting"), summary("running")]),
+		).toBeUndefined();
+		// Parked, but this session may not decide it: nested child, leased
+		// elsewhere, or no checkpoint pending.
+		expect(
+			firstParkedOwnedRun([
+				parked({ availableActions: ["stop"] }),
+				parked({ ownership: "leased-elsewhere", leasedElsewhere: true }),
+				parked({ pendingCheckpointCount: 0 }),
+			]),
+		).toBeUndefined();
+		const owned = parked();
+		expect(
+			firstParkedOwnedRun([parked({ ownership: "inactive" }), owned]),
+		).toBe(owned);
+	});
+
+	it("cuts the question to the widget width and collapses its whitespace", () => {
+		const long = "A".repeat(WORKFLOW_WIDGET_WIDTH * 2);
+		const lines = workflowWidgetLines([parked()], long);
+		const first = lines?.[0] ?? "";
+		expect(first.length).toBe(WORKFLOW_WIDGET_WIDTH);
+		expect(first.startsWith(`${WORKFLOW_WIDGET_PARKED_PREFIX}AAA`)).toBe(true);
+		expect(first.endsWith("…")).toBe(true);
+		expect(workflowWidgetLines([parked()], "  Which\n tone?\t ")?.[0]).toBe(
+			"waiting for you: Which tone?",
+		);
+		// A prompt that is only whitespace is no question at all.
+		expect(workflowWidgetLines([parked()], "   ")).toEqual([
+			"workflows ongoing: 1 waiting · alt+w",
+		]);
+	});
+
 	it("polls only while a run can change without notifying", () => {
 		expect(WORKFLOW_WIDGET_STATUSES).toEqual([
 			"created",
@@ -178,29 +282,35 @@ describe("workflow widget controller", () => {
 
 	function harness(initial: WorkflowRunPage) {
 		let current = initial;
+		let currentInspection: unknown = inspection("Approve the plan?");
 		let listener: (() => void) | undefined;
 		const unsubscribe = vi.fn(() => {
 			listener = undefined;
 		});
 		const listRuns = vi.fn(async () => current);
+		const inspect = vi.fn(async () => currentInspection);
 		const subscribe = vi.fn((next: () => void) => {
 			listener = next;
 			return unsubscribe;
 		});
 		const setWidget = vi.fn();
 		const controller = createWidgetController({
-			service: { listRuns, subscribe } as never,
+			service: { listRuns, subscribe, inspect } as never,
 			setWidget,
 		});
 		return {
 			controller,
 			listRuns,
+			inspect,
 			subscribe,
 			unsubscribe,
 			setWidget,
 			notify: () => listener?.(),
 			set: (next: WorkflowRunPage) => {
 				current = next;
+			},
+			setInspection: (next: unknown) => {
+				currentInspection = next;
 			},
 		};
 	}
@@ -324,6 +434,77 @@ describe("workflow widget controller", () => {
 		expect(h.setWidget.mock.calls.length).toBe(calls);
 		h.controller.stop();
 		expect(h.unsubscribe).toHaveBeenCalledTimes(1);
+	});
+
+	it("reads a parked run's prompt once and reuses it across polls", async () => {
+		const run = parked();
+		const h = harness(page([run]));
+		await h.controller.start();
+		expect(h.inspect).toHaveBeenCalledTimes(1);
+		expect(h.inspect).toHaveBeenCalledWith(run.runId, { include: ["tasks"] });
+		expect(h.setWidget).toHaveBeenLastCalledWith([
+			"waiting for you: Approve the plan?",
+			"workflows ongoing: 1 waiting · alt+w",
+		]);
+		// Polling re-reads the page but never the prompt.
+		await vi.advanceTimersByTimeAsync(WORKFLOW_WIDGET_POLL_MS * 3);
+		expect(h.listRuns).toHaveBeenCalledTimes(4);
+		expect(h.inspect).toHaveBeenCalledTimes(1);
+		h.controller.stop();
+	});
+
+	it("drops the cached prompt when the run stops waiting and re-reads the next execution", async () => {
+		const run = parked();
+		const h = harness(page([run]));
+		await h.controller.start();
+		expect(h.inspect).toHaveBeenCalledTimes(1);
+		// Decided: the run drives again and the question is gone.
+		h.set(page([summary("running", { runId: run.runId })]));
+		await vi.advanceTimersByTimeAsync(WORKFLOW_WIDGET_POLL_MS);
+		expect(h.setWidget).toHaveBeenLastCalledWith([
+			"workflows ongoing: 1 running · alt+w",
+		]);
+		expect(h.inspect).toHaveBeenCalledTimes(1);
+		// Parked again on a later checkpoint: a new execution, a new prompt.
+		h.set(page([run]));
+		h.setInspection(inspection("Which tone should the summary use?", "e2"));
+		await vi.advanceTimersByTimeAsync(WORKFLOW_WIDGET_POLL_MS);
+		expect(h.inspect).toHaveBeenCalledTimes(2);
+		expect(h.setWidget).toHaveBeenLastCalledWith([
+			"waiting for you: Which tone should the summary use?",
+			"workflows ongoing: 1 waiting · alt+w",
+		]);
+		h.controller.stop();
+	});
+
+	it("keeps the counts when the prompt cannot be read", async () => {
+		const h = harness(page([parked()]));
+		h.inspect.mockRejectedValueOnce(new Error("run unavailable"));
+		await h.controller.start();
+		expect(h.setWidget).toHaveBeenLastCalledWith([
+			"workflows ongoing: 1 waiting · alt+w",
+		]);
+		// Nothing was cached, so the next refresh asks again and succeeds.
+		await vi.advanceTimersByTimeAsync(WORKFLOW_WIDGET_POLL_MS);
+		expect(h.inspect).toHaveBeenCalledTimes(2);
+		expect(h.setWidget).toHaveBeenLastCalledWith([
+			"waiting for you: Approve the plan?",
+			"workflows ongoing: 1 waiting · alt+w",
+		]);
+		h.controller.stop();
+	});
+
+	it("shows the counts alone when the inspection carries no waiting checkpoint", async () => {
+		const h = harness(page([parked()]));
+		h.setInspection({ run: parked(), tasks: [], truncated: {} });
+		await h.controller.start();
+		expect(h.setWidget).toHaveBeenLastCalledWith([
+			"workflows ongoing: 1 waiting · alt+w",
+		]);
+		// The empty read is cached like any other: polling does not retry it.
+		await vi.advanceTimersByTimeAsync(WORKFLOW_WIDGET_POLL_MS * 2);
+		expect(h.inspect).toHaveBeenCalledTimes(1);
+		h.controller.stop();
 	});
 
 	it("hides the widget and stops polling when a refresh fails, then retries on the next event", async () => {
