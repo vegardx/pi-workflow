@@ -36,6 +36,19 @@ export {
 	workflowUsage,
 } from "./budget.js";
 export {
+	CHECKPOINT_RUN_ENDING_REASON,
+	cancelOpenWorkflowCheckpoints,
+	createWorkflowCheckpointTaskExecutor,
+	type WorkflowCheckpointDecisionInput,
+	WorkflowCheckpointExecutionError,
+	type WorkflowCheckpointExecutionResult,
+	type WorkflowCheckpointFailureStage,
+	type WorkflowCheckpointRequestOutcome,
+	type WorkflowCheckpointTaskExecutor,
+	type WorkflowCheckpointTaskExecutorOptions,
+	type WorkflowCheckpointTaskOutcome,
+} from "./checkpoint-executor.js";
+export {
 	type AgentResumePolicy,
 	AgentResumePolicySchema,
 	type AgentRetryClass,
@@ -188,6 +201,7 @@ export {
 	type AgentTaskAuthoringRequest,
 	type AgentTaskHandle,
 	type ArtifactHandle,
+	type CheckpointRequest,
 	defineWorkflow,
 	type FanInOptions,
 	type FanOutOptions,
@@ -261,6 +275,7 @@ export {
 } from "./lifecycle.js";
 export {
 	deriveAgentTaskIdentity,
+	deriveCheckpointTaskIdentity,
 	deriveNestedWorkflowTaskIdentity,
 	deriveSupportTaskIdentity,
 	deriveWorkflowTaskId,

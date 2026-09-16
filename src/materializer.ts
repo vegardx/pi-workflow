@@ -9,9 +9,14 @@ import {
 	type AgentTaskRequest,
 	AgentTaskRequestSchema,
 	type AgentTaskSpec,
+	type CheckpointTaskRequest,
+	CheckpointTaskRequestSchema,
+	type CheckpointTaskSpec,
 	MAX_NESTED_WORKFLOW_TASKS,
 	type MaterializedAgentTask,
 	MaterializedAgentTaskSchema,
+	type MaterializedCheckpointTask,
+	MaterializedCheckpointTaskSchema,
 	type MaterializedNestedWorkflowTask,
 	MaterializedNestedWorkflowTaskSchema,
 	type MaterializedSupportTask,
@@ -36,6 +41,7 @@ import {
 import {
 	type AgentTaskAuthoringRequest,
 	type AgentTaskHandle,
+	type CheckpointRequest,
 	createTaskHandle,
 	type FinalizerKind,
 	type TaskHandle,
@@ -60,6 +66,8 @@ const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
 const MAX_MATERIALIZED_TASKS = 256;
 const MAX_MATERIALIZATION_EPOCHS = 4096;
+const MAX_WORKFLOW_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
+const MAX_CHECKPOINT_PROMPT_LENGTH = 4096;
 
 function canonicalValue(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(canonicalValue);
@@ -124,6 +132,21 @@ export function deriveNestedWorkflowTaskIdentity(value: {
 	readonly inputSha256: string;
 	readonly namespace: readonly TaskKey[];
 	readonly spec: Omit<NestedWorkflowTaskSpec, "identitySha256">;
+}): string {
+	return sha256({
+		contractRevision: WORKFLOW_CONTRACT_REVISION,
+		definitionIdentitySha256: value.definitionIdentitySha256,
+		inputSha256: value.inputSha256,
+		namespace: value.namespace,
+		...value.spec,
+	});
+}
+
+export function deriveCheckpointTaskIdentity(value: {
+	readonly definitionIdentitySha256: string;
+	readonly inputSha256: string;
+	readonly namespace: readonly TaskKey[];
+	readonly spec: Omit<CheckpointTaskSpec, "identitySha256">;
 }): string {
 	return sha256({
 		contractRevision: WORKFLOW_CONTRACT_REVISION,
@@ -412,6 +435,18 @@ export class WorkflowTaskMaterializer {
 		declaration: NestedWorkflowDeclaration,
 	): TaskHandle<TOutput> {
 		return this.declareWorkflow<TOutput>(key, declaration, "task");
+	}
+
+	/**
+	 * Declares a checkpoint: a human decision the run parks on. Its handle is
+	 * an ordinary result handle (the decision is a JSON result artifact) and
+	 * never carries a handoff.
+	 */
+	checkpoint<TDecisionSchema extends TSchema>(
+		key: TaskKey,
+		request: CheckpointRequest<TDecisionSchema>,
+	): TaskHandle<Static<TDecisionSchema>> {
+		return this.declareCheckpoint(key, request, "task");
 	}
 
 	/**
@@ -868,6 +903,151 @@ export class WorkflowTaskMaterializer {
 		}
 		const selected = this.adopt(task, expected);
 		return createTaskHandle<TOutput>(
+			{ runId: this.runId, taskId: selected.id },
+			{
+				runId: this.runId,
+				producerTaskId: selected.id,
+				output: "result",
+			},
+		);
+	}
+
+	private declareCheckpoint<TDecisionSchema extends TSchema>(
+		key: TaskKey,
+		request: CheckpointRequest<TDecisionSchema>,
+		role: TaskRole,
+	): TaskHandle<Static<TDecisionSchema>> {
+		if (this.finalClosed) {
+			throw new WorkflowMaterializationError(
+				"task declaration follows the final materialization barrier",
+			);
+		}
+		if (this.sequence >= MAX_MATERIALIZED_TASKS) {
+			throw new WorkflowMaterializationError("workflow task limit exceeded");
+		}
+		if (!Value.Check(TaskKeySchema, key)) {
+			throw new WorkflowMaterializationError("invalid task key");
+		}
+		this.assertUndeclared(this.namespace, key);
+		const after = new Map<string, TaskRef>(this.controlAfter);
+		for (const dependency of request.after ?? []) {
+			if (
+				dependency.runId !== this.runId ||
+				!this.seen.has(dependency.taskId)
+			) {
+				throw new WorkflowMaterializationError(
+					"task order dependency is unknown or belongs to another run",
+				);
+			}
+			after.set(dependency.taskId, dependency);
+		}
+		const inputs = this.resolveInputs(after, request.inputs);
+		this.assertRoleDependencies(role, after);
+		if (role === "finalizer") {
+			throw new WorkflowMaterializationError(
+				"a checkpoint cannot be a finalizer",
+			);
+		}
+		const schema = validateJsonSchemaDocument(
+			request.schema,
+			"checkpoint decision schema",
+		);
+		const { prompt, headless, timeoutMs } = request;
+		if (
+			typeof prompt !== "string" ||
+			prompt.length < 1 ||
+			prompt.length > MAX_CHECKPOINT_PROMPT_LENGTH
+		) {
+			throw new WorkflowMaterializationError("invalid checkpoint prompt");
+		}
+		if (headless !== "block" && headless !== "use-explicit-default") {
+			throw new WorkflowMaterializationError(
+				"invalid checkpoint headless policy",
+			);
+		}
+		if (
+			timeoutMs !== undefined &&
+			(!Number.isSafeInteger(timeoutMs) ||
+				timeoutMs < 1_000 ||
+				timeoutMs > MAX_WORKFLOW_DURATION_MS)
+		) {
+			throw new WorkflowMaterializationError("invalid checkpoint timeout");
+		}
+		let defaultValue: unknown;
+		if (Object.hasOwn(request, "default") && request.default !== undefined) {
+			try {
+				defaultValue = cloneFrozen<unknown>(request.default);
+			} catch {
+				throw new WorkflowMaterializationError(
+					"checkpoint default is not JSON",
+				);
+			}
+			const ajv = new Ajv({
+				allErrors: true,
+				strict: true,
+				validateSchema: true,
+			});
+			addFormats(ajv);
+			if (!ajv.validate(schema, defaultValue)) {
+				throw new WorkflowMaterializationError(
+					"checkpoint default does not match its schema",
+				);
+			}
+		}
+		if (headless === "use-explicit-default" && defaultValue === undefined) {
+			throw new WorkflowMaterializationError(
+				"checkpoint headless default requires an explicit default",
+			);
+		}
+		const checkpointRequest: CheckpointTaskRequest = {
+			schema: schema as CheckpointTaskRequest["schema"],
+			prompt,
+			headless,
+			...(defaultValue === undefined ? {} : { default: defaultValue }),
+			...(timeoutMs === undefined ? {} : { timeoutMs }),
+		};
+		if (!Value.Check(CheckpointTaskRequestSchema, checkpointRequest)) {
+			throw new WorkflowMaterializationError("invalid checkpoint task request");
+		}
+		const orderedAfter = [...after.values()].sort((left, right) =>
+			left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0,
+		);
+		const specWithoutIdentity: Omit<CheckpointTaskSpec, "identitySha256"> = {
+			key,
+			kind: "checkpoint",
+			role,
+			disposition: request.disposition ?? "required",
+			after: orderedAfter,
+			inputs,
+			replay: request.replay ?? "read-only",
+			request: checkpointRequest,
+		};
+		const spec: CheckpointTaskSpec = {
+			...specWithoutIdentity,
+			identitySha256: deriveCheckpointTaskIdentity({
+				definitionIdentitySha256: this.definitionIdentitySha256,
+				inputSha256: this.inputSha256,
+				namespace: this.namespace,
+				spec: specWithoutIdentity,
+			}),
+		};
+		const id = deriveWorkflowTaskId(this.runId, this.namespace, key);
+		const { expected, ...position } = this.nextPosition();
+		const task = cloneFrozen({
+			id,
+			runId: this.runId,
+			namespace: this.namespace,
+			spec,
+			definitionIdentitySha256: this.definitionIdentitySha256,
+			...position,
+		}) as MaterializedCheckpointTask;
+		if (!Value.Check(MaterializedCheckpointTaskSchema, task)) {
+			throw new WorkflowMaterializationError(
+				"invalid materialized checkpoint task",
+			);
+		}
+		const selected = this.adopt(task, expected);
+		return createTaskHandle<Static<TDecisionSchema>>(
 			{ runId: this.runId, taskId: selected.id },
 			{
 				runId: this.runId,

@@ -242,6 +242,25 @@ export interface NestedWorkflowRequest<TInput = unknown> {
 	readonly replay?: ReplayPolicy;
 }
 
+/**
+ * A human decision the run waits for. The decision value is validated against
+ * `schema` and becomes the task's JSON result; `default` is required (and
+ * validated) for the "use-explicit-default" headless policy. `timeoutMs` is
+ * relative to the request and capped by the run deadline. A checkpoint can
+ * never be a finalizer.
+ */
+export interface CheckpointRequest<TDecisionSchema extends TSchema> {
+	readonly schema: TDecisionSchema;
+	readonly prompt: string;
+	readonly default?: Static<TDecisionSchema>;
+	readonly headless: CheckpointHeadlessPolicy;
+	readonly timeoutMs?: number;
+	readonly disposition?: TaskDisposition;
+	readonly after?: readonly TaskRef[];
+	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
+	readonly replay?: ReplayPolicy;
+}
+
 export type FinalizerKind = "required" | "advisory";
 
 export interface FinalizeRequest<
@@ -330,6 +349,15 @@ export interface WorkflowContext<TInput> {
 		key: TaskKey,
 		request: NestedWorkflowRequest,
 	): TaskHandle<TOutput>;
+	/**
+	 * Declares a checkpoint: the run parks until an operator decides (or the
+	 * headless default applies). The handle resolves to the decision and never
+	 * carries a handoff.
+	 */
+	checkpoint<TDecisionSchema extends TSchema>(
+		key: TaskKey,
+		request: CheckpointRequest<TDecisionSchema>,
+	): TaskHandle<Static<TDecisionSchema>>;
 	fanOut<
 		TItem,
 		TOutputSchema extends TSchema,
