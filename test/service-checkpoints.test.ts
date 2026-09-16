@@ -1183,10 +1183,21 @@ describe("checkpoint expiry", () => {
 			),
 		});
 		const service = await serviceFor(fx);
+		// Only the wall clock is faked, and frozen before the run starts: the
+		// 1 s expiry cannot pass before the park is observed however slowly the
+		// drive runs. With a real clock it did under full-suite load (run
+		// 35099072360) and `wait` swept the park to `failed` instead of
+		// returning it. The watchdog armed at the park keeps its real 1 s
+		// timer; the clock is moved past `expiresAt` so its re-drive's sweep
+		// expires the checkpoint.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
-			const { runId } = await parked(service, "watchdog");
+			const { runId, view: park } = await parked(service, "watchdog");
 			// No wait, decide, or reconcile touches the run from here on: only
 			// the watchdog can re-drive it.
+			vi.setSystemTime(
+				Date.parse(checkpointView(park).checkpoint?.expiresAt ?? "") + 1,
+			);
 			const status = await untilStatus(
 				service,
 				runId,
@@ -1214,9 +1225,18 @@ describe("checkpoint expiry", () => {
 			),
 		});
 		const service = await serviceFor(fx);
+		// Only the wall clock is faked, and frozen before the run starts, so the
+		// park is observed before its 1 s expiry however slowly the drive runs
+		// (with a real clock `wait` swept it to `failed` under full-suite load,
+		// run 35099072360). The clock then passes `expiresAt` and the watchdog's
+		// real timer is the only thing that re-drives the run.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
 			const { runId, view } = await parked(service, "race");
 			const parkedAt = (await journalEvents(fx.storeRoot, runId)).length;
+			vi.setSystemTime(
+				Date.parse(checkpointView(view).checkpoint?.expiresAt ?? "") + 1,
+			);
 			// The watchdog's re-drive is live from its first append (the expiry
 			// sweep); the decision is issued at that instant.
 			const redriven = bounded(
@@ -1276,14 +1296,18 @@ describe("checkpoint expiry", () => {
 			),
 		});
 		const service = await serviceFor(fx);
+		// Only the wall clock is faked, and frozen before the run starts: the
+		// park is observed before its 1 s expiry however slowly the drive runs
+		// (frozen only after the park, the expiry had already passed under
+		// full-suite load and `wait` swept it to `failed`, run 35099072360).
+		// The decision then lands 30 ms before the expiry, and the clock passes
+		// it before the restarted drive sweeps.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
 			const { runId, view } = await parked(service, "late");
 			const expiresAt = Date.parse(
 				checkpointView(view).checkpoint?.expiresAt ?? "",
 			);
-			// Only the wall clock is faked: the decision lands 30 ms before the
-			// expiry, then the clock passes it before the restarted drive sweeps.
-			vi.useFakeTimers({ toFake: ["Date"] });
 			vi.setSystemTime(expiresAt - 30);
 			const decided = await service.decide(runId, checkpointView(view).id, {
 				decision: APPROVE,
@@ -1870,6 +1894,12 @@ describe("nested checkpoints", () => {
 			),
 		});
 		const service = await serviceFor(fx);
+		// Only the wall clock is faked, and frozen before the runs start: the
+		// child's 1 s checkpoint cannot be defaulted before its park is listed
+		// and its decision refused, however slowly the two drives run (with a
+		// real clock the child had already completed under full-suite load,
+		// run 35099072360). The child's watchdog keeps its real 1 s timer.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
 			const { parentRunId, childRunId } = await parkedChild(service);
 			const receipt = { runId: parentRunId };
@@ -1902,7 +1932,11 @@ describe("nested checkpoints", () => {
 				code: "validation",
 				message: ROOT_ONLY_MESSAGE,
 			});
-			// The child's watchdog defaults the checkpoint; the parent completes.
+			// Past the expiry, the child's watchdog re-drive defaults the
+			// checkpoint; the parent completes.
+			vi.setSystemTime(
+				Date.parse(checkpointView(childView).checkpoint?.expiresAt ?? "") + 1,
+			);
 			const final = await bounded(service.wait(receipt.runId), "wait");
 			expect(final).toMatchObject({
 				status: "completed",

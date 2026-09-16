@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Value } from "typebox/value";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowStateProjection } from "../src/events.js";
 import { deriveTaskExecutionId } from "../src/execution.js";
 import {
@@ -278,6 +278,10 @@ async function nestedCopy(fixture: Fixture, runId: string): Promise<string> {
 // ---------------------------------------------------------------------------
 // resume
 // ---------------------------------------------------------------------------
+
+afterEach(() => {
+	vi.useRealTimers();
+});
 
 describe("operator resume", () => {
 	it("re-attempts a durably interrupted task on the operator's intent and completes", async () => {
@@ -802,20 +806,21 @@ describe("operator resume", () => {
 		}
 	});
 
-	it("refuses resume once the run deadline has passed", {
-		timeout: 20_000,
-	}, async () => {
+	it("refuses resume once the run deadline has passed", async () => {
 		const fixture = await operatorFixture();
+		// Only the wall clock is faked, and frozen before the run starts: the
+		// run lands `interrupted` before its 4 s deadline however slowly the
+		// attempt settles (with a real clock the deadline could pass first
+		// under full-suite load, run 35099072360). The clock is then moved
+		// past the deadline instead of sleeping up to it.
+		vi.useFakeTimers({ toFake: ["Date"] });
 		const { service, runId } = await settledRun(fixture, "brief", [
 			INTERRUPTED,
 		]);
 		try {
 			const view = await service.status(runId);
 			expect(view.status).toBe("interrupted");
-			const remaining = Date.parse(view.deadlineAt) - Date.now();
-			if (remaining > 0) {
-				await new Promise((resolve) => setTimeout(resolve, remaining + 50));
-			}
+			vi.setSystemTime(Date.parse(view.deadlineAt) + 1);
 			await expectServiceError(
 				service.resume(runId, REASON),
 				"validation",
