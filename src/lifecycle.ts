@@ -76,6 +76,7 @@ const TASK_TRANSITIONS: Readonly<
 		"interrupted",
 		"cancelling",
 		"cleanup-blocked",
+		"cancelled",
 	]),
 	completed: new Set(["invalidated"]),
 	failed: new Set(["running", "invalidated"]),

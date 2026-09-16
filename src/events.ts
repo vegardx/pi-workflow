@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import {
+	CheckpointDecisionSourceSchema,
 	GitObjectIdSchema,
 	MAX_TASK_ATTEMPTS,
 	MAX_WORKFLOW_CONCURRENCY,
@@ -366,6 +367,41 @@ const TaskExecutionHandoffAbsentEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const TaskExecutionCheckpointRequestedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-checkpoint-requested"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				inputsSha256: Sha256Schema,
+				expiresAt: Type.Optional(Type.String({ format: "date-time" })),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const TaskExecutionCheckpointDecidedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-checkpoint-decided"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				artifactId: WorkflowArtifactIdSchema,
+				decisionSha256: Sha256Schema,
+				source: CheckpointDecisionSourceSchema,
+				/** When the decision was durably recorded; never later than the event. */
+				decidedAt: Type.String({ format: "date-time" }),
+				decidedBy: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+				reason: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskExecutionReleaseIntendedEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-release-intended"),
@@ -609,6 +645,8 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionArtifactImportedEventSchema,
 	TaskExecutionHandoffImportedEventSchema,
 	TaskExecutionHandoffAbsentEventSchema,
+	TaskExecutionCheckpointRequestedEventSchema,
+	TaskExecutionCheckpointDecidedEventSchema,
 	TaskExecutionReleaseIntendedEventSchema,
 	TaskExecutionReleasedEventSchema,
 	TaskExecutionSupportIntendedEventSchema,
@@ -653,6 +691,8 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("attempt-intended"),
 	Type.Literal("artifact-imported"),
 	Type.Literal("handoff-resolved"),
+	Type.Literal("checkpoint-requested"),
+	Type.Literal("checkpoint-decided"),
 	Type.Literal("release-intended"),
 	Type.Literal("released"),
 	Type.Literal("support-intended"),
@@ -794,6 +834,35 @@ const SequencedHandoffAbsentSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const SequencedCheckpointRequestSchema = Type.Object(
+	{
+		inputsSha256: Sha256Schema,
+		expiresAt: Type.Optional(Type.String({ format: "date-time" })),
+		requestedAt: Type.String({ format: "date-time" }),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type TaskExecutionCheckpointRequestProjection = Static<
+	typeof SequencedCheckpointRequestSchema
+>;
+
+const SequencedCheckpointDecisionSchema = Type.Object(
+	{
+		artifactId: WorkflowArtifactIdSchema,
+		decisionSha256: Sha256Schema,
+		source: CheckpointDecisionSourceSchema,
+		decidedBy: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+		reason: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+		decidedAt: Type.String({ format: "date-time" }),
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type TaskExecutionCheckpointDecisionProjection = Static<
+	typeof SequencedCheckpointDecisionSchema
+>;
+
 const SequencedReleaseIntentSchema = Type.Object(
 	{
 		subagentRunId: SubagentRunIdSchema,
@@ -909,6 +978,8 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		artifactImport: Type.Optional(SequencedArtifactImportSchema),
 		handoffImport: Type.Optional(SequencedHandoffImportSchema),
 		handoffAbsent: Type.Optional(SequencedHandoffAbsentSchema),
+		checkpointRequest: Type.Optional(SequencedCheckpointRequestSchema),
+		checkpointDecision: Type.Optional(SequencedCheckpointDecisionSchema),
 		releaseIntent: Type.Optional(SequencedReleaseIntentSchema),
 		release: Type.Optional(SequencedReleaseSchema),
 		supportIntent: Type.Optional(SequencedSupportIntentSchema),

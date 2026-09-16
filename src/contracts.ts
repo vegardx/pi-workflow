@@ -123,6 +123,28 @@ export type NestedWorkflowTaskRequest = Static<
 	typeof NestedWorkflowTaskRequestSchema
 >;
 
+export const CheckpointHeadlessPolicySchema = Type.Union([
+	Type.Literal("block"),
+	Type.Literal("use-explicit-default"),
+]);
+export type CheckpointHeadlessPolicy = Static<
+	typeof CheckpointHeadlessPolicySchema
+>;
+
+export const CheckpointTaskRequestSchema = Type.Object(
+	{
+		schema: JsonSchemaDocumentSchema,
+		prompt: Type.String({ minLength: 1, maxLength: 4096 }),
+		default: Type.Optional(Type.Unknown()),
+		headless: CheckpointHeadlessPolicySchema,
+		timeoutMs: Type.Optional(
+			Type.Integer({ minimum: 1_000, maximum: MAX_WORKFLOW_DURATION_MS }),
+		),
+	},
+	{ additionalProperties: false },
+);
+export type CheckpointTaskRequest = Static<typeof CheckpointTaskRequestSchema>;
+
 const TaskInputsSchema = Type.Record(
 	TaskKeySchema,
 	WorkflowArtifactHandleRefSchema,
@@ -191,6 +213,25 @@ export type NestedWorkflowTaskSpec = Static<
 	typeof NestedWorkflowTaskSpecSchema
 >;
 
+export const CheckpointTaskSpecSchema = Type.Object(
+	{
+		key: TaskKeySchema,
+		kind: Type.Literal("checkpoint"),
+		role: TaskRoleSchema,
+		disposition: TaskDispositionSchema,
+		after: Type.Array(TaskRefSchema, {
+			maxItems: 256,
+			uniqueItems: true,
+		}),
+		inputs: TaskInputsSchema,
+		replay: ReplayPolicySchema,
+		request: CheckpointTaskRequestSchema,
+		identitySha256: Sha256Schema,
+	},
+	{ additionalProperties: false },
+);
+export type CheckpointTaskSpec = Static<typeof CheckpointTaskSpecSchema>;
+
 export const MaterializedAgentTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
@@ -246,10 +287,30 @@ export type MaterializedNestedWorkflowTask = Static<
 	typeof MaterializedNestedWorkflowTaskSchema
 >;
 
+export const MaterializedCheckpointTaskSchema = Type.Object(
+	{
+		id: WorkflowTaskIdSchema,
+		runId: WorkflowRunIdSchema,
+		namespace: Type.Array(TaskKeySchema, {
+			maxItems: MAX_TASK_NAMESPACE_DEPTH,
+		}),
+		spec: CheckpointTaskSpecSchema,
+		definitionIdentitySha256: Sha256Schema,
+		materializationSequence: Type.Integer({ minimum: 1 }),
+		materializationEpoch: Type.Integer({ minimum: 1 }),
+		epochPosition: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type MaterializedCheckpointTask = Static<
+	typeof MaterializedCheckpointTaskSchema
+>;
+
 export const MaterializedWorkflowTaskSchema = Type.Union([
 	MaterializedAgentTaskSchema,
 	MaterializedSupportTaskSchema,
 	MaterializedNestedWorkflowTaskSchema,
+	MaterializedCheckpointTaskSchema,
 ]);
 export type MaterializedWorkflowTask = Static<
 	typeof MaterializedWorkflowTaskSchema
@@ -303,10 +364,26 @@ export type NestedWorkflowTaskExecutionRecord = Static<
 	typeof NestedWorkflowTaskExecutionRecordSchema
 >;
 
+export const CheckpointTaskExecutionRecordSchema = Type.Object(
+	{
+		kind: Type.Literal("checkpoint"),
+		id: TaskExecutionIdSchema,
+		runId: WorkflowRunIdSchema,
+		taskId: WorkflowTaskIdSchema,
+		generation: TaskExecutionGenerationSchema,
+		taskIdentitySha256: Sha256Schema,
+	},
+	{ additionalProperties: false },
+);
+export type CheckpointTaskExecutionRecord = Static<
+	typeof CheckpointTaskExecutionRecordSchema
+>;
+
 export const TaskExecutionRecordSchema = Type.Union([
 	AgentTaskExecutionRecordSchema,
 	SupportTaskExecutionRecordSchema,
 	NestedWorkflowTaskExecutionRecordSchema,
+	CheckpointTaskExecutionRecordSchema,
 ]);
 export type TaskExecutionRecord = Static<typeof TaskExecutionRecordSchema>;
 
@@ -368,6 +445,8 @@ export const WorkflowExecutionFailureEvidenceSchema = Type.Object(
 			Type.Literal("nested-import"),
 			Type.Literal("nested-input"),
 			Type.Literal("handoff-import"),
+			Type.Literal("checkpoint-expired"),
+			Type.Literal("checkpoint-input"),
 		]),
 		failureSha256: Sha256Schema,
 		message: Type.String({ minLength: 1, maxLength: 4096 }),
@@ -426,11 +505,34 @@ export type NestedWorkflowTerminalEvidence = Static<
 	typeof NestedWorkflowTerminalEvidenceSchema
 >;
 
+export const CheckpointDecisionSourceSchema = Type.Union([
+	Type.Literal("operator"),
+	Type.Literal("default"),
+]);
+export type CheckpointDecisionSource = Static<
+	typeof CheckpointDecisionSourceSchema
+>;
+
+export const CheckpointTerminalEvidenceSchema = Type.Object(
+	{
+		kind: Type.Literal("checkpoint"),
+		artifactId: WorkflowArtifactIdSchema,
+		decisionSha256: Sha256Schema,
+		source: CheckpointDecisionSourceSchema,
+		decidedBy: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+	},
+	{ additionalProperties: false },
+);
+export type CheckpointTerminalEvidence = Static<
+	typeof CheckpointTerminalEvidenceSchema
+>;
+
 export const TaskExecutionTerminalEvidenceSchema = Type.Union([
 	SubagentTerminalEvidenceSchema,
 	WorkflowExecutionFailureEvidenceSchema,
 	SupportTaskTerminalEvidenceSchema,
 	NestedWorkflowTerminalEvidenceSchema,
+	CheckpointTerminalEvidenceSchema,
 ]);
 export type TaskExecutionTerminalEvidence = Static<
 	typeof TaskExecutionTerminalEvidenceSchema
@@ -506,6 +608,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				transactionalInvalidation: Type.Boolean(),
 				finalizers: Type.Boolean(),
 				operatorAttempts: Type.Boolean(),
+				checkpoints: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -570,6 +673,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			transactionalInvalidation: true,
 			finalizers: true,
 			operatorAttempts: true,
+			checkpoints: true,
 		}),
 	},
 );
