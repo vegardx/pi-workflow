@@ -11,6 +11,13 @@ import {
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	DIVERSE_MODEL_ID,
+	envelope,
+	MAX_REVIEW_LENSES,
+	MAX_VERIFY_ROUNDS,
+	MODEL_ID,
+} from "../src/components/index.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
 import type {
 	WorkflowServiceRunView,
@@ -20,12 +27,14 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
+import { compileStages } from "../workflows/plan-to-ship.workflow.js";
 
-// W2/W3 acceptance: the builtin plan-to-ship definition driven through the
-// real service with a scripted subagent, and the agent templates it names held
-// to the requests it actually makes. Every expectation below is the
-// plan-to-ship spec (sections 2 and 5) or experiment W1's verdict, not the
-// definition's implementation.
+// W2-PTS acceptance: the builtin plan-to-ship definition, now a COMPILER over
+// `plan.deliverables[].stages` and `plan.policy`, driven through the real
+// service with a scripted subagent. Every expectation below is the plan-loop
+// spec (sections 1.3, 2.1, 2.3 and 5), the plan-to-ship spec, experiment W1's
+// verdict, or a component's documented rule — never the definition's
+// implementation.
 
 const BUILTIN_ROOT = fileURLToPath(new URL("../workflows", import.meta.url));
 const AGENT_TEMPLATES = fileURLToPath(
@@ -42,14 +51,25 @@ const W1 = {
 } as const;
 const CACHE_MARKER = "npm_config_cache=/tmp/npm-cache";
 
+/** The compiler's own input types, so a fixture cannot drift from the schema. */
+type PlanInput = Parameters<typeof compileStages>[0];
+type PolicyInput = NonNullable<Parameters<typeof compileStages>[1]>;
+type PlanStage = NonNullable<
+	PlanInput["deliverables"][number]["stages"]
+>[number];
+
 interface PlanOptions {
 	readonly deliverables?: number;
 	readonly lensesPerDeliverable?: readonly string[];
 	readonly diverse?: boolean;
 	readonly pinnedModel?: string;
+	readonly tier?: "light" | "standard" | "heavy";
+	readonly policy?: PolicyInput;
+	readonly stages?: readonly PlanStage[];
+	readonly after?: boolean;
 }
 
-function plan(options: PlanOptions = {}) {
+function plan(options: PlanOptions = {}): PlanInput {
 	const count = options.deliverables ?? 1;
 	const lenses = options.lensesPerDeliverable ?? ["correctness"];
 	return {
@@ -58,7 +78,7 @@ function plan(options: PlanOptions = {}) {
 		deliverables: Array.from({ length: count }, (_unused, index) => ({
 			id: `d${index}`,
 			title: `Deliverable ${index}`,
-			after: [],
+			after: options.after && index > 0 ? [`d${index - 1}`] : [],
 			reads: [],
 			tasks: [
 				{ id: `w${index}`, title: "Write the code" },
@@ -67,13 +87,18 @@ function plan(options: PlanOptions = {}) {
 					title: `Review: ${lens}`,
 					by: {
 						lens,
-						...(options.diverse ? { diverse: true } : {}),
+						...(options.diverse === undefined
+							? {}
+							: { diverse: options.diverse }),
+						...(options.tier ? { tier: options.tier } : {}),
 						...(options.pinnedModel ? { model: options.pinnedModel } : {}),
 					},
 				})),
 			],
+			...(options.stages ? { stages: [...options.stages] } : {}),
 		})),
 		repos: [{ key: "main", path: "/repo" }],
+		...(options.policy ? { policy: options.policy } : {}),
 	};
 }
 
@@ -81,7 +106,7 @@ function input(options: PlanOptions & { effort?: string } = {}) {
 	return {
 		plan: plan(options),
 		planDigest: PLAN_DIGEST,
-		effort: options.effort ?? "standard",
+		...(options.effort === undefined ? {} : { effort: options.effort }),
 	};
 }
 
@@ -99,8 +124,43 @@ function patchFor(commit: string): Buffer {
 	);
 }
 
+/** How a scripted verifier answers, per round. */
+type CheckScript = "pass" | "fail-then-pass" | "fail" | "not-run";
+
+function implementation(summary: string) {
+	return {
+		summary,
+		files: ["a.txt"],
+		checkCommand: "npm run check",
+		checkRan: true,
+		checkPassed: true,
+		checkTail: "ok",
+	};
+}
+
+function checkReport(script: CheckScript, round: number) {
+	if (script === "not-run") {
+		return {
+			summary: "The install was killed before the check ran.",
+			checkCommand: "npm run check",
+			checkRan: false,
+			checkPassed: false,
+			checkTail: "",
+		};
+	}
+	const passed =
+		script === "pass" || (script === "fail-then-pass" && round >= 2);
+	return {
+		summary: passed ? "The check passed." : "The check failed.",
+		checkCommand: "npm run check",
+		checkRan: true,
+		checkPassed: passed,
+		checkTail: passed ? "ok" : "1 test failed",
+	};
+}
+
 /** The structured output a scripted child returns, keyed by what it was asked. */
-function outputFor(request: SubagentRequest): unknown {
+function outputFor(request: SubagentRequest, script: CheckScript): unknown {
 	const goal = request.task.goal;
 	if (goal.startsWith("Refine the authored plan")) {
 		return {
@@ -117,21 +177,31 @@ function outputFor(request: SubagentRequest): unknown {
 			blockers: [],
 		};
 	}
-	if (goal.startsWith("Implement deliverable")) {
-		return {
-			summary: "Edited a.txt",
-			files: ["a.txt"],
-			checkCommand: "npm run check",
-			checkRan: true,
-			checkPassed: true,
-			checkTail: "ok",
-		};
+	if (goal.startsWith("Implement deliverable"))
+		return implementation("Edited a.txt");
+	if (goal.startsWith("Fix what the check reported")) {
+		return implementation("Fixed what the check reported");
+	}
+	if (goal.startsWith("Verify deliverable")) {
+		const round = Number(/round (\d+)/.exec(goal)?.[1] ?? "1");
+		return checkReport(script, round);
 	}
 	if (goal.startsWith("Review deliverable")) {
 		return {
 			verdict: "request-changes",
-			findings: [{ severity: "blocking", summary: "Missing a test." }],
+			findings: [
+				{
+					id: "missing-test",
+					severity: "blocking",
+					kind: "gap",
+					where: "/deliverables/0",
+					what: "Missing a test.",
+				},
+			],
 		};
+	}
+	if (goal.startsWith("Synthesize the review")) {
+		return { synthesis: "One lens asked for a test." };
 	}
 	if (goal.startsWith("Record the plan-to-ship receipt")) {
 		return { recorded: true, refs: [] };
@@ -182,7 +252,14 @@ interface Child {
  * child, and every child answers with the structured output its goal calls for.
  * Worktree children capture a handoff; read-only children never do.
  */
-function scripted(options: { readonly failReview?: boolean } = {}) {
+function scripted(
+	options: {
+		readonly failReview?: boolean;
+		/** Fail only the lens whose name the goal names; the rest report. */
+		readonly failLens?: string;
+		readonly check?: CheckScript;
+	} = {},
+) {
 	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
 	const pending = new Map<string, Child>();
 	const children = new Map<string, Child>();
@@ -198,7 +275,7 @@ function scripted(options: { readonly failReview?: boolean } = {}) {
 		const attemptId = `attempt_child${nonce}${preflights}`;
 		pending.set(preflightId, { runId, attemptId, request });
 		requests.push(request);
-		const plan = {
+		const launchPlan = {
 			schema: "pi-subagent-launch" as const,
 			contractRevision: SUBAGENT_RUNTIME_CONTRACT.contractRevision,
 			operationId: request.operationId,
@@ -253,12 +330,12 @@ function scripted(options: { readonly failReview?: boolean } = {}) {
 			outputSchema: structuredClone(request.outputSchema),
 			limits: structuredClone(request.limits),
 		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
-		const identitySha256 = canonicalSha256(plan);
+		const identitySha256 = canonicalSha256(launchPlan);
 		return {
 			preflightId,
 			identitySha256,
 			expiresAt: "2099-01-01T00:00:00.000Z",
-			launchPlan: { ...plan, identitySha256 },
+			launchPlan: { ...launchPlan, identitySha256 },
 		};
 	});
 
@@ -278,13 +355,20 @@ function scripted(options: { readonly failReview?: boolean } = {}) {
 	const wait = vi.fn(async (runId: string) => {
 		const child = childOf(runId);
 		const worktree = child.request.workspace.mode === "worktree";
+		const goal = child.request.task.goal;
 		const failed =
-			options.failReview === true &&
-			child.request.task.goal.startsWith("Review deliverable");
+			goal.startsWith("Review deliverable") &&
+			(options.failReview === true ||
+				(options.failLens !== undefined &&
+					goal.includes(`"${options.failLens}" lens`)));
 		const result = {
 			runId,
 			status: failed ? ("failed" as const) : ("completed" as const),
-			...(failed ? {} : { structuredOutput: outputFor(child.request) }),
+			...(failed
+				? {}
+				: {
+						structuredOutput: outputFor(child.request, options.check ?? "pass"),
+					}),
 			usage: {
 				input: 1,
 				output: 1,
@@ -391,6 +475,10 @@ function scripted(options: { readonly failReview?: boolean } = {}) {
 		requestsFor(agent: string) {
 			return requests.filter((request) => request.agent === agent);
 		},
+		/** Every request whose goal starts with `prefix`, in declaration order. */
+		requestsGoal(prefix: string) {
+			return requests.filter((request) => request.task.goal.startsWith(prefix));
+		},
 		childFor(goalPrefix: string): Child {
 			for (const child of children.values()) {
 				if (child.request.task.goal.startsWith(goalPrefix)) return child;
@@ -444,9 +532,18 @@ function taskByKey(
 	view: WorkflowServiceRunView,
 	key: string,
 ): WorkflowServiceTaskView {
-	const task = (view.tasks ?? []).find((entry) => entry.key === key);
+	const task = (view.tasks ?? []).find(
+		(entry) => [...(entry.namespace ?? []), entry.key].join("/") === key,
+	);
 	if (!task) throw new Error(`missing task ${key}`);
 	return task;
+}
+
+/** Every task's `${namespace}/${key}` path, in declaration order. */
+function taskPaths(view: WorkflowServiceRunView): readonly string[] {
+	return (view.tasks ?? []).map((task) =>
+		[...(task.namespace ?? []), task.key].join("/"),
+	);
 }
 
 /** Parks at a checkpoint and answers it; returns the view it parked with. */
@@ -475,6 +572,375 @@ async function decide(
 	});
 }
 
+describe("plan-to-ship: the compiler", () => {
+	it("compiles a v3 plan with neither `stages` nor `policy` to the default stage list", () => {
+		// Spec 2.1: a plan with neither field is valid and gets the defaults, so
+		// every stored v3 document still compiles to what it always compiled to.
+		const document = compileStages(plan());
+		expect(document.effort).toBe("standard");
+		expect(document.gates).toEqual(["approve-plan", "ship"]);
+		expect(document.deliverables).toEqual([
+			{
+				id: "d0",
+				stages: [
+					{
+						use: "implement",
+						id: "implement",
+						key: "implement-d0",
+						origin: "policy",
+						tasks: ["implement-d0"],
+					},
+					{
+						use: "verify-and-fix",
+						id: "verify",
+						key: "verify-d0",
+						origin: "policy",
+						// `standard` pays for one FIX round, which is two VERIFY rounds.
+						fixRounds: 1,
+						verifyRounds: 2,
+						tasks: [
+							"verify-d0-verify-1",
+							"verify-d0-fix-1",
+							"verify-d0-verify-2",
+						],
+					},
+					{
+						use: "review-fan-out",
+						id: "review",
+						key: "review-d0",
+						origin: "policy",
+						// Seeded from `tasks[].by`, with the policy's review defaults.
+						lenses: [{ id: "correctness", tier: "standard", diverse: false }],
+						synthesis: "optional",
+						tasks: ["review-d0/correctness", "review-d0-synthesis"],
+					},
+				],
+			},
+		]);
+	});
+
+	it("omits the review stage when nothing in the deliverable asked for one", () => {
+		const document = compileStages(plan({ lensesPerDeliverable: [] }));
+		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
+			"implement",
+			"verify-and-fix",
+		]);
+	});
+
+	it.each([
+		["cheap", 0, 1, ["verify-d0-verify-1"]],
+		[
+			"standard",
+			1,
+			2,
+			["verify-d0-verify-1", "verify-d0-fix-1", "verify-d0-verify-2"],
+		],
+		[
+			"deep",
+			2,
+			3,
+			[
+				"verify-d0-verify-1",
+				"verify-d0-fix-1",
+				"verify-d0-verify-2",
+				"verify-d0-fix-2",
+				"verify-d0-verify-3",
+			],
+		],
+	] as const)(
+		"maps %s to %i fix round(s) and %i verify round(s)",
+		(effort, fixRounds, verifyRounds, tasks) => {
+			const document = compileStages(plan(), { effort });
+			const verify = document.deliverables[0]?.stages[1];
+			expect(verify).toMatchObject({ fixRounds, verifyRounds, tasks });
+		},
+	);
+
+	it("honours a stage's own maxRounds over the policy's", () => {
+		// `maxFixRounds: 2` is the plan vocabulary's maximum and compiles to the
+		// component's cap of 3 VERIFY rounds: a fix is never left unchecked.
+		const document = compileStages(
+			plan({
+				stages: [
+					{ use: "implement", id: "build" },
+					{ use: "verify-and-fix", id: "green", maxRounds: 2 },
+				],
+			}),
+			{ effort: "cheap" },
+		);
+		expect(document.deliverables[0]?.stages[1]).toMatchObject({
+			key: "green-d0",
+			fixRounds: 2,
+			verifyRounds: MAX_VERIFY_ROUNDS,
+			tasks: [
+				"green-d0-verify-1",
+				"green-d0-fix-1",
+				"green-d0-verify-2",
+				"green-d0-fix-2",
+				"green-d0-verify-3",
+			],
+		});
+	});
+
+	it.each([
+		["approve-plan", ["approve-plan"]],
+		["approve-plan+ship", ["approve-plan", "ship"]],
+		["every-deliverable", ["approve-plan", "approve-d0", "approve-d1", "ship"]],
+	] as const)("compiles the gate policy %s", (gates, expected) => {
+		const document = compileStages(plan({ deliverables: 3 }), { gates });
+		expect(document.gates).toEqual(
+			gates === "every-deliverable"
+				? expected
+				: // Three deliverables, and still exactly the gates the policy names.
+					expected,
+		);
+		// A per-deliverable gate is a stage of the deliverable it follows; the
+		// ship gate is a run-level gate over every handoff.
+		const perDeliverable = document.deliverables.map((deliverable) =>
+			deliverable.stages
+				.filter((stage) => stage.use === "gate")
+				.map((stage) => stage.key),
+		);
+		expect(perDeliverable).toEqual(
+			gates === "every-deliverable"
+				? [["approve-d0"], ["approve-d1"], []]
+				: [[], [], []],
+		);
+	});
+
+	it("compiles a declared gate stage where it stands, with its own question", () => {
+		const document = compileStages(
+			plan({
+				stages: [
+					{ use: "implement", id: "build" },
+					{
+						use: "gate",
+						id: "look",
+						question: "Did it do the right thing?",
+						show: ["build"],
+					},
+				],
+			}),
+		);
+		expect(document.deliverables[0]?.stages[1]).toEqual({
+			use: "gate",
+			id: "look",
+			key: "look-d0",
+			origin: "plan",
+			tasks: ["look-d0"],
+			question: "Did it do the right thing?",
+		});
+		expect(document.gates).toEqual(["approve-plan", "look-d0", "ship"]);
+	});
+
+	it("seeds review lenses from `tasks[].by` and resolves tier and diversity from the policy", () => {
+		const document = compileStages(plan({ lensesPerDeliverable: ["a", "b"] }), {
+			reviewDefault: { tier: "heavy", diverse: true },
+		});
+		expect(document.deliverables[0]?.stages[2]).toMatchObject({
+			lenses: [
+				{ id: "a", tier: "heavy", diverse: true },
+				{ id: "b", tier: "heavy", diverse: true },
+			],
+		});
+		// A lens that says it for itself outranks the policy.
+		const pinned = compileStages(
+			plan({ lensesPerDeliverable: ["a"], tier: "light", diverse: false }),
+			{ reviewDefault: { tier: "heavy", diverse: true } },
+		);
+		expect(pinned.deliverables[0]?.stages[2]).toMatchObject({
+			lenses: [{ id: "a", tier: "light", diverse: false }],
+		});
+	});
+
+	it("de-duplicates repeated lens ids by declaration ordinal", () => {
+		const document = compileStages(
+			plan({
+				stages: [
+					{ use: "implement", id: "build" },
+					{
+						use: "review-fan-out",
+						id: "review",
+						lenses: [{ id: "risk" }, { id: "risk" }, { id: "risk" }],
+						synthesis: "none",
+					},
+				],
+			}),
+		);
+		expect(document.deliverables[0]?.stages[1]?.tasks).toEqual([
+			"review-d0/risk",
+			"review-d0/risk-2",
+			"review-d0/risk-3",
+		]);
+	});
+
+	it.each([
+		[
+			"dynamic stages are not compiled yet",
+			[{ use: "dynamic", id: "invent", brief: "Work it out." }],
+		],
+		[
+			"sub-workflows are not part of this slice",
+			[{ use: "sub-workflow", id: "child", workflow: "deep-review" }],
+		],
+		[
+			"declares no `implement` stage",
+			[{ use: "review-fan-out", id: "review", lenses: [{ id: "a" }] }],
+		],
+		[
+			"declares a second `implement` stage",
+			[
+				{ use: "implement", id: "one" },
+				{ use: "implement", id: "two" },
+			],
+		],
+		[
+			"verifies before anything was implemented",
+			[
+				{ use: "verify-and-fix", id: "green" },
+				{ use: "implement", id: "build" },
+			],
+		],
+		[
+			"is a gate but not the last stage",
+			[
+				{ use: "gate", id: "look", question: "Now?" },
+				{ use: "implement", id: "build" },
+			],
+		],
+		[
+			"is declared twice",
+			[
+				{ use: "implement", id: "build" },
+				{ use: "verify-and-fix", id: "build" },
+			],
+		],
+		["a leading digit is not a task key", [{ use: "implement", id: "1st" }]],
+		[
+			"which is not a question",
+			[
+				{ use: "implement", id: "build" },
+				{ use: "gate", id: "look", question: "Decide." },
+			],
+		],
+		[
+			"a fan-out over nothing is not a cheaper review",
+			[
+				{ use: "implement", id: "build" },
+				{ use: "review-fan-out", id: "review", lenses: [] },
+			],
+		],
+	] as const)("refuses at compile time: %s", (message, stages) => {
+		expect(() =>
+			compileStages(
+				plan({
+					stages: stages as unknown as readonly PlanStage[],
+					lensesPerDeliverable: [],
+				}),
+			),
+		).toThrow(message);
+	});
+
+	it("refuses more lenses than a fan-out admits", () => {
+		expect(() =>
+			compileStages(
+				plan({
+					stages: [
+						{ use: "implement", id: "build" },
+						{
+							use: "review-fan-out",
+							id: "review",
+							lenses: Array.from(
+								{ length: MAX_REVIEW_LENSES + 1 },
+								(_x, i) => ({
+									id: `lens${i}`,
+								}),
+							),
+						},
+					],
+				}),
+			),
+		).toThrow(`at most ${MAX_REVIEW_LENSES} fan out at once`);
+	});
+
+	it("refuses a `reads` edge, because a handoff is never applied to another worktree", () => {
+		const document = plan();
+		const first = document.deliverables[0];
+		if (!first) throw new Error("no deliverable");
+		expect(() =>
+			compileStages({
+				...document,
+				deliverables: [{ ...first, reads: ["dx"] }],
+			}),
+		).toThrow(/cannot build on another's code/);
+	});
+
+	it("refuses an `after` edge that points forwards", () => {
+		const document = plan({ deliverables: 2 });
+		expect(() =>
+			compileStages({
+				...document,
+				deliverables: [
+					{ ...document.deliverables[0], after: ["d1"] },
+					document.deliverables[1],
+				],
+			} as never),
+		).toThrow(/is not declared before it/);
+	});
+
+	it("refuses escalation above the top of the effort ladder", () => {
+		expect(() =>
+			compileStages(
+				plan({
+					stages: [
+						{ use: "implement", id: "build" },
+						{ use: "verify-and-fix", id: "green", escalate: "thinking" },
+					],
+				}),
+				{ effort: "deep" },
+			),
+		).toThrow(/where the effort ladder ends/);
+	});
+
+	it("refuses two stages that compile to the same task key", () => {
+		const document = plan({ deliverables: 2, lensesPerDeliverable: [] });
+		expect(() =>
+			compileStages({
+				...document,
+				deliverables: [
+					{
+						...document.deliverables[0],
+						id: "a",
+						stages: [{ use: "implement", id: "b-c" }],
+					},
+					{
+						...document.deliverables[1],
+						id: "c",
+						stages: [{ use: "implement", id: "a-b" }],
+					},
+				],
+			} as never),
+		).not.toThrow();
+		expect(() =>
+			compileStages({
+				...document,
+				deliverables: [
+					{
+						...document.deliverables[0],
+						id: "c",
+						stages: [{ use: "implement", id: "a-b" }],
+					},
+					{
+						...document.deliverables[1],
+						id: "b-c",
+						stages: [{ use: "implement", id: "a" }],
+					},
+				],
+			} as never),
+		).toThrow(/already claims/);
+	});
+});
+
 describe("plan-to-ship: the approval gate", () => {
 	it("returns approved: false and launches no implementer when the plan is declined", async () => {
 		const delegated = scripted();
@@ -486,6 +952,10 @@ describe("plan-to-ship: the approval gate", () => {
 		expect(taskByKey(parked, "approve-plan").checkpoint?.inputs).toMatchObject({
 			plan: { summary: "Refined." },
 		});
+		// The prompt names the compiled graph, which is what was approved.
+		expect(taskByKey(parked, "approve-plan").checkpoint?.prompt).toContain(
+			"approve-plan -> ship",
+		);
 		// Only the refiner has run; nothing has been written anywhere.
 		expect(delegated.requests).toHaveLength(1);
 		expect(delegated.requests[0]?.workspace.mode).toBe("read-only");
@@ -502,6 +972,7 @@ describe("plan-to-ship: the approval gate", () => {
 				shipped: false,
 				deliverables: [],
 				reviews: [],
+				findings: [],
 				receipt: { planDigest: PLAN_DIGEST, refs: [], note: "not now" },
 			},
 		});
@@ -511,14 +982,11 @@ describe("plan-to-ship: the approval gate", () => {
 				(request) => request.workspace.mode === "worktree",
 			),
 		).toBe(false);
-		expect((finished.tasks ?? []).map((task) => task.key)).toEqual([
-			"refine",
-			"approve-plan",
-		]);
+		expect(taskPaths(finished)).toEqual(["refine", "approve-plan"]);
 	});
 });
 
-describe("plan-to-ship: approved, reviewed, shipped", () => {
+describe("plan-to-ship: the stage walk", () => {
 	async function approvedRun(options: PlanOptions & { effort?: string } = {}) {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
@@ -528,6 +996,36 @@ describe("plan-to-ship: approved, reviewed, shipped", () => {
 		const ship = await park(service, receipt.runId, "ship");
 		return { delegated, service, runId: receipt.runId, ship };
 	}
+
+	it("lowers the default stage list to the compiled keys, in order", async () => {
+		const { ship } = await approvedRun();
+		// Exactly `compileStages`' own task list, plus the two run-level gates.
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"verify-d0-verify-1",
+			"review-d0/correctness",
+			"review-d0-synthesis",
+			"ship",
+		]);
+	});
+
+	it("declares every deliverable's implementer up front when no gate can stop the walk", async () => {
+		const { ship } = await approvedRun({
+			deliverables: 2,
+			lensesPerDeliverable: [],
+		});
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"implement-d1",
+			"verify-d0-verify-1",
+			"verify-d1-verify-1",
+			"ship",
+		]);
+	});
 
 	it("launches the implementer with W1's limits and the cache instruction", async () => {
 		const { delegated } = await approvedRun();
@@ -559,6 +1057,79 @@ describe("plan-to-ship: approved, reviewed, shipped", () => {
 		expect(instructions).toMatch(/never a reason to leave the tree unchanged/i);
 	});
 
+	it("verifies the implementer's own patch and takes the verify envelope", async () => {
+		const { delegated } = await approvedRun();
+		const [verify] = delegated.requestsGoal("Verify deliverable");
+		if (!verify) throw new Error("no verifier request");
+		expect(verify.agent).toBe("implementer");
+		// A verifier has to apply the handoff before it can run the check, so it
+		// runs in a worktree — with the `verify` row's model and the write grant.
+		expect(verify.workspace.mode).toBe("worktree");
+		expect(verify.model).toEqual(envelope("standard", "verify").model);
+		expect(verify.limits.workspaceWriteBytes).toBeGreaterThanOrEqual(
+			W1.workspaceWriteBytes,
+		);
+		expect(verify.task.instructions.join("\n")).toMatch(
+			/Apply that ref in your worktree/,
+		);
+	});
+
+	it("fixes what a failing check reported and reviews the fixer's patch", async () => {
+		const delegated = scripted({ check: "fail-then-pass" });
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const ship = await park(service, run.runId, "ship");
+
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"verify-d0-verify-1",
+			"verify-d0-fix-1",
+			"verify-d0-verify-2",
+			"review-d0/correctness",
+			"review-d0-synthesis",
+			"ship",
+		]);
+		const [fix] = delegated.requestsGoal("Fix what the check reported");
+		expect(fix?.model).toEqual(envelope("standard", "fix").model);
+		// The reviewer judges the FIXER's patch, not the implementer's.
+		const fixChild = delegated.childFor("Fix what the check reported");
+		const [review] = delegated.requestsFor("reviewer");
+		expect((review?.task.context ?? []).join("\n")).toContain(
+			commitFor(fixChild.attemptId),
+		);
+		const status = await service.status(run.runId);
+		expect(taskByKey(status, "verify-d0-fix-1").handoff).toMatchObject({
+			handoffCommit: commitFor(fixChild.attemptId),
+		});
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.output).toMatchObject({
+			deliverables: [
+				{ id: "d0", checkRan: true, checkPassed: true, verifyRounds: 2 },
+			],
+		});
+	});
+
+	it("stops the loop on a check that did not run and says the change is unverified", async () => {
+		const delegated = scripted({ check: "not-run" });
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const ship = await park(service, run.runId, "ship");
+		// `checkRan: false` escalates to a human; it never declares a fixer.
+		expect(taskPaths(ship)).not.toContain("verify-d0-fix-1");
+		await decide(service, ship, "ship", { ship: false });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.output).toMatchObject({
+			deliverables: [{ id: "d0", checkRan: false, checkPassed: false }],
+		});
+	});
+
 	it("imports the handoff and hands its descriptor to the reviewer", async () => {
 		const { delegated, service, runId, ship } = await approvedRun();
 		const child = delegated.childFor("Implement deliverable");
@@ -583,11 +1154,12 @@ describe("plan-to-ship: approved, reviewed, shipped", () => {
 		expect(projected).not.toContain("From: Agent");
 		expect(review?.workspace.mode).toBe("read-only");
 
-		// The ship gate shows the summaries, the check results, and the verdicts.
+		// The ship gate shows the summaries and the review synthesis, keyed by
+		// deliverable id rather than by an ordinal nobody can look up.
 		const gate = taskByKey(ship, "ship").checkpoint;
 		expect(gate?.inputs).toMatchObject({
-			"summary-0": { checkRan: true, checkPassed: true, files: ["a.txt"] },
-			"review-0": { verdict: "request-changes" },
+			"summary-d0": { checkRan: true, checkPassed: true, files: ["a.txt"] },
+			"review-d0": { synthesis: "One lens asked for a test." },
 		});
 		expect(gate?.prompt).toContain("1 blocking finding(s)");
 	});
@@ -608,15 +1180,22 @@ describe("plan-to-ship: approved, reviewed, shipped", () => {
 					id: "d0",
 					checkRan: true,
 					checkPassed: true,
+					verifyRounds: 1,
 					handoff: { sha256: sha256(patchFor(commitFor(child.attemptId))) },
 				},
 			],
 			reviews: [
-				{ lens: "correctness", verdict: "request-changes", blocking: true },
+				{
+					deliverable: "d0",
+					lens: "correctness",
+					verdict: "request-changes",
+					blocking: true,
+				},
 			],
+			findings: [{ id: "missing-test", severity: "blocking", kind: "gap" }],
 			receipt: { planDigest: PLAN_DIGEST, refs: [ref] },
 		});
-		// (h) The required finalizer ran after the output was committed, and could
+		// The required finalizer ran after the output was committed, and could
 		// not have changed it.
 		const record = taskByKey(finished, "receipt");
 		expect(record).toMatchObject({ role: "finalizer", status: "completed" });
@@ -649,108 +1228,349 @@ describe("plan-to-ship: approved, reviewed, shipped", () => {
 	});
 });
 
+describe("plan-to-ship: the gate policies", () => {
+	it("asks only for the approval when `policy.gates` is approve-plan", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ policy: { gates: "approve-plan" }, lensesPerDeliverable: [] }),
+		);
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+
+		expect(finished.status).toBe("completed");
+		expect(taskPaths(finished)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"verify-d0-verify-1",
+			"receipt",
+		]);
+		// No ship gate means no ship decision, so nothing is shipped and the
+		// receipt names no ref: the handoff is still in the run to cherry-pick.
+		expect(finished.output).toMatchObject({
+			approved: true,
+			shipped: false,
+			deliverables: [{ id: "d0", handoff: { mediaType: PATCH_MEDIA_TYPE } }],
+			receipt: { refs: [] },
+		});
+		expect(
+			(finished.output as { receipt: { note: string } }).receipt.note,
+		).toContain("no ship gate was declared");
+	});
+
+	it("gates after every deliverable but the last, whose gate is the ship gate", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({
+				deliverables: 2,
+				lensesPerDeliverable: [],
+				policy: { gates: "every-deliverable" },
+			}),
+		);
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const first = await park(service, run.runId, "approve-d0");
+		// A per-deliverable gate is walked strictly in order: the second
+		// deliverable is not implemented until a person allowed the first.
+		expect(taskPaths(first)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"verify-d0-verify-1",
+			"approve-d0",
+		]);
+		await decide(service, first, "approve-d0", { proceed: true });
+		const ship = await park(service, run.runId, "ship");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.status).toBe("completed");
+		expect(taskPaths(finished)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"verify-d0-verify-1",
+			"approve-d0",
+			"implement-d1",
+			"verify-d1-verify-1",
+			"ship",
+			"receipt",
+		]);
+	});
+
+	it("stops at a per-deliverable gate and declares nothing after it", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({
+				deliverables: 2,
+				lensesPerDeliverable: [],
+				policy: { gates: "every-deliverable" },
+			}),
+		);
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const first = await park(service, run.runId, "approve-d0");
+		await decide(service, first, "approve-d0", {
+			proceed: false,
+			note: "wrong direction",
+		});
+		const finished = await bounded(service.wait(run.runId), "wait");
+
+		expect(finished.status).toBe("completed");
+		expect(taskPaths(finished)).not.toContain("implement-d1");
+		expect(taskPaths(finished)).not.toContain("ship");
+		expect(finished.output).toMatchObject({
+			approved: true,
+			shipped: false,
+			deliverables: [{ id: "d0" }],
+		});
+		expect(
+			(finished.output as { receipt: { note: string } }).receipt.note,
+		).toContain("stopped at gate approve-d0");
+	});
+
+	it("shows a declared gate stage what its `show` names", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({
+				lensesPerDeliverable: [],
+				stages: [
+					{ use: "implement", id: "build" },
+					{
+						use: "gate",
+						id: "look",
+						question: "Is the patch worth verifying?",
+						show: ["build"],
+					},
+				],
+			}),
+		);
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const look = await park(service, run.runId, "look-d0");
+		const checkpoint = taskByKey(look, "look-d0").checkpoint;
+		expect(checkpoint?.prompt).toContain("Is the patch worth verifying?");
+		expect(checkpoint?.inputs).toMatchObject({
+			"stage-build": { files: ["a.txt"] },
+		});
+		await decide(service, look, "look-d0", { proceed: true });
+		const ship = await park(service, run.runId, "ship");
+		await decide(service, ship, "ship", { ship: true });
+		expect((await bounded(service.wait(run.runId), "wait")).status).toBe(
+			"completed",
+		);
+	});
+});
+
+describe("plan-to-ship: replay", () => {
+	it("re-declares the identical prefix on every drive, including after a restart", async () => {
+		// Every decision re-executes the definition from the top and re-declares
+		// every task of every epoch already crossed; a prefix that did not match
+		// fails materialization with "barrier does not match the persisted ordered
+		// epoch". This run crosses four gates, so the prefix is re-derived four
+		// times — the last of them from a service that never saw the earlier ones.
+		const delegated = scripted({ check: "fail-then-pass" });
+		const service = await serviceFor(delegated);
+		const base = path.resolve(".pi", "test-plan-to-ship", randomUUID());
+		const cwd = path.join(base, "project");
+		await mkdir(cwd, { recursive: true });
+		const options = {
+			cwd,
+			agentDir: path.join(base, "agent"),
+			storeRoot: path.join(cwd, ".pi", "workflow"),
+			projectTrusted: () => false,
+			subagents: delegated.provider,
+			registeredRoots: [
+				{ path: BUILTIN_ROOT, scope: "builtin" as const, source: "package" },
+			],
+		};
+		const first = await createWorkflowService(options);
+		services.push(first);
+		const run = await first.run(
+			"plan-to-ship",
+			input({ deliverables: 2, policy: { gates: "every-deliverable" } }),
+		);
+		const approve = await park(first, run.runId, "approve-plan");
+		await decide(first, approve, "approve-plan", { proceed: true });
+		const gateOne = await park(first, run.runId, "approve-d0");
+		const prefix = taskPaths(gateOne);
+		await decide(first, gateOne, "approve-d0", { proceed: true });
+		const ship = await park(first, run.runId, "ship");
+		expect(taskPaths(ship).slice(0, prefix.length)).toEqual(prefix);
+
+		// A restart: a second service over the same store finishes the run.
+		await first.shutdown();
+		services.splice(services.indexOf(first), 1);
+		const second = await createWorkflowService(options);
+		services.push(second);
+		const reopened = await second.status(run.runId);
+		expect(taskPaths(reopened).slice(0, prefix.length)).toEqual(prefix);
+		await decide(second, reopened, "ship", { ship: true });
+		const finished = await bounded(second.wait(run.runId), "wait");
+		expect(finished.status).toBe("completed");
+		expect(taskPaths(finished).slice(0, prefix.length)).toEqual(prefix);
+		expect(taskPaths(finished)).toEqual([
+			"refine",
+			"approve-plan",
+			"implement-d0",
+			"verify-d0-verify-1",
+			"verify-d0-fix-1",
+			"verify-d0-verify-2",
+			"review-d0/correctness",
+			"review-d0-synthesis",
+			"approve-d0",
+			"implement-d1",
+			"verify-d1-verify-1",
+			"verify-d1-fix-1",
+			"verify-d1-verify-2",
+			"review-d1/correctness",
+			"review-d1-synthesis",
+			"ship",
+			"receipt",
+		]);
+		expect(service).toBeDefined();
+	});
+});
+
 describe("plan-to-ship: a reviewer that dies", () => {
 	// The spec wants an optional reviewer to degrade the run rather than kill an
-	// approved implementation, and the reviewers are declared `optional` for
-	// exactly that. The runtime blocks every task that depends on a failed one
-	// regardless of its disposition, though, and the ship gate must depend on
-	// the verdicts it shows. This test records what that costs today so a change
-	// to either side is visible; see the definition's header.
-	it("blocks the ship gate, and the handoff it already imported survives in the run", async () => {
+	// approved implementation, and `reviewFanOut` declares them `optional` and
+	// reads `ctx.settled` for exactly that. The runtime blocks every task
+	// declared after a barrier that closed over a failed one, though, so the
+	// cost is recorded here rather than claimed away; see the definition's
+	// header and `deep-review`'s.
+	it("still asks the ship gate when every lens died, and names no review there", async () => {
 		const delegated = scripted({ failReview: true });
 		const service = await serviceFor(delegated);
 		const run = await service.run("plan-to-ship", input());
 		const approve = await park(service, run.runId, "approve-plan");
 		await decide(service, approve, "approve-plan", { proceed: true });
+		const ship = await park(service, run.runId, "ship");
+
+		// No lens reported, so `synthesis: "optional"` declared no reducer and the
+		// gate names only what exists. A dead reviewer subtracts coverage; it does
+		// not park the gate it was meant to inform.
+		expect(
+			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}),
+		).toEqual(["summary-d0"]);
+		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
 
-		expect(finished.status).toBe("failed");
+		// Degraded, not failed: the implementation was approved and its handoff is
+		// imported and shipped; what is missing is the review, and the output says
+		// so by reporting no verdicts.
+		expect(finished.status).toBe("completed-degraded");
 		expect(taskByKey(finished, "implement-d0")).toMatchObject({
 			status: "completed",
 			handoff: { mediaType: PATCH_MEDIA_TYPE },
 		});
-		expect(taskByKey(finished, "ship").status).toBe("blocked");
+		expect(taskByKey(finished, "review-d0/correctness").status).toBe("failed");
+		expect(finished.output).toMatchObject({
+			shipped: true,
+			reviews: [],
+			findings: [],
+		});
+	});
+
+	it("records what a half-dead fan-out costs the synthesis declared after it", async () => {
+		// The honest half: a barrier's control edge covers every task it closed
+		// over, so the reducer declared after `ctx.settled` is blocked when one
+		// lens failed - even though its `inputs` name only the lens that reported.
+		// `deep-review` records the same cost. The verdict and the findings are
+		// computed on the deterministic rail either way.
+		const delegated = scripted({ failLens: "b" });
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["a", "b"] }),
+		);
+		const approve = await park(service, run.runId, "approve-plan");
+		await decide(service, approve, "approve-plan", { proceed: true });
+		const ship = await park(service, run.runId, "ship");
+		expect(taskByKey(ship, "review-d0/a").status).toBe("completed");
+		expect(taskByKey(ship, "review-d0/b").status).toBe("failed");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.status).toBe("completed-degraded");
+		expect(finished.output).toMatchObject({
+			shipped: true,
+			reviews: [{ deliverable: "d0", lens: "a", blocking: true }],
+		});
 	});
 });
 
 describe("plan-to-ship: the effort dial", () => {
-	it("spends the cheap column on one lens and the deep column on all of them, twice", async () => {
-		const cheap = scripted();
-		const cheapService = await serviceFor(cheap);
-		const cheapRun = await cheapService.run(
-			"plan-to-ship",
-			input({ effort: "cheap", lensesPerDeliverable: ["a", "b"] }),
+	it("reads every model and limit from the envelope table", async () => {
+		const runs: Record<string, Scripted> = {};
+		for (const effort of ["cheap", "deep"] as const) {
+			const delegated = scripted();
+			const service = await serviceFor(delegated);
+			const run = await service.run(
+				"plan-to-ship",
+				input({ effort, lensesPerDeliverable: ["a", "b"] }),
+			);
+			const gate = await park(service, run.runId, "approve-plan");
+			await decide(service, gate, "approve-plan", { proceed: true });
+			await park(service, run.runId, "ship");
+			runs[effort] = delegated;
+		}
+		const cheap = runs.cheap as Scripted;
+		const deep = runs.deep as Scripted;
+
+		// The lens list is the PLAN's, not the effort column's: both efforts run
+		// every lens the deliverable asked for, exactly once.
+		expect(cheap.requestsFor("reviewer")).toHaveLength(3); // two lenses + synthesis
+		expect(deep.requestsFor("reviewer")).toHaveLength(3);
+
+		expect(cheap.requestsFor("implementer")[0]?.model).toEqual(
+			envelope("cheap", "implement").model,
 		);
-		const cheapGate = await park(cheapService, cheapRun.runId, "approve-plan");
-		await decide(cheapService, cheapGate, "approve-plan", { proceed: true });
-		await park(cheapService, cheapRun.runId, "ship");
-
-		const deep = scripted();
-		const deepService = await serviceFor(deep);
-		const deepRun = await deepService.run(
-			"plan-to-ship",
-			input({ effort: "deep", lensesPerDeliverable: ["a", "b"] }),
+		expect(deep.requestsFor("implementer")[0]?.model).toEqual(
+			envelope("deep", "implement").model,
 		);
-		const deepGate = await park(deepService, deepRun.runId, "approve-plan");
-		await decide(deepService, deepGate, "approve-plan", { proceed: true });
-		await park(deepService, deepRun.runId, "ship");
-
-		// cheap: the first lens only. deep: every lens, twice.
-		expect(cheap.requestsFor("reviewer")).toHaveLength(1);
-		expect(deep.requestsFor("reviewer")).toHaveLength(4);
-
-		// The thinking level and the budgets come from the table, per stage.
-		expect(cheap.requestsFor("implementer")[0]?.model).toMatchObject({
-			thinking: "low",
-		});
-		expect(deep.requestsFor("implementer")[0]?.model).toMatchObject({
-			thinking: "high",
-		});
 		expect(
 			cheap.requestsFor("implementer")[0]?.limits.cumulativeRuntimeMs,
 		).toBeLessThan(
 			deep.requestsFor("implementer")[0]?.limits.cumulativeRuntimeMs ?? 0,
 		);
+		// `cheap` pays for no fix round, so it verifies once; `deep` pays for two.
+		expect(cheap.requestsGoal("Verify deliverable")).toHaveLength(1);
+	});
 
-		// deep's second copy of each lens is the other-family pass; today that is
-		// a second exact model, the stand-in for real routing.
-		const deepModels = deep
-			.requestsFor("reviewer")
-			.map((request) => request.model?.id);
-		expect(new Set(deepModels).size).toBe(2);
+	it("resolves a diverse lens to the other-family stand-in and says so", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["a"], diverse: true }),
+		);
+		const gate = await park(service, run.runId, "approve-plan");
+		await decide(service, gate, "approve-plan", { proceed: true });
+		await park(service, run.runId, "ship");
+		const [review] = delegated.requestsFor("reviewer");
+		expect(review?.model?.id).toBe(DIVERSE_MODEL_ID);
 	});
 
 	it("honours a review task's tier and its exact model pin", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", {
-			plan: {
-				slug: "pinned",
-				title: "Pinned",
-				deliverables: [
-					{
-						id: "d0",
-						title: "Deliverable 0",
-						after: [],
-						reads: [],
-						tasks: [
-							{
-								id: "r0",
-								title: "Review",
-								by: {
-									lens: "security",
-									tier: "heavy",
-									model: "github-copilot/gpt-5.6-luna",
-								},
-							},
-						],
-					},
-				],
-				repos: [{ key: "main", path: "/repo" }],
-			},
-			planDigest: PLAN_DIGEST,
-			effort: "cheap",
-		});
+		const run = await service.run(
+			"plan-to-ship",
+			input({
+				effort: "cheap",
+				lensesPerDeliverable: ["security"],
+				tier: "heavy",
+				pinnedModel: "github-copilot/gpt-5.6-luna",
+			}),
+		);
 		const gate = await park(service, run.runId, "approve-plan");
 		await decide(service, gate, "approve-plan", { proceed: true });
 		await park(service, run.runId, "ship");
@@ -764,17 +1584,43 @@ describe("plan-to-ship: the effort dial", () => {
 });
 
 describe("plan-to-ship: the input contract", () => {
+	it("accepts the v3 shape, with and without `effort`", async () => {
+		const service = await serviceFor(scripted());
+		for (const value of [
+			input(),
+			input({ effort: "deep" }),
+			input({ policy: { effort: "cheap", gates: "approve-plan" } }),
+			input({
+				stages: [
+					{ use: "implement", id: "build", tools: ["read", "edit", "write"] },
+					{
+						use: "verify-and-fix",
+						id: "green",
+						maxRounds: 2,
+						escalate: "thinking",
+					},
+					{
+						use: "review-fan-out",
+						id: "review",
+						lenses: [{ id: "contracts", tier: "heavy", diverse: true }],
+						synthesis: "required",
+					},
+				],
+			}),
+		]) {
+			await expect(
+				service.validate("plan-to-ship", value),
+			).resolves.toMatchObject({ valid: true });
+		}
+	});
+
 	it("refuses a bad digest, a bad effort, and an unknown plan field", async () => {
 		const service = await serviceFor(scripted());
-		await expect(
-			service.validate("plan-to-ship", input()),
-		).resolves.toMatchObject({
-			valid: true,
-		});
 		for (const bad of [
 			{ ...input(), planDigest: "not-a-digest" },
 			{ ...input(), effort: "standrd" },
 			{ ...input(), extra: true },
+			{ ...input(), plan: { ...plan(), policy: { gates: "sometimes" } } },
 			{
 				...input(),
 				plan: {
@@ -786,6 +1632,22 @@ describe("plan-to-ship: the input contract", () => {
 							after: [],
 							reads: [],
 							tasks: [{ id: "r0", title: "Review", by: { verdict: "nope" } }],
+						},
+					],
+				},
+			},
+			{
+				...input(),
+				plan: {
+					...plan(),
+					deliverables: [
+						{
+							id: "d0",
+							title: "t",
+							after: [],
+							reads: [],
+							tasks: [],
+							stages: [{ use: "teleport", id: "x" }],
 						},
 					],
 				},
@@ -807,7 +1669,7 @@ describe("plan-to-ship: the memory dial", () => {
 		["standard", 2 * 1024 * 1024 * 1024],
 		["deep", 4 * 1024 * 1024 * 1024],
 	] as const)(
-		"asks for %s memory on every implement task and says so in the instructions",
+		"asks for %s memory on every worktree task and says so in the instructions",
 		async (effort, memoryBytes) => {
 			const delegated = scripted();
 			const service = await serviceFor(delegated);
@@ -818,11 +1680,11 @@ describe("plan-to-ship: the memory dial", () => {
 			await decide(service, ship, "ship", { ship: true });
 			await bounded(service.wait(run.runId), "wait");
 
-			const implementers = delegated.requests.filter(
-				(request) => request.agent === "implementer",
+			const worktrees = delegated.requests.filter(
+				(request) => request.workspace.mode === "worktree",
 			);
-			expect(implementers.length).toBeGreaterThan(0);
-			for (const request of implementers) {
+			expect(worktrees.length).toBeGreaterThan(0);
+			for (const request of worktrees) {
 				expect(request.memoryBytes).toBe(memoryBytes);
 				// The agent is told the same number it was granted; a fixed
 				// "512 MiB" line would make it misreport a killed install.
@@ -833,7 +1695,7 @@ describe("plan-to-ship: the memory dial", () => {
 			}
 			// Read-only stages never ask for a grant; they take the agent ceiling.
 			for (const request of delegated.requests) {
-				if (request.agent === "implementer") continue;
+				if (request.workspace.mode === "worktree") continue;
 				expect("memoryBytes" in request).toBe(false);
 			}
 		},
@@ -874,7 +1736,7 @@ describe("plan-to-ship: the agent templates", () => {
 	});
 
 	it("covers every request a deep run makes", async () => {
-		const delegated = scripted();
+		const delegated = scripted({ check: "fail" });
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
@@ -889,6 +1751,13 @@ describe("plan-to-ship: the agent templates", () => {
 		const agents = await discoverAgents([
 			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
 		]);
+		// The deep column's cap: three verifiers and two fixers.
+		expect(delegated.requestsGoal("Verify deliverable")).toHaveLength(
+			MAX_VERIFY_ROUNDS,
+		);
+		expect(delegated.requestsGoal("Fix what the check reported")).toHaveLength(
+			MAX_VERIFY_ROUNDS - 1,
+		);
 		expect(delegated.requests.length).toBeGreaterThan(0);
 		for (const request of delegated.requests) {
 			const agent = agents.get(request.agent);
@@ -922,5 +1791,6 @@ describe("plan-to-ship: the agent templates", () => {
 				expect(value).toBeLessThanOrEqual(ceiling);
 			}
 		}
+		expect(MODEL_ID).toBeDefined();
 	});
 });
