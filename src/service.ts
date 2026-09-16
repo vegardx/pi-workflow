@@ -7,12 +7,17 @@ import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
 import { Value } from "typebox/value";
+import {
+	readWorkflowArtifactInputs,
+	WorkflowArtifactInputError,
+} from "./artifact-input.js";
 import { WorkflowArtifactStore } from "./artifact-store.js";
 import {
 	currentSubagentAttempt,
 	currentSubagentAttemptId,
 } from "./attempts.js";
 import { settledWorkflowUsage } from "./budget.js";
+import { WorkflowCheckpointExecutionError } from "./checkpoint-executor.js";
 import {
 	MAX_WORKFLOW_CONCURRENCY,
 	WORKFLOW_CONTRACT_REVISION,
@@ -24,9 +29,65 @@ import {
 	WorkflowTaskIdSchema,
 } from "./contracts.js";
 import {
+	deriveDecisionRecordSha256,
+	WorkflowDecisionRecordError,
+	WorkflowDecisionRecordStore,
+} from "./decision-store.js";
+import {
 	validateJsonSchemaDocument,
 	type WorkflowBudget,
 } from "./definition.js";
+import {
+	assertDynamicSourceRunnable,
+	type DynamicSourceApprovalRecord,
+	DynamicWorkflowApprovalError,
+	type DynamicWorkflowProposalView,
+	decideDynamicSource,
+	MSG_APPROVAL_INVALID,
+	MSG_PROPOSAL_NOT_FOUND,
+	readSourceApproval,
+	toDynamicWorkflowProposalView,
+} from "./dynamic/approval.js";
+import { MAX_DYNAMIC_PROPOSALS } from "./dynamic/constants.js";
+import {
+	type DynamicSourceApprover,
+	type DynamicSourceDecision,
+	type DynamicSupportHelperSpec,
+	type DynamicWorkflowProposer,
+	DynamicWorkflowProposerSchema,
+} from "./dynamic/contracts.js";
+import {
+	createDynamicDiscoveredWorkflow,
+	dynamicWorkflowForRecord,
+} from "./dynamic/definition.js";
+import { DynamicWorkflowExecutionError } from "./dynamic/execution-error.js";
+import {
+	deriveDynamicHostApiSha256,
+	deriveDynamicImportPolicySha256,
+} from "./dynamic/identity.js";
+import {
+	createDynamicWorkflowProposalRecord,
+	type DynamicWorkflowProposal,
+	DynamicWorkflowProposalStore,
+	WorkflowDynamicStoreError,
+	WorkflowDynamicStoreFullError,
+} from "./dynamic/proposal-store.js";
+import {
+	DynamicRunDefinitionError,
+	writeRunDefinitionCopy,
+} from "./dynamic/run-definition.js";
+import {
+	assertDynamicSourceIntake,
+	DynamicSourceIntakeError,
+	dynamicRef,
+	isDynamicRef,
+	parseDynamicRef,
+} from "./dynamic/source.js";
+import { assertDynamicTransformerVersion } from "./dynamic/transformer-identity.js";
+import {
+	type DynamicVmBridgeOverrides,
+	extractDynamicWorkflowManifest,
+} from "./dynamic/vm-host.js";
 import type {
 	TaskExecutionProjection,
 	WorkflowStateProjection,
@@ -82,6 +143,7 @@ import {
 	encodeWorkflowRunCursor,
 	invalidationPreview,
 	isCompletedWorktreeTask,
+	pendingCheckpointViews,
 	runInspection,
 	runLogs,
 	runSummary,
@@ -94,10 +156,13 @@ import {
 } from "./run-record.js";
 import {
 	createWorkflowSequentialScheduler,
+	WorkflowSchedulerError,
 	type WorkflowSequentialScheduler,
 } from "./scheduler.js";
 import {
 	MAX_WORKFLOW_RUN_LIST_ISSUES,
+	type WorkflowDecideOptions,
+	WorkflowDecideOptionsSchema,
 	type WorkflowInspectOptions,
 	WorkflowInspectOptionsSchema,
 	type WorkflowInvalidationPreview,
@@ -122,12 +187,18 @@ import {
 	type WorkflowWaitOptions,
 	WorkflowWaitOptionsSchema,
 } from "./service-views.js";
-import { createStaticWorkflowRuntime } from "./static-runtime.js";
+import {
+	createStaticWorkflowRuntime,
+	isStaticWorkflowParked,
+	type StaticWorkflowParkedResult,
+} from "./static-runtime.js";
 import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "./subagent-provider.js";
 import {
+	isValidSupportExportName,
+	SUPPORT_EXPORT_NAME_INVALID_MESSAGE,
 	type SupportTaskRegistration,
 	supportRegistrationIdentity,
 } from "./support.js";
@@ -163,10 +234,44 @@ export type WorkflowServiceRunReceipt = {
 	readonly status: WorkflowRunStatus;
 };
 
+export type { DynamicWorkflowProposalView } from "./dynamic/approval.js";
 export type {
 	WorkflowServiceRunView,
 	WorkflowServiceTaskView,
 } from "./service-views.js";
+
+export type DynamicWorkflowProposeOptions = {
+	readonly proposer: DynamicWorkflowProposer;
+};
+
+/**
+ * A human decision about a proposal. The service knows nothing about the UI:
+ * `approver.kind` is `"human"` by schema and `via` names the command that
+ * confirmed the decision; the record is written as `decidedBy: "human:<via>"`.
+ */
+export type DynamicSourceDecisionOptions = {
+	readonly decision: DynamicSourceDecision;
+	readonly approver: DynamicSourceApprover;
+	readonly reason?: string;
+};
+
+/** `inspectProposal` is the only surface that returns the source text. */
+export type DynamicWorkflowProposalInspection = DynamicWorkflowProposalView & {
+	readonly source: string;
+};
+
+export type DynamicWorkflowProposalListing =
+	| DynamicWorkflowProposalView
+	| { readonly ref: `dynamic:${string}`; readonly issue: string };
+
+export const DYNAMIC_TRUST_REQUIRED_MESSAGE =
+	"Dynamic workflows require project trust.";
+export const DYNAMIC_REF_INVALID_MESSAGE =
+	"Invalid dynamic workflow reference.";
+export const DYNAMIC_STORE_FULL_MESSAGE =
+	"Dynamic workflow proposal store is full.";
+export const DYNAMIC_STORE_CORRUPT_MESSAGE =
+	"Dynamic workflow proposal store is corrupt.";
 
 export type WorkflowRunListener = (observation: WorkflowRunObservation) => void;
 
@@ -194,6 +299,17 @@ export interface WorkflowService {
 		options?: WorkflowWaitOptions,
 	): Promise<WorkflowServiceWaitView>;
 	stop(runId: WorkflowRunId, reason: string): Promise<WorkflowServiceRunView>;
+	/**
+	 * Records an immutable operator decision for a checkpoint awaiting one and
+	 * restarts the parked drive; the decision record is the durable evidence,
+	 * the journal converges on it. Refused on nested runs and once the run's
+	 * deadline has passed.
+	 */
+	decide(
+		runId: WorkflowRunId,
+		taskId: string,
+		options: WorkflowDecideOptions,
+	): Promise<WorkflowServiceRunView>;
 	/**
 	 * Invalidates a settled task and its transitive dependents on a durably
 	 * failed or interrupted run, then restarts the drive so the invalidated
@@ -243,6 +359,28 @@ export interface WorkflowService {
 		options?: WorkflowResumeOptions,
 	): Promise<WorkflowServiceRunView>;
 	shutdown(): Promise<void>;
+	/**
+	 * Proposes dynamic workflow TypeScript source: intake gate, manifest
+	 * extraction in a manifest-only VM, and a proposal keyed by the source
+	 * digest. Idempotent for a known digest; nothing is approved here.
+	 */
+	propose(
+		source: string,
+		options: DynamicWorkflowProposeOptions,
+	): Promise<DynamicWorkflowProposalView>;
+	/** One proposal with its source text; never a tool surface. */
+	inspectProposal(ref: string): Promise<DynamicWorkflowProposalInspection>;
+	/** Bounded scan of the proposal store; `list()` stays static-only. */
+	proposals(): Promise<readonly DynamicWorkflowProposalListing[]>;
+	/**
+	 * Records the immutable human decision about a proposal bound to its
+	 * definition identity. Refused once decided; a rejected digest can never
+	 * be approved, only a changed source (new digest) can.
+	 */
+	decideSource(
+		ref: string,
+		options: DynamicSourceDecisionOptions,
+	): Promise<DynamicWorkflowProposalView>;
 	/** Lease-free scan of every durable run in the store, newest first. */
 	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
 	/** Lease-free bounded projection of one run; the `run` section always fits. */
@@ -285,6 +423,71 @@ export interface WorkflowServiceOptions {
 	readonly maxWorkflowChildRuntimeMs?: number;
 	readonly maxWorkflowTimeoutMs?: number;
 	readonly supportTasks?: readonly SupportTaskRegistration[];
+	/**
+	 * Checkpoint policy: with `headless`, `use-explicit-default` checkpoints
+	 * are decided from their default immediately and never park; `block`
+	 * checkpoints park regardless. Default `{ headless: false }`.
+	 */
+	readonly checkpoints?: { readonly headless?: boolean };
+	/**
+	 * Dynamic VM watchdogs: lengthens the boot watchdog (manifest extraction
+	 * and every run drive) and the compute watchdog for embedders and tests on
+	 * slow hosts. Positive integers up to 2 147 483 647 ms; defaults to the
+	 * production constants. Does not change `hostApiSha256`.
+	 */
+	readonly dynamic?: {
+		readonly bootTimeoutMs?: number;
+		readonly computeTimeoutMs?: number;
+	};
+}
+
+const DYNAMIC_OPTIONS_INVALID_MESSAGE =
+	"Workflow service dynamic options are invalid.";
+/** `setTimeout`'s largest delay; the watchdogs are host timers. */
+const MAX_DYNAMIC_WATCHDOG_MS = 2_147_483_647;
+const DYNAMIC_OPTION_KEYS: ReadonlySet<string> = new Set([
+	"bootTimeoutMs",
+	"computeTimeoutMs",
+]);
+
+/**
+ * Closed validation of the `dynamic` service option: only the two watchdog
+ * fields pass, so `resourceLimits`, `syncWaitMs`, and `workerEntry` can never
+ * reach the VM host through the service.
+ */
+function validateDynamicOptions(
+	dynamic: WorkflowServiceOptions["dynamic"],
+): DynamicVmBridgeOverrides | undefined {
+	if (dynamic === undefined) return undefined;
+	const invalid = new WorkflowServiceError(
+		"validation",
+		DYNAMIC_OPTIONS_INVALID_MESSAGE,
+	);
+	if (
+		typeof dynamic !== "object" ||
+		dynamic === null ||
+		Array.isArray(dynamic) ||
+		Object.keys(dynamic).some((key) => !DYNAMIC_OPTION_KEYS.has(key))
+	) {
+		throw invalid;
+	}
+	const overrides: {
+		bootTimeoutMs?: number;
+		computeTimeoutMs?: number;
+	} = {};
+	for (const key of ["bootTimeoutMs", "computeTimeoutMs"] as const) {
+		const value = dynamic[key];
+		if (value === undefined) continue;
+		if (
+			!Number.isSafeInteger(value) ||
+			value < 1 ||
+			value > MAX_DYNAMIC_WATCHDOG_MS
+		) {
+			throw invalid;
+		}
+		overrides[key] = value;
+	}
+	return Object.freeze(overrides);
 }
 
 export class WorkflowServiceError extends Error {
@@ -308,14 +511,23 @@ type OwnedRun = {
 	lease: WorkflowRunLease;
 	journal: WorkflowRunJournal;
 	artifacts: WorkflowArtifactStore;
+	decisions: WorkflowDecisionRecordStore;
 	binding: WorkflowSubagentBinding;
 	scheduler: WorkflowSequentialScheduler;
 	finalizer: WorkflowTaskFinalizer;
 	drive: Promise<void>;
+	/** Starts a new drive when the run is settled; otherwise the live drive. */
 	restart(): Promise<void>;
 	settled: boolean;
 	view?: WorkflowServiceRunView;
 	failure?: Error;
+	/** Set while the last drive settled parked at one or more checkpoints. */
+	parked?: StaticWorkflowParkedResult;
+	/** Re-drives a parked run at its earliest checkpoint expiry or deadline. */
+	watchdog?: NodeJS.Timeout;
+	/** Resolves when the run next starts a drive or is stopped while parked. */
+	nextChange(): Promise<void>;
+	wake(): void;
 };
 
 function summary(workflow: DiscoveredWorkflow): WorkflowDefinitionSummary {
@@ -389,6 +601,43 @@ function recoveryRefusal(state: WorkflowStateProjection): WorkflowServiceError {
 
 function runId(): WorkflowRunId {
 	return `workflow_${randomUUID().replaceAll("-", "")}`;
+}
+
+const DECISION_PERSISTENCE_MESSAGE =
+	"Checkpoint decision could not be recorded.";
+
+/**
+ * Maps a `decide` failure to the service surface. Executor refusals at the
+ * validation and decision stages are `validation` with the executor's own
+ * message; its input and persistence stages keep their fixed message under
+ * `persistence`; store corruption passes through; everything else (a decision
+ * record that fails verification, a reducer rejection, a fenced lease, an
+ * unexpected error) is `persistence` with one fixed message and the cause.
+ */
+function decisionRejection(error: unknown): unknown {
+	if (
+		error instanceof WorkflowServiceError ||
+		error instanceof WorkflowPersistenceCorruptionError
+	) {
+		return error;
+	}
+	if (error instanceof WorkflowCheckpointExecutionError) {
+		return new WorkflowServiceError(
+			error.stage === "validation" || error.stage === "decision"
+				? "validation"
+				: "persistence",
+			error.message,
+			{ cause: error },
+		);
+	}
+	if (error instanceof WorkflowSchedulerError && error.stage === "validation") {
+		return new WorkflowServiceError("validation", error.message, {
+			cause: error,
+		});
+	}
+	return new WorkflowServiceError("persistence", DECISION_PERSISTENCE_MESSAGE, {
+		cause: error,
+	});
 }
 
 /**
@@ -489,7 +738,23 @@ export async function createWorkflowService(
 			);
 		}
 	}
+	assertDynamicTransformerVersion();
 	const supportTasks = new Map<string, SupportTaskRegistration>();
+	const supportExports = new Set<string>();
+	if (
+		options.checkpoints !== undefined &&
+		(typeof options.checkpoints !== "object" ||
+			options.checkpoints === null ||
+			(options.checkpoints.headless !== undefined &&
+				typeof options.checkpoints.headless !== "boolean"))
+	) {
+		throw new WorkflowServiceError(
+			"validation",
+			"Workflow service checkpoint options are invalid.",
+		);
+	}
+	const headless = options.checkpoints?.headless ?? false;
+	const dynamicOverrides = validateDynamicOptions(options.dynamic);
 	for (const registration of options.supportTasks ?? []) {
 		if (typeof registration.execute !== "function") {
 			throw new WorkflowServiceError(
@@ -503,6 +768,25 @@ export async function createWorkflowService(
 				"conflict",
 				`Duplicate support task implementation: ${registration.name}`,
 			);
+		}
+		if (registration.exportName !== undefined) {
+			if (
+				typeof registration.exportName !== "string" ||
+				!isValidSupportExportName(registration.exportName)
+			) {
+				throw new WorkflowServiceError(
+					"validation",
+					SUPPORT_EXPORT_NAME_INVALID_MESSAGE,
+				);
+			}
+			const exported = `${registration.moduleSpecifier}#${registration.exportName}`;
+			if (supportExports.has(exported)) {
+				throw new WorkflowServiceError(
+					"conflict",
+					`Duplicate support task export name: ${exported}`,
+				);
+			}
+			supportExports.add(exported);
 		}
 		supportTasks.set(
 			registration.name,
@@ -519,8 +803,41 @@ export async function createWorkflowService(
 			}),
 		);
 	}
+	/**
+	 * The registered helpers dynamic sources may import (spec 10): frozen,
+	 * structured-clone-safe, sorted by module specifier and export name so the
+	 * import policy digest is order-independent of registration order.
+	 */
+	const supportHelpers: readonly DynamicSupportHelperSpec[] = Object.freeze(
+		[...supportTasks.values()]
+			.filter(
+				(
+					registration,
+				): registration is SupportTaskRegistration & {
+					readonly exportName: string;
+				} => registration.exportName !== undefined,
+			)
+			.map(
+				(registration) =>
+					Object.freeze({
+						name: registration.name,
+						moduleSpecifier: registration.moduleSpecifier,
+						revision: registration.revision,
+						implementationSha256: registration.implementationSha256,
+						parametersSchema: structuredClone(registration.parametersSchema),
+						outputSchema: structuredClone(registration.outputSchema),
+						exportName: registration.exportName,
+					}) as DynamicSupportHelperSpec,
+			)
+			.sort((a, b) =>
+				`${a.moduleSpecifier} ${a.exportName}`.localeCompare(
+					`${b.moduleSpecifier} ${b.exportName}`,
+				),
+			),
+	);
 	const cwd = await realpath(options.cwd);
 	const storeRoot = path.resolve(options.storeRoot);
+	let proposalStore: Promise<DynamicWorkflowProposalStore> | undefined;
 	const roots: WorkflowRoot[] = [];
 	const owned = new Map<WorkflowRunId, OwnedRun>();
 	const instanceId = randomUUID();
@@ -566,6 +883,137 @@ export async function createWorkflowService(
 		if (closed) {
 			throw new WorkflowServiceError("conflict", "Workflow service is closed.");
 		}
+	}
+
+	/** D10: dynamic source is untrusted orchestration input in a trusted process. */
+	function assertDynamicTrusted(): void {
+		if (!options.projectTrusted()) {
+			throw new WorkflowServiceError(
+				"validation",
+				DYNAMIC_TRUST_REQUIRED_MESSAGE,
+			);
+		}
+	}
+
+	/** Opened on first dynamic use; a failed open is retried by the next call. */
+	function openProposalStore(): Promise<DynamicWorkflowProposalStore> {
+		proposalStore ??= DynamicWorkflowProposalStore.open({ storeRoot }).catch(
+			(error: unknown) => {
+				proposalStore = undefined;
+				throw error;
+			},
+		);
+		return proposalStore;
+	}
+
+	/**
+	 * Maps the dynamic modules' refusals to service errors: intake, approval,
+	 * and run-copy errors carry their own code and final message; a full store
+	 * is a conflict; any other store failure is corruption.
+	 */
+	function dynamicFailure(error: unknown): unknown {
+		if (
+			error instanceof DynamicSourceIntakeError ||
+			error instanceof DynamicWorkflowApprovalError ||
+			error instanceof DynamicRunDefinitionError
+		) {
+			return new WorkflowServiceError(error.code, error.message, {
+				cause: error,
+			});
+		}
+		if (error instanceof WorkflowDynamicStoreFullError) {
+			return new WorkflowServiceError("conflict", DYNAMIC_STORE_FULL_MESSAGE, {
+				cause: error,
+			});
+		}
+		if (error instanceof WorkflowDynamicStoreError) {
+			return new WorkflowServiceError(
+				"persistence",
+				DYNAMIC_STORE_CORRUPT_MESSAGE,
+				{ cause: error },
+			);
+		}
+		if (error instanceof WorkflowDecisionRecordError) {
+			return new WorkflowServiceError("persistence", MSG_APPROVAL_INVALID, {
+				cause: error,
+			});
+		}
+		return error;
+	}
+
+	function parseDynamicReference(ref: string): string {
+		const sourceSha256 = parseDynamicRef(ref);
+		if (sourceSha256 === undefined) {
+			throw new WorkflowServiceError("validation", DYNAMIC_REF_INVALID_MESSAGE);
+		}
+		return sourceSha256;
+	}
+
+	async function readProposal(
+		sourceSha256: string,
+	): Promise<DynamicWorkflowProposal> {
+		const proposal = await (await openProposalStore()).read(sourceSha256);
+		if (proposal === undefined) {
+			throw new WorkflowServiceError(
+				"not-found",
+				MSG_PROPOSAL_NOT_FOUND(sourceSha256),
+			);
+		}
+		return proposal;
+	}
+
+	function proposalView(
+		proposal: DynamicWorkflowProposal,
+		approval: DynamicSourceApprovalRecord | undefined,
+	): DynamicWorkflowProposalView {
+		return toDynamicWorkflowProposalView({
+			proposal,
+			approval,
+			hostApiSha256: deriveDynamicHostApiSha256(),
+			importPolicySha256: deriveDynamicImportPolicySha256(supportHelpers),
+		});
+	}
+
+	/**
+	 * `run`/`validate` steps 1-5 for a `dynamic:` reference: the proposal must
+	 * be current for this project and carry an approval that matches it.
+	 */
+	async function dynamicRunnable(ref: string): Promise<{
+		readonly proposal: DynamicWorkflowProposal;
+		readonly approval: DynamicSourceApprovalRecord;
+		readonly hostApiSha256: string;
+	}> {
+		assertDynamicTrusted();
+		const sourceSha256 = parseDynamicReference(ref);
+		try {
+			const proposal = await readProposal(sourceSha256);
+			const hostApiSha256 = deriveDynamicHostApiSha256();
+			const approval = assertDynamicSourceRunnable({
+				proposal: proposal.record,
+				approval: await readSourceApproval(proposal),
+				cwd,
+				hostApiSha256,
+				importPolicySha256: deriveDynamicImportPolicySha256(supportHelpers),
+			});
+			return { proposal, approval, hostApiSha256 };
+		} catch (error) {
+			throw dynamicFailure(error);
+		}
+	}
+
+	/** The `DiscoveredWorkflow` of a runnable proposal (spec 5.4). */
+	function dynamicWorkflow(
+		proposal: DynamicWorkflowProposal,
+		createdAt: string,
+	): DiscoveredWorkflow {
+		return createDynamicDiscoveredWorkflow({
+			proposal: proposal.record,
+			source: proposal.source,
+			supportHelpers,
+			createdAt,
+			path: proposal.path,
+			...(dynamicOverrides === undefined ? {} : { bridge: dynamicOverrides }),
+		});
 	}
 
 	async function discover(): Promise<readonly DiscoveredWorkflow[]> {
@@ -654,6 +1102,7 @@ export async function createWorkflowService(
 			journalOptions(record.runId),
 		);
 		const artifacts = await WorkflowArtifactStore.open({ journal });
+		const decisions = await WorkflowDecisionRecordStore.open({ journal });
 		const discovered = await discover();
 		const byName = new Map(
 			discovered.map((candidate) => [
@@ -686,27 +1135,44 @@ export async function createWorkflowService(
 			finalizer,
 			artifacts,
 			supportTasks,
+			decisions,
+			checkpoints: { headless },
 			nestedRuns: nestedProvider,
 			nesting,
 			concurrency: record.concurrency,
 			budget: record.effectiveBudget,
 		});
+		const waiters = new Set<() => void>();
 		const ownedRun: OwnedRun = {
 			record,
 			lease,
 			journal,
 			artifacts,
+			decisions,
 			binding,
 			scheduler,
 			finalizer,
 			drive: Promise.resolve(),
 			restart: async () => undefined,
 			settled: false,
+			nextChange: () =>
+				new Promise<void>((resolve) => {
+					waiters.add(resolve);
+				}),
+			wake: () => {
+				const pending = [...waiters];
+				waiters.clear();
+				for (const resolve of pending) resolve();
+			},
 		};
 		const startDrive = () => {
 			ownedRun.settled = false;
 			delete ownedRun.failure;
 			delete ownedRun.view;
+			delete ownedRun.parked;
+			if (ownedRun.watchdog) clearTimeout(ownedRun.watchdog);
+			delete ownedRun.watchdog;
+			ownedRun.wake();
 			const controller = new AbortController();
 			// Durable stop intent (explicit stop, shutdown, or deadline) aborts the
 			// workflow signal so trusted source awaiting ctx.signal can unwind.
@@ -763,7 +1229,12 @@ export async function createWorkflowService(
 			});
 			const execution = Promise.resolve()
 				.then(() => runtime.drive())
-				.then(() => undefined);
+				.then((result) => {
+					// Parking is a resolved drive result, never a failure: the run
+					// stays `waiting` with its lease held until decided, expired,
+					// stopped, or resumed elsewhere after shutdown.
+					if (isStaticWorkflowParked(result)) ownedRun.parked = result;
+				});
 			void execution.catch(() => undefined);
 			ownedRun.drive = Promise.race([execution, deadline])
 				.catch((error: unknown) => {
@@ -786,17 +1257,116 @@ export async function createWorkflowService(
 					} finally {
 						ownedRun.settled = true;
 					}
+					if (ownedRun.parked && !closed) {
+						if ((ownedRun.view?.pendingCheckpoints ?? []).length === 0) {
+							// The park was decided from under the drive (a decision landed
+							// while another lane was busy): nothing waits, so re-drive.
+							void ownedRun.restart();
+						} else {
+							armParkedWatchdog(ownedRun);
+						}
+					}
 				});
 			return ownedRun.drive;
 		};
-		ownedRun.restart = startDrive;
+		ownedRun.restart = () => (ownedRun.settled ? startDrive() : ownedRun.drive);
 		startDrive();
 		return ownedRun;
 	}
 
+	/**
+	 * A parked run re-drives itself at the earliest pending checkpoint expiry
+	 * or at the run deadline, whichever comes first: the restarted drive's
+	 * sweep expires or defaults the checkpoint, and the deadline race stops the
+	 * run. Bounded to the timer maximum; cleared by every restart and stop.
+	 */
+	function armParkedWatchdog(run: OwnedRun): void {
+		const pending = run.parked?.pendingCheckpoints ?? [];
+		const at = Math.min(
+			Date.parse(run.record.deadlineAt),
+			...pending.flatMap((checkpoint) =>
+				checkpoint.expiresAt ? [Date.parse(checkpoint.expiresAt)] : [],
+			),
+		);
+		const delay = Math.min(Math.max(0, at - Date.now()), 2_147_483_647);
+		run.watchdog = setTimeout(() => {
+			delete run.watchdog;
+			if (!closed && run.settled && run.parked) void run.restart();
+		}, delay);
+		run.watchdog.unref();
+	}
+
+	/** A parked run whose deadline or a pending checkpoint expiry has passed. */
+	function parkExpired(run: OwnedRun, now: number): boolean {
+		if (!run.parked) return false;
+		return (
+			deadlinePassed(run.record.deadlineAt, now) ||
+			run.parked.pendingCheckpoints.some(
+				(checkpoint) =>
+					checkpoint.expiresAt !== undefined &&
+					Date.parse(checkpoint.expiresAt) <= now,
+			)
+		);
+	}
+
+	/**
+	 * Stops a settled parked run in place: the scheduler cancels its open
+	 * checkpoints and lands `cancelled`; a stop the scheduler left non-terminal
+	 * is drained by a restarted drive. Waiters on the run are woken.
+	 */
+	async function stopParked(run: OwnedRun, reason: string): Promise<void> {
+		if (run.watchdog) clearTimeout(run.watchdog);
+		delete run.watchdog;
+		await run.scheduler.stop(reason);
+		delete run.view;
+		const state = reduceWorkflowEvents(await run.journal.readEvents());
+		if (!isTerminalWorkflowRunStatus(state.status)) {
+			await run.restart();
+			return;
+		}
+		delete run.parked;
+		run.wake();
+	}
+
 	async function workflowForRecord(
 		record: WorkflowRunRecord,
+		journal: WorkflowRunJournal,
 	): Promise<DiscoveredWorkflow> {
+		if (record.definitionKind === "dynamic") {
+			// The run directory copy is the only evidence consulted; the proposal
+			// and decision stores are never read on resume (spec 5.4).
+			assertDynamicTrusted();
+			if (
+				record.approvalSha256 === undefined ||
+				record.hostApiSha256 === undefined
+			) {
+				throw new WorkflowServiceError(
+					"persistence",
+					"Workflow run record is invalid.",
+				);
+			}
+			try {
+				return await dynamicWorkflowForRecord({
+					record: {
+						cwd: record.cwd,
+						createdAt: record.createdAt,
+						definitionPath: record.definitionPath,
+						definitionIdentitySha256: record.definitionIdentitySha256,
+						definitionSourceSha256: record.definitionSourceSha256,
+						approvalSha256: record.approvalSha256,
+						hostApiSha256: record.hostApiSha256,
+					},
+					journal,
+					cwd,
+					supportHelpers,
+					...(dynamicOverrides === undefined
+						? {}
+						: { bridge: dynamicOverrides }),
+				});
+			} catch (error) {
+				throw dynamicFailure(error);
+			}
+		}
 		const workflow = await resolve(record.definitionPath);
 		if (
 			workflow.definition.meta.name !== record.definitionName ||
@@ -904,6 +1474,7 @@ export async function createWorkflowService(
 				deadlineAt: record.deadlineAt,
 				depth: record.depth,
 				...lineageOf(record),
+				...dynamicOf(record),
 			});
 		}
 		let output: unknown;
@@ -917,6 +1488,9 @@ export async function createWorkflowService(
 			}
 			output = await artifacts.readJson(artifact);
 		}
+		const tasks = artifacts
+			? await checkpointBackedTaskViews(state, artifacts)
+			: taskViews(state);
 		return Object.freeze({
 			runId: record.runId,
 			status: state.status,
@@ -925,12 +1499,88 @@ export async function createWorkflowService(
 			deadlineAt: record.deadlineAt,
 			depth: record.depth,
 			...lineageOf(record),
+			...dynamicOf(record),
 			...(state.outputArtifactId
 				? { outputArtifactId: state.outputArtifactId }
 				: {}),
 			...(output === undefined ? {} : { output }),
-			tasks: taskViews(state),
+			tasks,
+			pendingCheckpoints: pendingCheckpointViews(state),
 		});
+	}
+
+	/**
+	 * Task views with the artifact-backed checkpoint facts (C13): the verified
+	 * input values the approver sees and the recorded decision value. Handoff
+	 * inputs appear as descriptors; lease-free views omit both.
+	 */
+	async function checkpointBackedTaskViews(
+		state: WorkflowStateProjection,
+		artifacts: WorkflowArtifactStore,
+	): Promise<readonly WorkflowServiceTaskView[]> {
+		const views = taskViews(state);
+		if (!views.some((view) => view.checkpoint)) return views;
+		return Object.freeze(
+			await Promise.all(
+				views.map(async (view) => {
+					const projected = state.tasks[view.id];
+					const execution = projected?.currentExecutionId
+						? state.executions[projected.currentExecutionId]
+						: undefined;
+					if (
+						!view.checkpoint ||
+						!projected ||
+						projected.abandoned === true ||
+						execution?.checkpointRequest === undefined
+					) {
+						return view;
+					}
+					let inputs: Readonly<Record<string, unknown>>;
+					try {
+						inputs = await readWorkflowArtifactInputs({
+							task: projected.task,
+							state,
+							artifacts,
+						});
+					} catch (error) {
+						if (!(error instanceof WorkflowArtifactInputError)) throw error;
+						throw new WorkflowServiceError(
+							"persistence",
+							"Checkpoint inputs could not be read and verified.",
+							{ cause: error },
+						);
+					}
+					const decision = execution.checkpointDecision;
+					const decisionArtifact = decision
+						? state.artifacts[decision.artifactId]
+						: undefined;
+					if (decision && !decisionArtifact) {
+						throw new WorkflowServiceError(
+							"persistence",
+							"Checkpoint decision artifact metadata is missing.",
+						);
+					}
+					const value = decisionArtifact
+						? await artifacts.readJson(decisionArtifact)
+						: undefined;
+					return Object.freeze({
+						...view,
+						checkpoint: Object.freeze({
+							...view.checkpoint,
+							inputs,
+							...(view.checkpoint.decision
+								? {
+										decision: Object.freeze({
+											...view.checkpoint.decision,
+											value,
+										}),
+									}
+								: {}),
+						}),
+					});
+				}),
+			),
+		);
 	}
 
 	/**
@@ -985,6 +1635,27 @@ export async function createWorkflowService(
 				{ cause: error },
 			);
 		}
+	}
+
+	/** Spec 5.2: present iff the record is a dynamic run. */
+	function dynamicOf(record: WorkflowRunRecord): {
+		dynamic?: NonNullable<WorkflowServiceRunView["dynamic"]>;
+	} {
+		if (
+			record.definitionKind !== "dynamic" ||
+			record.approvalSha256 === undefined ||
+			record.hostApiSha256 === undefined
+		) {
+			return {};
+		}
+		return {
+			dynamic: Object.freeze({
+				ref: dynamicRef(record.definitionSourceSha256),
+				sourceSha256: record.definitionSourceSha256,
+				approvalSha256: record.approvalSha256,
+				hostApiSha256: record.hostApiSha256,
+			}),
+		};
 	}
 
 	function lineageOf(record: WorkflowRunRecord): {
@@ -1181,6 +1852,7 @@ export async function createWorkflowService(
 					definitionPath: workflow.path,
 					definitionIdentitySha256: workflow.identity.identitySha256,
 					definitionSourceSha256: workflow.identity.sourceSha256,
+					definitionKind: "static",
 					concurrency: Math.min(
 						workflow.definition.meta.concurrency,
 						maxConcurrency,
@@ -1224,16 +1896,23 @@ export async function createWorkflowService(
 			childRunId: WorkflowRunId,
 		): Promise<WorkflowNestedRunSettlement> {
 			const run = owned.get(childRunId) ?? (await resume(childRunId));
-			await run.drive;
-			const settlement = await nestedSettlementFrom(run.record, run.journal);
-			if (!settlement) {
+			// A parked child holds the parent's lane: the parent keeps running
+			// while the child waits, and continues once the child's checkpoint
+			// is decided, expired, or cancelled and its drive re-settles.
+			for (;;) {
+				await run.drive;
+				const settlement = await nestedSettlementFrom(run.record, run.journal);
+				if (settlement) return settlement;
+				if (run.parked && !closed) {
+					await run.nextChange();
+					continue;
+				}
 				throw new WorkflowNestedRunError(
 					"persistence",
 					"Nested workflow run ended without durable terminal state.",
 					{ cause: run.failure },
 				);
 			}
-			return settlement;
 		},
 		async readOutput(childRunId: WorkflowRunId, artifactId: string) {
 			const current = owned.get(childRunId);
@@ -1269,7 +1948,10 @@ export async function createWorkflowService(
 		async stop(childRunId: WorkflowRunId, reason: string): Promise<void> {
 			if (!(await runDirectoryExists(childRunId))) return;
 			const run = owned.get(childRunId) ?? (await resume(childRunId));
-			if (run.settled) return;
+			if (run.settled) {
+				if (run.parked) await stopParked(run, reason).catch(() => undefined);
+				return;
+			}
 			await run.scheduler.stop(reason).catch(() => undefined);
 			await run.drive;
 		},
@@ -1327,7 +2009,7 @@ export async function createWorkflowService(
 		if (existing && !existing.settled) return existing;
 		const opened = await openInactive(runIdValue);
 		try {
-			const workflow = await workflowForRecord(opened.record);
+			const workflow = await workflowForRecord(opened.record, opened.journal);
 			const binding = await options.subagents.bind(runIdValue);
 			const run = await compose(opened.record, workflow, opened.lease, binding);
 			owned.set(runIdValue, run);
@@ -1361,7 +2043,13 @@ export async function createWorkflowService(
 			return Object.freeze((await discover()).map(summary));
 		},
 		async validate(ref: string, input?: unknown) {
-			const workflow = await resolve(ref);
+			assertOpen();
+			const workflow = isDynamicRef(ref)
+				? dynamicWorkflow(
+						(await dynamicRunnable(ref)).proposal,
+						new Date().toISOString(),
+					)
+				: await resolve(ref);
 			if (input !== undefined) validateInput(workflow, input);
 			return Object.freeze({
 				valid: true as const,
@@ -1371,7 +2059,15 @@ export async function createWorkflowService(
 		run(ref: string, input: unknown) {
 			return exclusive(async () => {
 				assertOpen();
-				const workflow = await resolve(ref);
+				// The run's `createdAt` fixes the dynamic VM clock, so it is chosen
+				// before the definition is built; the record carries the same value.
+				const createdAt = new Date();
+				const dynamic = isDynamicRef(ref)
+					? await dynamicRunnable(ref)
+					: undefined;
+				const workflow = dynamic
+					? dynamicWorkflow(dynamic.proposal, createdAt.toISOString())
+					: await resolve(ref);
 				validateInput(workflow, input);
 				const id = runId();
 				const binding = await options.subagents.bind(id);
@@ -1388,7 +2084,20 @@ export async function createWorkflowService(
 						journalOptions(id),
 					);
 					const limits = effectiveLimits(workflow);
-					const createdAt = new Date();
+					if (dynamic) {
+						// Spec 4.4: the copies exist before the record does, so a run
+						// record implies the evidence resume verifies is on disk.
+						try {
+							await writeRunDefinitionCopy(journal.directory, {
+								source: dynamic.proposal.source,
+								manifest: dynamic.proposal.record.manifest,
+								proposal: dynamic.proposal.record,
+								approval: dynamic.approval,
+							});
+						} catch (error) {
+							throw dynamicFailure(error);
+						}
+					}
 					const record: WorkflowRunRecord = {
 						schema: "pi-workflow-run",
 						contractRevision: WORKFLOW_CONTRACT_REVISION,
@@ -1398,6 +2107,13 @@ export async function createWorkflowService(
 						definitionPath: workflow.path,
 						definitionIdentitySha256: workflow.identity.identitySha256,
 						definitionSourceSha256: workflow.identity.sourceSha256,
+						...(dynamic
+							? {
+									definitionKind: "dynamic" as const,
+									approvalSha256: deriveDecisionRecordSha256(dynamic.approval),
+									hostApiSha256: dynamic.hostApiSha256,
+								}
+							: { definitionKind: "static" as const }),
 						concurrency: Math.min(
 							workflow.definition.meta.concurrency,
 							maxConcurrency,
@@ -1443,14 +2159,32 @@ export async function createWorkflowService(
 				}
 				run = await resume(runIdValue);
 			}
-			if (!run.settled) {
-				const timedOut = await outlives(run.drive, options.timeoutMs);
-				if (timedOut) {
-					return Object.freeze({
-						...(await statusCurrent(runIdValue)),
-						timedOut: true as const,
-					});
+			const until =
+				options.timeoutMs === undefined
+					? undefined
+					: Date.now() + options.timeoutMs;
+			// A drive that settles and is re-driven at once (a park swept for
+			// expiry, or one decided from under a live drive) is followed until
+			// the run is settled for good or the timeout elapses.
+			for (;;) {
+				if (!run.settled) {
+					const remaining =
+						until === undefined ? undefined : Math.max(1, until - Date.now());
+					const timedOut = await outlives(run.drive, remaining);
+					if (timedOut) {
+						return Object.freeze({
+							...(await statusCurrent(runIdValue)),
+							timedOut: true as const,
+						});
+					}
 				}
+				// A parked run is settled without failure and returns its `waiting`
+				// view at once; a park whose expiry or deadline has passed is swept
+				// by one re-drive first (which expires, defaults, or stops it).
+				if (run.settled && parkExpired(run, Date.now())) {
+					await run.restart();
+				}
+				if (run.settled) break;
 			}
 			const view = await statusCurrent(runIdValue);
 			if (run.failure && !isTerminalWorkflowRunStatus(view.status)) {
@@ -1459,6 +2193,9 @@ export async function createWorkflowService(
 					"Workflow drive ended without durable terminal state.",
 					{ cause: run.failure },
 				);
+			}
+			if (run.settled && run.parked) {
+				return Object.freeze({ ...view, parked: true as const });
 			}
 			return view;
 		},
@@ -1470,6 +2207,8 @@ export async function createWorkflowService(
 			// and reconcile do instead of colliding with our own lease.
 			const run = owned.get(runIdValue) ?? (await resume(runIdValue));
 			const idle = run.settled;
+			if (run.watchdog) clearTimeout(run.watchdog);
+			delete run.watchdog;
 			await run.scheduler.stop(reason);
 			await run.drive;
 			// Stopping a settled run appends after its cached view was taken.
@@ -1482,7 +2221,141 @@ export async function createWorkflowService(
 				await run.restart();
 				view = await statusCurrent(runIdValue);
 			}
+			if (isTerminalWorkflowRunStatus(view.status)) {
+				delete run.parked;
+				run.wake();
+			}
 			return view;
+		},
+		decide(
+			runIdValue: WorkflowRunId,
+			taskId: string,
+			decideOptions: WorkflowDecideOptions,
+		) {
+			return exclusive(async () => {
+				assertOpen();
+				if (!Value.Check(WorkflowRunIdSchema, runIdValue)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid workflow run ID.",
+					);
+				}
+				if (!Value.Check(WorkflowTaskIdSchema, taskId)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid workflow task ID.",
+					);
+				}
+				if (typeof decideOptions !== "object" || decideOptions === null) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid checkpoint decision options.",
+					);
+				}
+				const { approver, reason } = decideOptions as {
+					readonly approver?: unknown;
+					readonly reason?: unknown;
+				};
+				if (
+					typeof approver !== "string" ||
+					approver.length < 1 ||
+					approver.length > 256
+				) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid checkpoint approver.",
+					);
+				}
+				if (
+					reason !== undefined &&
+					(typeof reason !== "string" ||
+						reason.length < 1 ||
+						reason.length > 4096)
+				) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid checkpoint decision reason.",
+					);
+				}
+				if (!Value.Check(WorkflowDecideOptionsSchema, decideOptions)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Invalid checkpoint decision options.",
+					);
+				}
+				const current = await statusCurrent(runIdValue);
+				// The same facts as the `decide` legality predicate: a root run that
+				// is running or waiting, before its deadline, with the named task
+				// awaiting a decision.
+				if (isNestedRun(current)) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Nested workflow runs are decided through their parent run.",
+					);
+				}
+				if (current.status !== "running" && current.status !== "waiting") {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow run status does not admit a checkpoint decision.",
+					);
+				}
+				const task = knownTask(current, taskId);
+				if (task.kind !== "checkpoint") {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow task is not a checkpoint task.",
+					);
+				}
+				if (
+					task.status !== "waiting" ||
+					!task.checkpoint ||
+					task.checkpoint.decision
+				) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Checkpoint is not awaiting a decision.",
+					);
+				}
+				if (deadlinePassed(current.deadlineAt, Date.now())) {
+					throw new WorkflowServiceError(
+						"validation",
+						"Workflow run deadline has passed.",
+					);
+				}
+				// A settled owned run still holds its lease and is reused; an
+				// inactive run is composed, and its initial drive re-parks while
+				// the decision is recorded under the scheduler lock.
+				const run = owned.get(runIdValue) ?? (await resume(runIdValue));
+				try {
+					await run.scheduler.decide(taskId, {
+						value: decideOptions.decision,
+						decidedBy: approver,
+						...(reason === undefined ? {} : { reason }),
+					});
+				} catch (error) {
+					throw decisionRejection(error);
+				}
+				// The decision was appended after any cached view was taken.
+				delete run.view;
+				if (run.settled) {
+					// The decision wakes the parked run; the restarted drive is not
+					// awaited here, wait() observes it.
+					void run.restart();
+				} else {
+					// A live drive that parks on a lane outcome older than the
+					// decision leaves the decided task unlisted or still listed as
+					// pending; either way nothing waits for it, so re-drive.
+					void run.drive.then(() => {
+						if (!closed && run.settled && run.parked) {
+							const decided = !(run.view?.pendingCheckpoints ?? []).some(
+								(checkpoint) => checkpoint.taskId === taskId,
+							);
+							if (decided) void run.restart();
+						}
+					});
+				}
+				return statusCurrent(runIdValue);
+			});
 		},
 		invalidate(runIdValue: WorkflowRunId, causeTaskId: string, reason: string) {
 			return exclusive(async () => {
@@ -1688,6 +2561,142 @@ export async function createWorkflowService(
 				await opened.lease.release();
 			}
 		},
+		propose(source: string, proposeOptions: DynamicWorkflowProposeOptions) {
+			return exclusive(async () => {
+				assertOpen();
+				assertDynamicTrusted();
+				try {
+					const identity = assertDynamicSourceIntake(source, {
+						allowedSupportImports: [...supportTasks.values()].map(
+							(registration) => registration.moduleSpecifier,
+						),
+					});
+					const proposer = (
+						proposeOptions as Partial<DynamicWorkflowProposeOptions> | undefined
+					)?.proposer;
+					if (!Value.Check(DynamicWorkflowProposerSchema, proposer)) {
+						throw new WorkflowServiceError(
+							"validation",
+							"Invalid dynamic workflow proposer.",
+						);
+					}
+					const store = await openProposalStore();
+					// The cap is checked before a VM boots; `put` re-checks under the
+					// store's mutation lock for the race.
+					if (
+						(await store.read(identity.sourceSha256)) === undefined &&
+						(await store.count()) >= MAX_DYNAMIC_PROPOSALS
+					) {
+						throw new WorkflowDynamicStoreFullError();
+					}
+					let manifest: Awaited<
+						ReturnType<typeof extractDynamicWorkflowManifest>
+					>;
+					try {
+						manifest = await extractDynamicWorkflowManifest({
+							source,
+							sourceSha256: identity.sourceSha256,
+							supportHelpers,
+							...(dynamicOverrides === undefined
+								? {}
+								: { overrides: dynamicOverrides }),
+						});
+					} catch (error) {
+						if (!(error instanceof DynamicWorkflowExecutionError)) throw error;
+						throw new WorkflowServiceError(
+							"validation",
+							`Dynamic workflow manifest extraction failed: ${error.message}`,
+							{ cause: error },
+						);
+					}
+					const record = createDynamicWorkflowProposalRecord({
+						sourceSha256: identity.sourceSha256,
+						sourceBytes: identity.sourceBytes,
+						manifest,
+						importPolicySha256: deriveDynamicImportPolicySha256(supportHelpers),
+						proposer,
+						proposedAt: new Date().toISOString(),
+						projectRoot: cwd,
+					});
+					const { proposal } = await store.put({ source, record });
+					return proposalView(proposal, await readSourceApproval(proposal));
+				} catch (error) {
+					throw dynamicFailure(error);
+				}
+			});
+		},
+		async inspectProposal(ref: string) {
+			assertOpen();
+			assertDynamicTrusted();
+			const sourceSha256 = parseDynamicReference(ref);
+			try {
+				const proposal = await readProposal(sourceSha256);
+				return Object.freeze({
+					...proposalView(proposal, await readSourceApproval(proposal)),
+					source: proposal.source,
+				});
+			} catch (error) {
+				throw dynamicFailure(error);
+			}
+		},
+		async proposals() {
+			assertOpen();
+			assertDynamicTrusted();
+			let listings: Awaited<ReturnType<DynamicWorkflowProposalStore["list"]>>;
+			try {
+				listings = await (await openProposalStore()).list();
+			} catch (error) {
+				throw dynamicFailure(error);
+			}
+			const views: DynamicWorkflowProposalListing[] = [];
+			for (const listing of listings) {
+				if ("issue" in listing) {
+					views.push(Object.freeze({ ref: listing.ref, issue: listing.issue }));
+					continue;
+				}
+				// One proposal's unreadable approval never fails the listing.
+				try {
+					views.push(
+						proposalView(
+							listing.proposal,
+							await readSourceApproval(listing.proposal),
+						),
+					);
+				} catch (error) {
+					const mapped = dynamicFailure(error);
+					if (!(mapped instanceof WorkflowServiceError)) throw error;
+					views.push(
+						Object.freeze({ ref: listing.ref, issue: mapped.message }),
+					);
+				}
+			}
+			return Object.freeze(views);
+		},
+		decideSource(ref: string, decisionOptions: DynamicSourceDecisionOptions) {
+			return exclusive(async () => {
+				assertOpen();
+				assertDynamicTrusted();
+				const sourceSha256 = parseDynamicReference(ref);
+				const { decision, approver, reason } =
+					(decisionOptions as Partial<DynamicSourceDecisionOptions> | null) ??
+					{};
+				try {
+					const decided = await decideDynamicSource({
+						store: await openProposalStore(),
+						sourceSha256,
+						decision: decision as DynamicSourceDecision,
+						approver: approver as DynamicSourceApprover,
+						...(reason === undefined ? {} : { reason }),
+						cwd,
+						hostApiSha256: deriveDynamicHostApiSha256(),
+						importPolicySha256: deriveDynamicImportPolicySha256(supportHelpers),
+					});
+					return proposalView(decided.proposal, decided.approval);
+				} catch (error) {
+					throw dynamicFailure(error);
+				}
+			});
+		},
 		shutdown() {
 			return exclusive(async () => {
 				if (closed) return;
@@ -1696,6 +2705,12 @@ export async function createWorkflowService(
 					(left, right) => left.record.depth - right.record.depth,
 				);
 				const depths = [...new Set(runs.map((run) => run.record.depth))];
+				// A parked run is settled and never stopped: its lease is released
+				// and a later session resumes it through wait, decide, or stop.
+				for (const run of runs) {
+					if (run.watchdog) clearTimeout(run.watchdog);
+					delete run.watchdog;
+				}
 				for (const depth of depths) {
 					await Promise.all(
 						runs

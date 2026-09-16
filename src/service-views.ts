@@ -1,5 +1,8 @@
 import { type Static, type TSchema, Type } from "typebox";
 import {
+	CheckpointDecisionSourceSchema,
+	CheckpointHeadlessPolicySchema,
+	JsonSchemaDocumentSchema,
 	MAX_TASK_KEY_LENGTH,
 	MAX_TASK_NAMESPACE_DEPTH,
 	NestedWorkflowInputArtifactsSchema,
@@ -20,6 +23,13 @@ import {
 	WorkflowTaskIdSchema,
 	WorkflowTaskStatusSchema,
 } from "./contracts.js";
+import {
+	DynamicSourceApproverSchema,
+	DynamicSourceDecisionSchema,
+	DynamicTransformerIdentitySchema,
+	DynamicWorkflowManifestSchema,
+	DynamicWorkflowProposerSchema,
+} from "./dynamic/contracts.js";
 import { TaskExecutionProjectionSchema } from "./events.js";
 
 /**
@@ -43,13 +53,22 @@ const TaskKindSchema = Type.Union([
 	Type.Literal("agent"),
 	Type.Literal("support"),
 	Type.Literal("workflow"),
+	Type.Literal("checkpoint"),
 ]);
+const ApproverSchema = Type.String({ minLength: 1, maxLength: 256 });
+const DynamicRefSchema = Type.String({ pattern: "^dynamic:[a-f0-9]{64}$" });
 
 export const MAX_WORKFLOW_RUN_PAGE_SIZE = 100;
 export const MAX_WORKFLOW_RUN_LIST_ISSUES = 16;
 export const MAX_WORKFLOW_INSPECTION_ITEMS = 256;
 export const MAX_WORKFLOW_LOG_PAGE_SIZE = 500;
 export const MAX_WORKFLOW_WAIT_TIMEOUT_MS = 2_147_483_647;
+/**
+ * Checkpoint prompts shown by the lease-free inspection are cut to this many
+ * characters and marked `promptTruncated`; artifact-backed views (status,
+ * wait, decide) carry the whole contract-bounded prompt.
+ */
+export const MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH = 256;
 /**
  * `${namespace.join("/")}/${key}` at the contract bounds: every namespace
  * entry is followed by "/" and the key closes the path (4256).
@@ -137,6 +156,8 @@ export const WorkflowRunSummarySchema = Type.Object(
 			uniqueItems: true,
 		}),
 		requiresAttention: Type.Boolean(),
+		/** On-path checkpoints awaiting a decision; `decide` is offered while it is positive. */
+		pendingCheckpointCount: CountSchema,
 		outputArtifactId: Type.Optional(WorkflowArtifactIdSchema),
 	},
 	{ additionalProperties: false },
@@ -225,6 +246,55 @@ export const WorkflowSettlementViewSchema = Type.Object(
 );
 export type WorkflowSettlementView = View<typeof WorkflowSettlementViewSchema>;
 
+export const WorkflowCheckpointDecisionViewSchema = Type.Object(
+	{
+		source: CheckpointDecisionSourceSchema,
+		decidedBy: Type.Optional(ApproverSchema),
+		decidedAt: TimestampSchema,
+		reason: Type.Optional(FixedStringSchema),
+		/** Canonical digest of the decision value (the result artifact's `sha256`). */
+		sha256: Sha256Schema,
+		/** The verified decision value; artifact-backed views only. */
+		value: Type.Optional(Type.Unknown()),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowCheckpointDecisionView = View<
+	typeof WorkflowCheckpointDecisionViewSchema
+>;
+
+/**
+ * A checkpoint task's request and, once the execution has them, its durable
+ * request and decision facts. Everything here is derived from the persisted
+ * task spec and the execution projection; the decision store is never read.
+ */
+export const WorkflowCheckpointTaskViewSchema = Type.Object(
+	{
+		prompt: FixedStringSchema,
+		/** The prompt was cut to `MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH` characters. */
+		promptTruncated: Type.Optional(Type.Literal(true)),
+		schema: JsonSchemaDocumentSchema,
+		headless: CheckpointHeadlessPolicySchema,
+		default: Type.Optional(Type.Unknown()),
+		timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000 })),
+		/** Present once the request is durable. */
+		requestedAt: Type.Optional(TimestampSchema),
+		expiresAt: Type.Optional(TimestampSchema),
+		/** Verified input values shown to the approver; artifact-backed views only. */
+		inputs: Type.Optional(
+			Type.Record(TaskKeySchema, Type.Unknown(), {
+				additionalProperties: false,
+				maxProperties: 64,
+			}),
+		),
+		decision: Type.Optional(WorkflowCheckpointDecisionViewSchema),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowCheckpointTaskView = View<
+	typeof WorkflowCheckpointTaskViewSchema
+>;
+
 export const WorkflowServiceTaskViewSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
@@ -252,6 +322,8 @@ export const WorkflowServiceTaskViewSchema = Type.Object(
 		 * worktree task that recorded no handoff under the optional policy.
 		 */
 		handoff: Type.Optional(WorkflowHandoffDescriptorSchema),
+		/** Present for every checkpoint task. */
+		checkpoint: Type.Optional(WorkflowCheckpointTaskViewSchema),
 		/** Sorted `after` dependency ids; inspection only. */
 		dependsOn: Type.Optional(
 			Type.Array(WorkflowTaskIdSchema, { maxItems: 256, uniqueItems: true }),
@@ -268,6 +340,23 @@ export const WorkflowServiceTaskViewSchema = Type.Object(
 );
 export type WorkflowServiceTaskView = View<
 	typeof WorkflowServiceTaskViewSchema
+>;
+
+export const WorkflowPendingCheckpointViewSchema = Type.Object(
+	{
+		taskId: WorkflowTaskIdSchema,
+		namespace: Type.Array(TaskKeySchema, {
+			maxItems: MAX_TASK_NAMESPACE_DEPTH,
+		}),
+		key: TaskKeySchema,
+		executionId: TaskExecutionIdSchema,
+		requestedAt: TimestampSchema,
+		expiresAt: Type.Optional(TimestampSchema),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowPendingCheckpointView = View<
+	typeof WorkflowPendingCheckpointViewSchema
 >;
 
 const RunViewProperties = {
@@ -287,6 +376,28 @@ const RunViewProperties = {
 			maxItems: MAX_WORKFLOW_INSPECTION_ITEMS,
 		}),
 	),
+	/**
+	 * On-path checkpoints awaiting a decision, in materialization order;
+	 * present whenever `tasks` is, empty unless a checkpoint waits.
+	 */
+	pendingCheckpoints: Type.Optional(
+		Type.Array(WorkflowPendingCheckpointViewSchema, {
+			maxItems: MAX_WORKFLOW_INSPECTION_ITEMS,
+		}),
+	),
+	/** Present iff the run executes an approved dynamic proposal (`definitionKind: "dynamic"`). */
+	dynamic: Type.Optional(
+		Type.Object(
+			{
+				ref: DynamicRefSchema,
+				sourceSha256: Sha256Schema,
+				/** Digest of the copied approval record the run was created under. */
+				approvalSha256: Sha256Schema,
+				hostApiSha256: Sha256Schema,
+			},
+			{ additionalProperties: false },
+		),
+	),
 };
 
 export const WorkflowServiceRunViewSchema = Type.Object(RunViewProperties, {
@@ -295,7 +406,12 @@ export const WorkflowServiceRunViewSchema = Type.Object(RunViewProperties, {
 export type WorkflowServiceRunView = View<typeof WorkflowServiceRunViewSchema>;
 
 export const WorkflowServiceWaitViewSchema = Type.Object(
-	{ ...RunViewProperties, timedOut: Type.Optional(Type.Literal(true)) },
+	{
+		...RunViewProperties,
+		timedOut: Type.Optional(Type.Literal(true)),
+		/** The drive settled at a checkpoint; `decide` restarts it. */
+		parked: Type.Optional(Type.Literal(true)),
+	},
 	{ additionalProperties: false },
 );
 export type WorkflowServiceWaitView = View<
@@ -311,6 +427,17 @@ export const WorkflowWaitOptionsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type WorkflowWaitOptions = View<typeof WorkflowWaitOptionsSchema>;
+
+export const WorkflowDecideOptionsSchema = Type.Object(
+	{
+		/** The decision value; validated against the checkpoint's schema by the executor. */
+		decision: Type.Unknown(),
+		approver: ApproverSchema,
+		reason: Type.Optional(FixedStringSchema),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowDecideOptions = View<typeof WorkflowDecideOptionsSchema>;
 
 const ExecutionPhaseSchema = TaskExecutionProjectionSchema.properties.phase;
 
@@ -610,6 +737,7 @@ export const WorkflowLogKindSchema = Type.Union([
 	Type.Literal("attempt"),
 	Type.Literal("terminal"),
 	Type.Literal("invalidation"),
+	Type.Literal("checkpoint"),
 ]);
 export type WorkflowLogKind = Static<typeof WorkflowLogKindSchema>;
 
@@ -707,3 +835,39 @@ export const WorkflowInvalidationPreviewSchema = Type.Object(
 export type WorkflowInvalidationPreview = View<
 	typeof WorkflowInvalidationPreviewSchema
 >;
+/**
+ * Mirrors the service's `DynamicWorkflowProposalView` (dynamic-workflow spec
+ * 3.5): what `workflow_propose` returns. The source text is never part of it.
+ */
+export const DynamicWorkflowProposalViewSchema = Type.Object(
+	{
+		ref: DynamicRefSchema,
+		sourceSha256: Sha256Schema,
+		sourceBytes: Type.Integer({ minimum: 1 }),
+		manifest: DynamicWorkflowManifestSchema,
+		manifestSha256: Sha256Schema,
+		hostApiSha256: Sha256Schema,
+		importPolicySha256: Sha256Schema,
+		definitionIdentitySha256: Sha256Schema,
+		transformer: DynamicTransformerIdentitySchema,
+		proposer: DynamicWorkflowProposerSchema,
+		proposedAt: TimestampSchema,
+		decision: Type.Optional(
+			Type.Object(
+				{
+					decision: DynamicSourceDecisionSchema,
+					approver: DynamicSourceApproverSchema,
+					approvedAt: TimestampSchema,
+					approvalSha256: Sha256Schema,
+					reason: Type.Optional(FixedStringSchema),
+				},
+				{ additionalProperties: false },
+			),
+		),
+		/** true iff decision is "approved" and both digests equal the current ones. */
+		runnable: Type.Boolean(),
+		/** `<storeRoot>/dynamic/<sha>/source.workflow.ts` */
+		path: Type.String({ minLength: 1, maxLength: 4096 }),
+	},
+	{ additionalProperties: false },
+);

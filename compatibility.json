@@ -3,7 +3,11 @@
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
 		"version": "0.1.0",
-		"contractRevision": 17
+		"contractRevision": 18,
+		"features": {
+			"checkpoints": true,
+			"dynamicWorkflows": true
+		}
 	},
 	"piSubagent": {
 		"package": "@vegardx/pi-subagent",
@@ -48,6 +52,10 @@
 	},
 	"typebox": {
 		"peerRange": ">=1.3.14 <2"
+	},
+	"transformer": {
+		"package": "amaro",
+		"version": "1.2.0"
 	},
 	"hosts": [
 		{
