@@ -71,6 +71,13 @@ revision; it may not lose or retype fields under the same major.
 **Persisted state.** Runs journaled by revision 18 are readable by every 1.x
 release; a release that cannot read them is a major.
 
+**1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
+`registeredRoots`, and the package ships its own `workflows/` directory, which
+the extension registers as a `builtin` root (see
+[Definition roots](#definition-roots)). No frozen export, shape, schema,
+message, tool, or contract revision changed; `WORKFLOW_CONTRACT_REVISION`
+stays 18.
+
 ## Static definition
 
 A saved workflow uses a `.workflow.ts`, `.workflow.mts`, `.workflow.js`, or
@@ -178,6 +185,56 @@ with the same messages, applies to dynamic workflow source proposed through
 one default export and no named or re-exports ("dynamic workflow source must
 have exactly one default export and no named exports"). See
 [Dynamic workflows](#dynamic-workflows).
+
+### Definition roots
+
+Discovery visits `<cwd>/workflows` and `<cwd>/.pi/workflows` (scope
+`project`), `<agentDir>/workflows` (scope `global`), and then every root the
+embedder registered (scope `package` or `builtin`, in that order, each sorted
+by path). A registered root of any other scope is rejected ("registered
+workflow roots must use package or builtin scope"); a directory reachable
+through two roots is rejected ("duplicate workflow root …"); names are unique
+across all roots.
+
+Project roots require Pi project trust and otherwise fail closed with
+`WorkflowDefinitionTrustError` before any module is evaluated. Registered
+`package` and `builtin` roots do not: they are trusted by their installation
+source, exactly like `<agentDir>/workflows`. The gate is the install, not the
+project.
+
+pi-workflow itself ships definitions in `workflows/` inside the tarball
+(declared by `files` and by the `pi.workflows` manifest key) and its extension
+registers that directory as `{ scope: "builtin", source: "package" }` when it
+creates the service, so those definitions are listed, validated, and runnable
+in any project without a trust prompt. They are trusted package code and are
+held to the same review as `src/`. They are loaded from source by the same
+jiti loader as any other definition, so imports resolve from the definition's
+own location — inside the installed package, where `@vegardx/pi-workflow`
+resolves to the package itself and `typebox` to the peer the consumer
+installed. No compiled copy under `dist/` is involved. When the project being
+worked in *is* the pi-workflow checkout, that directory is already
+`<cwd>/workflows`; the extension then omits the builtin root and the
+definitions load under `project` scope with the usual trust gate.
+
+The shipped builtin is `plan-to-ship` (`plan -> approve -> implement -> ship`):
+`refine` (read-only agent) -> `approve-plan` (checkpoint, `headless: "block"`)
+-> one `implement-<id>` worktree agent per deliverable with
+`handoff: "required"` -> `review/lens-N` (optional read-only reviewers over the
+plan's review tasks, each fed a handoff descriptor) -> `ship` (checkpoint,
+`headless: "block"`) -> `receipt` (required finalizer). Its input is a
+pi-maestro plan by value, that plan's sha256 digest, and an effort dial; its
+output is a receipt naming, per deliverable, the imported handoff descriptor
+and the durable ref `refs/pi-subagent/handoffs/<subagentRunId>/<attemptId>`,
+plus the approved `planDigest`. The workflow never pushes, merges, publishes,
+or applies a handoff: shipping is a cherry-pickable ref and a patch artifact.
+
+A root loads `*.workflow.ts|mts|js|mjs` only, so other files may live under
+one. `workflows/agents/{planner,implementer,reviewer}.md` uses that: the three
+agents `plan-to-ship` names travel with the package as **templates**, because
+pi-subagent discovers agents from `<agentDir>/agents` and a trusted
+`<cwd>/.pi/agents` and from nowhere else. A workflow cannot install an agent; a
+person copies the template, and a missing agent fails that task at pi-subagent
+preflight.
 
 ## Support-task descriptors
 
@@ -1578,7 +1635,12 @@ stop. Every run view carries `depth` and, for a linked child run,
 `parent: { runId, taskId, inputArtifacts }`, where `inputArtifacts` is the
 record's injected artifact identity map; a child run is addressable by its own
 run ID for status, wait, stop, reconcile, inspect, and logs.
-`createWorkflowService` accepts an optional `supportTasks` registration list
+`createWorkflowService` accepts an optional `registeredRoots` list of
+`package`/`builtin` roots (the constructor form of `registerRoot`, validated
+the same way and reported as `validation` "Registered roots must be package or
+builtin scope."; unlike `registerRoot` it does not discover eagerly, so a
+package can contribute definitions without forcing a project-trust decision at
+service creation), an optional `supportTasks` registration list
 that becomes the frozen constructor registry and supplies the nested run
 provider to every run it composes, and an optional
 `checkpoints: { headless?: boolean }` policy (default `{ headless: false }`;
