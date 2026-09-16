@@ -1,11 +1,19 @@
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import type { WorkflowRunId, WorkflowTaskId } from "../contracts.js";
 import {
+	DYNAMIC_REF_PATTERN,
+	DYNAMIC_REF_PREFIX,
+} from "../dynamic/constants.js";
+import type { DynamicSourceApprover } from "../dynamic/contracts.js";
+import {
 	IMPLEMENTED_WORKFLOW_RUN_ACTIONS,
 	WORKFLOW_RUN_ACTIONS,
 	type WorkflowRunAction,
 } from "../run-actions.js";
-import type { WorkflowService } from "../service.js";
+import type {
+	DynamicWorkflowProposalView,
+	WorkflowService,
+} from "../service.js";
 import type {
 	WorkflowInvalidationPreview,
 	WorkflowLogEntry,
@@ -26,25 +34,31 @@ export const WORKFLOW_COMMAND = "workflow";
 
 /**
  * Run actions the grammar offers: every action implemented by this build
- * except `wait` (its own subcommand) and `decide` (checkpoints have no
- * operator grammar yet). Deriving the list from the implemented set means the
- * grammar can never advertise a service method that does not exist.
+ * except `wait` (its own subcommand). Deriving the list from the implemented
+ * set means the grammar can never advertise a service method that does not
+ * exist. `decide` is a human authority act: it is a command and never a tool.
  */
 export const WORKFLOW_ACTION_SUBCOMMANDS: readonly WorkflowRunAction[] =
 	Object.freeze(
 		WORKFLOW_RUN_ACTIONS.filter(
 			(action) =>
-				IMPLEMENTED_WORKFLOW_RUN_ACTIONS.has(action) &&
-				action !== "wait" &&
-				action !== "decide",
+				IMPLEMENTED_WORKFLOW_RUN_ACTIONS.has(action) && action !== "wait",
 		),
 	);
+
+/** Definition-level human decisions about proposed dynamic sources. */
+export const SOURCE_DECISION_SUBCOMMANDS = Object.freeze([
+	"approve",
+	"reject",
+] as const);
+export type SourceDecisionKind = (typeof SOURCE_DECISION_SUBCOMMANDS)[number];
 
 export const WORKFLOW_SUBCOMMANDS: readonly string[] = Object.freeze([
 	"list",
 	"runs",
 	"validate",
 	"run",
+	...SOURCE_DECISION_SUBCOMMANDS,
 	"show",
 	"status",
 	"logs",
@@ -71,6 +85,20 @@ export const DEFAULT_STOP_REASON = "Stopped by operator.";
 export const DEFAULT_INVALIDATE_REASON = "Invalidated by operator.";
 export const DEFAULT_RETRY_REASON = "Retried by operator.";
 export const DEFAULT_RESUME_REASON = "Resumed by operator.";
+/**
+ * The checkpoint approver when the pinned Pi extension API exposes no user
+ * identity; never taken from command arguments or a model.
+ */
+export const DEFAULT_DECIDE_APPROVER = "pi-session";
+export const CHECKPOINT_DECISION_INVALID_JSON_MESSAGE =
+	"Checkpoint decision is not valid JSON.";
+export const DYNAMIC_REF_USAGE_MESSAGE =
+	"Dynamic workflow reference must be dynamic:<64 hex characters>.";
+export const SOURCE_DECISION_REQUIRES_UI_MESSAGE =
+	"Dynamic workflow approval requires an interactive Pi session.";
+export const CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE =
+	"Checkpoint decisions require an interactive Pi session.";
+export const SOURCE_DECISION_CANCELLED_MESSAGE = "No decision recorded.";
 
 export type ParsedWorkflowCommand =
 	| { kind: "inspector" }
@@ -85,7 +113,15 @@ export type ParsedWorkflowCommand =
 	| { kind: "reconcile"; runPrefix: string; taskKey?: string }
 	| { kind: "invalidate"; runPrefix: string; taskKey: string; reason?: string }
 	| { kind: "retry"; runPrefix: string; taskKey: string; reason?: string }
-	| { kind: "resume"; runPrefix: string; taskKey?: string };
+	| { kind: "resume"; runPrefix: string; taskKey?: string }
+	| {
+			kind: "decide";
+			runPrefix: string;
+			taskKey: string;
+			decision: unknown;
+			reason?: string;
+	  }
+	| { kind: SourceDecisionKind; ref: string; reason?: string };
 
 /** An operator mistake (grammar, addressing, legality); shown as a warning. */
 export class WorkflowCommandError extends Error {
@@ -116,6 +152,94 @@ export function parseWorkflowInput(text: string): unknown {
 	} catch {
 		throw new WorkflowCommandError("Workflow input is not valid JSON.");
 	}
+}
+
+/**
+ * Splits on whitespace, except that a token opening with `'`, `"`, `{`, or
+ * `[` runs to its closing quote or matching bracket (JSON string literals and
+ * their escapes are honoured inside brackets), so a JSON decision with spaces
+ * travels as one token. Quotes stay in the token; `parseCheckpointDecision`
+ * strips a wrapping pair.
+ */
+export function splitQuoted(text: string): string[] {
+	const tokens: string[] = [];
+	let index = 0;
+	while (index < text.length) {
+		const start = text[index] ?? "";
+		if (/\s/.test(start)) {
+			index += 1;
+			continue;
+		}
+		let end = index;
+		if (start === "'" || start === '"') {
+			end = closingQuote(text, index, start);
+		} else if (start === "{" || start === "[") {
+			end = closingBracket(text, index);
+		}
+		// A quote or bracket left open, or a plain word, runs to the next space.
+		if (end <= index) {
+			end = index;
+			while (end < text.length && !/\s/.test(text[end] ?? "")) end += 1;
+		}
+		tokens.push(text.slice(index, end));
+		index = end;
+	}
+	return tokens;
+}
+
+/** Index after the quote closing the one at `open`; `-1` when it never closes. */
+function closingQuote(text: string, open: number, quote: string): number {
+	for (let index = open + 1; index < text.length; index += 1) {
+		const character = text[index];
+		if (character === "\\" && quote === '"') {
+			index += 1;
+		} else if (character === quote) {
+			return index + 1;
+		}
+	}
+	return -1;
+}
+
+/** Index after the bracket matching the one at `open`; `-1` when unbalanced. */
+function closingBracket(text: string, open: number): number {
+	let depth = 0;
+	for (let index = open; index < text.length; index += 1) {
+		const character = text[index];
+		if (character === '"') {
+			const end = closingQuote(text, index, '"');
+			if (end < 0) return -1;
+			index = end - 1;
+		} else if (character === "{" || character === "[") {
+			depth += 1;
+		} else if (character === "}" || character === "]") {
+			depth -= 1;
+			if (depth === 0) return index + 1;
+		}
+	}
+	return -1;
+}
+
+/**
+ * The `<json>` token of `decide`: the token itself, or its content when a
+ * wrapping quote pair only groups it (`'{"proceed": true}'`). A JSON string
+ * literal (`"ship"`) still parses as the string.
+ */
+export function parseCheckpointDecision(token: string): unknown {
+	const candidates = [token];
+	const first = token[0];
+	if (
+		token.length >= 2 &&
+		(first === "'" || first === '"') &&
+		token.endsWith(first)
+	) {
+		candidates.unshift(token.slice(1, -1));
+	}
+	for (const candidate of candidates) {
+		try {
+			return JSON.parse(candidate);
+		} catch {}
+	}
+	throw new WorkflowCommandError(CHECKPOINT_DECISION_INVALID_JSON_MESSAGE);
 }
 
 function boundedInteger(
@@ -158,6 +282,16 @@ export function parseWorkflowCommand(args: string): ParsedWorkflowCommand {
 						ref: second,
 						input: parseWorkflowInput(remainder),
 					}
+				: { kind: subcommand, ref: second };
+		}
+		case "approve":
+		case "reject": {
+			if (!second) {
+				usage(`Usage: /workflow ${subcommand} dynamic:<sha256> [reason]`);
+			}
+			if (!DYNAMIC_REF_PATTERN.test(second)) usage(DYNAMIC_REF_USAGE_MESSAGE);
+			return rest.length > 0
+				? { kind: subcommand, ref: second, reason: rest.join(" ") }
 				: { kind: subcommand, ref: second };
 		}
 	}
@@ -224,6 +358,26 @@ export function parseWorkflowCommand(args: string): ParsedWorkflowCommand {
 				? { kind: subcommand, runPrefix, taskKey, reason: reason.join(" ") }
 				: { kind: subcommand, runPrefix, taskKey };
 		}
+		case "decide": {
+			// Re-tokenised with quoting so the JSON decision is one token; the
+			// decision is parsed here, before any run is resolved.
+			const [, , taskKey, json, ...reason] = splitQuoted(trimmed);
+			if (!taskKey || !json) {
+				usage(
+					"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
+				);
+			}
+			const decision = parseCheckpointDecision(json);
+			return reason.length > 0
+				? {
+						kind: "decide",
+						runPrefix,
+						taskKey,
+						decision,
+						reason: reason.join(" "),
+					}
+				: { kind: "decide", runPrefix, taskKey, decision };
+		}
 	}
 	return unknownCommand(subcommand);
 }
@@ -231,12 +385,14 @@ export function parseWorkflowCommand(args: string): ParsedWorkflowCommand {
 /**
  * Argument completions for `/workflow`: subcommands on the first token; on
  * the second token, known run ids (from the widget's last page, TUI only) for
- * run-addressed subcommands and `--all` for `runs`. Pi replaces the whole
+ * run-addressed subcommands, `--all` for `runs`, and undecided proposal refs
+ * (or the `dynamic:` prefix) for `approve`/`reject`. Pi replaces the whole
  * argument text with `value`, so second-token values carry the subcommand.
  */
 export function workflowArgumentCompletions(
 	prefix: string,
 	knownRunIds: readonly string[],
+	knownProposalRefs: readonly string[] = [],
 ): AutocompleteItem[] | null {
 	const tokens = prefix.trimStart().split(/\s+/);
 	const [subcommand = "", partial] = tokens;
@@ -250,6 +406,21 @@ export function workflowArgumentCompletions(
 	if (subcommand === "runs") {
 		return "--all".startsWith(partial)
 			? [{ value: "runs --all", label: "--all" }]
+			: null;
+	}
+	if (subcommand === "approve" || subcommand === "reject") {
+		const refs = knownProposalRefs.filter((ref) => ref.startsWith(partial));
+		if (refs.length > 0) {
+			return refs.map((ref) => ({ value: `${subcommand} ${ref}`, label: ref }));
+		}
+		return DYNAMIC_REF_PREFIX.startsWith(partial) &&
+			partial !== DYNAMIC_REF_PREFIX
+			? [
+					{
+						value: `${subcommand} ${DYNAMIC_REF_PREFIX}`,
+						label: DYNAMIC_REF_PREFIX,
+					},
+				]
 			: null;
 	}
 	if (!RUN_SUBCOMMANDS.has(subcommand)) return null;
@@ -348,8 +519,8 @@ export async function collectLogTail(
 // Action dispatch
 // ---------------------------------------------------------------------------
 
-/** Actions an operator can request; `decide` waits for checkpoints. */
-export type OperatorAction = Exclude<WorkflowRunAction, "decide">;
+/** Actions an operator can request from the command line. */
+export type OperatorAction = WorkflowRunAction;
 
 export const ACTION_LABELS: Record<OperatorAction, string> = {
 	stop: "Stop run",
@@ -358,9 +529,13 @@ export const ACTION_LABELS: Record<OperatorAction, string> = {
 	invalidate: "Invalidate a task and its dependents",
 	retry: "Retry failed work",
 	resume: "Resume interrupted child",
+	decide: "Decide a checkpoint",
 };
 
-/** Fixed confirmation texts; invalidate's is composed by `invalidateConsequence`. */
+/**
+ * Fixed confirmation texts; invalidate's is composed by `invalidateConsequence`
+ * and decide's by `decideConsequence`.
+ */
 export const ACTION_CONSEQUENCES: Record<"stop" | "retry" | "resume", string> =
 	{
 		stop: "Stop intent is persisted, active delegated work is interrupted, and terminal evidence is drained. The run ends cancelled.",
@@ -370,9 +545,13 @@ export const ACTION_CONSEQUENCES: Record<"stop" | "retry" | "resume", string> =
 			"The interrupted child continues as a new attempt and consumes remaining workflow budget.",
 	};
 
-/** Actions that ask for confirmation when a UI is available; reconcile and wait never do. */
+/**
+ * Actions that ask for confirmation when a UI is available; reconcile and
+ * wait never do. `decide` additionally refuses without a UI: a checkpoint
+ * decision is a human act and is never recorded unconfirmed.
+ */
 export const CONFIRMED_ACTIONS: ReadonlySet<OperatorAction> =
-	new Set<OperatorAction>(["stop", "invalidate", "retry", "resume"]);
+	new Set<OperatorAction>(["stop", "invalidate", "retry", "resume", "decide"]);
 
 /** The confirmation text for `invalidate`, from the service's preview only. */
 export function invalidateConsequence(
@@ -387,6 +566,18 @@ export function invalidateConsequence(
 	} epoch(s) after the exposing barrier are abandoned, retiring ${
 		preview.abandonedTaskIds.length
 	} declaration(s). Effects after that barrier are marked abandoned.`;
+}
+
+/**
+ * The confirmation text for `decide`: the checkpoint's prompt from the task
+ * view and the parsed decision, exactly as it will be recorded.
+ */
+export function decideConsequence(
+	task: Pick<WorkflowServiceTaskView, "namespace" | "key" | "checkpoint">,
+	decision: unknown,
+): string {
+	const prompt = task.checkpoint?.prompt ?? "(no checkpoint request)";
+	return `Checkpoint ${taskPath(task)}: ${prompt}\nDecision: ${JSON.stringify(decision)}\nThe decision is recorded once, immutably, and the run continues from it.`;
 }
 
 export function actionUnavailableMessage(
@@ -408,6 +599,10 @@ export interface ActionRequest {
 	readonly timeoutMs?: number;
 	/** Closure already fetched for the confirmation dialog. */
 	readonly preview?: WorkflowInvalidationPreview;
+	/** The parsed checkpoint decision (`decide`). */
+	readonly decision?: unknown;
+	/** The session identity recording a decision; never an argument. */
+	readonly approver?: string;
 }
 
 export interface ActionOutcome {
@@ -522,5 +717,81 @@ export async function performRunAction(
 				level: "info",
 			};
 		}
+		case "decide": {
+			if (!request.taskId || !("decision" in request)) {
+				usage(
+					"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
+				);
+			}
+			// The service validates the decision against the checkpoint schema
+			// and refuses a task that is not awaiting one; nothing is re-derived.
+			const view = await service.decide(runId, request.taskId, {
+				decision: request.decision,
+				approver: request.approver ?? DEFAULT_DECIDE_APPROVER,
+				...(request.reason ? { reason: request.reason } : {}),
+			});
+			return {
+				message: `decide accepted for ${runId}: ${request.taskKey ?? request.taskId} decided; run is ${view.status}.`,
+				level: "info",
+			};
+		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic source decisions
+// ---------------------------------------------------------------------------
+
+export interface SourceDecisionRequest {
+	readonly kind: SourceDecisionKind;
+	/** The proposal as inspected for the confirmation dialog. */
+	readonly view: Pick<DynamicWorkflowProposalView, "ref" | "decision">;
+	readonly approver: DynamicSourceApprover;
+	readonly reason?: string;
+}
+
+/** `/workflow approve` or `/workflow reject`: the recorded `via`. */
+export function sourceDecisionVia(kind: SourceDecisionKind): string {
+	return `/${WORKFLOW_COMMAND} ${kind}`;
+}
+
+export function sourceDecisionUnavailableMessage(
+	kind: SourceDecisionKind,
+	view: Pick<DynamicWorkflowProposalView, "ref" | "decision">,
+): string {
+	return `${kind} is unavailable: ${view.ref} is already ${view.decision?.decision ?? "decided"}.`;
+}
+
+/**
+ * Records one human decision about a proposed source after re-reading its
+ * decision state from the proposal view (the service refuses independently).
+ * The caller has already confirmed; a cancelled confirm never reaches here.
+ */
+export async function performSourceDecision(
+	service: Pick<WorkflowService, "decideSource">,
+	request: SourceDecisionRequest,
+): Promise<ActionOutcome> {
+	const { kind, view } = request;
+	if (view.decision) {
+		throw new WorkflowCommandError(
+			sourceDecisionUnavailableMessage(kind, view),
+		);
+	}
+	const decided = await service.decideSource(view.ref, {
+		decision: kind === "approve" ? "approved" : "rejected",
+		approver: request.approver,
+		...(request.reason ? { reason: request.reason } : {}),
+	});
+	if (kind === "approve") {
+		return {
+			message: decided.runnable
+				? `Approved ${decided.ref}. Run it with workflow_run or /workflow run ${decided.ref}.`
+				: `Approved ${decided.ref}, but it is not runnable under the current host API; propose the source again.`,
+			level: decided.runnable ? "info" : "warning",
+		};
+	}
+	return {
+		message: `Rejected ${decided.ref}. This source cannot be approved again; a changed source gets a new digest.`,
+		level: "info",
+	};
 }

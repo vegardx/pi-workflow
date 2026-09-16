@@ -1,31 +1,51 @@
-import { readdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { SubagentClient } from "@vegardx/pi-subagent";
 import { describe, expect, it, vi } from "vitest";
 import {
 	IMPLEMENTED_WORKFLOW_RUN_ACTIONS,
 	WORKFLOW_RUN_ACTIONS,
 } from "../src/run-actions.js";
-import type { WorkflowService } from "../src/service.js";
+import {
+	createWorkflowService,
+	type WorkflowService,
+	type WorkflowServiceOptions,
+} from "../src/service.js";
 import type {
 	WorkflowLogEntry,
 	WorkflowRunPage,
 	WorkflowRunSummary,
 	WorkflowServiceTaskView,
 } from "../src/service-views.js";
+import type {
+	WorkflowSubagentBinding,
+	WorkflowSubagentProvider,
+} from "../src/subagent-provider.js";
 import {
 	ACTION_LABELS,
 	actionUnavailableMessage,
+	CHECKPOINT_DECISION_INVALID_JSON_MESSAGE,
 	CONFIRMED_ACTIONS,
 	collectLogTail,
+	DEFAULT_DECIDE_APPROVER,
 	DEFAULT_INVALIDATE_REASON,
 	DEFAULT_RESUME_REASON,
 	DEFAULT_RETRY_REASON,
 	DEFAULT_STOP_REASON,
+	DYNAMIC_REF_USAGE_MESSAGE,
+	decideConsequence,
 	invalidateConsequence,
+	parseCheckpointDecision,
 	parseWorkflowCommand,
 	performRunAction,
+	performSourceDecision,
 	resolveRunPrefix,
 	resolveTaskKey,
+	SOURCE_DECISION_SUBCOMMANDS,
+	sourceDecisionUnavailableMessage,
+	sourceDecisionVia,
+	splitQuoted,
 	WORKFLOW_ACTION_SUBCOMMANDS,
 	WORKFLOW_SUBCOMMANDS,
 	WorkflowCommandError,
@@ -140,23 +160,25 @@ describe("/workflow grammar", () => {
 	it("derives the action subcommands from the implemented set only", () => {
 		const expected = WORKFLOW_RUN_ACTIONS.filter(
 			(action) =>
-				IMPLEMENTED_WORKFLOW_RUN_ACTIONS.has(action) &&
-				action !== "wait" &&
-				action !== "decide",
+				IMPLEMENTED_WORKFLOW_RUN_ACTIONS.has(action) && action !== "wait",
 		);
 		expect([...WORKFLOW_ACTION_SUBCOMMANDS]).toEqual(expected);
+		expect([...SOURCE_DECISION_SUBCOMMANDS]).toEqual(["approve", "reject"]);
 		expect([...WORKFLOW_SUBCOMMANDS]).toEqual([
 			"list",
 			"runs",
 			"validate",
 			"run",
+			"approve",
+			"reject",
 			"show",
 			"status",
 			"logs",
 			"wait",
 			...expected,
 		]);
-		expect(WORKFLOW_SUBCOMMANDS).not.toContain("decide");
+		// decide is a human command derived from the implemented set, never a tool.
+		expect(WORKFLOW_SUBCOMMANDS).toContain("decide");
 		for (const action of WORKFLOW_RUN_ACTIONS) {
 			if (!IMPLEMENTED_WORKFLOW_RUN_ACTIONS.has(action)) {
 				expect(WORKFLOW_SUBCOMMANDS).not.toContain(action);
@@ -164,14 +186,160 @@ describe("/workflow grammar", () => {
 		}
 		expect(Object.isFrozen(WORKFLOW_SUBCOMMANDS)).toBe(true);
 		expect(Object.keys(ACTION_LABELS).sort()).toEqual(
-			WORKFLOW_RUN_ACTIONS.filter((action) => action !== "decide").sort(),
+			[...WORKFLOW_RUN_ACTIONS].sort(),
 		);
 		expect([...CONFIRMED_ACTIONS].sort()).toEqual([
+			"decide",
 			"invalidate",
 			"resume",
 			"retry",
 			"stop",
 		]);
+		expect(DEFAULT_DECIDE_APPROVER).toBe("pi-session");
+	});
+
+	it("parses decide with a quoted JSON token and joins the reason", () => {
+		expect(splitQuoted(`a  'b c' "d e" f`)).toEqual([
+			"a",
+			"'b c'",
+			'"d e"',
+			"f",
+		]);
+		expect(splitQuoted(`x '{"a": 1}' tail`)).toEqual([
+			"x",
+			`'{"a": 1}'`,
+			"tail",
+		]);
+		expect(splitQuoted(`x {"a": 1, "b": "c d"} tail`)).toEqual([
+			"x",
+			`{"a": 1, "b": "c d"}`,
+			"tail",
+		]);
+		expect(splitQuoted(`[1, 2, {"k": "v w"}] "q r" 'e f' end`)).toEqual([
+			`[1, 2, {"k": "v w"}]`,
+			'"q r"',
+			"'e f'",
+			"end",
+		]);
+		expect(splitQuoted(`{"a": "b\\" c"} next`)).toEqual([
+			`{"a": "b\\" c"}`,
+			"next",
+		]);
+		// Unbalanced openers fall back to whitespace splitting.
+		expect(splitQuoted(`{"a": 1 tail`)).toEqual([`{"a":`, "1", "tail"]);
+		expect(splitQuoted(`'open tail`)).toEqual(["'open", "tail"]);
+		expect(parseCheckpointDecision("true")).toBe(true);
+		expect(parseCheckpointDecision('"ship"')).toBe("ship");
+		expect(parseCheckpointDecision(`'{"proceed": true}'`)).toEqual({
+			proceed: true,
+		});
+		expect(parseCheckpointDecision(`{"proceed": false}`)).toEqual({
+			proceed: false,
+		});
+		expect(() => parseCheckpointDecision("{nope")).toThrow(
+			CHECKPOINT_DECISION_INVALID_JSON_MESSAGE,
+		);
+		expect(parseWorkflowCommand("decide workflow_ab approve true")).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "approve",
+			decision: true,
+		});
+		expect(
+			parseWorkflowCommand(
+				`decide workflow_ab review/approve '{"proceed": true, "note": "ship it"}' Reviewed  the plan`,
+			),
+		).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "review/approve",
+			decision: { proceed: true, note: "ship it" },
+			reason: "Reviewed the plan",
+		});
+		expect(
+			parseWorkflowCommand('decide workflow_ab approve {"proceed":true}'),
+		).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "approve",
+			decision: { proceed: true },
+		});
+		expect(
+			parseWorkflowCommand(
+				'decide workflow_ab approve {"proceed": true, "note": "a b"} because',
+			),
+		).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "approve",
+			decision: { proceed: true, note: "a b" },
+			reason: "because",
+		});
+		expect(
+			parseWorkflowCommand('decide workflow_ab approve "text" by vegard'),
+		).toEqual({
+			kind: "decide",
+			runPrefix: "workflow_ab",
+			taskKey: "approve",
+			decision: "text",
+			reason: "by vegard",
+		});
+		const usage =
+			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]";
+		expect(() => parseWorkflowCommand("decide")).toThrow(
+			"Run prefix required for decide.",
+		);
+		expect(() => parseWorkflowCommand("decide workflow_ab")).toThrow(usage);
+		expect(() => parseWorkflowCommand("decide workflow_ab approve")).toThrow(
+			usage,
+		);
+		expect(() =>
+			parseWorkflowCommand("decide workflow_ab approve {not json}"),
+		).toThrow(CHECKPOINT_DECISION_INVALID_JSON_MESSAGE);
+		expect(() =>
+			parseWorkflowCommand("decide workflow_ab approve {a: 1} reason"),
+		).toThrow(CHECKPOINT_DECISION_INVALID_JSON_MESSAGE);
+	});
+
+	it("parses approve and reject with a dynamic ref and an optional reason", () => {
+		const ref = `dynamic:${"a".repeat(64)}`;
+		expect(parseWorkflowCommand(`approve ${ref}`)).toEqual({
+			kind: "approve",
+			ref,
+		});
+		expect(parseWorkflowCommand(`approve ${ref} looks  safe`)).toEqual({
+			kind: "approve",
+			ref,
+			reason: "looks safe",
+		});
+		expect(parseWorkflowCommand(`reject ${ref}`)).toEqual({
+			kind: "reject",
+			ref,
+		});
+		expect(parseWorkflowCommand(`reject ${ref} writes outside cwd`)).toEqual({
+			kind: "reject",
+			ref,
+			reason: "writes outside cwd",
+		});
+		expect(() => parseWorkflowCommand("approve")).toThrow(
+			"Usage: /workflow approve dynamic:<sha256> [reason]",
+		);
+		expect(() => parseWorkflowCommand("reject")).toThrow(
+			"Usage: /workflow reject dynamic:<sha256> [reason]",
+		);
+		for (const bad of [
+			"workflow_ab",
+			"dynamic:",
+			`dynamic:${"a".repeat(63)}`,
+			`dynamic:${"A".repeat(64)}`,
+			"a".repeat(64),
+		]) {
+			expect(() => parseWorkflowCommand(`approve ${bad}`)).toThrow(
+				DYNAMIC_REF_USAGE_MESSAGE,
+			);
+		}
+		expect(sourceDecisionVia("approve")).toBe("/workflow approve");
+		expect(sourceDecisionVia("reject")).toBe("/workflow reject");
 	});
 
 	it("parses every grammar line", () => {
@@ -308,7 +476,7 @@ describe("/workflow grammar", () => {
 			expect(resume).toThrow(/^Unknown workflow command: resume\./);
 		}
 		expect(() => parseWorkflowCommand("decide workflow_ab")).toThrow(
-			/^Unknown workflow command: decide\./,
+			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
 		);
 	});
 
@@ -403,6 +571,34 @@ describe("/workflow grammar", () => {
 		expect(workflowArgumentCompletions("run ", runIds)).toBeNull();
 		expect(workflowArgumentCompletions("show workflow_a x", runIds)).toBeNull();
 		expect(workflowArgumentCompletions("bogus ", runIds)).toBeNull();
+		expect(workflowArgumentCompletions("dec", runIds)).toEqual([
+			{ value: "decide", label: "decide" },
+		]);
+		expect(workflowArgumentCompletions("decide workflow_z", runIds)).toEqual([
+			{ value: "decide workflow_zzz999", label: "workflow_zzz999" },
+		]);
+	});
+
+	it("completes approve and reject with undecided proposal refs or the dynamic: prefix", () => {
+		const refs = [`dynamic:${"a".repeat(64)}`, `dynamic:${"b".repeat(64)}`];
+		expect(workflowArgumentCompletions("approve ", [], refs)).toEqual(
+			refs.map((ref) => ({ value: `approve ${ref}`, label: ref })),
+		);
+		expect(workflowArgumentCompletions("reject dynamic:b", [], refs)).toEqual([
+			{ value: `reject ${refs[1]}`, label: refs[1] },
+		]);
+		expect(workflowArgumentCompletions("approve ", [])).toEqual([
+			{ value: "approve dynamic:", label: "dynamic:" },
+		]);
+		expect(workflowArgumentCompletions("approve dyn", [])).toEqual([
+			{ value: "approve dynamic:", label: "dynamic:" },
+		]);
+		expect(workflowArgumentCompletions("approve dynamic:", [])).toBeNull();
+		expect(workflowArgumentCompletions("approve x", [], refs)).toBeNull();
+		// Run ids never complete a definition-level command.
+		expect(
+			workflowArgumentCompletions("approve workflow_", ["workflow_abc"]),
+		).toBeNull();
 	});
 });
 
@@ -838,6 +1034,471 @@ describe("action dispatch", () => {
 			"operator resume",
 			{ taskId: "task_report" },
 		);
+	});
+});
+
+describe("checkpoint decide dispatch", () => {
+	const checkpointTask = task({
+		id: "task_approve",
+		key: "approve",
+		namespace: ["review"],
+		kind: "checkpoint",
+		status: "waiting",
+		checkpoint: {
+			prompt: "Approve the plan?",
+			schema: { type: "object" },
+			headless: "block",
+		},
+	});
+
+	it("composes the confirmation from the checkpoint prompt and the parsed decision", () => {
+		expect(decideConsequence(checkpointTask, { proceed: true })).toBe(
+			'Checkpoint review/approve: Approve the plan?\nDecision: {"proceed":true}\nThe decision is recorded once, immutably, and the run continues from it.',
+		);
+		expect(
+			decideConsequence(task({ id: "task_report", key: "report" }), "ship"),
+		).toBe(
+			'Checkpoint report: (no checkpoint request)\nDecision: "ship"\nThe decision is recorded once, immutably, and the run continues from it.',
+		);
+	});
+
+	it("acts only when availableActions offers decide and never derives the approver from arguments", async () => {
+		const decide = vi.fn(async () => view("running"));
+		const service = fakeService({ decide });
+		const parked = summary("waiting", { availableActions: ["stop", "wait"] });
+		await expect(
+			performRunAction(service, {
+				action: "decide",
+				run: parked,
+				taskId: "task_approve",
+				decision: { proceed: true },
+			}),
+		).rejects.toThrow("decide is unavailable while the run is waiting.");
+		expect(decide).not.toHaveBeenCalled();
+		const run = summary("waiting", {
+			availableActions: ["stop", "wait", "decide"],
+		});
+		await expect(
+			performRunAction(service, { action: "decide", run }),
+		).rejects.toThrow(
+			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
+		);
+		await expect(
+			performRunAction(service, {
+				action: "decide",
+				run,
+				taskId: "task_approve",
+			}),
+		).rejects.toThrow(
+			"Usage: /workflow decide <run-prefix> <task-key> <json> [reason]",
+		);
+		expect(decide).not.toHaveBeenCalled();
+		await expect(
+			performRunAction(service, {
+				action: "decide",
+				run,
+				taskId: "task_approve",
+				taskKey: "review/approve",
+				decision: { proceed: true, approver: "mallory" },
+				reason: "approver: mallory",
+			}),
+		).resolves.toEqual({
+			message:
+				"decide accepted for workflow_abcdef0123: review/approve decided; run is running.",
+			level: "info",
+		});
+		expect(decide).toHaveBeenLastCalledWith(
+			"workflow_abcdef0123",
+			"task_approve",
+			{
+				decision: { proceed: true, approver: "mallory" },
+				approver: DEFAULT_DECIDE_APPROVER,
+				reason: "approver: mallory",
+			},
+		);
+		await performRunAction(service, {
+			action: "decide",
+			run,
+			taskId: "task_approve",
+			decision: false,
+			approver: "session-user",
+		});
+		expect(decide).toHaveBeenLastCalledWith(
+			"workflow_abcdef0123",
+			"task_approve",
+			{ decision: false, approver: "session-user" },
+		);
+		// Service refusals pass through verbatim.
+		const refusing = fakeService({
+			decide: vi.fn(async () => {
+				throw new Error("Checkpoint decision does not match its schema.");
+			}),
+		});
+		await expect(
+			performRunAction(refusing, {
+				action: "decide",
+				run,
+				taskId: "task_approve",
+				decision: 1,
+			}),
+		).rejects.toThrow("Checkpoint decision does not match its schema.");
+	});
+});
+
+describe("dynamic source decision dispatch", () => {
+	const ref = `dynamic:${"c".repeat(64)}` as const;
+	const approver = {
+		kind: "human",
+		via: "/workflow approve",
+		sessionId: "session-1",
+	} as const;
+
+	it("refuses a decided proposal from the view and records approve or reject", async () => {
+		const decided = {
+			ref,
+			decision: {
+				decision: "approved" as const,
+				approver,
+				approvedAt: "2026-09-15T00:00:00.000Z",
+				approvalSha256: "d".repeat(64),
+			},
+		};
+		expect(sourceDecisionUnavailableMessage("reject", decided)).toBe(
+			`reject is unavailable: ${ref} is already approved.`,
+		);
+		const decideSource = vi.fn(async () => ({ ref, runnable: true }));
+		const service = { decideSource } as unknown as WorkflowService;
+		await expect(
+			performSourceDecision(service, {
+				kind: "reject",
+				view: decided,
+				approver,
+			}),
+		).rejects.toThrow(`reject is unavailable: ${ref} is already approved.`);
+		expect(decideSource).not.toHaveBeenCalled();
+		await expect(
+			performSourceDecision(service, {
+				kind: "approve",
+				view: { ref },
+				approver,
+				reason: "reviewed",
+			}),
+		).resolves.toEqual({
+			message: `Approved ${ref}. Run it with workflow_run or /workflow run ${ref}.`,
+			level: "info",
+		});
+		expect(decideSource).toHaveBeenLastCalledWith(ref, {
+			decision: "approved",
+			approver,
+			reason: "reviewed",
+		});
+		const rejecter = { kind: "human", via: "/workflow reject" } as const;
+		await expect(
+			performSourceDecision(service, {
+				kind: "reject",
+				view: { ref },
+				approver: rejecter,
+			}),
+		).resolves.toEqual({
+			message: `Rejected ${ref}. This source cannot be approved again; a changed source gets a new digest.`,
+			level: "info",
+		});
+		expect(decideSource).toHaveBeenLastCalledWith(ref, {
+			decision: "rejected",
+			approver: rejecter,
+		});
+		const stale = {
+			decideSource: vi.fn(async () => ({ ref, runnable: false })),
+		} as unknown as WorkflowService;
+		await expect(
+			performSourceDecision(stale, {
+				kind: "approve",
+				view: { ref },
+				approver,
+			}),
+		).resolves.toEqual({
+			message: `Approved ${ref}, but it is not runnable under the current host API; propose the source again.`,
+			level: "warning",
+		});
+		const refusing = {
+			decideSource: vi.fn(async () => {
+				throw new Error("Dynamic workflow source was rejected.");
+			}),
+		} as unknown as WorkflowService;
+		await expect(
+			performSourceDecision(refusing, {
+				kind: "approve",
+				view: { ref },
+				approver,
+			}),
+		).rejects.toThrow("Dynamic workflow source was rejected.");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Real service
+// ---------------------------------------------------------------------------
+
+const CLIENT_METHODS = [
+	"preflight",
+	"launch",
+	"findByOperation",
+	"status",
+	"listRuns",
+	"logs",
+	"wait",
+	"interrupt",
+	"steer",
+	"followUp",
+	"retry",
+	"resume",
+	"reconcile",
+	"release",
+	"abandon",
+	"pin",
+	"unpin",
+	"exportArtifact",
+] as const;
+
+/** Neither fixture delegates: every subagent call is a failure. */
+function provider(): WorkflowSubagentProvider {
+	return {
+		bind: vi.fn(async (runId: string) => {
+			const methods: Record<string, unknown> = {};
+			for (const method of CLIENT_METHODS) {
+				methods[method] = vi.fn(async () => {
+					throw new Error(`unexpected subagent call: ${method}`);
+				});
+			}
+			return {
+				workflowRunId: runId,
+				ownerId: `pi-workflow:${runId}`,
+				client: methods as unknown as SubagentClient,
+			} satisfies WorkflowSubagentBinding;
+		}),
+	};
+}
+
+const CHECKPOINT_DEFINITION = `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "ui-decide", description: "Checkpoint workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  async run(ctx) {
+    ctx.phase("review");
+    const approve = ctx.checkpoint("approve", { schema: { type: "object", properties: { proceed: { type: "boolean" } }, required: ["proceed"], additionalProperties: false }, prompt: "Approve the plan?", headless: "block", timeoutMs: 60000 });
+    const decision = await ctx.result(approve);
+    return { answer: decision.proceed ? "approved" : "declined" };
+  }
+};
+`;
+
+const DYNAMIC_SOURCE = `import { defineWorkflow } from "@vegardx/pi-workflow";
+
+export default defineWorkflow({
+	meta: { name: "ui-approve", description: "Approval fixture", version: 1, budget: { cost: 10, childRuntimeMs: 600000 }, timeoutMs: 600000, concurrency: 1 },
+	inputSchema: { type: "object", properties: {}, additionalProperties: false },
+	outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+	async run(ctx) {
+		ctx.phase("answer");
+		return { answer: "fixed" };
+	},
+});
+`;
+
+async function realService(
+	name: string,
+	options: Partial<WorkflowServiceOptions> = {},
+): Promise<WorkflowService> {
+	const base = path.resolve(
+		".pi",
+		"test-ui-commands",
+		`${name}-${randomUUID()}`,
+	);
+	const cwd = path.join(base, "project");
+	const agentDir = path.join(base, "agent");
+	await mkdir(path.join(cwd, "workflows"), { recursive: true });
+	await mkdir(agentDir, { recursive: true });
+	await writeFile(
+		path.join(cwd, "workflows", "ui-decide.workflow.ts"),
+		CHECKPOINT_DEFINITION,
+	);
+	return createWorkflowService({
+		cwd,
+		agentDir,
+		storeRoot: path.join(cwd, ".pi", "workflow"),
+		projectTrusted: () => true,
+		subagents: provider(),
+		...options,
+	});
+}
+
+async function summaryOf(
+	service: WorkflowService,
+	runId: string,
+): Promise<WorkflowRunSummary> {
+	return resolveRunPrefix(service, runId);
+}
+
+describe("decide through a real service", () => {
+	it("drives a parked run to completion with the session approver", async () => {
+		const service = await realService("decide");
+		try {
+			const receipt = await service.run("ui-decide", {});
+			const parked = await service.wait(receipt.runId);
+			expect(parked).toMatchObject({ status: "waiting", parked: true });
+			const run = await summaryOf(service, receipt.runId);
+			expect(run.availableActions).toContain("decide");
+			const inspection = await service.inspect(receipt.runId, {
+				include: ["tasks"],
+			});
+			const checkpoint = resolveTaskKey(inspection.tasks ?? [], "approve");
+			expect(checkpoint.kind).toBe("checkpoint");
+			// A decision the schema refuses is surfaced verbatim and records nothing.
+			await expect(
+				performRunAction(service, {
+					action: "decide",
+					run,
+					taskId: checkpoint.id,
+					taskKey: "approve",
+					decision: { proceed: "yes" },
+				}),
+			).rejects.toThrow("Checkpoint decision does not match its schema.");
+			const outcome = await performRunAction(service, {
+				action: "decide",
+				run,
+				taskId: checkpoint.id,
+				taskKey: "approve",
+				decision: { proceed: true },
+				reason: "Reviewed the plan.",
+			});
+			expect(outcome.level).toBe("info");
+			expect(outcome.message).toMatch(
+				new RegExp(
+					`^decide accepted for ${receipt.runId}: approve decided; run is (waiting|running|finalizing|completed)\\.$`,
+				),
+			);
+			const final = await service.wait(receipt.runId);
+			expect(final).toMatchObject({
+				status: "completed",
+				output: { answer: "approved" },
+			});
+			const decided = final.tasks?.find((entry) => entry.id === checkpoint.id);
+			expect(decided?.checkpoint?.decision).toMatchObject({
+				source: "operator",
+				decidedBy: DEFAULT_DECIDE_APPROVER,
+				reason: "Reviewed the plan.",
+				value: { proceed: true },
+			});
+			const done = await summaryOf(service, receipt.runId);
+			expect(done.availableActions).not.toContain("decide");
+			await expect(
+				performRunAction(service, {
+					action: "decide",
+					run: done,
+					taskId: checkpoint.id,
+					decision: { proceed: true },
+				}),
+			).rejects.toThrow("decide is unavailable while the run is completed.");
+		} finally {
+			await service.shutdown();
+		}
+	});
+});
+
+describe("approve and reject through a real service", () => {
+	it("records the human decision once and refuses a second one", async () => {
+		const service = await realService("approve", {
+			// Source-mode workers boot slowly under full-suite load.
+			dynamic: { bootTimeoutMs: 60_000 },
+		});
+		try {
+			const proposed = await service.propose(DYNAMIC_SOURCE, {
+				proposer: { kind: "api", via: "test" },
+			});
+			expect(proposed.decision).toBeUndefined();
+			expect(proposed.runnable).toBe(false);
+			const inspected = await service.inspectProposal(proposed.ref);
+			const approver = {
+				kind: "human",
+				via: sourceDecisionVia("approve"),
+				sessionId: "session-42",
+			} as const;
+			await expect(
+				performSourceDecision(service, {
+					kind: "approve",
+					view: inspected,
+					approver,
+					reason: "Read every line.",
+				}),
+			).resolves.toEqual({
+				message: `Approved ${proposed.ref}. Run it with workflow_run or /workflow run ${proposed.ref}.`,
+				level: "info",
+			});
+			const approved = await service.inspectProposal(proposed.ref);
+			expect(approved.runnable).toBe(true);
+			expect(approved.decision).toMatchObject({
+				decision: "approved",
+				approver,
+				reason: "Read every line.",
+			});
+			// The view's decision state refuses before the service is asked;
+			// the service refuses the same request verbatim on its own.
+			await expect(
+				performSourceDecision(service, {
+					kind: "reject",
+					view: approved,
+					approver: { kind: "human", via: sourceDecisionVia("reject") },
+				}),
+			).rejects.toThrow(
+				`reject is unavailable: ${proposed.ref} is already approved.`,
+			);
+			await expect(
+				performSourceDecision(service, {
+					kind: "reject",
+					view: { ref: approved.ref },
+					approver: { kind: "human", via: sourceDecisionVia("reject") },
+				}),
+			).rejects.toThrow("Dynamic workflow source is already approved.");
+			const { workflow } = await service.validate(proposed.ref, {});
+			expect(workflow.name).toBe("ui-approve");
+
+			const other = await service.propose(`${DYNAMIC_SOURCE}\n// v2\n`, {
+				proposer: { kind: "api", via: "test" },
+			});
+			expect(other.ref).not.toBe(proposed.ref);
+			await expect(
+				performSourceDecision(service, {
+					kind: "reject",
+					view: other,
+					approver: { kind: "human", via: sourceDecisionVia("reject") },
+					reason: "Not needed.",
+				}),
+			).resolves.toEqual({
+				message: `Rejected ${other.ref}. This source cannot be approved again; a changed source gets a new digest.`,
+				level: "info",
+			});
+			const rejected = await service.inspectProposal(other.ref);
+			expect(rejected.decision).toMatchObject({
+				decision: "rejected",
+				approver: { kind: "human", via: "/workflow reject" },
+				reason: "Not needed.",
+			});
+			expect(rejected.runnable).toBe(false);
+			await expect(service.validate(other.ref, {})).rejects.toThrow(
+				"Dynamic workflow source was rejected.",
+			);
+			// A model approver never passes the service.
+			await expect(
+				performSourceDecision(service, {
+					kind: "approve",
+					view: { ref: other.ref },
+					approver: { kind: "model", via: "tool" } as never,
+				}),
+			).rejects.toThrow("Invalid dynamic workflow approver.");
+		} finally {
+			await service.shutdown();
+		}
 	});
 });
 

@@ -1,4 +1,8 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { MAX_DYNAMIC_APPROVAL_RENDER_BYTES } from "../src/dynamic/constants.js";
+import type { DynamicWorkflowProposalInspection } from "../src/service.js";
 import type {
 	WorkflowLogEntry,
 	WorkflowRunSummary,
@@ -18,6 +22,7 @@ import {
 	normalizeTaskKey,
 	ownershipLabel,
 	RUN_STATUS_ICON,
+	renderDynamicProposal,
 	runLine,
 	shortId,
 	TASK_STATUS_ICON,
@@ -214,6 +219,130 @@ describe("format helpers", () => {
 			}),
 		).toBe(
 			"    1 2026-09-15T12:00:00.000Z run          Run status changed from created to running.",
+		);
+	});
+});
+
+function proposal(
+	overrides: Partial<DynamicWorkflowProposalInspection> = {},
+): DynamicWorkflowProposalInspection {
+	return {
+		ref: `dynamic:${"a".repeat(64)}`,
+		sourceSha256: "a".repeat(64),
+		sourceBytes: 42,
+		manifest: {
+			meta: {
+				name: "triage",
+				description: "Sorts issues",
+				version: 2,
+				budget: { cost: 1.5, childRuntimeMs: 185_000, totalTokens: 35_000 },
+				timeoutMs: 7_620_000,
+				concurrency: 3,
+			},
+			inputSchema: { type: "object", properties: { b: {}, a: {} } },
+			outputSchema: { type: "object" },
+		},
+		manifestSha256: "b".repeat(64),
+		hostApiSha256: "c".repeat(64),
+		importPolicySha256: "d".repeat(64),
+		definitionIdentitySha256: "e".repeat(64),
+		transformer: { name: "amaro", version: "1.0.0" },
+		proposer: { kind: "tool", via: "workflow_propose" },
+		proposedAt: "2026-09-15T12:00:00.000Z",
+		runnable: false,
+		path: "/store/dynamic/aaa/source.workflow.ts",
+		source: 'export default 1;\nconst x = "two";\n',
+		...overrides,
+	} as DynamicWorkflowProposalInspection;
+}
+
+describe("renderDynamicProposal", () => {
+	it("renders identity, budget, decision state, canonical schemas, and the numbered source", () => {
+		expect(renderDynamicProposal(proposal()).split("\n")).toEqual([
+			`Dynamic workflow dynamic:${"a".repeat(64)}`,
+			"name: triage v2 · concurrency 3 · budget $1.5000 · 35k tok · 3m 05s child runtime · timeout 2h 07m",
+			"description: Sorts issues",
+			"proposed: 2026-09-15T12:00:00.000Z by tool:workflow_propose",
+			"decision: none (awaiting a human decision)",
+			"runnable: no",
+			`host API: ${"c".repeat(64)}`,
+			`import policy: ${"d".repeat(64)}`,
+			`identity: ${"e".repeat(64)}`,
+			'input schema: {"properties":{"a":{},"b":{}},"type":"object"}',
+			'output schema: {"type":"object"}',
+			`source (42 bytes, sha256 ${"a".repeat(64)}):`,
+			"   1 │ export default 1;",
+			'   2 │ const x = "two";',
+			"   3 │ ",
+		]);
+		const decided = renderDynamicProposal(
+			proposal({
+				runnable: true,
+				manifest: {
+					...proposal().manifest,
+					meta: {
+						...proposal().manifest.meta,
+						budget: { cost: 10, childRuntimeMs: 600_000 },
+					},
+				},
+				decision: {
+					decision: "approved",
+					approver: {
+						kind: "human",
+						via: "/workflow approve",
+						sessionId: "s1",
+					},
+					approvedAt: "2026-09-15T12:30:00.000Z",
+					approvalSha256: "f".repeat(64),
+					reason: "Reviewed.",
+				},
+			}),
+		).split("\n");
+		expect(decided[1]).toBe(
+			"name: triage v2 · concurrency 3 · budget $10.0000 · 10m 00s child runtime · timeout 2h 07m",
+		);
+		expect(decided[4]).toBe(
+			"decision: approved at 2026-09-15T12:30:00.000Z by human:/workflow approve (Reviewed.)",
+		);
+		expect(decided[5]).toBe("runnable: yes");
+	});
+
+	it("cuts the source to the render bound and points at the stored file", () => {
+		const line = `const padding = "${"x".repeat(60)}";`;
+		const lines = 2_000;
+		const source = Array.from({ length: lines }, () => line).join("\n");
+		const rendered = renderDynamicProposal(
+			proposal({ source, sourceBytes: Buffer.byteLength(source) }),
+		);
+		expect(Buffer.byteLength(rendered)).toBeLessThanOrEqual(
+			MAX_DYNAMIC_APPROVAL_RENDER_BYTES,
+		);
+		const renderedLines = rendered.split("\n");
+		expect(renderedLines.at(-1)).toBe(
+			`… source truncated at ${MAX_DYNAMIC_APPROVAL_RENDER_BYTES} bytes; read /store/dynamic/aaa/source.workflow.ts before approving.`,
+		);
+		const kept = renderedLines.filter((entry) => entry.includes(" │ "));
+		expect(kept.length).toBeGreaterThan(100);
+		expect(kept.length).toBeLessThan(lines);
+		expect(kept[0]).toBe(`   1 │ ${line}`);
+		expect(kept.at(-1)).toBe(`${String(kept.length).padStart(4)} │ ${line}`);
+		// One more source line would cross the bound.
+		expect(
+			Buffer.byteLength(rendered) + Buffer.byteLength(`\n${kept[0]}`),
+		).toBeGreaterThan(MAX_DYNAMIC_APPROVAL_RENDER_BYTES);
+		// A body exactly within the bound is never cut.
+		expect(renderDynamicProposal(proposal())).not.toContain("truncated");
+	});
+
+	it("stays pure: no pi-tui import and no service call", async () => {
+		const source = await readFile(path.resolve("src/ui/format.ts"), "utf8");
+		expect(source).not.toMatch(/@earendil-works\/pi-tui/);
+		// Only a type reaches the service module; nothing is loaded from it.
+		expect(source).not.toMatch(
+			/^import\s+(?!type\b)[^;]*?from\s+"\.\.\/service\.js"/m,
+		);
+		expect(source).toMatch(
+			/import type \{ DynamicWorkflowProposalInspection \}/,
 		);
 	});
 });

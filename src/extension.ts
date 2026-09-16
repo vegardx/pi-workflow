@@ -6,9 +6,9 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import type { WorkflowRunId } from "./contracts.js";
+import type { DynamicSourceApprover } from "./dynamic/contracts.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
 import type {
-	WorkflowInvalidationPreview,
 	WorkflowRunSummary,
 	WorkflowServiceTaskView,
 } from "./service-views.js";
@@ -18,21 +18,35 @@ import {
 	ACTION_CONSEQUENCES,
 	type ActionRequest,
 	actionUnavailableMessage,
+	CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE,
 	CONFIRMED_ACTIONS,
 	collectLogTail,
+	DEFAULT_DECIDE_APPROVER,
+	decideConsequence,
 	invalidateConsequence,
 	type OperatorAction,
 	type ParsedWorkflowCommand,
 	parseWorkflowCommand,
 	parseWorkflowInput,
 	performRunAction,
+	performSourceDecision,
 	resolveRunPrefix,
 	resolveTaskKey,
+	SOURCE_DECISION_CANCELLED_MESSAGE,
+	SOURCE_DECISION_REQUIRES_UI_MESSAGE,
+	type SourceDecisionKind,
+	sourceDecisionUnavailableMessage,
+	sourceDecisionVia,
 	WORKFLOW_COMMAND,
 	WorkflowCommandError,
 	workflowArgumentCompletions,
 } from "./ui/commands.js";
-import { logLine, shortId, taskPath } from "./ui/format.js";
+import {
+	logLine,
+	renderDynamicProposal,
+	shortId,
+	taskPath,
+} from "./ui/format.js";
 import type { InspectorIntent, InspectorState } from "./ui/inspector.js";
 import {
 	createWidgetController,
@@ -45,7 +59,21 @@ type InspectorInitialState = Partial<InspectorState>;
 
 type RunActionCommand = Extract<
 	ParsedWorkflowCommand,
-	{ kind: "wait" | "stop" | "reconcile" | "invalidate" | "retry" | "resume" }
+	{
+		kind:
+			| "wait"
+			| "stop"
+			| "reconcile"
+			| "invalidate"
+			| "retry"
+			| "resume"
+			| "decide";
+	}
+>;
+
+type SourceDecisionCommand = Extract<
+	ParsedWorkflowCommand,
+	{ kind: SourceDecisionKind }
 >;
 
 /**
@@ -92,19 +120,42 @@ function operatorOutput(
 }
 
 function consequenceFor(
-	action: OperatorAction,
-	preview: WorkflowInvalidationPreview | undefined,
+	request: ActionRequest,
+	task: WorkflowServiceTaskView | undefined,
 ): string {
-	switch (action) {
+	switch (request.action) {
 		case "invalidate":
-			return preview ? invalidateConsequence(preview) : "";
+			return request.preview ? invalidateConsequence(request.preview) : "";
+		case "decide":
+			return task ? decideConsequence(task, request.decision) : "";
 		case "stop":
 		case "retry":
 		case "resume":
-			return ACTION_CONSEQUENCES[action];
+			return ACTION_CONSEQUENCES[request.action];
 		default:
 			return "";
 	}
+}
+
+/**
+ * The identity a checkpoint decision is recorded under. The pinned Pi
+ * extension API exposes no user identity, so the fixed session literal is
+ * used; the approver never comes from command arguments or a model.
+ */
+function checkpointApprover(_ctx: ExtensionContext): string {
+	return DEFAULT_DECIDE_APPROVER;
+}
+
+/** The Pi session id when the context carries a session manager. */
+function sessionIdOf(ctx: ExtensionContext): string | undefined {
+	const manager = (ctx as Partial<ExtensionContext>).sessionManager;
+	const sessionId =
+		typeof manager?.getSessionId === "function"
+			? manager.getSessionId()
+			: undefined;
+	return typeof sessionId === "string" && sessionId.length > 0
+		? sessionId
+		: undefined;
 }
 
 export default function workflowExtension(pi: ExtensionAPI): void {
@@ -309,18 +360,72 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				? { timeoutMs: parsed.timeoutMs }
 				: {}),
 			...(preview ? { preview } : {}),
+			...(parsed.kind === "decide"
+				? { decision: parsed.decision, approver: checkpointApprover(ctx) }
+				: {}),
 		};
+		// A checkpoint decision is a human act: without a dialog to confirm it
+		// nothing is recorded, unlike the other actions in print mode.
+		if (action === "decide" && !ctx.hasUI) {
+			throw new WorkflowCommandError(CHECKPOINT_DECISION_REQUIRES_UI_MESSAGE);
+		}
 		if (
 			ctx.hasUI &&
 			CONFIRMED_ACTIONS.has(action) &&
 			!(await ctx.ui.confirm(
 				`${action} ${shortId(run.runId)}?`,
-				consequenceFor(action, preview),
+				consequenceFor(request, task),
 			))
 		) {
 			return;
 		}
 		const outcome = await performRunAction(runtime, request);
+		operatorOutput(ctx, outcome.message, outcome.level);
+		if (action === "decide") await widget?.refresh();
+	}
+
+	/**
+	 * `/workflow approve|reject dynamic:<sha>`: human-only. Refused without a
+	 * dialog, rendered in full before the explicit confirm, and recorded with
+	 * the session as approver; a cancelled confirm records nothing.
+	 */
+	async function sourceDecision(
+		ctx: ExtensionContext,
+		runtime: WorkflowService,
+		parsed: SourceDecisionCommand,
+	): Promise<void> {
+		if (!ctx.hasUI) {
+			throw new WorkflowCommandError(SOURCE_DECISION_REQUIRES_UI_MESSAGE);
+		}
+		const view = await runtime.inspectProposal(parsed.ref);
+		// Legality is the proposal's decision state; a decided source is never
+		// rendered for a second decision.
+		if (view.decision) {
+			throw new WorkflowCommandError(
+				sourceDecisionUnavailableMessage(parsed.kind, view),
+			);
+		}
+		const verb = parsed.kind === "approve" ? "Approve" : "Reject";
+		const confirmed = await ctx.ui.confirm(
+			`${verb} dynamic workflow ${shortId(view.sourceSha256)}?`,
+			renderDynamicProposal(view),
+		);
+		if (!confirmed) {
+			operatorOutput(ctx, SOURCE_DECISION_CANCELLED_MESSAGE, "info");
+			return;
+		}
+		const sessionId = sessionIdOf(ctx);
+		const approver: DynamicSourceApprover = {
+			kind: "human",
+			via: sourceDecisionVia(parsed.kind),
+			...(sessionId ? { sessionId } : {}),
+		};
+		const outcome = await performSourceDecision(runtime, {
+			kind: parsed.kind,
+			view,
+			approver,
+			...(parsed.reason ? { reason: parsed.reason } : {}),
+		});
 		operatorOutput(ctx, outcome.message, outcome.level);
 	}
 
@@ -400,17 +505,39 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				);
 				return;
 			}
+			case "approve":
+			case "reject":
+				return sourceDecision(ctx, runtime, parsed);
 			default:
 				return runAction(ctx, runtime, parsed);
 		}
 	}
 
+	/**
+	 * Undecided proposal refs for `approve`/`reject` completions, from the
+	 * service already opened by this session; nothing is opened for a completion.
+	 */
+	async function undecidedProposalRefs(prefix: string): Promise<string[]> {
+		const [subcommand] = prefix.trimStart().split(/\s+/);
+		if ((subcommand !== "approve" && subcommand !== "reject") || !service) {
+			return [];
+		}
+		try {
+			return (await service.proposals()).flatMap((listing) =>
+				"issue" in listing || listing.decision ? [] : [listing.ref],
+			);
+		} catch {
+			return [];
+		}
+	}
+
 	pi.registerCommand(WORKFLOW_COMMAND, {
 		description: "List, run, inspect, and control durable workflows",
-		getArgumentCompletions: (prefix) =>
+		getArgumentCompletions: async (prefix) =>
 			workflowArgumentCompletions(
 				prefix,
 				widget?.lastPage?.runs.map((run) => run.runId) ?? [],
+				await undecidedProposalRefs(prefix),
 			),
 		async handler(args, ctx) {
 			try {
