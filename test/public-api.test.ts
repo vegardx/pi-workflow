@@ -121,6 +121,13 @@ const PACKAGE_EXPORTS = {
 		types: "./dist/runtime/index.d.ts",
 		import: "./dist/runtime/index.js",
 	},
+	// W0-COMP-A: the component library. A third built entry, additive under
+	// the freeze: it declares no contract and re-exports nothing from the two
+	// pinned entries, so neither fixture above moves.
+	"./components": {
+		types: "./dist/components/index.d.ts",
+		import: "./dist/components/index.js",
+	},
 	"./package.json": "./package.json",
 } as const;
 
@@ -389,13 +396,14 @@ describe("entry point hygiene", () => {
 });
 
 describe("package entry points", () => {
-	it("maps exactly four exports to built files", async () => {
+	it("maps exactly five exports to built files", async () => {
 		const packageJson = await readJson<PackageJson>("../package.json");
 		expect(packageJson.exports).toEqual(PACKAGE_EXPORTS);
 		expect(Object.keys(packageJson.exports)).toEqual([
 			".",
 			"./extension",
 			"./runtime",
+			"./components",
 			"./package.json",
 		]);
 		expect(packageJson.main).toBe(PACKAGE_EXPORTS["."].import);
@@ -425,6 +433,23 @@ describe("package entry points", () => {
 		expect(typeof builtExtension.default).toBe("function");
 	});
 
+	it("exports the component library as its own disjoint entry", async () => {
+		// The library is additive: a third entry point whose names appear in
+		// neither pinned fixture, so no frozen surface moves with it. Its own
+		// export list is not pinned - `./components` is unfrozen.
+		const components = (await import("../src/components/index.js")) as object;
+		const names = exportNames(components);
+		expect(names).toContain("gate");
+		expect(names).toContain("envelope");
+		const rootNames = new Set(await readFixture(ROOT_FIXTURE));
+		const runtimeNames = new Set(await readFixture(RUNTIME_FIXTURE));
+		expect(
+			names.filter((name) => rootNames.has(name) || runtimeNames.has(name)),
+		).toEqual([]);
+		const built = (await import("../dist/components/index.js")) as object;
+		expect(exportNames(built)).toEqual(names);
+	});
+
 	it("records the frozen API in the compatibility matrix", async () => {
 		const packageJson = await readJson<PackageJson>("../package.json");
 		const compatibility = await readJson<Compatibility>(
@@ -446,6 +471,7 @@ describe("package entry points", () => {
 			".": "frozen",
 			"./extension": "frozen",
 			"./runtime": "unfrozen",
+			"./components": "unfrozen",
 		});
 		expect(Object.keys(api.entryPoints)).toEqual(
 			Object.keys(PACKAGE_EXPORTS).filter((key) => key !== "./package.json"),

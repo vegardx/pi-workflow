@@ -130,6 +130,37 @@ describe("workflow registry", () => {
 		).rejects.toBeInstanceOf(WorkflowDefinitionLoadError);
 	});
 
+	it("admits the components subpath and still refuses the runtime subpath", async () => {
+		const root = fixture("component-imports");
+		const cwd = path.join(root, "project");
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "components.workflow.ts"),
+			`import { gate } from "@vegardx/pi-workflow/components";\nvoid gate;\n${moduleSource("components")}`,
+		);
+		const discovered = await discoverWorkflows({
+			cwd,
+			agentDir: path.join(root, "agent"),
+			projectTrusted: true,
+		});
+		expect(discovered.map((entry) => entry.definition.meta.name)).toContain(
+			"components",
+		);
+		await writeFile(
+			path.join(cwd, "workflows", "components.workflow.ts"),
+			`import { reduceWorkflowEvents } from "@vegardx/pi-workflow/runtime";\nvoid reduceWorkflowEvents;\n${moduleSource("components")}`,
+		);
+		await expect(
+			discoverWorkflows({
+				cwd,
+				agentDir: path.join(root, "agent"),
+				projectTrusted: true,
+			}),
+		).rejects.toThrow(
+			/workflow import @vegardx\/pi-workflow\/runtime is not identity-bound/,
+		);
+	});
+
 	it("allows import-like text in strings and comments", async () => {
 		const root = fixture("import-text");
 		const cwd = path.join(root, "project");
