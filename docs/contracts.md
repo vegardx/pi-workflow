@@ -257,12 +257,17 @@ worked in *is* the pi-workflow checkout, that directory is already
 `<cwd>/workflows`; the extension then omits the builtin root and the
 definitions load under `project` scope with the usual trust gate.
 
-The shipped builtin is `plan-to-ship` (`plan -> approve -> implement -> ship`):
+The shipped builtin that writes is `plan-to-ship` (`plan -> approve -> stages
+-> ship`), a compiler over the plan's `deliverables[].stages` and `policy`:
 `refine` (read-only agent) -> `approve-plan` (checkpoint, `headless: "block"`)
--> one `implement-<id>` worktree agent per deliverable with
-`handoff: "required"` -> `review/lens-N` (optional read-only reviewers over the
-plan's review tasks, each fed a handoff descriptor) -> `ship` (checkpoint,
-`headless: "block"`) -> `receipt` (required finalizer). Its input is a
+-> per deliverable, in plan order, `implement` (one worktree agent
+`<stage>-<deliverable>` with `handoff: "required"`), `verify-and-fix` (the
+bounded `-verify-<n>`/`-fix-<n>` loop), `review-fan-out` (optional read-only
+reviewers keyed by lens id, each fed a handoff descriptor) and an optional
+`gate` -> `ship` (checkpoint, `headless: "block"`, declared for every
+`policy.gates` but `approve-plan`) -> `receipt` (required finalizer). A
+deliverable that declares no `stages` gets the default list derived from
+`policy`, so a plan written before stages existed compiles to the same graph. Its input is a
 pi-maestro plan by value, that plan's sha256 digest, and an effort dial; its
 output is a receipt naming, per deliverable, the imported handoff descriptor
 and the durable ref `refs/pi-subagent/handoffs/<subagentRunId>/<attemptId>`,

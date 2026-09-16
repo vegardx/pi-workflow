@@ -365,58 +365,82 @@ mistaken for a definition.
 
 ### `plan-to-ship`
 
-`workflows/plan-to-ship.workflow.ts` is the first builtin: **plan ->
-approve -> implement -> ship**, with two human gates and no publication at the
-end. Its input is a pi-maestro plan document by value, the sha256 digest of
-that document's canonical JSON, and an effort dial:
+`workflows/plan-to-ship.workflow.ts` is the first builtin and the only one that
+writes: a **compiler** over a pi-maestro plan's `deliverables[].stages` and
+`policy`, lowered onto the component library into one graph with one approval up
+front. Its input is the plan document by value, the sha256 digest of that
+document's canonical JSON, and an effort dial that now falls back to
+`plan.policy.effort`:
 
 ```text
-workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort } }
+workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort? } }
 ```
 
-The stages, in order:
+**The stage walk.** A deliverable that declares no `stages` gets the default
+list derived from `policy` — `implement`, `verify-and-fix` with
+`policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at `deep`), and, when
+any task carries a `by`, `review-fan-out` over those lenses — so every plan
+written before stages existed compiles to what it always compiled to. Each stage
+lowers through one component, and a stage id is the compiled key's prefix:
 
-1. **`refine`** — one read-only planner agent turns the authored plan into an
-   executable one: per deliverable a goal, the files it touches, acceptance
-   checks, risks, and the blockers that make the plan unexecutable as written.
-2. **`approve-plan`** — a checkpoint (`headless: "block"`). It is *the*
-   approval record: immutable, binding-addressed, stored in the run's
-   `decisions/`. A person answers
-   `/workflow decide <run> <task> '{"proceed":true}'`; a model never decides a
-   checkpoint. `{"proceed":false}` returns `{ approved: false }` and no
-   worktree task is ever declared, so no tree is touched.
-3. **`implement-<id>`** — one worktree agent per deliverable, `handoff:
-   "required"`, gated on the approval. Each starts from the same baseline:
-   deliverables never build on each other, `after` is honoured as order only,
-   and `reads` is not mapped to inputs.
-4. **verification inside the implementer** — it attempts the repository's own
-   install and check command in its worktree and reports `checkRan`,
-   `checkPassed`, and a bounded `checkTail` truthfully. The guest is small, so
-   a check that could not run is a normal, reportable outcome; the check is
-   evidence, never the gate.
-5. **`review/lens-N`** — read-only reviewers over the plan's review tasks, each
-   given the implementer's summary and its handoff **descriptor** (identity,
-   digest, size — never patch bytes). There is no automatic fix round in
-   milestone 1: blocking findings travel to the ship gate.
-6. **`ship`** — the second checkpoint, shown the implementer summaries, the
-   check results, and the review verdicts as its inputs.
-7. **`receipt`** — a required finalizer that records what shipped, after the
-   output is committed and unable to change it.
+| stage | component | task keys |
+| --- | --- | --- |
+| `implement` | `ctx.agent` | `<stage>-<deliverable>` |
+| `verify-and-fix` | `verifyAndFix` | `<stage>-<deliverable>-verify-<n>`, `-fix-<n>` |
+| `review-fan-out` | `reviewFanOut` | `<stage>-<deliverable>/<lens>`, `<stage>-<deliverable>-synthesis` |
+| `gate` | `gate` | `<stage>-<deliverable>` |
+
+The plan counts **fix** rounds and the component counts **verify** rounds, so
+the compiler maps `maxRounds = fixRounds + 1`: a fix is never left unchecked,
+and `maxFixRounds: 2` is three verifiers and two fixers. A verifier applies the
+handoff in its own worktree and runs the repository's check; `checkRan: false`
+is unverified rather than broken, so it stops the loop and goes to a person
+instead of starting a fix round. `use: "dynamic"` and `use: "sub-workflow"`
+parse and are refused by name — *"dynamic stages are not compiled yet"* and
+*"sub-workflows are not part of this slice"* — along with every other rule
+(`reads` between deliverables, a gate that is not last, two implement stages, a
+gate question that is not a question, escalation above `deep`), **before the
+first task is declared**, so a refusal costs nothing.
+
+**The gates come from `policy.gates`, and only from there.**
+
+| `policy.gates` | gates |
+| --- | --- |
+| `approve-plan` | `approve-plan`. No ship gate, so no ship decision: nothing is shipped and the receipt names no ref, while the handoffs stay in the run to cherry-pick. |
+| `approve-plan+ship` (default) | `approve-plan`, then one `ship` over every handoff. |
+| `every-deliverable` | `approve-plan`, a gate after each deliverable but the last, then `ship`. Answering `{"proceed":false}` stops the walk and declares nothing after it. |
+
+A `gate` **stage** the plan declares is compiled where it stands, shown what its
+`show` names, and is independent of `policy.gates`. When no gate can stop the
+walk part-way the implementers are declared up front and run concurrently; a
+plan with a mid-run gate is walked strictly deliverable by deliverable, because
+work nobody approved must not already be running when a person says stop.
+
+**The compiled document.** `compileStages(plan, policy)` is exported from the
+definition and returns exactly what the run will declare —
+`{ deliverables: [{ id, stages }], effort, gates }`, typed by
+`CompiledStageDocumentSchema` on `@vegardx/pi-workflow/components`. A host shows
+it to a person before starting and hands the same bytes to a blind reviewer; it
+names every task key, so a finding can point at `verify-d0-fix-1` rather than at
+a paragraph.
 
 **What "ship" means.** Nothing is pushed, merged, published, or turned into a
-pull request — the runtime never applies a handoff. Shipping is a receipt: for
-each deliverable the workflow-owned `git-format-patch` artifact and the durable
-ref `refs/pi-subagent/handoffs/<subagentRunId>/<subagentAttemptId>`, which
-survives the child's release, plus the `planDigest` that was approved. A person
-takes it from there with `git cherry-pick <handoffCommit>`.
+pull request — the runtime never applies a handoff, and `policy.publish` travels
+on the plan for a reviewer and a host to read and is never read here. Shipping
+is a receipt: for each deliverable the workflow-owned `git-format-patch`
+artifact and the durable ref
+`refs/pi-subagent/handoffs/<subagentRunId>/<subagentAttemptId>`, which survives
+the child's release, plus the `planDigest` that was approved. A person — or
+pi-maestro's audited Bash, authorized by the `ship` decision — takes it from
+there with `git cherry-pick <handoffCommit>`.
 
-**The effort dial.** `effort` is `cheap`, `standard`, or `deep`; a constant
-table in the definition maps it to a per-stage model, thinking level, token,
-cost and runtime budget, how many review lenses run (the first one, all of
-them, or all of them twice), and how long each gate waits. The model ids in
-that table are a marked stand-in until roster/allowance routing lands; a review
-task's `by.tier` and `by.diverse` are honoured through it, and `by.model` pins
-an exact route.
+**The effort dial.** `effort` is `cheap`, `standard`, or `deep`, and it is the
+component library's `envelope` table: a per-stage model, thinking level, token,
+cost and runtime budget, the worktree memory grant (1, 2 and 4 GiB), and how
+long each gate waits. It no longer selects lenses — the plan's stages do that —
+and a lens's `tier`/`diverse` resolve through `policy.reviewDefault` when the
+lens says nothing. The model ids are a marked stand-in until routing lands;
+`by.model` still pins an exact route.
 
 **The three agents.** The definition names `planner`, `implementer`, and
 `reviewer`. pi-subagent discovers agents only from `<agentDir>/agents/*.md` and
