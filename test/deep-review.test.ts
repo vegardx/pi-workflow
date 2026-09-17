@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	type DiscoveredAgent,
 	discoverAgents,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
@@ -200,21 +201,56 @@ interface Child {
 }
 
 /**
+ * pi-subagent's own resolution on a host whose agent discovery is empty: the
+ * definition must come from the roots the request carried, or preflight fails
+ * with the refusal the service raises.
+ */
+async function resolveLikeSubagent(
+	request: SubagentRequest,
+): Promise<DiscoveredAgent> {
+	const agents = await discoverAgents(
+		(request.agentRoots ?? []).map((directory) => ({
+			scope: "package" as const,
+			directory,
+			trusted: true,
+		})),
+	);
+	const agent = agents.get(request.agent);
+	if (!agent) throw new Error(`agent not found: ${request.agent}`);
+	return agent;
+}
+
+/**
  * A scripted owner client: every preflight is remembered, every launch mints a
  * child, and every child answers with the structured output its goal calls
  * for. `failLenses` kills exactly those lenses, which is how a degraded
  * fan-out is exercised.
  */
-function scripted(options: { readonly failLenses?: readonly string[] } = {}) {
+function scripted(
+	options: {
+		readonly failLenses?: readonly string[];
+		/**
+		 * Resolve each request's agent the way pi-subagent does on a host that
+		 * discovers none of its own: from the roots the request carried, or the
+		 * refusal the service raises.
+		 */
+		readonly resolveAgents?: boolean;
+	} = {},
+) {
 	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
 	const pending = new Map<string, Child>();
 	const children = new Map<string, Child>();
 	const statuses = new Map<string, "completed" | "failed">();
 	const requests: SubagentRequest[] = [];
+	const resolvedAgents: DiscoveredAgent[] = [];
 	let preflights = 0;
 	let ownerId = "";
 
 	const preflight = vi.fn(async (request: SubagentRequest) => {
+		const resolved = options.resolveAgents
+			? await resolveLikeSubagent(request)
+			: undefined;
+		if (resolved) resolvedAgents.push(resolved);
 		preflights += 1;
 		const preflightId = `preflight-${nonce}-${preflights}`;
 		const runId = `run_child${nonce}${preflights}`;
@@ -230,10 +266,10 @@ function scripted(options: { readonly failLenses?: readonly string[] } = {}) {
 			attemptId,
 			agent: request.agent,
 			agentDisplayName: request.agent,
-			agentPrompt: "prompt",
-			agentSource: "/agent.md",
-			agentSha256: "a".repeat(64),
-			agentScope: "global" as const,
+			agentPrompt: resolved?.prompt ?? "prompt",
+			agentSource: resolved?.source ?? "/agent.md",
+			agentSha256: resolved?.sha256 ?? "a".repeat(64),
+			agentScope: resolved?.scope ?? ("global" as const),
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
 			model: request.model ?? {
@@ -369,6 +405,7 @@ function scripted(options: { readonly failLenses?: readonly string[] } = {}) {
 			}),
 		} as WorkflowSubagentProvider,
 		requests,
+		resolvedAgents,
 		/** Every lens request, in declaration order. */
 		lensRequests(): SubagentRequest[] {
 			return requests.filter((request) => lensOf(request) !== undefined);
@@ -834,5 +871,63 @@ describe("deep-review: the agent template", () => {
 				}
 			}
 		}
+	});
+});
+
+describe("deep-review: the templates a run carries", () => {
+	it("hands a project that has no agents of its own the builtin templates", async () => {
+		const delegated = scripted();
+		const base = path.resolve(".pi", "test-deep-review", randomUUID());
+		const cwd = path.join(base, "project");
+		await mkdir(cwd, { recursive: true });
+		const service = await createWorkflowService({
+			cwd,
+			agentDir: path.join(base, "agent"),
+			storeRoot: path.join(cwd, ".pi", "workflow"),
+			projectTrusted: () => false,
+			subagents: delegated.provider,
+			registeredRoots: [
+				{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
+			],
+		});
+		services.push(service);
+		// The reported symptom's shape: an arbitrary project cwd with neither a
+		// `.pi/agents` of its own nor a host agent directory holding the
+		// definitions this builtin names.
+		await expect(stat(path.join(cwd, ".pi", "agents"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+		await expect(
+			stat(path.join(base, "agent", "agents")),
+		).rejects.toMatchObject({ code: "ENOENT" });
+		const receipt = await service.run("deep-review", input());
+		const finished = await bounded(service.wait(receipt.runId), "deep-review");
+		expect(finished.status).toBe("completed");
+		expect(delegated.requests.length).toBeGreaterThan(0);
+		const templates = await realpath(AGENT_TEMPLATES);
+		for (const request of delegated.requests) {
+			// Every request names the directory the definition's own root ships,
+			// so the template travels with the run instead of being copied into
+			// the host's agent directory first.
+			expect(request.agentRoots).toEqual([templates]);
+		}
+	});
+
+	it("preflights lens-reviewer from the templates the request carries", async () => {
+		const delegated = scripted({ resolveAgents: true });
+		const service = await serviceFor(delegated);
+		const receipt = await service.run("deep-review", input());
+		const finished = await bounded(service.wait(receipt.runId), "deep-review");
+		expect(finished.status).toBe("completed");
+		const templates = await realpath(AGENT_TEMPLATES);
+		const reviewer = delegated.resolvedAgents.find(
+			(agent) => agent.name === REVIEWER_AGENT,
+		);
+		if (!reviewer) throw new Error("lens-reviewer did not resolve");
+		// Resolved from the package's own template file, under package scope,
+		// which is what the host's empty discovery could not do.
+		expect(reviewer.source).toBe(path.join(templates, `${REVIEWER_AGENT}.md`));
+		expect(reviewer.scope).toBe("package");
+		expect(delegated.resolvedAgents).toHaveLength(delegated.requests.length);
 	});
 });
