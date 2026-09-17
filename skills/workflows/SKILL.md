@@ -48,12 +48,19 @@ holds `plan-review` alone, because it declares no checkpoint, no worktree, and
 no handoff — a run nobody can be asked to decide. That is the host's path, not
 yours: you start a workflow with `workflow_run`.
 
-**Workflows may be run from plan mode.** A workflow never mutates the working
-tree or the host: writers run in an isolated pi-subagent worktree and produce
-a handoff descriptor, which the runtime never applies, and the run's own state
-lives under `.pi/workflow/`. Starting, waiting on, and inspecting a run is
-therefore legal while planning; applying a handoff is not, and neither is
-deciding a checkpoint on the human's behalf.
+**A workflow run is allowed from plan mode when the person asks for one.** A
+workflow never mutates the working tree or the host: writers run in an isolated
+pi-subagent worktree and produce a handoff descriptor, which the runtime never
+applies, and the run's own state lives under `.pi/workflow/`. So the host's plan
+mode is no obstacle — starting, waiting on, and inspecting a run is legal while
+planning; applying a handoff is not, and neither is deciding a checkpoint on the
+human's behalf.
+
+That is a permission, not an invitation. In the host's plan mode you explore and
+converse; a run starts when the person asks for one. Do not start a workflow to
+review, verify, or research your own plan: the plan is checked after it is
+stored, by a blind reviewer that has not seen your reasoning, and a plan reviewed
+by its author is not reviewed.
 
 ## The operating loop
 

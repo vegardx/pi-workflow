@@ -45,9 +45,18 @@ admits the rest, so a plan may carry fields not listed here.
 | `body` | string? | |
 | `by` | `{lens, tier?, diverse?, skill?, model?}?` | present ⇒ this task is a **review**, and seeds a lens; absent ⇒ the deliverable's own worker does it |
 
-`by.lens` matches the id pattern. `by.tier` is `light`/`standard`/`heavy`.
-`by.model` must be a concrete `provider/model`; it is optional, and a plan that
-pins one runs only where that model exists.
+### `by`, field by field
+
+| Field | Required | Values |
+| --- | --- | --- |
+| `lens` | **required** | the **lens id pattern** `^[a-z][a-z0-9-]{0,63}$` — never empty, never a leading digit or hyphen; it is the fan-out key |
+| `tier` | optional | `light` \| `standard` \| `heavy` — **the one to reach for**; the host resolves the reviewer |
+| `diverse` | optional | boolean: a reviewer from another model family |
+| `skill` | optional | an ambient skill name, id pattern |
+| `model` | optional | **only ever** a concrete `provider/model` — never a bare model name, a tier word, or a role. **Prefer `tier` and omit `model`:** a plan that pins one runs only where that model exists |
+
+The lens id pattern is **not** the id pattern above: a lens id may not start
+with a digit, because it reaches pi-workflow as a fan-out namespace.
 
 ## Stage kinds (`use`)
 
@@ -58,7 +67,7 @@ the library that lowers it may diverge.
 | --- | --- | --- |
 | `implement` | `id`, `tools?` | exactly one per stage list; `tools` are tool **names**, never commands or paths |
 | `verify-and-fix` | `id`, `maxRounds?` (0\|1\|2 **fix** rounds), `escalate?` (`thinking`\|`none`) | must come after `implement` |
-| `review-fan-out` | `id`, `lenses` (1–16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` (`required`\|`optional`\|`none`) | duplicate lens ids get `-2`, `-3` by declaration ordinal |
+| `review-fan-out` | `id`, `lenses` (1–16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` (`required`\|`optional`\|`none`) | each `lenses[].id` is **required** and matches the lens id pattern `^[a-z][a-z0-9-]{0,63}$`; `tier`/`diverse`/`skill`/`model` are exactly the `by` fields above, `model` only ever `provider/model`; duplicate lens ids get `-2`, `-3` by declaration ordinal |
 | `gate` | `id`, `question`, `show?` | **last** in its deliverable; `show` names sibling stages declared *earlier*; `question` may not contain a path or code |
 | `dynamic` | `id`, `brief` | **reserved**: validation refuses it with "dynamic stages are not compiled yet" |
 
