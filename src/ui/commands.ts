@@ -5,6 +5,10 @@ import {
 	DYNAMIC_REF_PREFIX,
 } from "../dynamic/constants.js";
 import type { DynamicSourceApprover } from "../dynamic/contracts.js";
+import type {
+	WorkflowPruneReport,
+	WorkflowPruneSkipReason,
+} from "../persistence/retention.js";
 import {
 	IMPLEMENTED_WORKFLOW_RUN_ACTIONS,
 	WORKFLOW_RUN_ACTIONS,
@@ -14,15 +18,16 @@ import type {
 	DynamicWorkflowProposalView,
 	WorkflowService,
 } from "../service.js";
-import type {
-	WorkflowInvalidationPreview,
-	WorkflowLogEntry,
-	WorkflowLogPage,
-	WorkflowRunSummary,
-	WorkflowServiceRunView,
-	WorkflowServiceTaskView,
+import {
+	MAX_WORKFLOW_PRUNE_AGE_MS,
+	type WorkflowInvalidationPreview,
+	type WorkflowLogEntry,
+	type WorkflowLogPage,
+	type WorkflowRunSummary,
+	type WorkflowServiceRunView,
+	type WorkflowServiceTaskView,
 } from "../service-views.js";
-import { normalizeTaskKey, taskPath } from "./format.js";
+import { formatAge, normalizeTaskKey, shortId, taskPath } from "./format.js";
 
 /**
  * Pure grammar, resolution, and action dispatch for the `/workflow` command.
@@ -57,6 +62,10 @@ export type SourceDecisionKind = (typeof SOURCE_DECISION_SUBCOMMANDS)[number];
 export const WORKFLOW_SUBCOMMANDS: readonly string[] = Object.freeze([
 	"list",
 	"runs",
+	// Store-level retention, listed with the other store-level subcommands: it
+	// addresses the run store, never one run, so it is not derived from
+	// `IMPLEMENTED_WORKFLOW_RUN_ACTIONS` and never takes a run prefix.
+	"prune",
 	"validate",
 	"run",
 	...SOURCE_DECISION_SUBCOMMANDS,
@@ -67,6 +76,12 @@ export const WORKFLOW_SUBCOMMANDS: readonly string[] = Object.freeze([
 	...WORKFLOW_ACTION_SUBCOMMANDS,
 ]);
 
+/** The flags `/workflow prune` completes on its second token. */
+export const PRUNE_FLAGS: readonly string[] = Object.freeze([
+	"--apply",
+	"--older-than",
+]);
+
 /** Subcommands whose second token is a run id prefix. */
 const RUN_SUBCOMMANDS: ReadonlySet<string> = new Set([
 	"show",
@@ -75,6 +90,46 @@ const RUN_SUBCOMMANDS: ReadonlySet<string> = new Set([
 	"wait",
 	...WORKFLOW_ACTION_SUBCOMMANDS,
 ]);
+
+/** Duration flags (`--older-than 24h`): `<positive integer><s|m|h|d|w>`. */
+const DURATION_UNITS_MS: Readonly<Record<string, number>> = Object.freeze({
+	s: 1_000,
+	m: 60_000,
+	h: 3_600_000,
+	d: 86_400_000,
+	w: 604_800_000,
+});
+
+/**
+ * Milliseconds for `24h`, `7d`, `90m`; `undefined` for anything else,
+ * including a zero, an overlong value, or one past the service's ceiling.
+ */
+export function parseDurationMs(token: string): number | undefined {
+	const match = /^(\d{1,9})([smhdw])$/.exec(token);
+	if (!match) return undefined;
+	const value = Number(match[1]) * (DURATION_UNITS_MS[match[2] ?? ""] ?? 0);
+	return value > 0 && value <= MAX_WORKFLOW_PRUNE_AGE_MS ? value : undefined;
+}
+
+/**
+ * The `--older-than` token a bound came from: the shortest exact `<n><unit>`
+ * rendering. Distinct from `formatDurationMs` in `./format.js`, which reads a
+ * duration to a human; this one reads back as a flag value.
+ */
+export function formatDurationToken(ms: number): string {
+	for (const [unit, size] of [
+		["w", DURATION_UNITS_MS.w],
+		["d", DURATION_UNITS_MS.d],
+		["h", DURATION_UNITS_MS.h],
+		["m", DURATION_UNITS_MS.m],
+		["s", DURATION_UNITS_MS.s],
+	] as const) {
+		if (size !== undefined && ms >= size && ms % size === 0) {
+			return `${ms / size}${unit}`;
+		}
+	}
+	return `${ms}ms`;
+}
 
 export const DEFAULT_LOG_TAIL = 20;
 export const MIN_LOG_TAIL = 1;
@@ -109,11 +164,16 @@ export const CHECKPOINT_DECISION_CANCELLED_MESSAGE = "No decision recorded.";
 export const DECIDE_USAGE_MESSAGE =
 	"Usage: /workflow decide <run-prefix> <task-key> [json] [reason]";
 export const SOURCE_DECISION_CANCELLED_MESSAGE = "No decision recorded.";
+export const PRUNE_USAGE_MESSAGE =
+	"Usage: /workflow prune [--apply] [--older-than <duration>] (duration: 30m, 24h, 7d, 4w)";
+/** A declined prune confirmation, exactly like a declined decision: nothing moved. */
+export const PRUNE_CANCELLED_MESSAGE = "Nothing pruned.";
 
 export type ParsedWorkflowCommand =
 	| { kind: "inspector" }
 	| { kind: "list" }
 	| { kind: "runs"; includeChildren: boolean }
+	| { kind: "prune"; apply: boolean; olderThanMs?: number }
 	| { kind: "validate"; ref: string; input?: unknown }
 	| { kind: "run"; ref: string; input?: unknown }
 	| { kind: "show"; runPrefix: string }
@@ -281,6 +341,28 @@ export function parseWorkflowCommand(args: string): ParsedWorkflowCommand {
 				usage("Usage: /workflow runs [--all]");
 			}
 			return { kind: "runs", includeChildren: second === "--all" };
+		case "prune": {
+			// Flags in either order; a dry run is what an unflagged prune is.
+			const flags = second === undefined ? [] : [second, ...rest];
+			let apply = false;
+			let olderThanMs: number | undefined;
+			for (let index = 0; index < flags.length; index += 1) {
+				const flag = flags[index];
+				if (flag === "--apply" && !apply) {
+					apply = true;
+					continue;
+				}
+				if (flag === "--older-than" && olderThanMs === undefined) {
+					index += 1;
+					olderThanMs = parseDurationMs(flags[index] ?? "");
+					if (olderThanMs !== undefined) continue;
+				}
+				usage(PRUNE_USAGE_MESSAGE);
+			}
+			return olderThanMs === undefined
+				? { kind: "prune", apply }
+				: { kind: "prune", apply, olderThanMs };
+		}
 		case "validate":
 		case "run": {
 			if (!second) usage(`Usage: /workflow ${subcommand} <ref> [json-input]`);
@@ -417,6 +499,12 @@ export function workflowArgumentCompletions(
 		return "--all".startsWith(partial)
 			? [{ value: "runs --all", label: "--all" }]
 			: null;
+	}
+	if (subcommand === "prune") {
+		const flags = PRUNE_FLAGS.filter((flag) => flag.startsWith(partial)).map(
+			(flag) => ({ value: `prune ${flag}`, label: flag }),
+		);
+		return flags.length > 0 ? flags : null;
 	}
 	if (subcommand === "approve" || subcommand === "reject") {
 		const refs = knownProposalRefs.filter((ref) => ref.startsWith(partial));
@@ -874,4 +962,77 @@ export async function performSourceDecision(
 		message: `Rejected ${decided.ref}. This source cannot be approved again; a changed source gets a new digest.`,
 		level: "info",
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Store retention
+// ---------------------------------------------------------------------------
+
+/** Skip reasons in the order the summary line names them. */
+const PRUNE_SKIP_ORDER: readonly WorkflowPruneSkipReason[] = Object.freeze([
+	"not-terminal",
+	"too-recent",
+	"lease-held",
+]);
+
+const PRUNE_SKIP_LABELS: Readonly<Record<WorkflowPruneSkipReason, string>> =
+	Object.freeze({
+		"not-terminal": "still recoverable or running",
+		"too-recent": "inside the age bound",
+		"lease-held": "leased by a live process",
+	});
+
+/** Listed runs before the report collapses the rest into a count. */
+export const MAX_PRUNE_REPORT_ROWS = 10;
+
+function pruneBound(report: WorkflowPruneReport): string {
+	return report.olderThanMs === undefined
+		? ""
+		: ` older than ${formatDurationToken(report.olderThanMs)}`;
+}
+
+function pruneKept(report: WorkflowPruneReport): string {
+	if (report.skipped.length === 0) return "";
+	const counts = PRUNE_SKIP_ORDER.flatMap((reason) => {
+		const count = report.skipped.filter(
+			(skip) => skip.reason === reason,
+		).length;
+		return count > 0 ? [`${count} ${PRUNE_SKIP_LABELS[reason]}`] : [];
+	});
+	return `\nKept ${report.skipped.length} run(s): ${counts.join(", ")}.`;
+}
+
+/**
+ * The prune report as the operator reads it: what moved (or would move), where
+ * it went, and why every other run stayed. Never decides anything; the service
+ * selected and the store moved.
+ */
+export function pruneReportText(
+	report: WorkflowPruneReport,
+	now = Date.now(),
+): string {
+	const destination = `${report.trashRoot}/${report.batch}/`;
+	if (report.selected.length === 0) {
+		return `No terminal workflow run${pruneBound(report)} to prune.${pruneKept(report)}`;
+	}
+	const rows = report.selected
+		.slice(0, MAX_PRUNE_REPORT_ROWS)
+		.map(
+			(run) =>
+				`  ${run.status.padEnd(19)} ${shortId(run.runId).padEnd(14)} ${formatAge(run.updatedAt, now)} old`,
+		);
+	const more = report.selected.length - rows.length;
+	if (more > 0) rows.push(`  +${more} more`);
+	const header = report.dryRun
+		? `Prune (dry run): ${report.selected.length} terminal run(s)${pruneBound(report)} would move to ${destination}`
+		: `Pruned ${report.selected.length} terminal run(s)${pruneBound(report)} to ${destination}`;
+	const footer = report.dryRun
+		? "\nRun /workflow prune --apply to move them. Nothing is deleted: each run keeps its journal, tasks, artifacts, and decisions under its trash entry beside a manifest, and moving the entry back restores it."
+		: "\nNothing was deleted; each entry holds the run directory, its lease file, and a manifest, and moving them back restores the run.";
+	return `${header}\n${rows.join("\n")}${pruneKept(report)}${footer}`;
+}
+
+/** The confirmation body shown before an apply; the dialog title carries the count. */
+export function pruneConsequence(report: WorkflowPruneReport): string {
+	return `${report.selected.length} terminal run(s)${pruneBound(report)} move to ${report.trashRoot}/${report.batch}/ with a manifest each. Nothing is deleted and no journal is appended to; the runs leave /workflow runs and the widget's counts, and are recoverable from trash by hand.`;
 }

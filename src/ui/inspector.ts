@@ -249,7 +249,12 @@ export function isPendingCheckpointTask(
 	);
 }
 
-/** The only source of palette entries: the service's own projection. */
+/**
+ * The only source of palette entries: the service's own projection. Every
+ * entry is one run's `availableActions`, so a store-level operation is never
+ * offered here - `/workflow prune` addresses the run store, not the selected
+ * run, and putting it in this palette would pretend it were a run action.
+ */
 export function paletteActions(summary: WorkflowRunSummary): InspectorAction[] {
 	return summary.availableActions.filter(isInspectorAction);
 }

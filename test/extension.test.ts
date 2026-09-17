@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -153,6 +153,15 @@ async function builtinSummaryList(): Promise<unknown> {
 		path: entry.path,
 		identitySha256: entry.identity.identitySha256,
 	}));
+}
+
+async function pathExists(target: string): Promise<boolean> {
+	try {
+		await stat(target);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function emptyProject(): Promise<string> {
@@ -506,7 +515,7 @@ describe("workflow Pi extension", () => {
 		await command.handler("bogus", rpc);
 		expect(notify).toHaveBeenLastCalledWith(
 			expect.stringMatching(
-				/^Unknown workflow command: bogus\. Expected one of list, runs, validate, run, approve, reject, show, status, logs, wait, stop, reconcile, invalidate, retry, resume, decide\.$/,
+				/^Unknown workflow command: bogus\. Expected one of list, runs, prune, validate, run, approve, reject, show, status, logs, wait, stop, reconcile, invalidate, retry, resume, decide\.$/,
 			),
 			"warning",
 		);
@@ -812,6 +821,143 @@ export default defineWorkflow({
 			expect(notify).toHaveBeenLastCalledWith(
 				"decide is unavailable while the run is completed.",
 				"warning",
+			);
+			expect(confirm).toHaveBeenCalledTimes(2);
+		} finally {
+			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	});
+
+	it("prunes terminal runs only after a confirm, and never on a dry run", async () => {
+		const { tools, commands, handlers } = capture({ subagents: true });
+		const command = commands.get("workflow");
+		if (!command) throw new Error("/workflow missing");
+		const tool = (name: string) => {
+			const found = tools.find((candidate) => candidate.name === name);
+			if (!found) throw new Error(`${name} missing`);
+			return found;
+		};
+		const notify = vi.fn();
+		const confirm = vi.fn<(title: string, body: string) => Promise<boolean>>();
+		const cwd = await emptyProject();
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "ui-prune.workflow.ts"),
+			`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "ui-prune", description: "Prune fixture", version: 1, budget: { cost: 10, childRuntimeMs: 1000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run() {
+    return { answer: "done" };
+  }
+};
+`,
+		);
+		const context = {
+			cwd,
+			mode: "tui",
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui: { notify, confirm, setWidget: vi.fn() },
+		};
+		const signal = new AbortController().signal;
+		const storeRoot = path.join(cwd, ".pi", "workflow");
+		try {
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "ui-prune", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+
+			// The dry run is the default: it lists and asks nothing.
+			await command.handler("prune", context);
+			expect(confirm).not.toHaveBeenCalled();
+			expect(notify.mock.calls.at(-1)?.[0]).toContain(
+				"Prune (dry run): 1 terminal run(s) would move to",
+			);
+			expect(notify.mock.calls.at(-1)?.[1]).toBe("warning");
+			expect(await pathExists(path.join(storeRoot, "runs", runId))).toBe(true);
+
+			// An age bound keeps the run that just finished.
+			await command.handler("prune --older-than 24h --apply", context);
+			expect(confirm).not.toHaveBeenCalled();
+			expect(notify.mock.calls.at(-1)?.[0]).toContain(
+				"No terminal workflow run older than 1d to prune.",
+			);
+			expect(await pathExists(path.join(storeRoot, "runs", runId))).toBe(true);
+
+			// A declined confirm moves nothing.
+			confirm.mockResolvedValueOnce(false);
+			await command.handler("prune --apply", context);
+			expect(confirm).toHaveBeenCalledTimes(1);
+			expect(confirm.mock.calls[0]?.[0]).toBe(
+				"Prune 1 terminal workflow run(s)?",
+			);
+			expect(confirm.mock.calls[0]?.[1]).toContain("Nothing is deleted");
+			expect(notify).toHaveBeenLastCalledWith("Nothing pruned.", "info");
+			expect(await pathExists(path.join(storeRoot, "runs", runId))).toBe(true);
+
+			// Confirmed: the run leaves the store for trash and nothing is deleted.
+			confirm.mockResolvedValueOnce(true);
+			await command.handler("prune --apply", context);
+			expect(notify.mock.calls.at(-1)?.[0]).toContain(
+				"Pruned 1 terminal run(s) to",
+			);
+			expect(await pathExists(path.join(storeRoot, "runs", runId))).toBe(false);
+			const [batch] = await readdir(path.join(storeRoot, "trash"));
+			expect(
+				await pathExists(
+					path.join(storeRoot, "trash", batch ?? "", runId, "manifest.json"),
+				),
+			).toBe(true);
+			expect(
+				await pathExists(
+					path.join(
+						storeRoot,
+						"trash",
+						batch ?? "",
+						runId,
+						"run",
+						"events.jsonl",
+					),
+				),
+			).toBe(true);
+			expect(
+				await pathExists(
+					path.join(storeRoot, "trash", batch ?? "", runId, "lease.json"),
+				),
+			).toBe(true);
+
+			// The listing no longer sees it.
+			const listed = await tool("workflow_runs").execute(
+				"call-3",
+				{},
+				signal,
+				undefined,
+				context as never,
+			);
+			expect((listed.details as { runs: unknown[] }).runs).toEqual([]);
+
+			// Print mode executes directly: there is nothing left to move.
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			await command.handler("prune --apply", {
+				...context,
+				mode: "print",
+				hasUI: false,
+			});
+			expect(log).toHaveBeenLastCalledWith(
+				expect.stringContaining("No terminal workflow run to prune."),
 			);
 			expect(confirm).toHaveBeenCalledTimes(2);
 		} finally {

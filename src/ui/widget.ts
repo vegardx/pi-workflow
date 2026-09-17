@@ -1,4 +1,5 @@
 import type { WorkflowRunStatus } from "../contracts.js";
+import { isPrunableWorkflowRunStatus } from "../persistence/retention.js";
 import type { WorkflowService } from "../service.js";
 import type { WorkflowRunPage, WorkflowRunSummary } from "../service-views.js";
 import { ATTENTION_RUN_STATUSES, NONTERMINAL_RUN_STATUSES } from "./format.js";
@@ -28,6 +29,13 @@ export const WORKFLOW_WIDGET_SHORTCUT = "alt+w";
 export const WORKFLOW_WIDGET_WIDTH = 80;
 /** Opens the first line while a run this session owns waits for a decision. */
 export const WORKFLOW_WIDGET_PARKED_PREFIX = "waiting for you: ";
+/**
+ * Named on the attention line when every run that needs action is terminal
+ * and prunable: the count cannot fall on its own, and this is the command
+ * that clears it. Nothing about attention changes - a terminal failed run
+ * needs action until it is pruned - only the line says what to do about it.
+ */
+export const WORKFLOW_WIDGET_PRUNE_HINT = "/workflow prune";
 
 const ONGOING_ORDER: readonly WorkflowRunStatus[] = [
 	"running",
@@ -86,12 +94,18 @@ export function workflowWidgetLines(
 	const attention = new Map<WorkflowRunStatus, number>();
 	let elsewhere = 0;
 	let recovering = 0;
+	// A prune moves terminal, unleased runs only, so the hint is offered only
+	// when it would clear every run on the attention line.
+	let allAttentionPrunable = true;
 	for (const run of runs) {
 		if (NONTERMINAL_RUN_STATUSES.includes(run.status)) {
 			ongoing.set(run.status, (ongoing.get(run.status) ?? 0) + 1);
 			if (run.leasedElsewhere) elsewhere += 1;
 		} else if (run.requiresAttention) {
 			attention.set(run.status, (attention.get(run.status) ?? 0) + 1);
+			if (!isPrunableWorkflowRunStatus(run.status) || run.leasedElsewhere) {
+				allAttentionPrunable = false;
+			}
 		} else if (run.status === "failed" || run.status === "interrupted") {
 			// Durably failed or interrupted with invalidated work pending: the
 			// next drive recovers it, so it is ongoing rather than actionable.
@@ -112,7 +126,9 @@ export function workflowWidgetLines(
 				}`
 			: undefined,
 		attentionParts.length > 0
-			? `workflows need action: ${attentionParts.join(" · ")}`
+			? `workflows need action: ${attentionParts.join(" · ")}${
+					allAttentionPrunable ? ` · ${WORKFLOW_WIDGET_PRUNE_HINT}` : ""
+				}`
 			: undefined,
 	].filter((line): line is string => line !== undefined);
 	const parked =

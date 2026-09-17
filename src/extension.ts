@@ -33,10 +33,13 @@ import {
 	invalidateConsequence,
 	type OperatorAction,
 	type ParsedWorkflowCommand,
+	PRUNE_CANCELLED_MESSAGE,
 	parseWorkflowCommand,
 	parseWorkflowInput,
 	performRunAction,
 	performSourceDecision,
+	pruneConsequence,
+	pruneReportText,
 	resolveRunPrefix,
 	resolveTaskKey,
 	SOURCE_DECISION_CANCELLED_MESSAGE,
@@ -554,6 +557,46 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 	}
 
 	/**
+	 * `/workflow prune [--apply] [--older-than <duration>]`: store-level
+	 * retention, never a run action. The dry run is the default and the same
+	 * selection the apply performs, so what the operator confirms is what the
+	 * store moves. With a UI the apply asks first; in print mode it executes
+	 * directly, exactly like the other non-decision actions.
+	 */
+	async function prune(
+		ctx: ExtensionContext,
+		runtime: WorkflowService,
+		parsed: Extract<ParsedWorkflowCommand, { kind: "prune" }>,
+	): Promise<void> {
+		const bound =
+			parsed.olderThanMs === undefined
+				? {}
+				: { olderThanMs: parsed.olderThanMs };
+		const preview = await runtime.prune({ dryRun: true, ...bound });
+		if (!parsed.apply || preview.selected.length === 0) {
+			operatorOutput(
+				ctx,
+				pruneReportText(preview),
+				!parsed.apply && preview.selected.length > 0 ? "warning" : "info",
+			);
+			return;
+		}
+		if (
+			ctx.hasUI &&
+			!(await ctx.ui.confirm(
+				`Prune ${preview.selected.length} terminal workflow run(s)?`,
+				pruneConsequence(preview),
+			))
+		) {
+			operatorOutput(ctx, PRUNE_CANCELLED_MESSAGE);
+			return;
+		}
+		const report = await runtime.prune({ dryRun: false, ...bound });
+		operatorOutput(ctx, pruneReportText(report));
+		await widget?.refresh();
+	}
+
+	/**
 	 * `/workflow approve|reject dynamic:<sha>`: human-only. Refused without a
 	 * dialog, rendered in full before the explicit confirm, and recorded with
 	 * the session as approver; a cancelled confirm records nothing.
@@ -674,6 +717,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 				);
 				return;
 			}
+			case "prune":
+				return prune(ctx, runtime, parsed);
 			case "approve":
 			case "reject":
 				return sourceDecision(ctx, runtime, parsed);

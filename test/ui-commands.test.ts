@@ -39,11 +39,16 @@ import {
 	DEFAULT_STOP_REASON,
 	DYNAMIC_REF_USAGE_MESSAGE,
 	decideConsequence,
+	formatDurationToken,
 	invalidateConsequence,
+	PRUNE_USAGE_MESSAGE,
 	parseCheckpointDecision,
+	parseDurationMs,
 	parseWorkflowCommand,
 	performRunAction,
 	performSourceDecision,
+	pruneConsequence,
+	pruneReportText,
 	resolveRunPrefix,
 	resolveTaskKey,
 	SOURCE_DECISION_SUBCOMMANDS,
@@ -171,6 +176,7 @@ describe("/workflow grammar", () => {
 		expect([...WORKFLOW_SUBCOMMANDS]).toEqual([
 			"list",
 			"runs",
+			"prune",
 			"validate",
 			"run",
 			"approve",
@@ -303,9 +309,9 @@ describe("/workflow grammar", () => {
 	});
 
 	it("parses decide without a decision so the guided form can ask for it", () => {
-		// Widening an accepted input: the 16 subcommands are unchanged and
+		// Widening an accepted input: the 17 subcommands are unchanged and
 		// every decide that parsed before still parses the same way.
-		expect(WORKFLOW_SUBCOMMANDS).toHaveLength(16);
+		expect(WORKFLOW_SUBCOMMANDS).toHaveLength(17);
 		expect(DECIDE_USAGE_MESSAGE).toBe(
 			"Usage: /workflow decide <run-prefix> <task-key> [json] [reason]",
 		);
@@ -1694,5 +1700,164 @@ describe("ui import discipline", () => {
 			const source = await readFile(path.resolve(file), "utf8");
 			expect(source, file).toMatch(runtimeImport);
 		}
+	});
+});
+
+describe("/workflow prune grammar", () => {
+	it("parses the flags in either order and defaults to a dry run", () => {
+		expect(parseWorkflowCommand("prune")).toEqual({
+			kind: "prune",
+			apply: false,
+		});
+		expect(parseWorkflowCommand("prune --apply")).toEqual({
+			kind: "prune",
+			apply: true,
+		});
+		expect(parseWorkflowCommand("prune --older-than 24h")).toEqual({
+			kind: "prune",
+			apply: false,
+			olderThanMs: 86_400_000,
+		});
+		expect(parseWorkflowCommand("prune --older-than 7d --apply")).toEqual({
+			kind: "prune",
+			apply: true,
+			olderThanMs: 7 * 86_400_000,
+		});
+		expect(parseWorkflowCommand("prune --apply --older-than 30m")).toEqual({
+			kind: "prune",
+			apply: true,
+			olderThanMs: 1_800_000,
+		});
+	});
+
+	it("refuses an unknown flag, a repeated flag, and a bad duration", () => {
+		for (const args of [
+			"prune --force",
+			"prune workflow_abc",
+			"prune --apply --apply",
+			"prune --older-than",
+			"prune --older-than 24",
+			"prune --older-than 0h",
+			"prune --older-than -1d",
+			"prune --older-than 2y",
+			"prune --older-than 400d",
+			"prune --older-than 24h --older-than 7d",
+		]) {
+			expect(() => parseWorkflowCommand(args), args).toThrow(
+				PRUNE_USAGE_MESSAGE,
+			);
+		}
+	});
+
+	it("reads and renders the duration tokens the usage message names", () => {
+		expect(parseDurationMs("30m")).toBe(1_800_000);
+		expect(parseDurationMs("24h")).toBe(86_400_000);
+		expect(parseDurationMs("7d")).toBe(604_800_000);
+		expect(parseDurationMs("4w")).toBe(4 * 604_800_000);
+		expect(parseDurationMs("1s")).toBe(1_000);
+		expect(parseDurationMs("")).toBeUndefined();
+		expect(parseDurationMs("1x")).toBeUndefined();
+		expect(formatDurationToken(86_400_000)).toBe("1d");
+		expect(formatDurationToken(90 * 60_000)).toBe("90m");
+		expect(formatDurationToken(1_500)).toBe("1500ms");
+	});
+
+	it("completes the prune flags and never a run id", () => {
+		expect(workflowArgumentCompletions("prune ", ["workflow_abc"])).toEqual([
+			{ value: "prune --apply", label: "--apply" },
+			{ value: "prune --older-than", label: "--older-than" },
+		]);
+		expect(workflowArgumentCompletions("prune --o", [])).toEqual([
+			{ value: "prune --older-than", label: "--older-than" },
+		]);
+		expect(
+			workflowArgumentCompletions("prune workflow_", ["workflow_abc"]),
+		).toBe(null);
+		expect(workflowArgumentCompletions("pru", [])).toEqual([
+			{ value: "prune", label: "prune" },
+		]);
+	});
+
+	it("renders a dry run, an apply, and an empty report", () => {
+		const base = {
+			trashRoot: "/store/trash",
+			batch: "20260304-050607",
+			reason: "Operator prune of a terminal workflow run.",
+			skipped: [],
+			generatedAt: "2026-03-04T05:06:07.000Z",
+		} as const;
+		const selection = {
+			runId: "workflow_abcdef0123456789",
+			status: "failed",
+			updatedAt: "2026-03-04T02:06:07.000Z",
+		} as const;
+		const now = Date.parse("2026-03-04T05:06:07.000Z");
+		const dry = pruneReportText(
+			{ ...base, dryRun: true, selected: [selection] },
+			now,
+		);
+		expect(dry).toContain("Prune (dry run): 1 terminal run(s) would move to");
+		expect(dry).toContain("/store/trash/20260304-050607/");
+		expect(dry).toContain("workflow_abc…");
+		expect(dry).toContain("3h old");
+		expect(dry).toContain("/workflow prune --apply");
+		expect(dry).toContain("Nothing is deleted");
+		const applied = pruneReportText(
+			{
+				...base,
+				dryRun: false,
+				selected: [{ ...selection, trashPath: "/store/trash/x" }],
+			},
+			now,
+		);
+		expect(applied).toContain("Pruned 1 terminal run(s) to");
+		expect(applied).not.toContain("--apply");
+		const empty = pruneReportText(
+			{
+				...base,
+				dryRun: true,
+				olderThanMs: 86_400_000,
+				selected: [],
+				skipped: [
+					{
+						runId: "workflow_abcdef0123456789",
+						status: "completed",
+						reason: "too-recent",
+					},
+					{
+						runId: "workflow_bbcdef0123456789",
+						status: "running",
+						reason: "not-terminal",
+					},
+				],
+			},
+			now,
+		);
+		expect(empty).toContain("No terminal workflow run older than 1d to prune.");
+		expect(empty).toContain(
+			"Kept 2 run(s): 1 still recoverable or running, 1 inside the age bound.",
+		);
+	});
+
+	it("states in the confirmation that nothing is deleted", () => {
+		const consequence = pruneConsequence({
+			dryRun: true,
+			trashRoot: "/store/trash",
+			batch: "20260304-050607",
+			reason: "Operator prune of a terminal workflow run.",
+			selected: [
+				{
+					runId: "workflow_abcdef0123456789",
+					status: "failed",
+					updatedAt: "2026-03-04T02:06:07.000Z",
+				},
+			],
+			skipped: [],
+			generatedAt: "2026-03-04T05:06:07.000Z",
+		});
+		expect(consequence).toContain("1 terminal run(s) move to");
+		expect(consequence).toContain("Nothing is deleted");
+		expect(consequence).toContain("no journal is appended to");
+		expect(consequence).toContain("recoverable from trash by hand");
 	});
 });
