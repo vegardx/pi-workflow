@@ -1160,6 +1160,31 @@ export async function createWorkflowService(
 	 * run, the one made for it): nested runs resolve their definitions by name
 	 * from it, so one `run`, `resume`, or nested launch discovers once.
 	 */
+	/**
+	 * The agent definitions that travel with a definition's root: `<root>/agents`
+	 * when it exists and is a real directory. A root holds `*.workflow.*`
+	 * definitions only, so the templates a definition names live beside them and
+	 * reach pi-subagent as the request's own agent roots instead of having to be
+	 * copied into a host's agent directory first. Project roots are included on
+	 * the same terms, and a project's own `.pi/agents` still wins: pi-subagent
+	 * consults a request root only for a name its own discovery does not define.
+	 */
+	async function agentRootsFor(
+		workflow: DiscoveredWorkflow,
+	): Promise<readonly string[]> {
+		// A dynamic definition's root is the proposal store, not a definition
+		// root a package or project curates; it ships no templates.
+		if (workflow.scope === "dynamic") return [];
+		if (!path.isAbsolute(workflow.root)) return [];
+		const directory = path.join(workflow.root, "agents");
+		try {
+			if (!(await lstat(directory)).isDirectory()) return [];
+			return [await realpath(directory)];
+		} catch {
+			return [];
+		}
+	}
+
 	async function compose(
 		record: WorkflowRunRecord,
 		workflow: DiscoveredWorkflow,
@@ -1189,10 +1214,12 @@ export async function createWorkflowService(
 			definitionIdentitySha256: record.definitionIdentitySha256,
 			deadlineAt: record.deadlineAt,
 		});
+		const agentRoots = await agentRootsFor(workflow);
 		const launcher = createWorkflowTaskLauncher({
 			journal,
 			binding,
 			artifacts,
+			...(agentRoots.length === 0 ? {} : { agentRoots }),
 		});
 		const finalizer = createWorkflowTaskFinalizer({
 			journal,
