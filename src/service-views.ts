@@ -617,6 +617,24 @@ export const WorkflowResumeOptionsSchema = Type.Object(
 );
 export type WorkflowResumeOptions = View<typeof WorkflowResumeOptionsSchema>;
 
+/** The `--older-than` ceiling a prune may be bounded by: 365 days. */
+export const MAX_WORKFLOW_PRUNE_AGE_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Store-level prune options. `dryRun` defaults to true: the safe answer to an
+ * unqualified call is a listing, never a move.
+ */
+export const WorkflowPruneOptionsSchema = Type.Object(
+	{
+		dryRun: Type.Optional(Type.Boolean()),
+		olderThanMs: Type.Optional(
+			Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_PRUNE_AGE_MS }),
+		),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowPruneOptions = View<typeof WorkflowPruneOptionsSchema>;
+
 export const WorkflowExecutionAttemptViewSchema = Type.Object(
 	{
 		kind: Type.Union([Type.Literal("retry"), Type.Literal("resume")]),

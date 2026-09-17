@@ -39,6 +39,7 @@ const WORKFLOW_SERVICE_METHODS = [
 	"project",
 	"proposals",
 	"propose",
+	"prune",
 	"reconcile",
 	"registerRoot",
 	"resume",
@@ -301,7 +302,7 @@ describe("frozen service surface", () => {
 		});
 		try {
 			expect(methodNames(service)).toEqual([...WORKFLOW_SERVICE_METHODS]);
-			expect(WORKFLOW_SERVICE_METHODS).toHaveLength(24);
+			expect(WORKFLOW_SERVICE_METHODS).toHaveLength(25);
 		} finally {
 			await service.shutdown();
 			await rm(base, { recursive: true, force: true });

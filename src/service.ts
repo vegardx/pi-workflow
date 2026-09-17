@@ -123,6 +123,11 @@ import {
 	type WorkflowRunJournalOpenOptions,
 } from "./persistence/journal.js";
 import {
+	pruneWorkflowRuns,
+	type WorkflowPruneCandidate,
+	type WorkflowPruneReport,
+} from "./persistence/retention.js";
+import {
 	acquireWorkflowRunLease,
 	probeWorkflowRunLease,
 	WorkflowPersistenceCorruptionError,
@@ -176,6 +181,7 @@ import {
 } from "./scheduler.js";
 import {
 	MAX_WORKFLOW_RUN_LIST_ISSUES,
+	MAX_WORKFLOW_RUN_PAGE_SIZE,
 	type WorkflowBudgetProjection,
 	type WorkflowDecideOptions,
 	WorkflowDecideOptionsSchema,
@@ -186,6 +192,8 @@ import {
 	type WorkflowLogOptions,
 	WorkflowLogOptionsSchema,
 	type WorkflowLogPage,
+	type WorkflowPruneOptions,
+	WorkflowPruneOptionsSchema,
 	type WorkflowReconciledExecution,
 	type WorkflowReconcileOptions,
 	type WorkflowResumeOptions,
@@ -416,6 +424,16 @@ export interface WorkflowService {
 	): Promise<DynamicWorkflowProposalView>;
 	/** Lease-free scan of every durable run in the store, newest first. */
 	listRuns(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
+	/**
+	 * Store-level retention, not a run action: moves every terminal, settled
+	 * run (`completed`, `completed-degraded`, `failed`, `cancelled`) and its
+	 * lease file into recoverable trash under `trash/<yyyymmdd-hhmmss>/`, so
+	 * `listRuns` stops reporting it. Nothing is deleted and no journal is
+	 * appended to; a run another live process leases is always refused, as is
+	 * one still recoverable (`interrupted`, `cleanup-blocked`) or running.
+	 * `dryRun` defaults to true and reports the selection without moving it.
+	 */
+	prune(options?: WorkflowPruneOptions): Promise<WorkflowPruneReport>;
 	/** Lease-free bounded projection of one run; the `run` section always fits. */
 	inspect(
 		runId: WorkflowRunId,
@@ -2153,7 +2171,10 @@ export async function createWorkflowService(
 		}
 	}
 
-	return Object.freeze({
+	// Named rather than returned inline so a store-level operation can reuse
+	// the service's own read surface: `prune` selects from `listRuns`, the
+	// same projection the operator and the widget see.
+	const service: WorkflowService = Object.freeze({
 		registerRoot(root: WorkflowRoot) {
 			return exclusive(async () => {
 				assertOpen();
@@ -3166,6 +3187,60 @@ export async function createWorkflowService(
 				throw reducerRejection(error);
 			}
 		},
+		async prune(pruneOptions: WorkflowPruneOptions = {}) {
+			assertOpen();
+			if (!Value.Check(WorkflowPruneOptionsSchema, pruneOptions)) {
+				throw new WorkflowServiceError(
+					"validation",
+					"Invalid workflow prune options.",
+				);
+			}
+			const { olderThanMs } = pruneOptions;
+			const dryRun = pruneOptions.dryRun ?? true;
+			// Exclusive for the whole selection and move: no drive of this
+			// service can open a run between reading its status and renaming
+			// its directory away.
+			return exclusive(async () => {
+				assertOpen();
+				const candidates: WorkflowPruneCandidate[] = [];
+				let cursor: string | undefined;
+				do {
+					const page = await service.listRuns({
+						includeChildren: true,
+						limit: MAX_WORKFLOW_RUN_PAGE_SIZE,
+						...(cursor === undefined ? {} : { cursor }),
+					});
+					for (const summary of page.runs) {
+						const current = owned.get(summary.runId);
+						candidates.push({
+							runId: summary.runId,
+							status: summary.status,
+							updatedAt: summary.updatedAt,
+							// This process keeps the lease of every run it drove,
+							// settled or not. A settled drive is idle, so our own
+							// listener is not the live process a prune refuses; the
+							// lease is released below, immediately before the move.
+							...(current?.settled === true ? { heldHere: true } : {}),
+						});
+					}
+					cursor = page.nextCursor;
+				} while (cursor !== undefined);
+				return pruneWorkflowRuns({
+					storeRoot,
+					candidates,
+					dryRun,
+					...(olderThanMs === undefined ? {} : { olderThanMs }),
+					async releaseLocalLease(runIdValue) {
+						const current = owned.get(runIdValue);
+						if (!current) return;
+						owned.delete(runIdValue);
+						if (current.watchdog) clearTimeout(current.watchdog);
+						delete current.watchdog;
+						await current.lease.release();
+					},
+				});
+			});
+		},
 		subscribe(listener: WorkflowRunListener) {
 			assertOpen();
 			listeners.add(listener);
@@ -3174,6 +3249,7 @@ export async function createWorkflowService(
 			};
 		},
 	});
+	return service;
 
 	/**
 	 * Resolves the drive to false or a timer to true, whichever settles first.

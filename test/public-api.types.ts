@@ -136,6 +136,7 @@ export type ServiceApiPins = [
 			| "project"
 			| "proposals"
 			| "propose"
+			| "prune"
 			| "reconcile"
 			| "registerRoot"
 			| "resume"
