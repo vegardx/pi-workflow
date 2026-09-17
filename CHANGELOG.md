@@ -15,7 +15,8 @@ port the host installs, a lease-free read of a settled run's output and of a
 checkpoint's decided value, and a support-task wiring fix in the extension. No
 frozen export, shape or message was removed or retyped, no returned union was
 widened, and nothing persisted changed; `WORKFLOW_CONTRACT_REVISION` stays 19
-and the required pi-subagent contract stays revision 7 (`0.11.0`).
+and the required pi-subagent contract stays revision 7, now pinned to `0.12.0`
+for the request field the agent-template fix needs.
 
 ### Added
 
@@ -191,6 +192,14 @@ and the required pi-subagent contract stays revision 7 (`0.11.0`).
 
 ### Changed
 
+- **`@vegardx/pi-subagent` `0.12.0` (exact) is required**, up from `0.11.0`.
+  The release adds optional `agentRoots` to the launch request, which is what
+  lets a builtin definition's agent templates resolve; the contract revision is
+  unchanged at 7, so `REQUIRED_SUBAGENT_CONTRACT` and
+  `isCompatibleSubagentContract` are untouched. `compatibility.json` and
+  `.github/workflows/ci.yml` move the pinned pi-subagent commit to
+  `8d0c344ce4e86831567b5831fb9eb490d7adde73` so CI builds a source tree whose
+  version matches the pin.
 - **`plan-to-ship` compiles a plan's stages.** The builtin is now a compiler
   over `plan.deliverables[].stages` and `plan.policy` rather than a fixed
   five-stage pipeline, lowered entirely onto the component library — `gate` for
@@ -270,9 +279,9 @@ and the required pi-subagent contract stays revision 7 (`0.11.0`).
   `WORKFLOW_CONTRACT_REVISION` stays 19. A project's own `.pi/agents` and a
   host's `<agentDir>/agents` still win for their own names, because a request
   root is consulted only for a name pi-subagent's discovery does not define.
-  This requires the pi-subagent release that ships `agentRoots` on the launch
-  request; its contract revision is unchanged at 7, so the next release raises
-  the exact peer pin from `0.11.0` to that version.
+  This needs the pi-subagent release that ships `agentRoots` on the launch
+  request, so the exact peer pin is now `0.12.0`; its contract revision is
+  unchanged at 7.
 
 ## 2.0.0
 
