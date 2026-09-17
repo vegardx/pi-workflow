@@ -274,6 +274,8 @@ from run summaries and never decide legality themselves.
 /workflow                                   inspector (TUI) or run list (print, rpc, json)
 /workflow list                              trusted definitions
 /workflow runs [--all]                      durable runs; --all includes nested children
+/workflow prune [--apply] [--older-than <duration>]
+                                            store-level; dry run without --apply
 /workflow validate <ref> [json]
 /workflow run <ref> [json]                  TUI without json opens an editor
 /workflow show|status <run-prefix>
@@ -296,10 +298,32 @@ methods that exist; `decide`
 for the decision when `json` is omitted), `approve`, and `reject` follow as
 human-only subcommands. `stop`, `invalidate`, `retry`, and `resume` ask for
 confirmation when a UI is present; `print` mode executes directly and writes
-to stdout. `alt+w` opens the inspector without interrupting input. In the
+to stdout.
+
+`prune` is the one subcommand that is not a run action and takes no run
+prefix: it addresses the run store, so it is not derived from
+`IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, never appears in the inspector's per-run
+palette (which is `availableActions` and nothing else), and is not a tool. It
+moves every terminal, settled run - `completed`, `completed-degraded`,
+`failed`, `cancelled` - together with its lease file into
+`.pi/workflow/trash/<yyyymmdd-hhmmss>/<run-id>/`, beside a manifest recording
+the run ID, its status, when it was pruned, and why. A run that is still
+running, still recoverable (`interrupted`, `cleanup-blocked`), or leased by a
+live Pi process is refused; `--older-than` (`30m`, `24h`, `7d`, `4w`) keeps
+recent runs. Without `--apply` it only lists what would move; with `--apply`
+it confirms first when a UI is present and executes directly in `print` mode.
+Pruning is an operator action on durable state outside a run's journal: it
+appends no event and changes no run's status (see
+[docs/authority.md](docs/authority.md)). **Nothing is deleted.** A pruned
+run's evidence - journal, tasks, artifacts, decisions - is exactly the bytes
+it had, under the trash entry's `run/`, and is recoverable by hand: move
+`run/` back to `.pi/workflow/runs/<run-id>` and `lease.json` back to
+`.pi/workflow/leases/<run-id>.lease.json`. `alt+w` opens the inspector without interrupting input. In the
 TUI a two-line `pi-workflow` widget below the editor shows
 `workflows ongoing: …` and `workflows need action: …`, is hidden when neither
-applies, marks runs leased by another Pi process as `(n elsewhere)`, refreshes
+applies, names `/workflow prune` on the attention line when every run that
+needs action is a terminal prunable one (nothing else about attention changes:
+a terminal failed run needs action until it is pruned), marks runs leased by another Pi process as `(n elsewhere)`, refreshes
 from `subscribe`, and polls only while nonterminal runs exist. While a run
 this session owns waits for a decision, its first line becomes
 `waiting for you: <prompt>` and the counts collapse into the second.

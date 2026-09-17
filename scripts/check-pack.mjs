@@ -214,6 +214,11 @@ try {
 	// bound is raised deliberately to 2816 KiB and this measurement keeps
 	// 196 KiB spare. The ENTRY bound stays at 208: 20 spare entries is still
 	// ample, and two slices in a row have added prose rather than files.
+	// W5-PRUNE records its own measurement in turn: unreleased with
+	// `/workflow prune` (the store-level retention module and its docs and
+	// README prose) the package measures 192 entries and 2675 KiB unpacked -
+	// four entries and 55 KiB over the row above. Both bounds stand as they
+	// are, with 16 entries and 141 KiB spare.
 	if (workflow.entryCount > 208 || workflow.unpackedSize > 2816 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,

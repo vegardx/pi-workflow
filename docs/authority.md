@@ -72,6 +72,34 @@ Static workflow code executes with extension-process authority. The bounded
 `WorkflowContext` reduces coupling but is not a sandbox. Runtime policy and
 human checkpoints still apply to dangerous task requests from trusted code.
 
+## Store retention
+
+Pruning is an operator action on durable state that sits **outside** any run's
+journal. A workflow run's journal is append-only and is the sole authority for
+what happened inside that run; nothing an operator does to the store rewrites
+it, and `/workflow prune` appends no event, records no decision, and changes no
+run's status. It is not a run action: it is never derived from
+`availableActions`, never offered in the inspector's per-run palette, and never
+a model-callable tool. `service.prune` addresses the run store.
+
+What it may move is bounded by the run's own terminal state, not by intent. A
+prune moves only runs that are terminal and settled for good - `completed`,
+`completed-degraded`, `failed`, `cancelled` - and refuses a run that is still
+running, still recoverable (`interrupted`, `cleanup-blocked`, which `resume`,
+`reconcile`, and `invalidate` still act on), or leased by a live process. Lease
+evidence is the same probe an acquirer reads, and it fails closed: an occupant
+that does not identify itself, and a lease record too corrupt to read, both
+count as held.
+
+Nothing is deleted. The run directory and its lease file are renamed into
+`trash/<yyyymmdd-hhmmss>/<run-id>/` beside a manifest naming the run, its
+status, when it was pruned, and why. The trash is append-only and is never
+read by the runtime: a pruned run's journal, tasks, artifacts, and decisions
+remain exactly as they were, and recovering that evidence is moving the entry
+back by hand (see `docs/persistence.md`). Because the evidence survives the
+move, a prune destroys no audit trail; it only stops the store presenting the
+run to `listRuns`, the inspector, and the widget.
+
 ## Handles and graph validation
 
 Task and artifact handles are opaque capabilities scoped to one workflow run.

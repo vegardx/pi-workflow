@@ -478,6 +478,21 @@ Revision 19 must prove:
 - the widget lists depth-0 runs that are ongoing or need action, hides when
   neither applies, marks runs leased elsewhere, refreshes from `subscribe`,
   and polls only while a listed run is nonterminal or awaits recovery;
+- the widget's attention line names `/workflow prune` exactly when every run
+  it counts is terminal, prunable, and not leased elsewhere, and attention
+  semantics are otherwise unchanged;
+- `/workflow prune [--apply] [--older-than <duration>]` is store-level: it
+  takes no run prefix, is not derived from
+  `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, is absent from the inspector's per-run
+  palette, and is not a tool; the dry run is the default and moves nothing,
+  an apply confirms first when a UI is present and executes directly in
+  `print` mode, and a declined confirm moves nothing;
+- `service.prune` moves each terminal, settled run and its lease file into
+  `trash/<yyyymmdd-hhmmss>/<run-id>/` as `run/` and `lease.json` beside a
+  schema-valid `manifest.json`, appends no journal event, deletes nothing,
+  and leaves a pruned run out of `listRuns`; it refuses a run that is still
+  running, still recoverable, or whose lease a live process holds, and
+  `--older-than` keeps runs inside the bound;
 - the widget stays at two lines while a run this session owns waits for a
   decision: `waiting for you: <prompt>` cut to the widget width takes the
   first line, the ongoing and attention counts collapse into the second, and

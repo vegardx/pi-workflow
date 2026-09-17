@@ -20,6 +20,28 @@ for the request field the agent-template fix needs.
 
 ### Added
 
+- **`/workflow prune [--apply] [--older-than <duration>]` and
+  `service.prune`.** Store-level retention, not a run action: it takes no run
+  prefix, is not derived from `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, is absent
+  from the inspector's per-run palette, and is not a tool. It moves every
+  terminal, settled run — `completed`, `completed-degraded`, `failed`,
+  `cancelled` — and its lease file out of `.pi/workflow/runs/<run-id>` and
+  `.pi/workflow/leases/<run-id>.lease.json` and into
+  `.pi/workflow/trash/<yyyymmdd-hhmmss>/<run-id>/` as `run/` and `lease.json`,
+  beside a `manifest.json` (`schema`, `contractRevision`, `runId`, `status`,
+  `prunedAt`, `reason`) written before anything is renamed. Runs that are
+  still running, still recoverable (`interrupted`, `cleanup-blocked`), or
+  leased by a live process are refused, and `--older-than` (`30m`, `24h`,
+  `7d`, `4w`, up to 365 days) keeps recent ones. A dry run is the default and
+  moves nothing; `--apply` confirms first when a UI is present and executes
+  directly in `print` mode. Pruning appends no journal event and changes no
+  run's status — it is an operator action on durable state outside a run's
+  journal — and **nothing is deleted**: a pruned run's evidence is exactly the
+  bytes it had, under the trash entry, and is recoverable by hand. `listRuns`
+  stops reporting a pruned run. The widget's `workflows need action:` line now
+  names `/workflow prune` when every run it counts is a terminal prunable one;
+  attention semantics are unchanged. Adding a subcommand and a service method
+  is additive; nothing persisted changed.
 - **`@vegardx/pi-workflow/components`.** A fourth entry point exporting the
   component library: `gate`, `envelope`, `forEach`, `reviewFanOut` and
   `verifyAndFix`, with their error and finding types and the compiled stage
