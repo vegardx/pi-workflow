@@ -79,11 +79,11 @@ try {
 		"workflows/deep-review.workflow.ts",
 		"workflows/plan-review.workflow.ts",
 		"workflows/deep-research.workflow.ts",
-		// W3: the three agent definitions plan-to-ship names. pi-subagent
-		// discovers agents only from `<agentDir>/agents` and a trusted
-		// `<cwd>/.pi/agents`, so a builtin workflow cannot ship them into place;
-		// they travel as templates a person copies. Packing them is what makes
-		// "copy these three files" an instruction a consumer can follow.
+		// W3: the agent definitions the builtin workflows name. They are not
+		// installed anywhere: a run composed from this root carries
+		// `workflows/agents` to pi-subagent as the request's `agentRoots`,
+		// which resolves them under `package` scope in any project. Packing
+		// them is therefore what makes a builtin definition runnable at all.
 		"workflows/agents/implementer.md",
 		"workflows/agents/planner.md",
 		"workflows/agents/reviewer.md",

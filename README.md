@@ -363,6 +363,15 @@ with `scope: "package"` or `"builtin"`. Discovery loads only `*.workflow.*`
 files, so `workflows/agents/*.md` travels in the same directory without being
 mistaken for a definition.
 
+**Agent templates travel with the root.** When a root has an `agents/`
+directory, every task a definition from that root launches carries its absolute
+path as the request's `agentRoots`, and pi-subagent resolves the named
+definition from it under `package` scope. A root consulted this way never
+displaces a definition the host already discovers: `<agentDir>/agents/*.md` and
+a trusted project's `.pi/agents/*.md` win for their own names. This is what
+lets a builtin definition name `lens-reviewer` and run in a project that has no
+`.pi/agents` of its own.
+
 ### `plan-to-ship`
 
 `workflows/plan-to-ship.workflow.ts` is the first builtin and the only one that
@@ -447,15 +456,15 @@ lens says nothing. The model ids are a marked stand-in until routing lands;
 `by.model` still pins an exact route.
 
 **The three agents.** The definition names `planner`, `implementer`, and
-`reviewer`. pi-subagent discovers agents only from `<agentDir>/agents/*.md` and
-a trusted project's `.pi/agents/*.md`, so a builtin workflow **cannot** install
-them; a run whose host lacks one fails that task at preflight. The package
-ships them as templates:
+`reviewer`, and the package ships all three under `workflows/agents/`. They
+need no installation: the run carries that directory to pi-subagent as the
+request's `agentRoots`, so the definitions resolve in any project. A host that
+wants its own instead defines that name in `<agentDir>/agents/*.md` or, for one
+trusted project, `.pi/agents/*.md`; either wins over the packaged template.
 
 ```sh
-cp node_modules/@vegardx/pi-workflow/workflows/agents/*.md ~/.config/pi/agent/agents/
-# or, for one trusted project only:
-cp node_modules/@vegardx/pi-workflow/workflows/agents/*.md .pi/agents/
+# Only to override a template, never to make a builtin run:
+cp node_modules/@vegardx/pi-workflow/workflows/agents/implementer.md .pi/agents/
 ```
 
 Each template is an authority **ceiling** a task may narrow but never widen:
@@ -463,7 +472,7 @@ the implementer is the only one with `edit`/`write`/`bash`, the only one
 allowed `workspaceModes: [worktree]`, and carries a 2 GiB
 `workspaceWriteBytes` ceiling so a real install and build fit. Pinning
 `by.model` to a route outside a template's `allowedModels` fails preflight with
-`model exceeds ceiling`; add the route to the template you copied.
+`model exceeds ceiling`; add the route in a copy that overrides the template.
 
 ### `deep-review`
 

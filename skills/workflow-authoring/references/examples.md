@@ -4,8 +4,9 @@ Every fenced `ts` block below is a complete `*.workflow.ts` module. The test
 `test/skill-examples.test.ts` writes each block to a trusted project root and
 loads it through the real definition loader, so the examples cannot drift from
 the loader's import and schema rules. Agent names (`researcher`, `reviewer`,
-`implementer`) are placeholders for named agents that must exist in the
-project or global agent directory at preflight.
+`implementer`) are placeholders for named agents that must resolve at
+preflight: from the project or global agent directory, or from an `agents/`
+directory beside the definition's own root.
 
 ## Linear: one agent task returned as the output
 

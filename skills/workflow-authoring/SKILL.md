@@ -148,10 +148,12 @@ checkpoints, worktree handoffs, a bounded loop, fan-out and finalizers in one
 definition, with `compileStageDocument` and `compileStages` showing the whole
 graph as data — the plan's view and the runtime's — before a task is declared.
 It names the
-agents `planner`, `implementer`, and `reviewer`, which a person must copy from
-`workflows/agents/*.md` into `<agentDir>/agents` or a trusted project's
-`.pi/agents` first: a definition can name an agent but never install one, and a
-missing one fails the task at pi-subagent preflight.
+agents `planner`, `implementer`, and `reviewer`, which the package ships under
+`workflows/agents/*.md`: a run composed from a root that has an `agents/`
+directory carries it to pi-subagent as the request's `agentRoots`, so those
+definitions resolve in any project. A host's `<agentDir>/agents` or a trusted
+project's `.pi/agents` still wins for a name it defines, and a name no source
+defines fails the task at pi-subagent preflight.
 
 Project definitions are trusted code. When either project root exists and the
 project is not trusted, discovery throws `WorkflowDefinitionTrustError`
@@ -1077,9 +1079,10 @@ receipt. `plan-review` is deliberately blind — `contextMode: "fresh"`,
 inherits the conversation only ever agrees with it. `deep-research` is the
 opposite: its threads read the project's own context files, and the
 independence it needs is between the threads, which `contextMode: "fresh"`
-delivers. All four name agents a person must copy from
-`workflows/agents/*.md` into `<agentDir>/agents` or a trusted project's
-`.pi/agents` first: a definition can name an agent but never install one.
+delivers. All four name agents the package ships under
+`workflows/agents/*.md`, which the run carries to pi-subagent as the request's
+`agentRoots`; `<agentDir>/agents` or a trusted project's `.pi/agents` overrides
+a name it defines.
 
 ## Dynamic workflows
 
