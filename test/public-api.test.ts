@@ -73,6 +73,7 @@ const WORKFLOW_TOOL_NAMES = [
 const WORKFLOW_SUBCOMMAND_GRAMMAR = [
 	"list",
 	"runs",
+	"prune",
 	"validate",
 	"run",
 	"approve",
@@ -361,7 +362,7 @@ describe("frozen extension surface", () => {
 	it("pins the /workflow grammar, widget key, and shortcut", () => {
 		expect(WORKFLOW_COMMAND).toBe("workflow");
 		expect([...WORKFLOW_SUBCOMMANDS]).toEqual([...WORKFLOW_SUBCOMMAND_GRAMMAR]);
-		expect(WORKFLOW_SUBCOMMAND_GRAMMAR).toHaveLength(16);
+		expect(WORKFLOW_SUBCOMMAND_GRAMMAR).toHaveLength(17);
 		expect(WORKFLOW_WIDGET_KEY).toBe("pi-workflow");
 		expect(WORKFLOW_WIDGET_SHORTCUT).toBe("alt+w");
 	});

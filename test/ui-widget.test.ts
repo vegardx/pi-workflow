@@ -11,6 +11,7 @@ import {
 	WORKFLOW_WIDGET_LIMIT,
 	WORKFLOW_WIDGET_PARKED_PREFIX,
 	WORKFLOW_WIDGET_POLL_MS,
+	WORKFLOW_WIDGET_PRUNE_HINT,
 	WORKFLOW_WIDGET_STATUSES,
 	WORKFLOW_WIDGET_WIDTH,
 	widgetNeedsPolling,
@@ -338,7 +339,7 @@ describe("workflow widget controller", () => {
 		const h = harness(page([summary("failed")]));
 		await h.controller.start();
 		expect(h.setWidget).toHaveBeenLastCalledWith([
-			"workflows need action: 1 failed · alt+w",
+			"workflows need action: 1 failed · /workflow prune · alt+w",
 		]);
 		h.notify();
 		h.notify();
@@ -526,5 +527,39 @@ describe("workflow widget controller", () => {
 		expect(vi.getTimerCount()).toBe(1);
 		h.controller.stop();
 		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+describe("prune hint on the attention line", () => {
+	it("names /workflow prune when every needing-action run is prunable", () => {
+		expect(workflowWidgetLines([summary("failed"), summary("failed")])).toEqual(
+			[
+				`workflows need action: 2 failed · ${WORKFLOW_WIDGET_PRUNE_HINT} · alt+w`,
+			],
+		);
+	});
+
+	it("withholds the hint while an unprunable run needs action", () => {
+		// `interrupted` and `cleanup-blocked` are still recoverable, so a prune
+		// would leave the count exactly where it is.
+		for (const status of ["interrupted", "cleanup-blocked"] as const) {
+			const lines = workflowWidgetLines([summary("failed"), summary(status)]);
+			expect(lines?.join("\n")).not.toContain(WORKFLOW_WIDGET_PRUNE_HINT);
+		}
+	});
+
+	it("withholds the hint while a needing-action run is leased elsewhere", () => {
+		const lines = workflowWidgetLines([
+			summary("failed", { leasedElsewhere: true }),
+		]);
+		expect(lines?.join("\n")).not.toContain(WORKFLOW_WIDGET_PRUNE_HINT);
+	});
+
+	it("leaves attention semantics alone", () => {
+		// The hint is the only change: a terminal failed run still needs action.
+		expect(workflowWidgetLines([summary("failed")])?.[0]).toContain(
+			"workflows need action: 1 failed",
+		);
+		expect(workflowWidgetLines([summary("completed")])).toBeUndefined();
 	});
 });

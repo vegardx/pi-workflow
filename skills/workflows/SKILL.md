@@ -255,6 +255,7 @@ You cannot invoke these. Quote them to the user when they are the next step.
 /workflow                                                      — opens the inspector
 /workflow list
 /workflow runs [--all]
+/workflow prune [--apply] [--older-than 24h|7d]                store-level
 /workflow validate <ref> [json-input]
 /workflow run <ref> [json-input]
 /workflow approve dynamic:<sha256> [reason]                    human-only
@@ -276,6 +277,15 @@ A task key is `namespace/key` (as the logs render it, with or without the
 leading `/`) or a full task id. `show` and `status` are the same view.
 `stop`, `invalidate`, `retry`, `resume`, and `decide` ask the human to
 confirm before anything is recorded.
+
+`prune` addresses the run store, not one run: it moves terminal runs
+(`completed`, `completed-degraded`, `failed`, `cancelled`) and their lease
+files into recoverable trash so they leave `/workflow runs` and the widget's
+"need action" count. It never touches a run that is still running, still
+recoverable (`interrupted`, `cleanup-blocked`), or leased by a live process,
+it appends nothing to any journal, and it deletes nothing. Without `--apply`
+it only lists what would move. Quote it when the human asks how to clear
+terminal runs that keep asking for attention.
 
 ## Never
 
