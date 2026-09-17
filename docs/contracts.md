@@ -1952,6 +1952,27 @@ never judges the run's status, nesting, deadline, or ownership: whether
 `invalidate` is legal is `availableActions`. The command line and the
 inspector confirmation take their closure from this method only.
 
+`prune(options?)` is store-level retention, not a run action. It moves every
+terminal, settled run (`completed`, `completed-degraded`, `failed`,
+`cancelled`) and its lease file from `runs/<run-id>` and
+`leases/<run-id>.lease.json` into `trash/<yyyymmdd-hhmmss>/<run-id>/` as
+`run/` and `lease.json`, beside a `manifest.json` carrying `schema`
+(`"pi-workflow-prune"`), `contractRevision`, `runId`, `status`, `prunedAt`,
+and `reason`. The manifest is written before anything is renamed. It appends
+no journal event, changes no run's status, and deletes nothing; `listRuns`
+stops reporting a pruned run because it scans `runs/` alone, and the evidence
+is recoverable from trash by hand. `dryRun` defaults to true and reports the
+same selection an apply performs without creating or moving anything.
+`olderThanMs` (1 ms to 365 days) keeps runs whose `updatedAt` is younger than
+the bound. A run that is not terminal-and-settled is skipped `not-terminal`,
+one inside the bound `too-recent`, and one whose lease a live process holds
+`lease-held` - the ordinary read-only lease probe, failing closed on an
+unidentified occupant and on a lease record too corrupt to read. A run this
+service itself drove and settled is the exception: its own lease is released
+immediately before the move. It refuses after shutdown (`conflict`) and
+refuses an unknown option or an out-of-range bound (`validation`, "Invalid
+workflow prune options.").
+
 `subscribe(listener)` observes every append this service makes to an owned
 run's journal as `{ runId, status, sequence }`, delivered from the journal's
 post-append microtask in sequence order per run without coalescing; a
@@ -1970,8 +1991,8 @@ from run summaries; no UI module imports the legality predicates (only the
 an action the summary does not list is refused before the service is called
 (`<action> is unavailable while the run is <status>.` or
 `<action> is unavailable: <runId> is leased by another Pi process.`). The
-grammar (`list`, `runs [--all]`, `validate`, `run`, `show|status`, `logs`,
-`wait`, then the run actions) derives its action subcommands from
+grammar (`list`, `runs [--all]`, `prune`, `validate`, `run`, `show|status`,
+`logs`, `wait`, then the run actions) derives its action subcommands from
 `IMPLEMENTED_WORKFLOW_RUN_ACTIONS` minus `wait` and `decide` (`stop`,
 `reconcile`, `invalidate`, `retry`, `resume` in this build), so an action
 appears only in builds whose service implements it, and a build
@@ -1980,10 +2001,18 @@ that lists an action without its method fails with
 through `listRuns({ includeChildren: true })` with an exact id winning over an
 ambiguous prefix; task keys are `[...namespace, key].join("/")` (a leading
 `/` as log entries render it is accepted) or full task ids, and abandoned
-tasks are never actionable. The widget lists depth-0 runs in the nonterminal
+tasks are never actionable. `prune` is the one subcommand that is not a run
+action: it takes no run prefix, is not derived from
+`IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, is absent from the inspector's per-run
+palette (which is `availableActions` and nothing else), and is not a tool. It
+forwards to `service.prune`, defaults to a dry run, confirms before an apply
+when a UI is present, and accepts `--older-than <n><s|m|h|d|w>` up to 365 days. The widget lists depth-0 runs in the nonterminal
 and attention statuses, shows at most two lines, hides when both are empty,
 refreshes from `subscribe`, and polls (unref'd, 5 s) only while a listed run
-is nonterminal or awaits recovery. While a listed run this session owns waits
+is nonterminal or awaits recovery. The attention line names `/workflow prune`
+exactly when every run it counts is terminal, prunable, and not leased
+elsewhere; attention itself is unchanged, so a terminal failed run needs
+action until it is pruned. While a listed run this session owns waits
 for a decision it may record (`status: "waiting"`, `ownership: "owned"`,
 `pendingCheckpointCount > 0`, `decide` in `availableActions`), the first line
 becomes `waiting for you: <prompt>` cut to `WORKFLOW_WIDGET_WIDTH` (80)

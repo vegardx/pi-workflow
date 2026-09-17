@@ -15,6 +15,11 @@
   tasks/<task-id>/
   artifacts/
   decisions/                       checkpoint decision records
+<cwd>/.pi/workflow/leases/<run-id>.lease.json
+<cwd>/.pi/workflow/trash/<yyyymmdd-hhmmss>/<run-id>/
+  manifest.json                    canonical prune manifest + "\n"
+  run/                             the whole runs/<run-id> directory, moved
+  lease.json                       the moved leases/<run-id>.lease.json, if any
 <cwd>/.pi/workflow/dynamic/<sourceSha256>/
   source.workflow.ts               exact proposed source bytes
   current                          "<version>\n": the active record pair
@@ -48,6 +53,39 @@ starts. A linked child workflow run is a peer directory under the same
 Credential-shaped metadata is redacted. Source-derived sensitive content that
 must be retained is stored as private artifact data, not copied into indexes or
 ordinary diagnostics.
+
+## Store retention and trash
+
+`/workflow prune` (`service.prune`) is store-level retention, not a run action
+and not a journal event: see `docs/authority.md`. It moves every run that is
+terminal and settled for good - `completed`, `completed-degraded`, `failed`,
+`cancelled` - out of `runs/` and `leases/` and into one trash entry per run,
+named by the batch second and the run ID. Runs that are still running, still
+recoverable (`interrupted`, `cleanup-blocked`), or leased by a live process are
+never moved; lease evidence is the ordinary read-only probe and fails closed.
+
+The manifest is written before anything is renamed, so an interrupted prune
+leaves a trash entry that names its run and holds whichever entries had already
+moved, never a half-moved run directory:
+
+```json
+{
+  "schema": "pi-workflow-prune",
+  "contractRevision": 18,
+  "runId": "workflow_…",
+  "status": "failed",
+  "prunedAt": "2026-03-04T05:06:07.000Z",
+  "reason": "Operator prune of a terminal workflow run."
+}
+```
+
+Nothing is deleted and the trash is append-only; the runtime never reads it.
+A pruned run's evidence - its journal, snapshot, task execution records,
+artifacts, decisions, and definition copy - is exactly the bytes it had, under
+`run/`, and is recoverable by hand: move `run/` back to
+`runs/<run-id>` and `lease.json` back to `leases/<run-id>.lease.json`, and the
+run is readable again. Until then `listRuns` does not see it, because
+`listRuns` scans `runs/` alone.
 
 ## Journal and snapshot
 
