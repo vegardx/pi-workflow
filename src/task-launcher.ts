@@ -69,6 +69,14 @@ export interface WorkflowTaskLauncherOptions {
 	readonly journal: WorkflowRunJournal;
 	readonly binding: WorkflowSubagentBinding;
 	readonly artifacts?: WorkflowArtifactStore;
+	/**
+	 * Absolute directories of agent definitions that travel with the running
+	 * definition's root, lowered onto every request this launcher makes. They
+	 * are the run's, not the task's: pi-subagent consults them only for a name
+	 * its own discovery does not define, so a host's global definition and a
+	 * trusted project's `.pi/agents` still win.
+	 */
+	readonly agentRoots?: readonly string[];
 }
 
 function launchReceipt(
@@ -182,6 +190,7 @@ async function lowerRequest(
 	operationId: string,
 	current: WorkflowStateProjection,
 	artifacts?: WorkflowArtifactStore,
+	agentRoots: readonly string[] = [],
 ): Promise<SubagentRequest> {
 	const hasInputs = Object.keys(task.spec.inputs).length > 0;
 	if (hasInputs && !artifacts) {
@@ -201,6 +210,10 @@ async function lowerRequest(
 	const request = {
 		operationId,
 		agent: task.spec.request.agent,
+		// The definition root's own templates. Not part of the persisted task
+		// spec: which directory a definition was loaded from is a property of
+		// this run's registry, not of the task's identity.
+		...(agentRoots.length === 0 ? {} : { agentRoots: [...agentRoots] }),
 		task: {
 			...structuredClone(task.spec.request.task),
 			context,
@@ -563,6 +576,7 @@ export function createWorkflowTaskLauncher(
 				agentOperationId(execution),
 				current,
 				await artifactsFor(agentTask),
+				options.agentRoots ?? [],
 			);
 		} catch (error) {
 			const message =
