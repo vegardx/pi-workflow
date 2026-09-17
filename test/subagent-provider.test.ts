@@ -10,7 +10,21 @@ import {
 } from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { describe, expect, it, vi } from "vitest";
-import { createWorkflowSubagentProvider } from "../src/subagent-provider.js";
+import {
+	createWorkflowSubagentProvider,
+	SUBAGENT_ACQUISITION_FAILURE_MESSAGE,
+	SUBAGENT_BINDING_FAILURE_MESSAGE,
+} from "../src/subagent-provider.js";
+
+/** pi-subagent's store refusal, verbatim: a fixed message with no host path. */
+const REVISION_REFUSAL =
+	"run record uses contract revision 6; expected 7. Discard incompatible persisted state before continuing.";
+
+function fixedMessageError(name: string, message: string): Error {
+	const error = new Error(message);
+	error.name = name;
+	return error;
+}
 
 const context = {} as ExtensionContext;
 
@@ -254,6 +268,64 @@ describe("workflow subagent provider", () => {
 				"workflow_ownerfailure",
 			),
 		).rejects.toMatchObject({ code: "acquisition" });
+	});
+
+	it("carries a pi-subagent fixed message into the acquisition failure", async () => {
+		const events = createEventBus();
+		const refusal = fixedMessageError(
+			"IncompatibleContractRevisionError",
+			REVISION_REFUSAL,
+		);
+		registerSubagentServiceProvider(events, async () => {
+			throw refusal;
+		});
+
+		const error = await createWorkflowSubagentProvider(events, context)
+			.bind("workflow_staterevision")
+			.catch((value: unknown) => value);
+
+		expect(error).toMatchObject({ code: "acquisition" });
+		expect((error as Error).message).toBe(
+			`Failed to acquire the shared pi-subagent service: ${REVISION_REFUSAL}`,
+		);
+		expect((error as Error).cause).toBe(refusal);
+	});
+
+	it("carries a fixed message into the owner-binding failure", async () => {
+		const events = createEventBus();
+		const shared = service();
+		const refusal = fixedMessageError(
+			"RunLeaseFencedError",
+			"run lease fenced: run_owner",
+		);
+		vi.mocked(shared.forOwner).mockImplementation(() => {
+			throw refusal;
+		});
+		registerSubagentServiceProvider(events, async () => shared);
+
+		const error = await createWorkflowSubagentProvider(events, context)
+			.bind("workflow_ownerfenced")
+			.catch((value: unknown) => value);
+
+		expect((error as Error).message).toBe(
+			`Failed to bind the subagent client to the workflow run: run lease fenced: run_owner`,
+		);
+	});
+
+	it("keeps the fixed message when the cause is not a fixed one", async () => {
+		const events = createEventBus();
+		registerSubagentServiceProvider(events, async () => {
+			throw new Error("ENOENT: /Users/someone/.config/pi/agent/subagents");
+		});
+
+		const error = await createWorkflowSubagentProvider(events, context)
+			.bind("workflow_opaquefailure")
+			.catch((value: unknown) => value);
+
+		expect((error as Error).message).toBe(SUBAGENT_ACQUISITION_FAILURE_MESSAGE);
+		expect(SUBAGENT_BINDING_FAILURE_MESSAGE).toBe(
+			"Failed to bind the subagent client to the workflow run.",
+		);
 	});
 
 	it("rejects invalid run identities before provider acquisition", async () => {

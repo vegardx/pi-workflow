@@ -245,6 +245,16 @@ replacement. It returns only the owner client, never the service or its shutdown
 method. Missing, duplicate, malformed, or incompatible providers fail before
 workflow work starts.
 
+An acquisition or owner-binding failure keeps its fixed message and appends the
+cause's own message when that cause is itself fixed and sanitized by
+construction - pi-subagent's provider, contract-revision, persistence, and
+lease errors, matched by name because an error from another module graph fails
+`instanceof`, and only while the message is still one short line with no host
+path and no URL. The same rule applies to the fixed message this package's own
+service-provider seam hands a consumer. A wrapper that hides a store's plain
+refusal costs a session; a wrapper that leaks a stack costs more, so both gates
+hold.
+
 ## Workflow service
 
 The session-scoped service discovers definitions under current trust, validates

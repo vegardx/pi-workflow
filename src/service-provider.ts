@@ -35,6 +35,7 @@ import {
 	WorkflowRuntimeContractSchema,
 } from "./contracts.js";
 import type { WorkflowDefinition } from "./definition.js";
+import { withSanitizedCause } from "./sanitized-cause.js";
 import {
 	projectWorkflowGraph,
 	type WorkflowDefinitionSummary,
@@ -234,12 +235,18 @@ export function isCompatibleWorkflowProvider(
 /**
  * `WorkflowServiceError` passes through with its code intact; anything else
  * becomes one fixed message, so no internal failure text crosses the seam.
+ *
+ * When the cause is itself a fixed, sanitized message - this package's own
+ * provider errors, or pi-subagent's - it is appended to that message
+ * (`sanitized-cause.ts`). The consumer is another extension's operator
+ * notice, and a notice that cannot name the failure sends a human looking in
+ * the wrong runtime.
  */
 function mapFailure(error: unknown): unknown {
 	if (error instanceof WorkflowServiceError) return error;
 	return new WorkflowServiceError(
 		"execution",
-		WORKFLOW_SERVICE_FAILURE_MESSAGE,
+		withSanitizedCause(WORKFLOW_SERVICE_FAILURE_MESSAGE, error),
 		{ cause: error },
 	);
 }

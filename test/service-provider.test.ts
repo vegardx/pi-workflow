@@ -555,6 +555,28 @@ describe("delegation and error mapping", () => {
 		expect((error as Error).cause).toBe(cause);
 	});
 
+	it("carries a fixed cause message alongside the fixed message", async () => {
+		const cause = new Error(
+			"Failed to acquire the shared pi-subagent service: run record uses contract revision 6; expected 7. Discard incompatible persisted state before continuing.",
+		);
+		cause.name = "WorkflowSubagentProviderError";
+		const { client } = await acquire(
+			serviceDouble({
+				list: async () => {
+					throw cause;
+				},
+			} as unknown as Partial<WorkflowService>),
+		);
+
+		const error = await client.list().catch((value: unknown) => value);
+
+		expect((error as WorkflowServiceError).code).toBe("execution");
+		expect((error as Error).message).toBe(
+			`The workflow service could not complete the request: ${cause.message}`,
+		);
+		expect((error as Error).cause).toBe(cause);
+	});
+
 	it("observes through subscribe and unsubscribes", async () => {
 		const unsubscribe = vi.fn();
 		const subscribe = vi.fn(() => unsubscribe);

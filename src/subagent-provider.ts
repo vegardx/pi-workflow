@@ -17,6 +17,7 @@ import {
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
 } from "./contracts.js";
+import { withSanitizedCause } from "./sanitized-cause.js";
 
 type CompleteMethodList<T, TMethods extends readonly (keyof T)[]> =
 	Exclude<keyof T, TMethods[number]> extends never ? TMethods : never;
@@ -118,6 +119,20 @@ export class WorkflowSubagentProviderError extends Error {
 	}
 }
 
+/**
+ * The fixed prefix every acquisition failure keeps. pi-subagent builds its
+ * errors from literals, so when one of them is the cause its own message is
+ * appended here: this wrapper alone says only that something failed, which is
+ * the whole reason an obsolete record in the shared store once read as a
+ * missing runtime.
+ */
+export const SUBAGENT_ACQUISITION_FAILURE_MESSAGE =
+	"Failed to acquire the shared pi-subagent service.";
+
+/** The fixed prefix every owner-binding failure keeps. */
+export const SUBAGENT_BINDING_FAILURE_MESSAGE =
+	"Failed to bind the subagent client to the workflow run.";
+
 export interface WorkflowSubagentBinding {
 	readonly workflowRunId: WorkflowRunId;
 	readonly ownerId: string;
@@ -166,7 +181,7 @@ export function createWorkflowSubagentProvider(
 			}
 			throw new WorkflowSubagentProviderError(
 				"acquisition",
-				"Failed to acquire the shared pi-subagent service.",
+				withSanitizedCause(SUBAGENT_ACQUISITION_FAILURE_MESSAGE, error),
 				{ cause: error },
 			);
 		}
@@ -194,7 +209,7 @@ export function createWorkflowSubagentProvider(
 		} catch (error) {
 			throw new WorkflowSubagentProviderError(
 				"acquisition",
-				"Failed to bind the subagent client to the workflow run.",
+				withSanitizedCause(SUBAGENT_BINDING_FAILURE_MESSAGE, error),
 				{ cause: error },
 			);
 		}
