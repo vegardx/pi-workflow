@@ -256,6 +256,23 @@ and the required pi-subagent contract stays revision 7 (`0.11.0`).
   and their module specifiers were never admitted to the definition import
   gate. The extension now passes them, which is the constructor form the
   contract's `supportTaskExecution` feature promises.
+- **A builtin definition's agent templates resolve in any project.** The
+  builtin workflows name `lens-reviewer`, `plan-reviewer`, `implementer`,
+  `planner`, `reviewer` and `researcher`, and the package ships those
+  definitions under `workflows/agents/`, but nothing told pi-subagent where
+  they were: a run in a project without matching `.pi/agents` failed at once
+  with "Subagent preflight failed before launch. agent not found:
+  lens-reviewer". A run composed from a root that has an `agents/` directory
+  now lowers that directory's canonical path onto every subagent request it
+  makes, as `SubagentRequest.agentRoots`, and pi-subagent resolves the named
+  definition from it under `package` scope. The roots are the run's, not the
+  task's: no task spec, event or record changed, so
+  `WORKFLOW_CONTRACT_REVISION` stays 19. A project's own `.pi/agents` and a
+  host's `<agentDir>/agents` still win for their own names, because a request
+  root is consulted only for a name pi-subagent's discovery does not define.
+  This requires the pi-subagent release that ships `agentRoots` on the launch
+  request; its contract revision is unchanged at 7, so the next release raises
+  the exact peer pin from `0.11.0` to that version.
 
 ## 2.0.0
 

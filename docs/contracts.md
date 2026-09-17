@@ -285,12 +285,17 @@ plus the approved `planDigest`. The workflow never pushes, merges, publishes,
 or applies a handoff: shipping is a cherry-pickable ref and a patch artifact.
 
 A root loads `*.workflow.ts|mts|js|mjs` only, so other files may live under
-one. `workflows/agents/{planner,implementer,reviewer}.md` uses that: the three
-agents `plan-to-ship` names travel with the package as **templates**, because
-pi-subagent discovers agents from `<agentDir>/agents` and a trusted
-`<cwd>/.pi/agents` and from nowhere else. A workflow cannot install an agent; a
-person copies the template, and a missing agent fails that task at pi-subagent
-preflight.
+one. `workflows/agents/*.md` uses that: the agent definitions a builtin names
+travel with the package beside the definitions that name them. A run composed
+from a root with an `agents/` directory lowers that directory's canonical path
+onto every subagent request it makes, as `SubagentRequest.agentRoots`, and
+pi-subagent resolves the named definition from it under `package` scope. The
+roots are the run's, not the task's: they are not part of a task spec's
+identity, because which directory a definition was loaded from belongs to this
+run's registry. A request root is consulted only for a name pi-subagent's own
+discovery does not define, so `<agentDir>/agents` and a trusted
+`<cwd>/.pi/agents` still win for their own names; a name no source defines
+still fails that task at pi-subagent preflight.
 
 ## Support-task descriptors
 
