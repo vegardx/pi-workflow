@@ -90,7 +90,7 @@ function plan(options: PlanOptions = {}): PlanInput {
 				...lenses.map((lens, lensIndex) => ({
 					id: `r${index}-${lensIndex}`,
 					title: `Review: ${lens}`,
-					by: {
+					review: {
 						lens,
 						...(options.diverse === undefined
 							? {}
@@ -600,7 +600,7 @@ function examplePlan(): PlanInput {
 					{
 						id: "rev-contracts",
 						title: "Contract review",
-						by: { lens: "contracts", tier: "heavy", diverse: true },
+						review: { lens: "contracts", tier: "heavy", diverse: true },
 					},
 				],
 				stages: [
@@ -799,7 +799,7 @@ describe("plan-to-ship: the compiler", () => {
 						id: "review",
 						key: "review-d0",
 						origin: "policy",
-						// Seeded from `tasks[].by`, with the policy's review defaults.
+						// Seeded from `tasks[].review`, with the policy's review defaults.
 						lenses: [{ id: "correctness", tier: "standard", diverse: false }],
 						synthesis: "optional",
 						tasks: ["review-d0/correctness", "review-d0-synthesis"],
@@ -923,7 +923,7 @@ describe("plan-to-ship: the compiler", () => {
 		expect(document.gates).toEqual(["approve-plan", "look-d0", "ship"]);
 	});
 
-	it("seeds review lenses from `tasks[].by` and resolves tier and diversity from the policy", () => {
+	it("seeds review lenses from `tasks[].review` and resolves tier and diversity from the policy", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: ["a", "b"] }), {
 			reviewDefault: { tier: "heavy", diverse: true },
 		});
@@ -941,6 +941,36 @@ describe("plan-to-ship: the compiler", () => {
 		expect(pinned.deliverables[0]?.stages[2]).toMatchObject({
 			lenses: [{ id: "a", tier: "light", diverse: false }],
 		});
+	});
+
+	it("refuses a plan schema v3 task that still carries `by`, by name", () => {
+		const v3 = plan();
+		const deliverable = v3.deliverables[0];
+		if (!deliverable) throw new Error("fixture");
+		const tasks = [
+			{ id: "w0", title: "Write the code" },
+			{
+				id: "r0-0",
+				title: "Review: correctness",
+				by: { lens: "correctness" },
+			},
+		];
+		const document = {
+			...v3,
+			deliverables: [{ ...deliverable, tasks }],
+		} satisfies PlanInput;
+		expect(() => compileStages(document)).toThrow(
+			'deliverable "d0" task "r0-0" carries `by`, which plan schema v4 renamed to `review`',
+		);
+		expect(() => compileStages(document)).toThrow(
+			"this is a version 3 document and there is no migration",
+		);
+		// The refusal is the compiler's, not the schema's: a v3 document parses,
+		// so the person is told what is wrong instead of reading a TypeBox error,
+		// and it is never compiled without the reviewers it asked for.
+		expect(() =>
+			compileStages({ ...v3, deliverables: [deliverable] }),
+		).not.toThrow();
 	});
 
 	it("de-duplicates repeated lens ids by declaration ordinal", () => {
@@ -1774,7 +1804,7 @@ describe("plan-to-ship: the effort dial", () => {
 });
 
 describe("plan-to-ship: the input contract", () => {
-	it("accepts the v3 shape, with and without `effort`", async () => {
+	it("accepts the v4 shape, with and without `effort`", async () => {
 		const service = await serviceFor(scripted());
 		for (const value of [
 			input(),
@@ -1804,6 +1834,37 @@ describe("plan-to-ship: the input contract", () => {
 		}
 	});
 
+	it("admits `by` at validate, so the version 3 refusal is the compiler's", async () => {
+		// The plan mirror carries `by` on purpose: refused by TypeBox it would
+		// read as an unexpected property, and a person cannot act on that. It
+		// parses, and the compiler then names it.
+		const service = await serviceFor(scripted());
+		const v3 = {
+			...input(),
+			plan: {
+				...plan(),
+				deliverables: [
+					{
+						id: "d0",
+						title: "t",
+						after: [],
+						reads: [],
+						tasks: [
+							{ id: "w0", title: "Write the code" },
+							{ id: "r0", title: "Review", by: { lens: "correctness" } },
+						],
+					},
+				],
+			},
+		};
+		await expect(service.validate("plan-to-ship", v3)).resolves.toMatchObject({
+			valid: true,
+		});
+		expect(() => compileStages(v3.plan as PlanInput)).toThrow(
+			'deliverable "d0" task "r0" carries `by`, which plan schema v4 renamed to `review`',
+		);
+	});
+
 	it("refuses a bad digest, a bad effort, and an unknown plan field", async () => {
 		const service = await serviceFor(scripted());
 		for (const bad of [
@@ -1821,7 +1882,9 @@ describe("plan-to-ship: the input contract", () => {
 							title: "t",
 							after: [],
 							reads: [],
-							tasks: [{ id: "r0", title: "Review", by: { verdict: "nope" } }],
+							tasks: [
+								{ id: "r0", title: "Review", review: { verdict: "nope" } },
+							],
 						},
 					],
 				},
