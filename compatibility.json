@@ -24,7 +24,7 @@
 	},
 	"piSubagent": {
 		"package": "@vegardx/pi-subagent",
-		"peerRange": "0.12.0",
+		"peerRange": "0.13.0",
 		"contractRevision": 7,
 		"requiredFeatures": {
 			"nativeSessionBackend": true,
@@ -49,9 +49,10 @@
 			"publicNetworkEgress": true,
 			"explicitResources": true,
 			"ambientExtensionsControl": true,
-			"hostBrokeredTools": true
+			"hostBrokeredTools": true,
+			"agentRootsFirst": true
 		},
-		"ciCommit": "8d0c344ce4e86831567b5831fb9eb490d7adde73"
+		"ciCommit": "bc2d816f78be8aa67100acf4ead25d0d99d6f35f"
 	},
 	"pi": {
 		"packages": [
@@ -94,7 +95,7 @@
 			"platform": "linux-x64",
 			"status": "build-only",
 			"node": "24.16.0",
-			"piSubagentCommit": "8d0c344ce4e86831567b5831fb9eb490d7adde73",
+			"piSubagentCommit": "bc2d816f78be8aa67100acf4ead25d0d99d6f35f",
 			"evidence": [".github/workflows/ci.yml"]
 		}
 	]

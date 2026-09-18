@@ -655,6 +655,7 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		explicitResources: true,
 		ambientExtensionsControl: true,
 		hostBrokeredTools: true,
+		agentRootsFirst: true,
 	}),
 });
 
