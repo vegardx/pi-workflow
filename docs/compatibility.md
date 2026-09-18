@@ -26,9 +26,9 @@ disagree.
 | `WORKFLOW_RUNTIME_CONTRACT.features.checkpoints` | `true` | `src/contracts.ts` |
 | `WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows` | `true` (proposed `dynamic:<sha256>` sources run only after a human approval bound to their digest, manifest, host API, and import policy) | `src/contracts.ts` |
 | `WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart` | `true` (the service-provider client exposes `startBuiltin`, gated by the frozen `BUILTIN_STARTABLE_WORKFLOWS`, and `run-created` carries the optional `origin: "service-provider"`) | `src/contracts.ts` |
-| Required `@vegardx/pi-subagent` | `0.12.0` (exact; raised from `0.11.0` by request-supplied agent roots) | `package.json` `peerDependencies` |
+| Required `@vegardx/pi-subagent` | `0.13.0` (exact; raised from `0.12.0` by roots-first agent resolution) | `package.json` `peerDependencies` |
 | Required pi-subagent contract revision | 7 | `WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision` |
-| pi-subagent commit built in CI | `8d0c344ce4e86831567b5831fb9eb490d7adde73` | `.github/workflows/ci.yml` |
+| pi-subagent commit built in CI | `bc2d816f78be8aa67100acf4ead25d0d99d6f35f` | `.github/workflows/ci.yml` |
 | Pi (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-server`, `@earendil-works/pi-tui`) | `>=0.85.0 <0.86` | `package.json` `peerDependencies` |
 | Node.js engines | `>=23.6.0` | `package.json` `engines` |
 | Node.js in CI | 24.16.0 | `.github/workflows/ci.yml` |
@@ -71,7 +71,7 @@ it is revision 7 and every feature below has exactly this value.
 
 | Host | Status | What was exercised |
 | --- | --- | --- |
-| macOS arm64 | Qualified | Real Pi 0.85.0 print-mode sessions on Node.js 24.16.0 loaded the packed extension and ran trusted workflows through pi-subagent Gondolin VMs: single agent task, artifact pipeline, parallel barrier, settled results, fan-out, fan-in, and the pipeline builder. Evidence: the reports under [`docs/qualification/`](qualification/). Those reports record pi-subagent commit `55e84bd731e2017510ee85b2df898e7f2d3679f2`; the current CI pin `8d0c344ce4e86831567b5831fb9eb490d7adde73` (pi-subagent 0.12.0, contract revision 7) has been verified only by the packed contract check, not by a new host run. 1.0.0 packed tarball qualification: see [`docs/qualification.md`](qualification.md), which records its own status; an unchecked item there is not a claim. |
+| macOS arm64 | Qualified | Real Pi 0.85.0 print-mode sessions on Node.js 24.16.0 loaded the packed extension and ran trusted workflows through pi-subagent Gondolin VMs: single agent task, artifact pipeline, parallel barrier, settled results, fan-out, fan-in, and the pipeline builder. Evidence: the reports under [`docs/qualification/`](qualification/). Those reports record pi-subagent commit `55e84bd731e2017510ee85b2df898e7f2d3679f2`; the current CI pin `bc2d816f78be8aa67100acf4ead25d0d99d6f35f` (pi-subagent 0.13.0, contract revision 7) has been verified only by the packed contract check, not by a new host run. 1.0.0 packed tarball qualification: see [`docs/qualification.md`](qualification.md), which records its own status; an unchecked item there is not a claim. |
 | Linux x64 | Build-only | GitHub Actions `ubuntu-latest` on Node.js 24.16.0 builds the pinned pi-subagent commit, then runs `npm run check` (Biome, `tsc`, build, Vitest with fake subagent clients, pack check) and `npm audit --audit-level=low`. No real Pi session, model, or Gondolin VM is exercised. |
 | Other platforms | Not built | Nothing else is built, tested, or qualified. |
 
