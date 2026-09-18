@@ -25,6 +25,7 @@
 	"StaticWorkflowRuntimeError",
 	"WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE",
 	"WORKFLOW_HANDOFF_VERIFICATION_MESSAGES",
+	"WORKFLOW_STATE_DIR_NAME",
 	"WorkflowArtifactInputError",
 	"WorkflowArtifactStore",
 	"WorkflowArtifactStoreError",
@@ -94,6 +95,7 @@
 	"deriveWorkflowHandoffDescriptor",
 	"deriveWorkflowTaskId",
 	"discoverWorkflows",
+	"encodeWorkflowProjectKey",
 	"encodeWorkflowRunCursor",
 	"exactModelRequest",
 	"exactThinkingLevel",
@@ -133,5 +135,6 @@
 	"validateWorkflowTaskContext",
 	"verifyWorkflowArtifactInputs",
 	"verifyWorkflowHandoffEvidence",
+	"workflowStateRoot",
 	"workflowUsage"
 ]

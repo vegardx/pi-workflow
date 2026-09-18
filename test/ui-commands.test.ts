@@ -1470,7 +1470,7 @@ async function realService(
 	return createWorkflowService({
 		cwd,
 		agentDir,
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		projectTrusted: () => true,
 		subagents: provider(),
 		...options,

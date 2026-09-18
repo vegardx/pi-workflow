@@ -246,7 +246,7 @@ describe("public API export lists", () => {
 		const actual = exportNames(runtime);
 		expect(diff(actual, pinned)).toEqual({ added: [], removed: [] });
 		expect(actual).toEqual(pinned);
-		expect(pinned).toHaveLength(135);
+		expect(pinned).toHaveLength(138);
 	});
 
 	it("exports every name from exactly one entry point", async () => {
@@ -297,7 +297,7 @@ describe("frozen service surface", () => {
 		const service = await root.createWorkflowService({
 			cwd,
 			agentDir: path.join(base, "agent"),
-			storeRoot: path.join(cwd, ".pi", "workflow"),
+			storeRoot: path.join(cwd, "state"),
 			projectTrusted: () => true,
 			subagents,
 		});

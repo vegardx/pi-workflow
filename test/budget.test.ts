@@ -717,7 +717,7 @@ async function attemptWorkflowFixture(options: AttemptWorkflowOptions = {}) {
 	const base = root("attempts");
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	const definitionPath = path.join(cwd, "workflows", "attempts.workflow.ts");
 	const policies = options.retry

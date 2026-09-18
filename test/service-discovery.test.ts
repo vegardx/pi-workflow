@@ -77,7 +77,7 @@ describe("service project discovery", () => {
 		await mkdir(path.join(cwd, "workflows"), { recursive: true });
 		await mkdir(agentDir, { recursive: true });
 		await writeFile(definitionPath, definition("example", "first "));
-		const storeRoot = path.join(cwd, ".pi", "workflow");
+		const storeRoot = path.join(cwd, "state");
 		const service = await createWorkflowService({
 			cwd,
 			agentDir,
@@ -133,7 +133,7 @@ describe("service registered roots", () => {
 		const service = await createWorkflowService({
 			cwd,
 			agentDir,
-			storeRoot: path.join(cwd, ".pi", "workflow"),
+			storeRoot: path.join(cwd, "state"),
 			projectTrusted: () => false,
 			subagents: provider(),
 			registeredRoots: [
@@ -161,7 +161,7 @@ describe("service registered roots", () => {
 			createWorkflowService({
 				cwd,
 				agentDir: path.join(base, "agent"),
-				storeRoot: path.join(cwd, ".pi", "workflow"),
+				storeRoot: path.join(cwd, "state"),
 				projectTrusted: () => true,
 				subagents: provider(),
 				registeredRoots: [{ path: cwd, scope: "project", source: "test" }],

@@ -10,9 +10,10 @@ import {
 } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import type {
-	ExtensionAPI,
-	ToolDefinition,
+import {
+	type ExtensionAPI,
+	getAgentDir,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type AgentLaunchPlan,
@@ -24,7 +25,7 @@ import {
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowStateProjection } from "../src/events.js";
 import workflowExtension from "../src/extension.js";
 import {
@@ -35,6 +36,7 @@ import {
 	WorkflowPersistenceCorruptionError,
 	type WorkflowRunLeaseRecord,
 } from "../src/persistence/run-lease.js";
+import { workflowStateRoot } from "../src/persistence/state-root.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
 import {
 	createWorkflowService,
@@ -53,6 +55,7 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
+import { useTempAgentDir } from "./fixtures/agent-dir.js";
 
 // ---------------------------------------------------------------------------
 // Helpers copied from the service test files
@@ -77,6 +80,18 @@ function deferred<T>() {
 function root(name: string): string {
 	return path.resolve(".pi", "test-service-read", `${name}-${randomUUID()}`);
 }
+
+/**
+ * The read tools boot the extension, which derives its store root from
+ * `getAgentDir()`; every test gets a throwaway agent directory.
+ */
+beforeEach(async () => {
+	await useTempAgentDir(root("agent"));
+});
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
 
 async function until(predicate: () => boolean | Promise<boolean>) {
 	while (!(await predicate())) {
@@ -179,8 +194,10 @@ const AGENT_BODY = (policies: string, limitCost: number, retries: number) =>
 async function projectFixture(name = "project") {
 	const base = root(name);
 	const cwd = path.join(base, "project");
-	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	// The throwaway agent dir this test stubbed: the read tools reach the
+	// store through the extension, which derives the root from it.
+	const agentDir = getAgentDir();
+	const storeRoot = workflowStateRoot(cwd, agentDir);
 	const workflows = path.join(cwd, "workflows");
 	await mkdir(workflows, { recursive: true });
 	const files: Record<string, string> = {

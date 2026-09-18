@@ -50,7 +50,7 @@ async function serviceWith(supportTasks: readonly SupportTaskRegistration[]) {
 	return createWorkflowService({
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		projectTrusted: () => true,
 		subagents,
 		supportTasks,

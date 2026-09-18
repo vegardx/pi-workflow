@@ -343,7 +343,7 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 19 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 20 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows !== true ||

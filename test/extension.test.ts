@@ -10,9 +10,10 @@ import {
 import type { SubagentService } from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { Value } from "typebox/value";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowRunId, WorkflowTaskId } from "../src/contracts.js";
 import workflowExtension from "../src/extension.js";
+import { workflowStateRoot } from "../src/persistence/state-root.js";
 import { discoverWorkflows } from "../src/registry.js";
 import type {
 	WorkflowRunSummary,
@@ -20,6 +21,7 @@ import type {
 } from "../src/service-views.js";
 import { WORKFLOW_TOOL_DECLARATIONS } from "../src/tools.js";
 import { createParkedRunObserver } from "../src/ui/parked-observer.js";
+import { useTempAgentDir } from "./fixtures/agent-dir.js";
 
 type Handler = (...args: unknown[]) => unknown;
 type Command = {
@@ -169,6 +171,23 @@ async function emptyProject(): Promise<string> {
 	await mkdir(cwd, { recursive: true });
 	return cwd;
 }
+
+/**
+ * The extension derives its store root from `getAgentDir()`, so every test
+ * that boots it gets a throwaway agent directory; nothing here ever writes to
+ * the real one.
+ */
+let agentDir: string;
+
+beforeEach(async () => {
+	agentDir = await useTempAgentDir(
+		path.resolve(".pi", "test-extension", `agent-${randomUUID()}`),
+	);
+});
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
 
 describe("workflow Pi extension", () => {
 	afterEach(() => {
@@ -828,6 +847,109 @@ export default defineWorkflow({
 		}
 	});
 
+	it("keeps state out of the project and keys it by project path", async () => {
+		const { tools, handlers } = capture({ subagents: true });
+		const tool = (name: string) => {
+			const found = tools.find((candidate) => candidate.name === name);
+			if (!found) throw new Error(`${name} missing`);
+			return found;
+		};
+		const signal = new AbortController().signal;
+		const contexts = [];
+		for (const label of ["one", "two"]) {
+			const cwd = await emptyProject();
+			await mkdir(path.join(cwd, "workflows"), { recursive: true });
+			await writeFile(
+				path.join(cwd, "workflows", `keyed-${label}.workflow.ts`),
+				`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "keyed-${label}", description: "Keyed fixture", version: 1, budget: { cost: 10, childRuntimeMs: 1000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run() { return { answer: "done" }; }
+};
+`,
+			);
+			contexts.push({
+				cwd,
+				label,
+				context: {
+					cwd,
+					mode: "print",
+					hasUI: false,
+					isProjectTrusted: () => true,
+					ui: { notify: vi.fn(), confirm: vi.fn(), setWidget: vi.fn() },
+				},
+			});
+		}
+		const [first, second] = contexts;
+		if (!first || !second) throw new Error("fixtures missing");
+		try {
+			const started = await tool("workflow_run").execute(
+				"call-1",
+				{ ref: "keyed-one", input: {} },
+				signal,
+				undefined,
+				first.context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			await tool("workflow_wait").execute(
+				"call-2",
+				{ runId },
+				signal,
+				undefined,
+				first.context as never,
+			);
+
+			// The run is under the agent dir, keyed by the first project, and
+			// nothing at all was written inside the project.
+			const storeRoot = workflowStateRoot(first.cwd, agentDir);
+			expect(storeRoot).toBe(
+				path.join(
+					agentDir,
+					"workflow",
+					`--${path.resolve(first.cwd).slice(1).replaceAll("/", "-")}--`,
+				),
+			);
+			expect(await pathExists(path.join(storeRoot, "runs", runId))).toBe(true);
+			expect(await pathExists(path.join(first.cwd, ".pi", "workflow"))).toBe(
+				false,
+			);
+			expect(
+				(await readdir(first.cwd)).filter((entry) => entry !== "workflows"),
+			).toEqual([]);
+
+			// The key is the project path: the same agent dir, a different cwd,
+			// and the run is not there.
+			const listedHere = await tool("workflow_runs").execute(
+				"call-3",
+				{},
+				signal,
+				undefined,
+				first.context as never,
+			);
+			expect(
+				(listedHere.details as { runs: { runId: string }[] }).runs.map(
+					(run) => run.runId,
+				),
+			).toEqual([runId]);
+			const listedThere = await tool("workflow_runs").execute(
+				"call-4",
+				{},
+				signal,
+				undefined,
+				second.context as never,
+			);
+			expect((listedThere.details as { runs: unknown[] }).runs).toEqual([]);
+			expect(workflowStateRoot(second.cwd, agentDir)).not.toBe(storeRoot);
+		} finally {
+			await handlers.get("session_shutdown")?.(
+				{ reason: "quit" },
+				second.context,
+			);
+		}
+	});
+
 	it("prunes terminal runs only after a confirm, and never on a dry run", async () => {
 		const { tools, commands, handlers } = capture({ subagents: true });
 		const command = commands.get("workflow");
@@ -862,7 +984,7 @@ export default defineWorkflow({
 			ui: { notify, confirm, setWidget: vi.fn() },
 		};
 		const signal = new AbortController().signal;
-		const storeRoot = path.join(cwd, ".pi", "workflow");
+		const storeRoot = workflowStateRoot(cwd, agentDir);
 		try {
 			const started = await tool("workflow_run").execute(
 				"call-1",

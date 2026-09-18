@@ -212,7 +212,7 @@ describe("compatibility matrix", () => {
 				),
 			),
 		).resolves.toBeUndefined();
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(19);
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(20);
 		expect(compatibility.piWorkflow.features).toEqual({
 			checkpoints: true,
 			dynamicWorkflows: true,
@@ -372,7 +372,7 @@ describe("compatibility matrix 1.0", () => {
 		);
 		expect(doc).toContain("no `typesVersions`");
 		expect(doc).toContain(
-			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); 2.0.0 raises it from 18`,
+			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); 2.0.0 raised it from 18 to 19`,
 		);
 		expect(doc).toContain(
 			"| Required `@vegardx/pi-subagent` | `0.12.0` (exact; raised from `0.11.0` by request-supplied agent roots) |",

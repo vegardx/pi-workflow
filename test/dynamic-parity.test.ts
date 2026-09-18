@@ -608,7 +608,7 @@ const projects: Project[] = [];
 async function openProject(name: string, source: string): Promise<Project> {
 	const cwd = path.join(parityRoot, name, "project");
 	const agentDir = path.join(parityRoot, name, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	await mkdir(agentDir, { recursive: true });
 	await installPackageShims(cwd);

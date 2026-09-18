@@ -537,7 +537,7 @@ async function fixture(name: string, names: readonly DefinitionName[]) {
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	const packageDir = path.join(cwd, "node_modules", ...TOOLS_MODULE.split("/"));
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	await mkdir(packageDir, { recursive: true });
@@ -746,7 +746,7 @@ async function crashSnapshot(
 	fx: { cwd: string; storeRoot: string },
 	runIds: readonly WorkflowRunId[],
 ): Promise<string> {
-	const storeRoot = path.join(fx.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fx.cwd, ".pi", `state-${randomUUID()}`);
 	// Leases live under `<storeRoot>/leases`, so seed one per copied run: the
 	// next acquisition then fences at a higher generation than the copied
 	// journal tail written by the first service.

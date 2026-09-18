@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
+import { workflowStateRoot } from "./persistence/state-root.js";
 import type { WorkflowRoot } from "./registry.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
 import { registerWorkflowServiceProvider } from "./service-provider.js";
@@ -229,7 +230,11 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		service = await createWorkflowService({
 			cwd: ctx.cwd,
 			agentDir,
-			storeRoot: path.join(ctx.cwd, CONFIG_DIR_NAME, "workflow"),
+			// Run state is machine-local recovery state, not project content:
+			// it lives under the agent dir keyed by this project's path, a
+			// sibling of Pi's own sessions directory for the same project
+			// (`persistence/state-root.ts`).
+			storeRoot: workflowStateRoot(ctx.cwd, agentDir),
 			projectTrusted: () => ctx.isProjectTrusted(),
 			subagents: createWorkflowSubagentProvider(pi.events, ctx),
 			registeredRoots: builtinRoots(ctx.cwd, agentDir),
