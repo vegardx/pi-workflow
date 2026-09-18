@@ -10,7 +10,7 @@ import { type Static, type TSchema, Type } from "typebox";
  * `test/dynamic-vm-host.test.ts` pins that import boundary.
  */
 
-export const WORKFLOW_CONTRACT_REVISION = 19 as const;
+export const WORKFLOW_CONTRACT_REVISION = 20 as const;
 /** Upper bound of one imported handoff; equals the artifact byte bound. */
 export const MAX_WORKFLOW_HANDOFF_BYTES = 16 * 1024 * 1024;
 /**

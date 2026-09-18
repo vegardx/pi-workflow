@@ -163,6 +163,11 @@ export {
 	WorkflowRunLeaseUnavailableError,
 } from "../persistence/run-lease.js";
 export {
+	encodeWorkflowProjectKey,
+	WORKFLOW_STATE_DIR_NAME,
+	workflowStateRoot,
+} from "../persistence/state-root.js";
+export {
 	invalidationClosure,
 	rebuildWorkflowSnapshot,
 	reduceWorkflowEvents,

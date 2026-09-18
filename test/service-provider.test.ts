@@ -120,7 +120,7 @@ async function realService(
 	const service = await createWorkflowService({
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		projectTrusted: () => false,
 		subagents,
 		registeredRoots: [
@@ -174,7 +174,7 @@ async function fanOutService(): Promise<WorkflowService> {
 	const service = await createWorkflowService({
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		projectTrusted: () => true,
 		subagents: {
 			bind: async () => {
@@ -223,7 +223,7 @@ async function shipService(): Promise<WorkflowService> {
 	const service = await createWorkflowService({
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		projectTrusted: () => true,
 		subagents: {
 			// A checkpoint workflow launches nothing, so a binding whose every
@@ -534,7 +534,9 @@ describe("delegation and error mapping", () => {
 	});
 
 	it("maps every other failure to one fixed message", async () => {
-		const cause = new Error("ENOENT: /home/someone/.pi/workflow/runs");
+		const cause = new Error(
+			"ENOENT: /home/someone/.pi/agent/workflow/--repo--/runs",
+		);
 		const { client } = await acquire(
 			serviceDouble({
 				list: async () => {

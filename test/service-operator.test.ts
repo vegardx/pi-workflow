@@ -243,7 +243,7 @@ async function nestedCopy(fixture: Fixture, runId: string): Promise<string> {
 	} finally {
 		await sourceLease.release();
 	}
-	const storeRoot = path.join(fixture.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fixture.cwd, ".pi", `state-${randomUUID()}`);
 	const lease = await acquireWorkflowRunLease({
 		storeRoot,
 		runId,

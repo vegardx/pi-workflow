@@ -300,7 +300,7 @@ export async function operatorFixture() {
 	const base = root("project");
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	const workflows = path.join(cwd, "workflows");
 	await mkdir(workflows, { recursive: true });
 	const files: Record<string, string> = {

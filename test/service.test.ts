@@ -95,7 +95,7 @@ async function workflowFixture(name = "example") {
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	const definitionPath = path.join(cwd, "workflows", `${name}.workflow.ts`);
 	await writeFile(
@@ -581,7 +581,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 19,
+			contractRevision: 20,
 			runId,
 			depth: 0,
 			definitionName: "pending",
@@ -737,7 +737,7 @@ async function crashSnapshot(
 	fx: { cwd: string; storeRoot: string },
 	runId: string,
 ): Promise<string> {
-	const storeRoot = path.join(fx.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fx.cwd, ".pi", `state-${randomUUID()}`);
 	const setup = await acquireWorkflowRunLease({
 		storeRoot,
 		runId,

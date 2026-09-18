@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
-	CONFIG_DIR_NAME,
 	createEventBus,
 	type ExtensionAPI,
 	type ToolDefinition,
@@ -10,10 +9,11 @@ import {
 import type { SubagentService } from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { type Static, Type } from "typebox";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowStateProjection } from "../src/events.js";
 import workflowExtension from "../src/extension.js";
 import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
+import { workflowStateRoot } from "../src/persistence/state-root.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
 import type { WorkflowServiceOptions } from "../src/service.js";
 import {
@@ -25,6 +25,7 @@ import {
 	registerSupportTask,
 	supportTaskRegistrations,
 } from "../src/support-registry.js";
+import { useTempAgentDir } from "./fixtures/agent-dir.js";
 
 /**
  * Every `createWorkflowService` call the extension makes, so the construction
@@ -213,7 +214,7 @@ async function stateOf(
 	runId: string,
 ): Promise<WorkflowStateProjection> {
 	const journal = await readFile(
-		path.join(cwd, CONFIG_DIR_NAME, "workflow", "runs", runId, "events.jsonl"),
+		path.join(workflowStateRoot(cwd, agentDir), "runs", runId, "events.jsonl"),
 		"utf8",
 	);
 	return reduceWorkflowEvents(
@@ -262,10 +263,20 @@ async function runThroughExtension(cwd: string, ref: string) {
 	}
 }
 
+/** The extension's store root comes from here; never the real agent dir. */
+let agentDir: string;
+
+beforeEach(async () => {
+	agentDir = await useTempAgentDir(
+		path.resolve(".pi", "test-support-wiring", `agent-${randomUUID()}`),
+	);
+});
+
 describe("support task wiring", () => {
 	afterEach(() => {
 		constructed.length = 0;
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	it("ships no builtin implementation, so the default registry is empty", () => {
@@ -330,6 +341,12 @@ describe("support task wiring", () => {
 			expect(constructed[0]?.supportTasks?.map((entry) => entry.name)).toEqual([
 				shout.implementation,
 			]);
+			// The same construction proves where state goes: the store root is
+			// the agent dir keyed by the project path, never inside the project.
+			expect(constructed[0]?.cwd).toBe(cwd);
+			expect(constructed[0]?.agentDir).toBe(agentDir);
+			expect(constructed[0]?.storeRoot).toBe(workflowStateRoot(cwd, agentDir));
+			expect(constructed[0]?.storeRoot.startsWith(cwd)).toBe(false);
 		} finally {
 			remove();
 		}

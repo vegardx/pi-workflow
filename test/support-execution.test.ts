@@ -312,7 +312,7 @@ async function fixture(name: string, source: string) {
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	const packageDir = path.join(cwd, "node_modules", ...TOOLS_MODULE.split("/"));
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	await mkdir(packageDir, { recursive: true });
@@ -411,7 +411,7 @@ async function crashSnapshot(
 	fx: { cwd: string; storeRoot: string },
 	runId: string,
 ): Promise<string> {
-	const storeRoot = path.join(fx.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fx.cwd, ".pi", `state-${randomUUID()}`);
 	const setup = await acquireWorkflowRunLease({
 		storeRoot,
 		runId,

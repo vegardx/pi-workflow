@@ -527,7 +527,7 @@ async function serviceFor(delegated: Scripted): Promise<WorkflowService> {
 	const service = await createWorkflowService({
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		// The builtin root needs no project trust: that is the point of F1.
 		projectTrusted: () => false,
 		subagents: delegated.provider,
@@ -1390,7 +1390,7 @@ describe("plan-to-ship: replay", () => {
 		const options = {
 			cwd,
 			agentDir: path.join(base, "agent"),
-			storeRoot: path.join(cwd, ".pi", "workflow"),
+			storeRoot: path.join(cwd, "state"),
 			projectTrusted: () => false,
 			subagents: delegated.provider,
 			registeredRoots: [

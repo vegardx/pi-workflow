@@ -274,7 +274,7 @@ async function fixture(name: string): Promise<Fixture> {
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(

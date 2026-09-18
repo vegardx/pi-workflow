@@ -145,9 +145,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 19 and rejects revision 18", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(19);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(19);
+	it("publishes revision 20 and rejects revision 19", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(20);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(20);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -162,7 +162,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 19,
+			contractRevision: 20,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -177,12 +177,12 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowJournalEventSchema, {
 				...event,
-				contractRevision: 18,
+				contractRevision: 19,
 			}),
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 19,
+			contractRevision: 20,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -206,13 +206,13 @@ describe("workflow contracts", () => {
 		expect(
 			Value.Check(WorkflowRunSnapshotSchema, {
 				...snapshot,
-				contractRevision: 18,
+				contractRevision: 19,
 			}),
 		).toBe(false);
 		// The persisted-state claim in docs/compatibility.md and
-		// docs/acceptance.md: every earlier revision is refused, not just 18,
-		// and no migration turns one into a revision-19 record.
-		for (let revision = 1; revision <= 18; revision += 1) {
+		// docs/acceptance.md: every earlier revision is refused, not just 19,
+		// and no migration turns one into a revision-20 record.
+		for (let revision = 1; revision <= 19; revision += 1) {
 			expect(
 				Value.Check(WorkflowJournalEventSchema, {
 					...event,

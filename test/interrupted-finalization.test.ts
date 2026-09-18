@@ -125,7 +125,7 @@ async function agentWorkflowFixture(
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	const definitionPath = path.join(cwd, "workflows", `${name}.workflow.ts`);
 	const request = `{
@@ -522,7 +522,7 @@ async function cutJournal(
 	runId: string,
 	keep: number,
 ): Promise<string> {
-	const storeRoot = path.join(fx.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fx.cwd, ".pi", `state-${randomUUID()}`);
 	const setup = await acquireWorkflowRunLease({
 		storeRoot,
 		runId,

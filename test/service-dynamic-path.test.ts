@@ -47,7 +47,7 @@ async function fixture(trusted: boolean) {
 	const options: WorkflowServiceOptions = {
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, ".pi", "workflow"),
+		storeRoot: path.join(cwd, "state"),
 		projectTrusted: () => trusted,
 		subagents: provider(),
 		// Source-mode workers boot slowly under full-suite load.

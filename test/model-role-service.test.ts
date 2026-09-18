@@ -54,7 +54,7 @@ async function roleWorkflowFixture(guarded = false) {
 	const base = path.resolve(".pi", "test-model-role", randomUUID());
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	const declaration = `ctx.agent("review", {
       agent: "researcher",

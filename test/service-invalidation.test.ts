@@ -104,7 +104,7 @@ async function workflowFixture(name = "example") {
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	const definitionPath = path.join(cwd, "workflows", `${name}.workflow.ts`);
 	await writeFile(
@@ -553,7 +553,7 @@ async function supportWorkflowFixture(name: string) {
 	const base = root(name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	const packageDir = path.join(cwd, "node_modules", ...TOOLS_MODULE.split("/"));
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	await mkdir(packageDir, { recursive: true });
@@ -740,7 +740,7 @@ async function replayedInterruptedRun(
 	const dropIndex =
 		statusBeforeObservation === "waiting" ? lastRunStatusIndex : -1;
 
-	const storeRoot = path.join(fixture.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fixture.cwd, ".pi", `state-${randomUUID()}`);
 	const lease = await acquireWorkflowRunLease({
 		storeRoot,
 		runId,
@@ -1537,7 +1537,7 @@ describe("invalidation and re-execution", () => {
 				inputArtifacts: {},
 			},
 		};
-		const storeRoot = path.join(fixture.cwd, ".pi", `workflow-${randomUUID()}`);
+		const storeRoot = path.join(fixture.cwd, ".pi", `state-${randomUUID()}`);
 		const lease = await acquireWorkflowRunLease({
 			storeRoot,
 			runId,

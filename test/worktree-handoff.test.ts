@@ -614,7 +614,7 @@ async function crashImageAfter(
 	runId: string,
 	cutAfter: (event: WorkflowJournalEvent) => boolean,
 ): Promise<{ storeRoot: string; prefix: WorkflowJournalEvent[] }> {
-	const storeRoot = path.join(fx.cwd, ".pi", `workflow-${randomUUID()}`);
+	const storeRoot = path.join(fx.cwd, ".pi", `state-${randomUUID()}`);
 	const setup = await acquireWorkflowRunLease({
 		storeRoot,
 		runId,
@@ -767,7 +767,7 @@ async function worktreeFixture(
 	const base = root(options.name);
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	await mkdir(path.join(cwd, "workflows"), { recursive: true });
 	if (options.supportModule) {
 		const packageDir = path.join(

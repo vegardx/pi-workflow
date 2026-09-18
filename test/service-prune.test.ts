@@ -119,7 +119,7 @@ const services: WorkflowService[] = [];
 async function serviceFixture() {
 	const base = root("service");
 	const cwd = path.join(base, "project");
-	const storeRoot = path.join(cwd, ".pi", "workflow");
+	const storeRoot = path.join(cwd, "state");
 	const workflows = path.join(cwd, "workflows");
 	await mkdir(workflows, { recursive: true });
 	await writeFile(
