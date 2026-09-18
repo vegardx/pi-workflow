@@ -38,6 +38,31 @@ const HandoffBytesSchema = Type.Integer({
 	maximum: MAX_WORKFLOW_HANDOFF_BYTES,
 });
 
+/**
+ * How a run came to exist, recorded once on `run-created`.
+ *
+ * The runtime can only name an origin it can actually tell apart. A run
+ * started by the model's `workflow_run` tool call and one started by a
+ * person's `/workflow run` command both reach `WorkflowService.run` through
+ * the same call with nothing to distinguish them, so neither records an
+ * origin: absent means "started through the service in the open, by a tool
+ * call or a UI command". A start over the service-provider seam
+ * (`WorkflowReadClient.startBuiltin`) is the one origin the runtime knows,
+ * because the seam is the only caller that identifies itself, and it is worth
+ * knowing: no model turn and no `/workflow` command is in the transcript for
+ * it, so the journal is the only place the provenance can be read.
+ *
+ * **Persisted event data, additive and revision-20.** The event schema is
+ * `additionalProperties: false`, so the field is optional exactly as
+ * `WorkflowRunRecordSchema.modelRouting` is: every journal written before it
+ * still validates, the reducer does not read it, and nothing derives identity
+ * from it. It carries no extension id - the request channel
+ * (`@vegardx/pi-workflow/service-provider/request/v1`) carries none and
+ * `ExtensionContext` has none, so a consumer id would be a guess.
+ */
+export const WorkflowRunOriginSchema = Type.Literal("service-provider");
+export type WorkflowRunOrigin = Static<typeof WorkflowRunOriginSchema>;
+
 const RunCreatedEventSchema = Type.Object(
 	{
 		type: Type.Literal("run-created"),
@@ -45,6 +70,8 @@ const RunCreatedEventSchema = Type.Object(
 			{
 				definitionIdentitySha256: Sha256Schema,
 				inputSha256: Sha256Schema,
+				/** Revision 20, additive: see {@link WorkflowRunOriginSchema}. */
+				origin: Type.Optional(WorkflowRunOriginSchema),
 			},
 			{ additionalProperties: false },
 		),

@@ -35,6 +35,7 @@ import type {
 	WorkflowServiceHandoffExport,
 	WorkflowServiceOptions,
 	WorkflowServiceReconcileView,
+	WorkflowServiceRunOptions,
 	WorkflowServiceRunReceipt,
 	WorkflowServiceRunView,
 	WorkflowServiceRunViewSchema,
@@ -163,7 +164,12 @@ export type ServiceApiPins = [
 	Assert<
 		Equal<ReturnType<Method<"validate">>, Promise<WorkflowValidationResult>>
 	>,
-	Assert<Equal<Parameters<Method<"run">>, [string, unknown]>>,
+	Assert<
+		Equal<
+			Parameters<Method<"run">>,
+			[string, unknown, (WorkflowServiceRunOptions | undefined)?]
+		>
+	>,
 	Assert<Equal<ReturnType<Method<"run">>, Promise<WorkflowServiceRunReceipt>>>,
 	Assert<Equal<Parameters<Method<"status">>, [WorkflowRunId]>>,
 	Assert<Equal<ReturnType<Method<"status">>, Promise<WorkflowServiceRunView>>>,
