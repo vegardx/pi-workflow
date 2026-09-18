@@ -90,7 +90,7 @@ with a digit, because it reaches pi-workflow as a fan-out namespace.
 | Field | Values | Default |
 | --- | --- | --- |
 | `effort` | `cheap` \| `standard` \| `deep` | `standard` |
-| `gates` | `approve-plan` \| `approve-plan+ship` \| `every-deliverable` | `approve-plan+ship` |
+| `gates` | `ship` \| `every-deliverable` | `ship` |
 | `reviewDefault` | `{tier?, diverse?}` | `{tier: "standard", diverse: false}` |
 | `maxFixRounds` | 0 \| 1 \| 2 | 0 cheap / 1 standard / 2 deep |
 | `publish` | `{mode: none\|branch\|pr, base?}` | `{mode: "none"}` |
@@ -112,9 +112,12 @@ deliverable, in order, and what the compiled stage document shows:
    one lens per `reviews[]` entry, with `tier`/`diverse` falling back to
    `policy.reviewDefault`. **Omitted entirely when `reviews` is empty.**
 
-Gates are *not* stages: `approve-plan`, a per-deliverable gate and `ship` come
-from `policy.gates`, applied by the compiler, and a compiled deliverable never
-carries a `gate`.
+Gates are *not* stages: a per-deliverable gate and `ship` come from
+`policy.gates`, applied by the compiler, and a compiled deliverable never
+carries a `gate`. There is no gate before the work and no "no gates" value: the
+START of the run is the approval, and the `ship` decision is what a receipt is
+checked against. `approve-plan` and `approve-plan+ship` were removed and are
+refused by name at compile.
 
 ## What a stored plan has already passed
 

@@ -94,7 +94,7 @@ deliverable's `reviews` list and the plan's `policy`.
 ```jsonc
 { "deliverables": [ { "id": "<plan deliverable id>", "stages": [ /* below */ ] } ],
   "effort": "cheap" | "standard" | "deep",
-  "gates":  "approve-plan" | "approve-plan+ship" | "every-deliverable" }
+  "gates":  "ship" | "every-deliverable" }
 ```
 
 | `use` | Fields |

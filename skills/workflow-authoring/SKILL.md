@@ -132,7 +132,7 @@ resolve from inside the installed package. Do not add a definition there
 for one project; use a project root for that.
 
 The shipped builtin that writes is `plan-to-ship`, and it is a **compiler**:
-`refine` (read-only agent) -> `approve-plan` (checkpoint, `headless: "block"`)
+`refine` (read-only agent)
 -> each deliverable's derived stages, in plan order -> `ship` (checkpoint) -> a
 required `receipt` finalizer. A plan authors no stages: the compiler derives
 them from the deliverable's `reviews` list and the plan's `policy`, and each
@@ -584,7 +584,7 @@ prompt, the declared inputs, and the answer shape in one dialog and asks the
 decision field by field:
 
 - **The prompt is a question**, in full words, that the declared `inputs`
-  alone are enough to answer ("Approve this plan before the writer runs?",
+  alone are enough to answer ("Approve this draft before the writer runs?",
   "Which tone should the summary use?"). Not a label ("approval"), not an
   instruction to go read something else. It is the only text the approver is
   guaranteed to see.
@@ -604,7 +604,7 @@ decision field by field:
 ```ts
 const approve = ctx.checkpoint("approve", {
 	schema: Type.Object({ proceed: Type.Boolean() }, { additionalProperties: false }),
-	prompt: "Approve the plan before the writer runs?", // 1..4096 characters
+	prompt: "Approve the draft before the writer runs?", // 1..4096 characters
 	headless: "block", // or "use-explicit-default" with a `default`
 	timeoutMs: 3_600_000, // optional, 1_000 .. 365 days, capped by the run deadline
 	inputs: { plan: plan.output }, // what the approver is shown
@@ -825,9 +825,9 @@ work mid-run ([Budgets and admission](#budgets-and-admission)).
 
 ```ts
 // Hand-written
-const approve = ctx.checkpoint("approve-plan", {
+const approve = ctx.checkpoint("approve-draft", {
 	schema: DecisionSchema,
-	prompt: "Approve this plan before the writer runs?",
+	prompt: "Approve this draft before the writer runs?",
 	headless: "block",
 	timeoutMs: 86_400_000,
 	inputs: { plan: refine.output },
@@ -835,8 +835,8 @@ const approve = ctx.checkpoint("approve-plan", {
 const decision = await ctx.result(approve);
 
 // With the component
-const approve = gate(ctx, "approve-plan", {
-	prompt: "Approve this plan before the writer runs?",
+const approve = gate(ctx, "approve-draft", {
+	prompt: "Approve this draft before the writer runs?",
 	schema: DecisionSchema,
 	inputs: { plan: refine.output },
 	timeoutMs: gateTimeoutMs(ctx.input.effort),
@@ -1068,7 +1068,7 @@ without project trust. They are the worked examples of the patterns above.
 
 | Ref | In | Out | Parks for a human? |
 | --- | --- | --- | --- |
-| `plan-to-ship` | `{plan, planDigest, effort}` — a pi-maestro plan by value with its sha256 digest and the effort dial | `{approved, shipped, deliverables[], reviews[], receipt}`; the receipt names each durable handoff ref and the approved plan digest | Yes: the `approve-plan` and `ship` gates, both `headless: "block"` |
+| `plan-to-ship` | `{plan, planDigest, effort}` — a pi-maestro plan by value with its sha256 digest and the effort dial | `{approved, shipped, deliverables[], reviews[], receipt}`; the receipt names each durable handoff ref and the approved plan digest | Yes: the `ship` gate, `headless: "block"` |
 | `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` — one `worktree-handoff`, `tree`, or `document` subject | `{verdict, findings (≤64), coverage[], synthesis?}` | No gate, no worktree, no handoff |
 | `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict: ready \| gaps \| blocked, findings (≤32), notes?}` | No. Exactly one read-only agent, and the one definition a host may start headlessly |
 | `deep-research` | `{question, depth, sources?}` — one question, the depth dial doubling as the thread count, and up to 16 `path`/`url`/`note` sources | `{answer, claims[], crossChecks[], coverage[]}`; a coverage row per thread says which one did not report | No gate, no worktree, no handoff — structurally headless, but **not** on the headless allowlist |

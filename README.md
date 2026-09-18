@@ -522,9 +522,21 @@ nothing.
 
 | `policy.gates` | gates |
 | --- | --- |
-| `approve-plan` | `approve-plan`. No ship gate, so no ship decision: nothing is shipped and the receipt names no ref, while the handoffs stay in the run to cherry-pick. |
-| `approve-plan+ship` (default) | `approve-plan`, then one `ship` over every handoff. |
-| `every-deliverable` | `approve-plan`, a gate after each deliverable but the last, then `ship`. Answering `{"proceed":false}` stops the walk and declares nothing after it. |
+| `ship` (default) | One `ship` gate over every handoff: the single human decision, after all the work and before publication. |
+| `every-deliverable` | A gate after each deliverable but the last, then `ship`. Answering `{"proceed":false}` stops the walk and declares nothing after it. |
+
+There is no "no gates" value: publication proof is a durable decision, so the
+ship gate is not optional.
+
+**The start of the run is the approval.** `approve-plan` and
+`approve-plan+ship` are gone, and a plan naming either is refused by name at
+compile: *"`policy.gates` is "approve-plan+ship", which was removed because the
+start of the run IS the approval — the plan-mode exit's yes, or a deliberate
+`/plan run` — so ask for "ship", one decision after all the work and before
+publication, or "every-deliverable", which adds one after each deliverable."*
+A run exists because a person said yes to the plan it carries, so the first
+work task is ready the moment the run is created; an up-front gate only asked
+that same person to approve the same digest seconds later.
 
 A plan cannot declare a gate of its own. When no gate can stop the walk
 part-way the implementers are declared up front and run concurrently;
