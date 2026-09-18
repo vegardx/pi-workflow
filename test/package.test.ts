@@ -27,7 +27,11 @@ interface Compatibility {
 		package: string;
 		version: string;
 		contractRevision: number;
-		features: { checkpoints: boolean; dynamicWorkflows: boolean };
+		features: {
+			checkpoints: boolean;
+			dynamicWorkflows: boolean;
+			serviceProviderStart: boolean;
+		};
 		api: {
 			version: string;
 			frozenSurfaces: string[];
@@ -188,6 +192,8 @@ describe("compatibility matrix", () => {
 			features: {
 				checkpoints: WORKFLOW_RUNTIME_CONTRACT.features.checkpoints,
 				dynamicWorkflows: WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows,
+				serviceProviderStart:
+					WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart,
 			},
 			api: {
 				version: "2.0.0",
@@ -216,6 +222,7 @@ describe("compatibility matrix", () => {
 		expect(compatibility.piWorkflow.features).toEqual({
 			checkpoints: true,
 			dynamicWorkflows: true,
+			serviceProviderStart: true,
 		});
 		expect(compatibility.piSubagent.package).toBe("@vegardx/pi-subagent");
 		expect(compatibility.piSubagent.peerRange).toBe(

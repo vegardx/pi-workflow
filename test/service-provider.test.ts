@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,13 @@ import {
 	type EventBus,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+	type AgentLaunchPlan,
+	canonicalSha256,
+	SUBAGENT_RUNTIME_CONTRACT,
+	type SubagentClient,
+	type SubagentRequest,
+} from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -14,6 +22,7 @@ import {
 	type WorkflowRunId,
 } from "../src/contracts.js";
 import { defineWorkflow, type WorkflowDefinition } from "../src/definition.js";
+import { readWorkflowJournalUnleased } from "../src/persistence/journal.js";
 import {
 	createWorkflowService,
 	type WorkflowService,
@@ -22,17 +31,23 @@ import {
 import {
 	acquireWorkflowService,
 	BUILTIN_HEADLESS_WORKFLOWS,
+	BUILTIN_STARTABLE_WORKFLOWS,
 	createWorkflowReadClient,
 	foreignRunRefusalMessage,
 	headlessBuiltinViolations,
 	headlessRefusalMessage,
 	isCompatibleWorkflowProvider,
 	registerWorkflowServiceProvider,
+	START_EFFORT_REFUSAL_MESSAGE,
+	startableRefusalMessage,
 	WORKFLOW_SERVICE_FAILURE_MESSAGE,
 	type WorkflowReadClient,
 	WorkflowServiceProviderError,
 } from "../src/service-provider.js";
-import type { WorkflowSubagentProvider } from "../src/subagent-provider.js";
+import type {
+	WorkflowSubagentBinding,
+	WorkflowSubagentProvider,
+} from "../src/subagent-provider.js";
 
 // W1-PROVIDER (spec 2.4, D2, D3): the seam pi-maestro acquires the runtime
 // through. Every expectation below is the spec's, not the implementation's:
@@ -45,6 +60,8 @@ const CONTEXT = {} as ExtensionContext;
 
 const bases: string[] = [];
 const services: WorkflowService[] = [];
+/** Where `realService` put each service's durable state, for journal reads. */
+const storeRoots = new WeakMap<WorkflowService, string>();
 
 afterEach(async () => {
 	for (const service of services.splice(0)) await service.shutdown();
@@ -117,10 +134,11 @@ async function realService(
 			throw new Error("the projection must never bind a subagent");
 		},
 	};
+	const storeRoot = path.join(cwd, "state");
 	const service = await createWorkflowService({
 		cwd,
 		agentDir: path.join(base, "agent"),
-		storeRoot: path.join(cwd, "state"),
+		storeRoot,
 		projectTrusted: () => false,
 		subagents,
 		registeredRoots: [
@@ -128,7 +146,15 @@ async function realService(
 		],
 	});
 	services.push(service);
+	storeRoots.set(service, storeRoot);
 	return service;
+}
+
+/** The store root `realService` gave this service. */
+function storeRootOf(service: WorkflowService): string {
+	const root = storeRoots.get(service);
+	if (!root) throw new Error("service was not created by realService");
+	return root;
 }
 
 /**
@@ -359,6 +385,7 @@ describe("registration and discovery", () => {
 			"project",
 			"runBuiltin",
 			"runs",
+			"startBuiltin",
 			"validate",
 		]);
 		expect(Object.isFrozen(client)).toBe(true);
@@ -699,6 +726,351 @@ describe("runBuiltin and awaitRun", () => {
 		expect((error as WorkflowServiceError).code).toBe("validation");
 		expect((error as Error).message).toBe(
 			foreignRunRefusalMessage("workflow_foreign"),
+		);
+	});
+});
+
+const SUBAGENT_CLIENT_METHODS = [
+	"preflight",
+	"launch",
+	"findByOperation",
+	"status",
+	"listRuns",
+	"logs",
+	"wait",
+	"interrupt",
+	"steer",
+	"followUp",
+	"retry",
+	"resume",
+	"reconcile",
+	"release",
+	"abandon",
+	"pin",
+	"unpin",
+	"exportArtifact",
+	"exportHandoff",
+] as const;
+
+/**
+ * A subagent provider that answers `plan-to-ship`'s refiner and nothing else.
+ * The run therefore reaches the `approve-plan` gate and parks there, which is
+ * as far as a start without a decision can go - and as far as this file needs
+ * to look to see that `startBuiltin` made an ordinary run.
+ */
+function scriptedPlanner(): WorkflowSubagentProvider {
+	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
+	const pending = new Map<
+		string,
+		{ runId: string; attemptId: string; request: SubagentRequest }
+	>();
+	const children = new Map<
+		string,
+		{ runId: string; attemptId: string; request: SubagentRequest }
+	>();
+	let preflights = 0;
+	let ownerId = "";
+
+	const methods: Record<string, unknown> = {};
+	for (const method of SUBAGENT_CLIENT_METHODS) {
+		methods[method] = vi.fn(async () => {
+			throw new Error(`unexpected subagent call: ${method}`);
+		});
+	}
+
+	methods.preflight = vi.fn(async (request: SubagentRequest) => {
+		preflights += 1;
+		const preflightId = `preflight-${nonce}-${preflights}`;
+		const runId = `run_child${nonce}${preflights}`;
+		const attemptId = `attempt_child${nonce}${preflights}`;
+		pending.set(preflightId, { runId, attemptId, request });
+		const launchPlan = {
+			schema: "pi-subagent-launch" as const,
+			contractRevision: SUBAGENT_RUNTIME_CONTRACT.contractRevision,
+			operationId: request.operationId,
+			ownerId,
+			runId,
+			attemptId,
+			agent: request.agent,
+			agentDisplayName: request.agent,
+			agentPrompt: "prompt",
+			agentSource: "/agent.md",
+			agentSha256: "a".repeat(64),
+			agentScope: "global" as const,
+			task: structuredClone(request.task),
+			contextMode: request.contextMode,
+			model: request.model ?? {
+				provider: "test",
+				id: "model",
+				thinking: "low" as const,
+			},
+			cwd: "/workspace" as const,
+			tools: [...request.tools],
+			preloadSkills: [...request.preloadSkills],
+			contextScopes: [...request.contextScopes],
+			resources: [
+				{
+					kind: "agent" as const,
+					name: request.agent,
+					source: "/agent.md",
+					sha256: "a".repeat(64),
+				},
+			],
+			workspace: {
+				mode: request.workspace.mode,
+				hostPathSha256: "a".repeat(64),
+				baselineSha256: "c".repeat(64),
+			},
+			sandbox: {
+				backend: "gondolin" as const,
+				packageVersion: "0.12.0",
+				imageSha256: "a".repeat(64),
+				mountPolicySha256: "a".repeat(64),
+				networkPolicySha256: "a".repeat(64),
+				capacityPolicySha256: "a".repeat(64),
+				memoryBytes: request.memoryBytes ?? 536_870_912,
+				guestDiskBytes: 1024,
+				workspaceWriteBytes: request.limits.workspaceWriteBytes,
+			},
+			network: {
+				mode: "public-egress" as const,
+				blockInternalRanges: true as const,
+			},
+			outputSchema: structuredClone(request.outputSchema),
+			limits: structuredClone(request.limits),
+		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
+		return {
+			preflightId,
+			identitySha256: canonicalSha256(launchPlan),
+			expiresAt: "2099-01-01T00:00:00.000Z",
+			launchPlan: {
+				...launchPlan,
+				identitySha256: canonicalSha256(launchPlan),
+			},
+		};
+	});
+
+	methods.launch = vi.fn(async (preflightId: string) => {
+		const child = pending.get(preflightId);
+		if (!child) throw new Error(`unknown preflight ${preflightId}`);
+		children.set(child.runId, child);
+		return { runId: child.runId, attemptId: child.attemptId, status: "active" };
+	});
+
+	methods.wait = vi.fn(async (runId: string) => {
+		const child = children.get(runId);
+		if (!child) throw new Error(`unknown child ${runId}`);
+		const goal = child.request.task.goal;
+		if (!goal.startsWith("Refine the authored plan")) {
+			throw new Error(`no scripted output for goal: ${goal}`);
+		}
+		const structuredOutput = {
+			summary: "Refined.",
+			deliverables: [
+				{
+					id: "d0",
+					goal: "Do the thing",
+					files: ["a.txt"],
+					acceptance: ["a.txt exists"],
+					risks: [],
+				},
+			],
+			blockers: [],
+		};
+		return {
+			result: {
+				runId,
+				status: "completed" as const,
+				structuredOutput: structuredOutput as unknown,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: 0,
+				},
+				usageComplete: true,
+				runtimeMs: 10,
+				sandboxCleanup: "proved" as const,
+				workspaceCleanup: "not-needed" as const,
+				truncated: false,
+			},
+			output: "",
+			sessionFile: "/private/repo/session.jsonl",
+			handoff: undefined,
+			structuredOutput: structuredOutput as unknown,
+			error: undefined,
+		};
+	});
+
+	methods.release = vi.fn(async (runId: string) => ({
+		runId,
+		attemptId: children.get(runId)?.attemptId ?? "",
+		status: "completed" as const,
+	}));
+
+	const client = methods as unknown as SubagentClient;
+	return {
+		bind: vi.fn(async (runId: string) => {
+			ownerId = `pi-workflow:${runId}`;
+			return {
+				workflowRunId: runId,
+				ownerId,
+				client,
+			} satisfies WorkflowSubagentBinding;
+		}),
+	} as WorkflowSubagentProvider;
+}
+
+/** The `origin` the run's own `run-created` event recorded, if any. */
+async function journalledOrigin(
+	service: WorkflowService,
+	runId: WorkflowRunId,
+): Promise<unknown> {
+	const read = await readWorkflowJournalUnleased(storeRootOf(service), runId);
+	const created = read.events[0];
+	expect(created?.type).toBe("run-created");
+	return (created?.data as { origin?: unknown } | undefined)?.origin;
+}
+
+describe("startBuiltin", () => {
+	it("freezes a startable allowlist disjoint from the headless one", () => {
+		expect(Object.isFrozen(BUILTIN_STARTABLE_WORKFLOWS)).toBe(true);
+		expect([...BUILTIN_STARTABLE_WORKFLOWS]).toEqual(["plan-to-ship"]);
+		expect(
+			[...BUILTIN_STARTABLE_WORKFLOWS].filter((ref) =>
+				(BUILTIN_HEADLESS_WORKFLOWS as readonly string[]).includes(ref),
+			),
+		).toEqual([]);
+	});
+
+	it.each([
+		"plan-review",
+		"deep-research",
+		"fan-out",
+		`dynamic:${"a".repeat(64)}`,
+		"",
+		"../plan-to-ship",
+	])("refuses to start %j", async (ref) => {
+		const { client } = await acquire(serviceDouble());
+		const error = await client
+			.startBuiltin(ref, { input: {} })
+			.catch((value: unknown) => value);
+		expect(error).toBeInstanceOf(WorkflowServiceError);
+		expect((error as WorkflowServiceError).code).toBe("validation");
+		expect((error as Error).message).toBe(startableRefusalMessage(ref));
+	});
+
+	it("refuses the startable name resolved outside the builtin root", async () => {
+		const run = vi.fn();
+		const { client } = await acquire(
+			serviceDouble({
+				validate: async () => ({
+					valid: true,
+					workflow: { scope: "project" },
+				}),
+				run,
+			} as unknown as Partial<WorkflowService>),
+		);
+		await expect(
+			client.startBuiltin("plan-to-ship", { input: {} }),
+		).rejects.toThrow(startableRefusalMessage("plan-to-ship"));
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("names the service-provider origin and returns only the run id", async () => {
+		const run = vi.fn(async () => ({
+			runId: "workflow_a1" as WorkflowRunId,
+			status: "created" as const,
+		}));
+		const wait = vi.fn(async () => ({ status: "waiting" }));
+		const { client } = await acquire(
+			serviceDouble({
+				validate: async () => ({
+					valid: true,
+					workflow: { scope: "builtin" },
+				}),
+				run,
+				wait,
+			} as unknown as Partial<WorkflowService>),
+		);
+		const started = await client.startBuiltin("plan-to-ship", {
+			input: { plan: 1 },
+			effort: "deep",
+		});
+		expect(started).toEqual({ runId: "workflow_a1" });
+		// The dial is a field of the definition's input, so it is merged into
+		// the one input the runtime validates - not a second parameter.
+		expect(run).toHaveBeenCalledWith(
+			"plan-to-ship",
+			{ plan: 1, effort: "deep" },
+			{ origin: "service-provider" },
+		);
+		// This client started it, so it may await it.
+		await expect(
+			client.awaitRun("workflow_a1" as WorkflowRunId, { timeoutMs: 10 }),
+		).resolves.toEqual({ status: "waiting" });
+	});
+
+	it("refuses an effort the input cannot carry, before any run", async () => {
+		const run = vi.fn();
+		const { client } = await acquire(
+			serviceDouble({ run } as unknown as Partial<WorkflowService>),
+		);
+		const error = await client
+			.startBuiltin("plan-to-ship", { input: [1, 2], effort: "cheap" })
+			.catch((value: unknown) => value);
+		expect(error).toBeInstanceOf(WorkflowServiceError);
+		expect((error as WorkflowServiceError).code).toBe("validation");
+		expect((error as Error).message).toBe(START_EFFORT_REFUSAL_MESSAGE);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("refuses an input the definition's schema rejects, creating no run", async () => {
+		const service = await realService(scriptedPlanner());
+		const { client } = await acquire(service);
+		await expect(
+			client.startBuiltin("plan-to-ship", { input: { plan: "not a plan" } }),
+		).rejects.toThrow("Workflow input does not match its schema.");
+		await expect(client.runs()).resolves.toMatchObject({ runs: [] });
+	});
+
+	it("creates an ordinary plan-to-ship run parked at approve-plan", async () => {
+		const service = await realService(scriptedPlanner());
+		const { client } = await acquire(service);
+		const { runId } = await client.startBuiltin("plan-to-ship", {
+			input: { plan: plan(1), planDigest: "a".repeat(64) },
+			effort: "cheap",
+		});
+		expect(runId).toMatch(/^workflow_[a-z0-9]+$/);
+
+		// An ordinary run the moment it exists: this client's own lease-free
+		// scan of the durable store sees it, exactly as `/workflow` does.
+		const page = await client.runs();
+		expect(page.runs.map((summary) => summary.runId)).toEqual([runId]);
+
+		// `awaitRun` is permitted, because this client started it, and the run
+		// parks on the gate every other plan-to-ship run parks on.
+		const view = await client.awaitRun(runId, { timeoutMs: 60_000 });
+		expect(view).toMatchObject({ status: "waiting", parked: true });
+		expect(
+			(view.pendingCheckpoints ?? []).map((checkpoint) => checkpoint.key),
+		).toEqual(["approve-plan"]);
+		await expect(client.inspect(runId)).resolves.toMatchObject({
+			run: { runId, definitionName: "plan-to-ship" },
+		});
+
+		// Provenance: the journal, not the caller, says where the run came from.
+		await expect(journalledOrigin(service, runId)).resolves.toBe(
+			"service-provider",
+		);
+	}, 90_000);
+
+	it("still refuses plan-to-ship through runBuiltin", async () => {
+		const { client } = await acquire(serviceDouble());
+		await expect(client.runBuiltin("plan-to-ship", {})).rejects.toThrow(
+			headlessRefusalMessage("plan-to-ship"),
 		);
 	});
 });

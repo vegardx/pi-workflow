@@ -19,6 +19,23 @@
  * worktree and no handoff - a structural property `workflow_validate` cannot
  * check but `headlessBuiltinViolations` can.
  *
+ * `startBuiltin` is the second and last exception, and a different one. The
+ * decision it carries is a person's, taken in the host's own dialog - "Start
+ * the run?" - and a decision a human already made does not become safer by
+ * being routed back through the model to make it call `workflow_run`. So the
+ * harness executes it: `startBuiltin` creates the durable run and returns,
+ * never awaiting and never observing. Its allowlist,
+ * `BUILTIN_STARTABLE_WORKFLOWS`, is separate from the headless one and holds
+ * the opposite kind of workflow - one that DOES park on a checkpoint, take a
+ * worktree and produce a handoff - so nothing on it may be reached by
+ * `runBuiltin`, and nothing on the headless list may be reached by
+ * `startBuiltin`. The run is an ordinary run in every other respect: the same
+ * journal, the same checkpoints, visible in `/workflow` and the widget,
+ * decided with `/workflow decide`. What marks it is provenance, not
+ * behaviour - `run-created` records `origin: "service-provider"`, because no
+ * model turn and no `/workflow` command is in the transcript to show where the
+ * run came from.
+ *
  * This entry point is **unfrozen** until a later minor pins it
  * (`docs/compatibility.md`).
  */
@@ -28,6 +45,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
+import type { Effort } from "./components/envelope.js";
 import {
 	WORKFLOW_RUNTIME_CONTRACT,
 	type WorkflowRunId,
@@ -103,6 +121,37 @@ export function headlessRefusalMessage(ref: string): string {
 	return `Workflow ${ref} may not be started by a service consumer; use workflow_run.`;
 }
 
+/**
+ * The workflows a host may start on a person's behalf, frozen here in the
+ * runtime and disjoint from `BUILTIN_HEADLESS_WORKFLOWS`. `plan-to-ship` is
+ * the builtin pipeline pi-maestro's plan mode exits into: the person has
+ * already answered "Start the run?" in the host's dialog, and the harness,
+ * not the model, carries that answer across.
+ *
+ * Nothing about the definition qualifies it - a startable builtin parks,
+ * writes and hands off, which is exactly what `headlessBuiltinViolations`
+ * refuses. What qualifies it is that a person decided, in the open, one
+ * dialog ago.
+ */
+export const BUILTIN_STARTABLE_WORKFLOWS = Object.freeze([
+	"plan-to-ship",
+] as const);
+export type BuiltinStartableWorkflow =
+	(typeof BUILTIN_STARTABLE_WORKFLOWS)[number];
+
+/** The one refusal `startBuiltin` raises for a ref outside its allowlist. */
+export function startableRefusalMessage(ref: string): string {
+	return `Workflow ${ref} is not a builtin a service consumer may start; use workflow_run.`;
+}
+
+/**
+ * The refusal `startBuiltin` raises when `effort` is given and the input
+ * cannot carry it. The dial is a field of the definition's input, so it is
+ * merged into the input object; a non-object input has nowhere to put it.
+ */
+export const START_EFFORT_REFUSAL_MESSAGE =
+	"Workflow input must be a JSON object to carry an effort.";
+
 /** The refusal `awaitRun` raises for a run this client did not start. */
 export function foreignRunRefusalMessage(runId: string): string {
 	return `Workflow run ${runId} was not started by this service consumer; use workflow_wait.`;
@@ -114,6 +163,20 @@ export function foreignRunRefusalMessage(runId: string): string {
  */
 export const WORKFLOW_SERVICE_FAILURE_MESSAGE =
 	"The workflow service could not complete the request.";
+
+/**
+ * What `startBuiltin` takes beyond the reference. `input` is validated against
+ * the definition\'s `inputSchema` exactly as `workflow_run` validates its own,
+ * with the same refusals and no run created by a refused one. `effort` is the
+ * dial the builtin pipelines read from their input: given, it is written onto
+ * the input object as `effort` (replacing any the caller already put there)
+ * and then validated with the rest, so an unknown value is refused by the
+ * definition\'s schema and not by a second list here.
+ */
+export interface WorkflowStartBuiltinOptions {
+	readonly input: unknown;
+	readonly effort?: Effort;
+}
 
 /** The narrowed client a consumer receives; see the module comment. */
 export interface WorkflowReadClient {
@@ -141,6 +204,21 @@ export interface WorkflowReadClient {
 	observe(listener: (observation: WorkflowRunObservation) => void): () => void;
 	/** Starts an allowlisted headless builtin; refuses every other ref. */
 	runBuiltin(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;
+	/**
+	 * Creates a durable run of an allowlisted startable builtin and returns
+	 * its id; refuses every other ref, including the headless list\'s.
+	 *
+	 * It returns as soon as the run exists: no drive is awaited and no
+	 * observation is opened. The run is an ordinary run - same journal, same
+	 * checkpoints, same `/workflow` and widget visibility, decided with
+	 * `/workflow decide` - marked only by `origin: "service-provider"` on
+	 * `run-created`. `awaitRun` is permitted on it, because this client
+	 * started it.
+	 */
+	startBuiltin(
+		ref: string,
+		options: WorkflowStartBuiltinOptions,
+	): Promise<{ runId: WorkflowRunId }>;
 	/** Drives a run this client started to a durable terminal state. */
 	awaitRun(
 		runId: WorkflowRunId,
@@ -260,6 +338,19 @@ async function delegate<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Writes `effort` onto the input the definition validates. The dial is an
+ * ordinary input field, so there is one schema and one refusal; a non-object
+ * input has nowhere to carry it and is refused before a run exists.
+ */
+function withEffort(input: unknown, effort: Effort | undefined): unknown {
+	if (effort === undefined) return input;
+	if (typeof input !== "object" || input === null || Array.isArray(input)) {
+		throw new WorkflowServiceError("validation", START_EFFORT_REFUSAL_MESSAGE);
+	}
+	return { ...(input as Record<string, unknown>), effort };
+}
+
+/**
  * Narrows a full `WorkflowService` to the client the seam exposes. The
  * allowlist and the started-run ledger live here, on the producer side: a
  * consumer cannot widen either by handing back a different object.
@@ -304,6 +395,30 @@ export function createWorkflowReadClient(
 				const receipt = await service.run(ref, input);
 				started.add(receipt.runId);
 				return receipt;
+			}),
+		startBuiltin: (ref: string, options: WorkflowStartBuiltinOptions) =>
+			delegate(async () => {
+				if (!(BUILTIN_STARTABLE_WORKFLOWS as readonly string[]).includes(ref)) {
+					throw new WorkflowServiceError(
+						"validation",
+						startableRefusalMessage(ref),
+					);
+				}
+				const input = withEffort(options.input, options.effort);
+				// The allowlist names a definition this package ships; a project
+				// definition that took the same name is not it.
+				const resolved = await service.validate(ref, input);
+				if (resolved.workflow.scope !== "builtin") {
+					throw new WorkflowServiceError(
+						"validation",
+						startableRefusalMessage(ref),
+					);
+				}
+				const receipt = await service.run(ref, input, {
+					origin: "service-provider",
+				});
+				started.add(receipt.runId);
+				return { runId: receipt.runId };
 			}),
 		awaitRun: (runId: WorkflowRunId, options?: WorkflowWaitOptions) =>
 			delegate(() => {

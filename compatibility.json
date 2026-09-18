@@ -6,7 +6,8 @@
 		"contractRevision": 20,
 		"features": {
 			"checkpoints": true,
-			"dynamicWorkflows": true
+			"dynamicWorkflows": true,
+			"serviceProviderStart": true
 		},
 		"api": {
 			"version": "2.0.0",

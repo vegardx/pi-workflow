@@ -158,6 +158,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.finalizers).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.checkpoints).toBe(true);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
@@ -302,6 +303,7 @@ describe("workflow contracts", () => {
 			"finalizers",
 			"operatorAttempts",
 			"checkpoints",
+			"serviceProviderStart",
 		] as const) {
 			expect(
 				isWorkflowRuntimeContract({
