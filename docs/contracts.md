@@ -300,15 +300,16 @@ worked in *is* the pi-workflow checkout, that directory is already
 `<cwd>/workflows`; the extension then omits the builtin root and the
 definitions load under `project` scope with the usual trust gate.
 
-The shipped builtin that writes is `plan-to-ship` (`plan -> approve -> stages
--> ship`), a compiler over the plan's `deliverables` and `policy`: `refine`
-(read-only agent) -> `approve-plan` (checkpoint, `headless: "block"`) -> per
-deliverable, in plan order, `implement` (one worktree agent
+The shipped builtin that writes is `plan-to-ship` (`plan -> stages -> ship`),
+a compiler over the plan's `deliverables` and `policy`: `refine` (read-only
+agent) -> per deliverable, in plan order, `implement` (one worktree agent
 `implement-<deliverable>` with `handoff: "required"`), `verify-and-fix` (the
 bounded `-verify-<n>`/`-fix-<n>` loop), `review-fan-out` (optional read-only
 reviewers keyed by lens id, each fed a handoff descriptor) and the gate
-`policy.gates` bought -> `ship` (checkpoint, `headless: "block"`, declared for
-every `policy.gates` but `approve-plan`) -> `receipt` (required finalizer). A
+`policy.gates` bought -> `ship` (checkpoint, `headless: "block"`, always
+declared) -> `receipt` (required finalizer). There is no gate before the work:
+the start of the run is the approval, so the first task is ready the moment the
+run is created. A
 plan schema v5 document authors no stages: the compiler derives that list from
 the deliverable's `reviews` and the plan's `policy`. Its input is a
 pi-maestro plan by value, that plan's sha256 digest, and an effort dial; its

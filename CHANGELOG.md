@@ -18,9 +18,44 @@ port the host installs, a lease-free read of a settled run's output and of a
 checkpoint's decided value, and a support-task wiring fix in the extension. No
 frozen export, shape or message was removed or retyped and no returned union
 was widened; the required pi-subagent contract stays revision 7, now pinned to
-`0.12.0` for the request field the agent-template fix needs.
+`0.12.0` for the request field the agent-template fix needs. The builtin
+`plan-to-ship`'s gate vocabulary does change, and the compiled stage document
+narrows with it — both over unfrozen surfaces, and neither is persisted state,
+so neither moves `WORKFLOW_CONTRACT_REVISION` on its own.
 
 ### Breaking
+
+- **`plan-to-ship` has no `approve-plan` gate: the start of the run is the
+  approval.** `policy.gates` is now `ship` (the default) or
+  `every-deliverable`, and both keep their old meaning minus the up-front
+  approval: `ship` is one human decision over every handoff, after all the work
+  and before publication; `every-deliverable` adds one gate after each
+  deliverable but the last, whose gate IS the ship gate, and is still walked
+  strictly deliverable by deliverable. There is no "no gates" value, because
+  publication proof is a durable decision. The two removed values still parse —
+  a TypeBox "unexpected property" is not something a person can act on — and
+  the compiler then refuses them by name, before the first task is declared:
+  *"plan-to-ship: `policy.gates` is "approve-plan+ship", which was removed
+  because the start of the run IS the approval — the plan-mode exit's yes, or a
+  deliberate `/plan run` — so ask for "ship", one decision after all the work
+  and before publication, or "every-deliverable", which adds one after each
+  deliverable."* A run exists because a person agreed the plan it carries:
+  pi-maestro's plan-mode exit agrees the description, shows the compiled
+  document, has it blind-reviewed and asks "Start the run?" before calling
+  `startBuiltin`. Parking on `approve-plan` asked that same person to approve
+  that same digest seconds later, so the gate is gone and the first work task
+  is ready the moment `run-created` is written. The `approve-<deliverable>`
+  keys are unchanged under `every-deliverable`; the `approve-plan` task key no
+  longer exists and no receipt note says "no ship gate was declared" any more.
+  There is no migration and no alias.
+- **`CompiledGatesSchema` narrows to `"ship" | "every-deliverable"`.** It is
+  the `gates` field of `CompiledStageDocumentSchema` on
+  `@vegardx/pi-workflow/components` — the resolved `policy.gates` a compiled
+  document carries. The compiled stage document is a PLAN-FACING VIEW, derived
+  on demand from the stored plan, not persisted run state, so
+  `WORKFLOW_CONTRACT_REVISION` does not move for it. `plan-review`'s `compiled`
+  input schema narrows with it, and a host that derives the document for itself
+  must narrow its own copy.
 
 - **Run state lives under the Pi agent directory, keyed by the project path.**
   Runs, leases, `/workflow prune` trash, and dynamic workflow proposals move
