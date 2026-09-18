@@ -13,7 +13,7 @@ import { type Static, Type } from "typebox";
  * This is the **graph, not prose**. It says which stages each deliverable
  * compiled into, in order, with the identifiers the workflow namespaces are
  * derived from - so "every deliverable was compiled", "the lenses were seeded
- * from `tasks[].by`" and "the gates the policy asked for are present" are
+ * from `tasks[].review`" and "the gates the policy asked for are present" are
  * questions a reader answers by comparing two documents, not by trusting a
  * summary.
  *

@@ -243,8 +243,9 @@ const EffortSchema = stringEnum(["cheap", "standard", "deep"] as const);
 const ReviewTierSchema = stringEnum(["light", "standard", "heavy"] as const);
 
 /**
- * A review task's delegation, mirroring pi-maestro's `WorkflowDelegation`:
- * `model` is optional and `tier`/`diverse` express the intent a host can route.
+ * A review task's `review` block, mirroring the delegation shape pi-maestro's
+ * plan document declares: `model` is optional and `tier`/`diverse` express the
+ * intent a host can route.
  * Closed, so a plan that names a field this runtime cannot honour is refused by
  * `workflow_validate` instead of ignored at run time.
  */
@@ -265,6 +266,12 @@ const PlanTaskSchema = Type.Object(
 		title: Type.String({ minLength: 1 }),
 		body: Type.Optional(Type.String()),
 		/** Present = this task is a review, not implementation work. */
+		review: Type.Optional(DelegationSchema),
+		/**
+		 * Plan schema v3's name for `review`. Admitted by the schema only so the
+		 * compiler can refuse a version 3 document by name instead of leaving a
+		 * TypeBox error about an unexpected property; there is no migration.
+		 */
 		by: Type.Optional(DelegationSchema),
 	},
 	{ additionalProperties: false },
@@ -317,7 +324,7 @@ const StageSchema = Type.Union([
 		{
 			use: Type.Literal("review-fan-out"),
 			id: StageIdSchema,
-			/** Absent or empty = seeded from the deliverable's `tasks[].by`. */
+			/** Absent or empty = seeded from the deliverable's `tasks[].review`. */
 			lenses: Type.Optional(
 				Type.Array(PlanLensSchema, { maxItems: MAX_REVIEW_LENSES }),
 			),
@@ -756,10 +763,10 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 }
 
 /**
- * A deliverable's review lenses, seeded from its `tasks[].by` with the policy's
- * review defaults resolved — the same list pi-maestro's own `defaultStagesFor`
- * produces, field for field, so a host that derives the compiled document for
- * itself gets the document this compiler produces.
+ * A deliverable's review lenses, seeded from its `tasks[].review` with the
+ * policy's review defaults resolved — the same list pi-maestro's own
+ * `defaultStagesFor` produces, field for field, so a host that derives the
+ * compiled document for itself gets the document this compiler produces.
  */
 function seedLenses(
 	deliverable: Deliverable,
@@ -767,14 +774,14 @@ function seedLenses(
 ): PlanLens[] {
 	const lenses: PlanLens[] = [];
 	for (const task of deliverable.tasks ?? []) {
-		const by: Delegation | undefined = task.by;
-		if (!by) continue;
+		const review: Delegation | undefined = task.review;
+		if (!review) continue;
 		lenses.push({
-			id: by.lens,
-			tier: by.tier ?? policy.reviewDefault.tier,
-			diverse: by.diverse ?? policy.reviewDefault.diverse,
-			...(by.skill ? { skill: by.skill } : {}),
-			...(by.model ? { model: by.model } : {}),
+			id: review.lens,
+			tier: review.tier ?? policy.reviewDefault.tier,
+			diverse: review.diverse ?? policy.reviewDefault.diverse,
+			...(review.skill ? { skill: review.skill } : {}),
+			...(review.model ? { model: review.model } : {}),
 		});
 	}
 	return lenses;
@@ -967,6 +974,12 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 		if ((deliverable.reads ?? []).length > 0) {
 			refuse(
 				`${where} reads ${(deliverable.reads ?? []).map((id) => `"${id}"`).join(", ")}, but a handoff is never applied to another worktree: every deliverable branches from the same baseline, so one cannot build on another's code. Drop \`reads\`, or merge the deliverables into one.`,
+			);
+		}
+		for (const task of deliverable.tasks ?? []) {
+			if (!task.by) continue;
+			refuse(
+				`${where} task "${task.id}" carries \`by\`, which plan schema v4 renamed to \`review\`: this is a version 3 document and there is no migration. Rename \`by\` to \`review\` on every review task and store the plan at \`schemaVersion: 4\`.`,
 			);
 		}
 		declared.add(deliverable.id);
@@ -1166,7 +1179,7 @@ function lowerStage(
 		const authored = planLenses ?? [];
 		if (authored.length === 0) {
 			refuse(
-				`${at} declares no lenses and the deliverable has no \`tasks[].by\` to seed from; a fan-out over nothing is not a cheaper review.`,
+				`${at} declares no lenses and the deliverable has no \`tasks[].review\` to seed from; a fan-out over nothing is not a cheaper review.`,
 			);
 		}
 		if (authored.length > MAX_REVIEW_LENSES) {
@@ -1258,7 +1271,7 @@ function handoffRef(descriptor: WorkflowHandoffDescriptor): string {
 /** One deliverable as authored, for an agent's context entry (16 KiB bound). */
 function planText(deliverable: Deliverable): string {
 	const tasks = (deliverable.tasks ?? [])
-		.filter((task) => !task.by)
+		.filter((task) => !task.review)
 		.map(
 			(task) =>
 				`- ${task.id}: ${task.title}${task.body ? ` — ${task.body}` : ""}`,

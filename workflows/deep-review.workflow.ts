@@ -235,7 +235,7 @@ function pinnedModel(model: string, thinking: Envelope["thinking"]) {
  * onto the component's.
  *
  * `tier` outranks the effort column, exactly as `plan-to-ship` resolves
- * `by.tier`. A tiered lens is therefore PINNED here rather than left to the
+ * `tasks[].review.tier`. A tiered lens is therefore PINNED here rather than left to the
  * component's diversity seam: the seam carries one exact model and cannot vary
  * its thinking level per lens. An untiered lens keeps the seam, so `diverse`
  * still resolves through `DIVERSE_MODEL_ID` and still logs that the answer is
