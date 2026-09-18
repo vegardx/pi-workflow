@@ -1283,7 +1283,12 @@ describe("plan-to-ship: the gate policies", () => {
 		const ship = await park(service, run.runId, "ship");
 		expect(
 			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}),
-		).toEqual(["summary-d0", "summary-d1"]);
+		).toEqual(["plan", "summary-d0", "summary-d1"]);
+		// The refined plan is one of them, so the refiner's `blockers` are read
+		// by the person who decides rather than by nobody.
+		expect(taskByKey(ship, "ship").checkpoint?.inputs).toMatchObject({
+			plan: { summary: "Refined.", blockers: [] },
+		});
 		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
 
@@ -1465,7 +1470,7 @@ describe("plan-to-ship: a reviewer that dies", () => {
 		// not park the gate it was meant to inform.
 		expect(
 			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}),
-		).toEqual(["summary-d0"]);
+		).toEqual(["plan", "summary-d0"]);
 		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
 
