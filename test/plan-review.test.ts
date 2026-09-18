@@ -96,7 +96,7 @@ function planFixture(): Record<string, unknown> {
 					{
 						id: "rev-contracts",
 						title: "Contract review",
-						by: { lens: "contracts", tier: "heavy", diverse: true },
+						review: { lens: "contracts", tier: "heavy", diverse: true },
 					},
 				],
 				stages: [
@@ -611,6 +611,14 @@ describe("plan-review: the lowered graph", () => {
 		expect(instructions).toContain("BLIND");
 		expect(instructions).toContain("AGENTS.md");
 		expect(instructions).toContain("RFC 6902");
+		// The plan mirror is v4: the reviewer checks `review`, and is told what
+		// the field means and that a task still carrying `by` is a v3 document.
+		expect(context).toContain('"review":{"lens":"contracts"');
+		expect(instructions).toContain("every task carrying `review`");
+		expect(instructions).toContain(
+			"the deliverable's own worker does every task that does not carry it",
+		);
+		expect(instructions).toContain("renamed this field from `by`");
 	});
 
 	it("spends the effort table's review row and nothing else", async () => {
@@ -650,7 +658,7 @@ describe("plan-review: the report", () => {
 			value: {
 				id: "rev-replay",
 				title: "Replay review",
-				by: { lens: "replay", tier: "standard" },
+				review: { lens: "replay", tier: "standard" },
 			},
 		};
 		const { finished } = await runPlanReview({
@@ -778,7 +786,7 @@ describe("plan-review: the input contract", () => {
 				input({
 					plan: {
 						...plan,
-						schemaVersion: 3,
+						schemaVersion: 4,
 						deliverables: [{ ...first, provenance: "conversation" }],
 					},
 				}),

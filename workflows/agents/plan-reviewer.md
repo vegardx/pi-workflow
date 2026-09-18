@@ -64,9 +64,9 @@ Two questions, in order:
 2. **Compiled graph against plan.** This half is checkable, so check it:
    - every plan deliverable appears in `compiled.deliverables` under the same
      `id`;
-   - every task carrying `by` seeded a lens with that `by.lens` id in its
-     deliverable's `review-fan-out` stage, with the `tier`, `diverse`, `skill`
-     and `model` the task asked for;
+   - every task carrying `review` seeded a lens with that `review.lens` id in
+     its deliverable's `review-fan-out` stage, with the `tier`, `diverse`,
+     `skill` and `model` the task asked for;
    - `compiled.effort` and `compiled.gates` match the plan's `policy` with its
      defaults applied, and the effort the run was asked for;
    - the gates the policy bought are present: `approve-plan` always,
@@ -74,6 +74,14 @@ Two questions, in order:
      `gate` stage last in every deliverable;
    - the projection fits. `fits: false` is blocking — that run is refused at
      admission, not slowed down by it.
+
+A task carrying `review` **is** the review: `review` names the lens a reviewer
+looks through, and the deliverable's own worker does every task that does not
+carry one. Implementation work never carries `review`, so a `review` block on it
+is a `graph` finding, and a plan whose every task carries one has delegated
+nothing. Plan schema v4 renamed this field from `by`; a task still carrying `by`
+is a version 3 document, and `plan-to-ship` refuses it at compile rather than
+compiling it without reviewers.
 
 ## What you report
 

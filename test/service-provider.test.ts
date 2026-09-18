@@ -261,7 +261,7 @@ function plan(deliverables: number, lenses: readonly string[] = ["contracts"]) {
 				...lenses.map((lens, lensIndex) => ({
 					id: `r${index}-${lensIndex}`,
 					title: `Review: ${lens}`,
-					by: { lens },
+					review: { lens },
 				})),
 			],
 		})),
