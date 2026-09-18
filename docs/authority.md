@@ -152,11 +152,12 @@ model can complete on its own:
 
 1. Proposal. `service.propose` (and the `workflow_propose` tool, which only
    proposes) requires Pi project trust ("Dynamic workflows require project
-   trust."), exactly like project static definitions: a run writes under
-   `<cwd>/.pi/workflow`, and the source may declare agent tasks against the
-   project. The proposal applies the static import gate and the two
-   dynamic-only source rules, extracts the manifest in a manifest-only VM, and
-   records nothing that grants execution.
+   trust."), exactly like project static definitions: a run executes against
+   the project and the source may declare agent tasks against it, while the
+   run's own state is written outside the project, under the agent directory
+   keyed by the project path (`docs/persistence.md`). The proposal applies the
+   static import gate and the two dynamic-only source rules, extracts the
+   manifest in a manifest-only VM, and records nothing that grants execution.
 2. Approval. Approval is a human decision recorded through a Pi command with
    an explicit `ctx.ui.confirm` (`/workflow approve dynamic:<sha256>` and
    `/workflow reject dynamic:<sha256> [reason…]`, both refusing outside an
