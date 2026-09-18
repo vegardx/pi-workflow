@@ -41,11 +41,15 @@ source of truth; a project may ship more.
 | `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict, findings, notes?}` — the blind plan reviewer, one read-only agent, no gate |
 | `deep-research` | `{question, depth, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |
 
-A host embedding this package may start an allowlisted builtin **headlessly**,
-without a model turn, through the service provider's `runBuiltin`. The
-allowlist is the package's own frozen `BUILTIN_HEADLESS_WORKFLOWS` and today
-holds `plan-review` alone, because it declares no checkpoint, no worktree, and
-no handoff — a run nobody can be asked to decide. That is the host's path, not
+A host embedding this package may start an allowlisted builtin without a model
+turn, through the service provider, over two separate frozen allowlists.
+`runBuiltin` starts a **headless** run and its allowlist is
+`BUILTIN_HEADLESS_WORKFLOWS`, today `plan-review` alone, because it declares no
+checkpoint, no worktree, and no handoff — a run nobody can be asked to decide.
+`startBuiltin` creates a run a person already asked for in the host's own
+dialog and its allowlist is `BUILTIN_STARTABLE_WORKFLOWS`, today `plan-to-ship`
+alone; that run parks and is decided like any other, and its `run-created`
+event records `origin: "service-provider"`. Both are the host's path, not
 yours: you start a workflow with `workflow_run`.
 
 **Whether you may start a run inside a host's plan mode is the HOST's rule, not
@@ -56,7 +60,8 @@ under the Pi agent directory keyed by the project path.
 Nothing here makes a run unsafe to start while planning — and safe is not the
 same as permitted. pi-maestro refuses it: `workflow_run` and `workflow_propose`
 are blocked in its plan mode, the person starts runs there with `/workflow run`,
-and its plan-mode exit starts the plan's own run. Reads stay legal in every
+and its plan-mode exit starts the plan's own run itself, through `startBuiltin`,
+once the person has answered its dialog. Reads stay legal in every
 host: listing, validating, inspecting, waiting on a run and its logs. Applying a
 handoff is not, and neither is deciding a checkpoint on the human's behalf.
 

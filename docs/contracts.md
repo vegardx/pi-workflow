@@ -10,8 +10,8 @@ runtime contract is revision 20 and declares the feature flags `supportTaskExecu
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
-`operatorAttempts: true`, `worktrees: true`, `checkpoints: true`, and
-`dynamicWorkflows: true`. Revision 18 bundled two halves under one contract
+`operatorAttempts: true`, `worktrees: true`, `checkpoints: true`,
+`serviceProviderStart: true`, and `dynamicWorkflows: true`. Revision 18 bundled two halves under one contract
 revision: checkpoints and dynamic workflows, both described in this document.
 Revision 19 adds no feature flag. It advances the pi-subagent handshake to
 contract revision 7, whose features include `handoffExport: true`,
@@ -26,7 +26,14 @@ directory by project path instead of under `<cwd>/.pi/workflow`
 state is part of the contract, so the revision advances; state written under
 the old root is not seen and there is no migration. Revision-20 stores refuse
 revision-19 leases, journals, snapshots, run records, decision records, and
-dynamic proposals; there is no migration.
+dynamic proposals; there is no migration. Revision 20 adds one feature flag
+after that move, `serviceProviderStart: true`: the service-provider seam gains
+`startBuiltin`, and the `run-created` event gains the optional `origin`
+([Service provider](#service-provider)). The flag is what a consumer checks;
+the optional event field is additive under the revision, the same way
+`WorkflowRunRecordSchema.modelRouting` is - a journal written without it still
+validates, the reducer does not read it, and no identity derivation changes -
+so the revision does not advance again for it.
 
 ## Public API and stability
 
@@ -137,7 +144,12 @@ and `deep-research`, from the same `workflows/` builtin root; `plan-review` is
 the only name on `BUILTIN_HEADLESS_WORKFLOWS`, and declares no checkpoint,
 worktree or handoff. `deep-research` declares none of the three either, but is
 not on the allowlist: the structural property and a reason to start without a
-model turn are different things.
+model turn are different things. The seam also gains `startBuiltin` and a
+second frozen allowlist, `BUILTIN_STARTABLE_WORKFLOWS`, holding `plan-to-ship`
+alone, for the run a host starts after a person answered its own dialog; the
+runtime contract advertises it as `serviceProviderStart: true` and
+`RunCreatedEventSchema` gains the optional `origin`, revision-20 additive on
+the same terms as `modelRouting` ([Service provider](#service-provider)).
 The lease-free `inspect` gains two additive reads: `WorkflowInspectSection`
 gains the member `"output"`, which puts a terminal run's committed output on
 `run.output` (`WorkflowRunSummarySchema` gains the optional `output`, bounded
@@ -1725,7 +1737,11 @@ store paths, or credential-shaped metadata.
 ### Lifecycle methods
 
 `run` validates trust, definition, input, and the shared subagent provider
-before creating durable state, then returns a run ID immediately. `status` is
+before creating durable state, then returns a run ID immediately. It takes an
+optional third argument, `WorkflowServiceRunOptions`, whose only member is
+`origin`: provenance recorded on `run-created` and nothing else. It changes no
+validation, no identity derivation, and no execution
+([Service provider](#service-provider)). `status` is
 a journal projection, `wait` reconstructs nonterminal work after restart and
 drives a durably `failed` or `interrupted` run whose on-path tasks are
 `invalidated` (that run awaits explicit recovery), and `stop` persists
@@ -2086,6 +2102,66 @@ call. Operator-triggered `retry` and interrupted-run `resume` are the service
 methods described under [Lifecycle methods](#lifecycle-methods), advertised
 through `availableActions` and exposed as `workflow_retry` and
 `workflow_resume`.
+
+### Service provider
+
+`@vegardx/pi-workflow/service-provider` registers a frozen
+`{contract, acquire(context)}` on the request channel
+`@vegardx/pi-workflow/service-provider/request/v1` and hands a consumer a
+`WorkflowReadClient`, never the `WorkflowService`. The channel carries one
+request shape, `{schema: "pi-workflow-service-request-v1", respond}`, and no
+consumer identity: there is no requesting extension id on it and none on
+`ExtensionContext`, so nothing downstream may claim one. The client is
+`list`, `validate`, `project`, `inspect`, `runs`, `observe`, `runBuiltin`,
+`startBuiltin`, and `awaitRun` - no `decide`, no `stop`, no `invalidate`, no
+general `run`.
+
+Two frozen allowlists live in the runtime, not in the caller, and they are
+disjoint:
+
+| Method | Allowlist | Holds | Refusal for anything else |
+| --- | --- | --- | --- |
+| `runBuiltin(ref, input)` | `BUILTIN_HEADLESS_WORKFLOWS` | `plan-review` | "Workflow `<ref>` may not be started by a service consumer; use workflow_run." |
+| `startBuiltin(ref, {input, effort?})` | `BUILTIN_STARTABLE_WORKFLOWS` | `plan-to-ship` | "Workflow `<ref>` is not a builtin a service consumer may start; use workflow_run." |
+
+Every name on the headless list must declare no checkpoint, no worktree, and
+no handoff (`headlessBuiltinViolations`). The startable list asserts the
+opposite kind of definition and makes no structural claim at all: what
+qualifies a name is that a person decided, in the host's own dialog, one step
+before the call. Both methods also resolve the ref and refuse it unless the
+definition came from the `builtin` root, so a project definition that took an
+allowlisted name is not it, and a `dynamic:<sha256>` ref is refused by name
+before anything is resolved.
+
+`startBuiltin` creates the durable run and returns `{runId}`. It never awaits
+and never observes. `input` is validated against the definition's
+`inputSchema` exactly as `workflow_run` validates its own - same refusals,
+same messages ("Workflow input does not match its schema.", "Workflow input is
+not bounded JSON.") - and a refused input creates no run. `effort` (`"cheap" |
+"standard" | "deep"`) is the dial the builtin pipelines read from their input:
+it is written onto the input object, replacing any `effort` already there,
+before that one validation, so an unknown value is refused by the definition's
+schema rather than by a second list. An `effort` given with a non-object
+input is `validation` "Workflow input must be a JSON object to carry an
+effort."
+
+The run it creates is an ordinary run in every respect but one: same journal,
+same checkpoints, same `/workflow` and widget visibility, decided with
+`/workflow decide`, readable through this same client's `runs` and `inspect`.
+`awaitRun` is permitted on it, on the same rule as `runBuiltin` - the client
+started it, so the started-run ledger on the producer side holds its id.
+
+The one difference is provenance. `run-created` carries the optional
+`origin`, whose only value is `"service-provider"`. A run started by the
+`workflow_run` tool and a run started by the `/workflow run` command both
+reach `WorkflowService.run` through the same call with nothing to tell them
+apart, so neither records an origin: absent means "started in the open,
+through a tool call or a UI command, with a transcript or a command line to
+show for it". A service-provider start has neither, which is why it is the
+value worth journalling. The field is revision-20 additive - optional on an
+`additionalProperties: false` event, unread by the reducer, outside every
+identity derivation - and the runtime contract advertises the capability as
+the feature flag `serviceProviderStart: true`, which is what a consumer pins.
 
 ## Dynamic workflows
 
