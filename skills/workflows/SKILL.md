@@ -5,7 +5,7 @@ description: Use when running, waiting on, inspecting, recovering, or stopping a
 
 # Operating pi-workflow runs
 
-This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 19. It is
+This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 20. It is
 about running workflows, not writing them. Every tool name, parameter, bound,
 status, subcommand, legality rule, and quoted message below is taken from the
 runtime source (`src/tools.ts`, `src/service-views.ts`, `src/run-actions.ts`,
@@ -51,7 +51,8 @@ yours: you start a workflow with `workflow_run`.
 **Whether you may start a run inside a host's plan mode is the HOST's rule, not
 this package's.** A workflow never mutates the working tree or the host: writers
 run in an isolated pi-subagent worktree and produce a handoff descriptor, which
-the runtime never applies, and the run's own state lives under `.pi/workflow/`.
+the runtime never applies, and the run's own state lives outside the project,
+under the Pi agent directory keyed by the project path.
 Nothing here makes a run unsafe to start while planning — and safe is not the
 same as permitted. pi-maestro refuses it: `workflow_run` and `workflow_propose`
 are blocked in its plan mode, the person starts runs there with `/workflow run`,
@@ -151,10 +152,11 @@ semantic result is not an answer.
 Call `workflow_wait` again if more waiting is justified.
 
 Never poll. Do not loop over `workflow_status`, and never read or list files
-under `.pi/workflow/runs/`. That directory is durable recovery state: the run
-record, the compiled snapshot, artifacts, decisions, and the journal. Do not
-edit or delete anything in it. (`.pi/workflows/` is something else entirely —
-one of the roots definitions are discovered from.)
+under the run store, `<agentDir>/workflow/<project key>/runs/`. That directory
+is durable recovery state: the run record, the compiled snapshot, artifacts,
+decisions, and the journal. Do not edit or delete anything in it. It is not in
+the project, and `<cwd>/.pi/workflows/` is something else entirely — one of the
+roots definitions are discovered from.
 
 ## Parked runs are for the human, not for you
 
@@ -293,7 +295,7 @@ terminal runs that keep asking for attention.
 
 - Never claim a workflow, tool, or parameter exists without checking
   `workflow_list` or the tool schema.
-- Never poll a run, and never read `.pi/workflow/` to learn a run's state.
+- Never poll a run, and never read the run store to learn a run's state.
 - Never decide a checkpoint or approve a dynamic source, or imply either has
   happened.
 - Never call an action missing from `availableActions`.

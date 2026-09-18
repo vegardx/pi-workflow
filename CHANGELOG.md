@@ -8,26 +8,66 @@ surfaces described in
 
 ## Unreleased
 
-Additive since 2.0.0, so the next release is the minor 2.1.0: two new entry
+The next release is the major 3.0.0: run state moves out of the project and
+`WORKFLOW_CONTRACT_REVISION` becomes 20, which under the persisted-state rule
+in [docs/contracts.md](docs/contracts.md#public-api-and-stability) is what
+makes it a major. Everything else since 2.0.0 is additive: two new entry
 points — a component library and a service-provider seam — three more builtin
 workflows built out of the first, two short reference skills, a model-routing
 port the host installs, a lease-free read of a settled run's output and of a
 checkpoint's decided value, and a support-task wiring fix in the extension. No
-frozen export, shape or message was removed or retyped, no returned union was
-widened, and nothing persisted changed; `WORKFLOW_CONTRACT_REVISION` stays 19
-and the required pi-subagent contract stays revision 7, now pinned to `0.12.0`
-for the request field the agent-template fix needs.
+frozen export, shape or message was removed or retyped and no returned union
+was widened; the required pi-subagent contract stays revision 7, now pinned to
+`0.12.0` for the request field the agent-template fix needs.
+
+### Breaking
+
+- **Run state lives under the Pi agent directory, keyed by the project path.**
+  Runs, leases, `/workflow prune` trash, and dynamic workflow proposals move
+  out of `<cwd>/.pi/workflow` and into
+  `<agentDir>/workflow/<project key>/{runs,leases,trash,dynamic}`. The project
+  key is Pi's own encoding of the resolved project path — the leading
+  separator dropped, every remaining separator and colon rewritten to `-`,
+  wrapped in `--`, so `/Users/x/src/proj` becomes `--Users-x-src-proj--` — the
+  same key Pi names `<agentDir>/sessions/<project key>` with, so a project's
+  sessions and its runs are sibling directories under one key.
+  `src/persistence/state-root.ts` is the one place that derives it
+  (`workflowStateRoot`, `encodeWorkflowProjectKey`, both now exported from the
+  unfrozen `@vegardx/pi-workflow/runtime` entry), so every process that needs
+  the root shares one module. **Run state left under `<cwd>/.pi/workflow` by
+  an earlier release is simply not seen: there is no migration, no fallback
+  root, and no dual-root reader.** Definitions are unaffected —
+  `<cwd>/workflows/*.workflow.ts`, `<cwd>/.pi/workflows` and
+  `<cwd>/.pi/agents/*.md` are source and discovery, not state, and stay in the
+  project. `WorkflowServiceOptions.storeRoot` is unchanged and still frozen:
+  the shipped extension is what now derives it, and an embedder still supplies
+  its own.
+- **`WORKFLOW_CONTRACT_REVISION` becomes 20.** The location of persisted state
+  is part of the contract, so moving it advances the revision. No record shape,
+  message, or identity derivation changes with it. Revision-20 stores refuse
+  revision-19 leases, journals, snapshots, run records, decision records, and
+  dynamic proposals, and there is no migration. Consumers that pin the runtime
+  contract must raise their pinned revision; a mismatched pin fails provider
+  discovery loudly rather than mis-calling.
+- **Every dynamic workflow source approval is invalidated.** The contract
+  revision is an input to `hostApiSha256` by construction, so the dynamic host
+  API digest rotates with it: an approved source drops back to `proposed` and
+  an operator must approve it again. Its proposal record and source bytes are
+  unchanged, but they now live under the new root, so in practice the source is
+  proposed and approved afresh.
 
 ### Added
 
 - **`/workflow prune [--apply] [--older-than <duration>]` and
-  `service.prune`.** Store-level retention, not a run action: it takes no run
+  `service.prune`.** Store-level retention, not a run action (`<store>` below
+  is the project's store root, `<agentDir>/workflow/<project key>`): it takes
+  no run
   prefix, is not derived from `IMPLEMENTED_WORKFLOW_RUN_ACTIONS`, is absent
   from the inspector's per-run palette, and is not a tool. It moves every
   terminal, settled run — `completed`, `completed-degraded`, `failed`,
-  `cancelled` — and its lease file out of `.pi/workflow/runs/<run-id>` and
-  `.pi/workflow/leases/<run-id>.lease.json` and into
-  `.pi/workflow/trash/<yyyymmdd-hhmmss>/<run-id>/` as `run/` and `lease.json`,
+  `cancelled` — and its lease file out of `<store>/runs/<run-id>` and
+  `<store>/leases/<run-id>.lease.json` and into
+  `<store>/trash/<yyyymmdd-hhmmss>/<run-id>/` as `run/` and `lease.json`,
   beside a `manifest.json` (`schema`, `contractRevision`, `runId`, `status`,
   `prunedAt`, `reason`) written before anything is renamed. Runs that are
   still running, still recoverable (`interrupted`, `cleanup-blocked`), or

@@ -12,7 +12,7 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 2.0.0; runtime contract revision 19 with the feature flags
+views. Version 2.0.0; runtime contract revision 20 with the feature flags
 `checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
 and it requires pi-subagent contract revision 7 (`handoffExport: true`,
 `vmMemoryCeiling: true`, `workspaceBudgetRefusal: true`). The
@@ -65,7 +65,7 @@ own publication, push, pull-request, merge, release, or deployment policy.
 (`defineWorkflow`, `defineSupportTask`, `WorkflowContext`, the handle and
 request types), the service API (`createWorkflowService`,
 `WorkflowServiceOptions`, every `WorkflowService` method and the views it
-returns), the contract layer (the revision-19 schemas, constants, and
+returns), the contract layer (the revision-20 schemas, constants, and
 compatibility predicates), and the extension entry (the default export of
 `@vegardx/pi-workflow/extension`, the fourteen `WORKFLOW_TOOL_DECLARATIONS`
 tools, the `/workflow` grammar, the `pi-workflow` widget, and the `alt+w`
@@ -78,7 +78,10 @@ it adds the optional `WorkflowServiceOptions.registeredRoots` and the
 package's own builtin workflow root, and changes nothing frozen. 2.0.0 is a
 major for one reason only: contract revision 19 cannot read revision-18
 persisted runs, and there is no migration. Its one schema change is additive
-(the optional agent-task `memoryBytes`).
+(the optional agent-task `memoryBytes`). The unreleased release is a major for
+the same reason: contract revision 20 cannot read revision-19 persisted runs,
+and it reads them from a different place (see
+[Where state lives](#where-state-lives)).
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:
@@ -114,6 +117,37 @@ Deep `dist/` paths are not exported. The exact root and runtime export lists
 are pinned in `test/fixtures/public-api/root-exports.json` and
 `runtime-exports.json`; the pack check and `test/public-api.test.ts` fail
 when the package deviates from them.
+
+## Where state lives
+
+Run state is not project content. Runs, leases, `/workflow prune` trash, and
+dynamic workflow proposals live under the Pi agent directory, keyed by the
+project path:
+
+```text
+<agentDir>/workflow/<project key>/runs/<run-id>/
+<agentDir>/workflow/<project key>/leases/<run-id>.lease.json
+<agentDir>/workflow/<project key>/trash/<yyyymmdd-hhmmss>/<run-id>/
+<agentDir>/workflow/<project key>/dynamic/<sha256>/
+```
+
+`agentDir` is `getAgentDir()`. The project key is Pi's own encoding of the
+resolved project path — the leading separator dropped, every remaining
+separator and colon rewritten to `-`, wrapped in `--`, so `/Users/x/src/proj`
+becomes `--Users-x-src-proj--`. It is the key Pi already names
+`<agentDir>/sessions/<project key>` with, so a project's sessions and its runs
+are sibling directories. `src/persistence/state-root.ts` is the one place that
+derives it (`workflowStateRoot`, exported from
+`@vegardx/pi-workflow/runtime`); the shipped extension passes the result as
+`WorkflowServiceOptions.storeRoot`, and an embedder that supplies its own
+store root still decides where its state goes.
+
+Definitions are the opposite and do not move: `<cwd>/workflows/*.workflow.ts`,
+`<cwd>/.pi/workflows`, and `<cwd>/.pi/agents/*.md` are source and discovery,
+read and reviewed with the project, and stay in the project.
+
+Run state written by an earlier release under `<cwd>/.pi/workflow` is simply
+not seen: there is no migration, no fallback root, and no dual-root reader.
 
 ## Documentation
 
@@ -306,7 +340,7 @@ prefix: it addresses the run store, so it is not derived from
 palette (which is `availableActions` and nothing else), and is not a tool. It
 moves every terminal, settled run - `completed`, `completed-degraded`,
 `failed`, `cancelled` - together with its lease file into
-`.pi/workflow/trash/<yyyymmdd-hhmmss>/<run-id>/`, beside a manifest recording
+`<store>/trash/<yyyymmdd-hhmmss>/<run-id>/`, beside a manifest recording
 the run ID, its status, when it was pruned, and why. A run that is still
 running, still recoverable (`interrupted`, `cleanup-blocked`), or leased by a
 live Pi process is refused; `--older-than` (`30m`, `24h`, `7d`, `4w`) keeps
@@ -317,8 +351,10 @@ appends no event and changes no run's status (see
 [docs/authority.md](docs/authority.md)). **Nothing is deleted.** A pruned
 run's evidence - journal, tasks, artifacts, decisions - is exactly the bytes
 it had, under the trash entry's `run/`, and is recoverable by hand: move
-`run/` back to `.pi/workflow/runs/<run-id>` and `lease.json` back to
-`.pi/workflow/leases/<run-id>.lease.json`. `alt+w` opens the inspector without interrupting input. In the
+`run/` back to `<store>/runs/<run-id>` and `lease.json` back to
+`<store>/leases/<run-id>.lease.json`, where `<store>` is the project's store
+root, `<agentDir>/workflow/<project key>` (see
+[Where state lives](#where-state-lives)). `alt+w` opens the inspector without interrupting input. In the
 TUI a two-line `pi-workflow` widget below the editor shows
 `workflows ongoing: …` and `workflows need action: …`, is hidden when neither
 applies, names `/workflow prune` on the attention line when every run that
@@ -989,7 +1025,7 @@ the static import gate (`@vegardx/pi-workflow`, `typebox`, and registered
 support module specifiers only) plus two dynamic-only rules (no
 `import.meta`; exactly one default export and no named exports), extracts
 the manifest (`meta`, `inputSchema`, `outputSchema`) in a manifest-only VM,
-and stores the proposal under `<cwd>/.pi/workflow/dynamic/<sha256>/` keyed by
+and stores the proposal under `<store>/dynamic/<sha256>/` keyed by
 the SHA-256 of the source bytes. Proposals are derived data: re-proposing the
 same bytes returns the existing proposal. Approval is human-only, through a
 Pi command with an explicit `ctx.ui.confirm`, never through a model-callable

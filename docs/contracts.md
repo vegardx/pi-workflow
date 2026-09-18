@@ -6,7 +6,7 @@ nested run executor, artifact store, and static source runtime (exported from
 `@vegardx/pi-workflow/runtime`) implement the current subset; later
 interfaces remain design contracts. Version 1.0.0 freezes the public surfaces
 listed under [Public API and stability](#public-api-and-stability). The
-runtime contract is revision 19 and declares the feature flags `supportTaskExecution: true`,
+runtime contract is revision 20 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
@@ -18,9 +18,15 @@ contract revision 7, whose features include `handoffExport: true`,
 `vmMemoryCeiling: true`, and `workspaceBudgetRefusal: true`, and admits the
 optional `memoryBytes` on an agent task request, which enters task identity.
 `WORKFLOW_HANDOFF_FORMAT.revision` becomes 7 with it, so every handoff
-artifact's `schemaSha256` changes. Revision-19 stores refuse revision-18
-leases, journals, snapshots, run records, decision records, and dynamic
-proposals; there is no migration.
+artifact's `schemaSha256` changes. Revision 20 adds no feature flag and
+changes no record shape: it moves where records live. Run state - runs,
+leases, prune trash, and dynamic proposals - is keyed under the agent
+directory by project path instead of under `<cwd>/.pi/workflow`
+([persistence](persistence.md#where-state-lives)). The location of persisted
+state is part of the contract, so the revision advances; state written under
+the old root is not seen and there is no migration. Revision-20 stores refuse
+revision-19 leases, journals, snapshots, run records, decision records, and
+dynamic proposals; there is no migration.
 
 ## Public API and stability
 
@@ -35,7 +41,7 @@ except as described here.
 2. **Service API** — `createWorkflowService`, `WorkflowServiceOptions`, every
    method of `WorkflowService`, `WorkflowServiceError`, and the view types and
    schemas those methods return.
-3. **Contract layer** — the revision-19 request, spec, record, evidence,
+3. **Contract layer** — the revision-20 request, spec, record, evidence,
    event, projection, and view schemas, the identity and bound constants,
    `WORKFLOW_RUNTIME_CONTRACT`, and the compatibility predicates.
 4. **Extension entry** — the default export of
@@ -76,9 +82,11 @@ revision; it may not lose or retype fields under the same major.
 
 **Persisted state.** Runs journaled by revision 18 are readable by every 1.x
 release; a release that cannot read them is a major. Revision 19 cannot read
-them, which is why the release that carries it is 2.0.0 and not 1.2.0. Runs
-journaled by revision 19 are readable by every 2.x release under the same
-rule.
+them, which is why the release that carries it is 2.0.0 and not 1.2.0. The
+rule covers where state is kept as well as what is in it: revision 20 both
+refuses revision-19 records and reads a different root, so the release that
+carries it is 3.0.0 and not 2.1.0. Runs journaled by revision 20 are readable
+by every 3.x release under the same rule.
 
 **1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
 `registeredRoots`, and the package ships its own `workflows/` directory, which
@@ -98,7 +106,20 @@ optional `memoryBytes`, which is lowered unchanged to pi-subagent and enters
 agent task identity. No export was removed, renamed, or retyped, no returned
 union widened, and no tool name, parameter, or output schema changed.
 
-**2.1.0 (unreleased).** Additive only; `WORKFLOW_CONTRACT_REVISION` stays 19.
+**3.0.0 (unreleased).** `WORKFLOW_CONTRACT_REVISION` becomes 20 and run state
+moves out of the project: runs, leases, prune trash, and dynamic proposals are
+keyed under `<agentDir>/workflow/<projectKey>` instead of
+`<cwd>/.pi/workflow` ([persistence](persistence.md#where-state-lives)).
+Definitions do not move. State left under the old root is not seen, and there
+is no migration, no fallback root, and no dual-root reader, so the
+persisted-state rule above makes this a major. No frozen export, shape,
+schema, message, or tool changed with it: `WorkflowServiceOptions.storeRoot`
+is still the store root an embedder supplies, and the shipped extension is
+what now derives it. The revision is an input to `hostApiSha256`, so the
+dynamic host API digest rotates and every existing dynamic source approval is
+invalidated - the same outcome as the unreadable stores. Everything else in
+the release is additive.
+
 Two entry points are added, both **unfrozen** until a later minor pins them:
 `@vegardx/pi-workflow/components`, the component library, which the definition
 import gate now accepts alongside `@vegardx/pi-workflow` and `typebox`; and
@@ -109,7 +130,7 @@ gains the optional `modelRouting` port; `AgentTaskAuthoringRequest` gains the
 optional `modelRole`, which is resolved to an exact model before hashing so no
 identity derivation and no `AgentTaskRequestSchema` field changes;
 `WorkflowRunRecordSchema` gains the optional `modelRouting`, which is
-revision-19 additive (every record written before it still validates, a reader
+revision-20 additive (every record written before it still validates, a reader
 that does not know the field ignores it, and nothing derives identity from it).
 The package ships three more builtin workflows, `deep-review`, `plan-review`
 and `deep-research`, from the same `workflows/` builtin root; `plan-review` is
@@ -227,7 +248,7 @@ source identity. The `@vegardx/pi-workflow/components` subpath is an allowed
 import (trusted package code, the same trade the root import makes); the
 `@vegardx/pi-workflow/runtime` subpath is not: the gate matches specifiers
 exactly, so a definition that imports it fails with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 19". A support implementation is identified by its registered
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 20". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,
 with the same messages, applies to dynamic workflow source proposed through
@@ -653,7 +674,7 @@ the same validation messages (`DYNAMIC_CONTEXT_PROPERTIES` = `cwd`, `input`,
 `runId`, `signal`; `DYNAMIC_CONTEXT_METHODS` = `agent`, `checkpoint`,
 `fanIn`, `fanOut`, `finalize`, `handoff`, `log`, `phase`, `pipeline`,
 `result`, `results`, `settled`, `support`, `workflow`, and nothing more).
-`ctx.artifact` is not available in revision 19 on either frontend. In the VM
+`ctx.artifact` is not available in revision 20 on either frontend. In the VM
 declarations are synchronous RPC calls answered by the static-runtime context
 and barriers are asynchronous replies; see [Dynamic workflows](#dynamic-workflows).
 
@@ -752,7 +773,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 19;
+`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 20;
 a checkpoint task (`ctx.checkpoint`) lowers to `CheckpointTaskSpec`, whose
 `request` is the `CheckpointTaskRequest` described in
 [Checkpoints](#checkpoints). `role` is `"task"` for every ordinary
@@ -2074,8 +2095,8 @@ it. The runtime contract publishes `dynamicWorkflows: true`. Nothing below
 runs without Pi project trust: every dynamic service method first refuses
 with `validation` "Dynamic workflows require project trust." when the project
 is untrusted (D10: the source is untrusted orchestration input executing in a
-determinism boundary inside a trusted process, and a run writes under
-`<cwd>/.pi/workflow`). The user-fixed rules of the design are: approval is
+determinism boundary inside a trusted process, and a run executes against the
+project). The user-fixed rules of the design are: approval is
 human-only through a Pi command with an explicit `ctx.ui.confirm`, never a
 model tool; approval records are definition-level (per source digest) and
 copied into every run directory; dynamic runs are root runs (depth 0) that
@@ -2103,10 +2124,10 @@ this order, each a `WorkflowServiceError` (code in brackets):
    UTF-8." (a lone surrogate or a NUL byte) [validation];
 3. the import gate of static definitions with its messages verbatim
    ("workflow import <specifier> is not identity-bound by contract revision
-   19", "dynamic workflow imports are not supported by contract revision 19",
+   20", "dynamic workflow imports are not supported by contract revision 20",
    "dynamic imports and CommonJS require are not supported by contract
-   revision 19", "TypeScript import assignment is not supported by contract
-   revision 19", "workflow definition syntax is invalid"); the allow-list is
+   revision 20", "TypeScript import assignment is not supported by contract
+   revision 20", "workflow definition syntax is invalid"); the allow-list is
    `@vegardx/pi-workflow`, `typebox`, and the module specifiers of the
    registered support tasks [validation];
 4. the dynamic-only rules: "dynamic workflow source may not use import.meta"

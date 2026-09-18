@@ -31,6 +31,21 @@ The first executable release must prove:
 
 An in-memory-only successful drive does not satisfy the first slice.
 
+## State location
+
+- a project's run state - runs, leases, prune trash, and dynamic proposals -
+  lives under `<agentDir>/workflow/<projectKey>`, where `projectKey` is Pi's
+  own encoding of the resolved project path, so it is a sibling of
+  `<agentDir>/sessions/<projectKey>`; the encoding is pinned against a
+  literal and against the directory Pi itself names;
+- the shipped extension derives that root from `getAgentDir()` and the
+  context's cwd, writes nothing inside the project, and two projects sharing
+  one agent directory never see each other's runs;
+- definitions do not move: `<cwd>/workflows`, `<cwd>/.pi/workflows`, and
+  `<cwd>/.pi/agents` stay in the project;
+- state left under a previous release's `<cwd>/.pi/workflow` is not read;
+  there is no migration, no fallback root, and no dual-root reader.
+
 ## Definition and discovery
 
 - uses `getAgentDir()` and project trust correctly;
@@ -646,9 +661,9 @@ Revision 19 must prove:
   converted into task failure;
 - nested execution recovery follows the documented crash-prefix ladder, a run
   record with `depth >= 1` requires exact lineage and a root record forbids it,
-  and revision-19 stores reject revision 1 through 18 leases, journals,
+  and revision-20 stores reject revision 1 through 19 leases, journals,
   snapshots, run records, decision records, and dynamic proposal records,
-  with no migration from revision 18;
+  with no migration from revision 19;
 - source or runtime drift cannot reinterpret prior human or model decisions;
 - finalizers are `role: "finalizer"` tasks declared through `ctx.finalize`
   with exactly one of `support`, `agent`, or `workflow`, `kind` lowers to the
@@ -668,7 +683,7 @@ Revision 19 must prove:
 
 ## Dynamic workflows
 
-Dynamic acceptance (contract revision 19, `dynamicWorkflows: true`) must prove:
+Dynamic acceptance (contract revision 20, `dynamicWorkflows: true`) must prove:
 
 ### Parity
 

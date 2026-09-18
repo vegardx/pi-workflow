@@ -1,9 +1,40 @@
 # Persistence and recovery
 
+## Where state lives
+
+Run state is not project content. A run, its lease, its prune trash, and the
+dynamic workflow proposals it may run from are machine-local recovery state
+about work done in a project, so they live under the Pi agent directory,
+keyed by the project path:
+
+```text
+<agentDir>/workflow/<projectKey>/
+```
+
+`agentDir` is `getAgentDir()`. `projectKey` is Pi's own encoding of the
+resolved project path - the leading separator dropped, every remaining
+separator and colon rewritten to `-`, wrapped in `--`, so `/Users/x/src/proj`
+becomes `--Users-x-src-proj--`. It is the same key Pi names
+`<agentDir>/sessions/<projectKey>` with, so a project's sessions and its runs
+are sibling directories under one key. `src/persistence/state-root.ts` is the
+one place that derives it (`workflowStateRoot(cwd, agentDir?)`); every process
+that needs the root imports that module rather than spelling the path again.
+Pi resolves but deliberately does not `realpath`, and neither does this, so a
+symlinked project path keys separately from its real path - for sessions and
+so for runs too.
+
+Workflow **definitions** are the opposite and are unaffected:
+`<cwd>/workflows/*.workflow.ts`, `<cwd>/.pi/workflows`, and
+`<cwd>/.pi/agents/*.md` are source and discovery, read and reviewed with the
+project, and stay in the project.
+
+State written by an earlier release under `<cwd>/.pi/workflow` is simply not
+seen. There is no migration, no fallback root, and no dual-root reader.
+
 ## Storage
 
 ```text
-<cwd>/.pi/workflow/runs/<run-id>/
+<agentDir>/workflow/<projectKey>/runs/<run-id>/
   service.json
   run.json
   events.jsonl
@@ -15,12 +46,12 @@
   tasks/<task-id>/
   artifacts/
   decisions/                       checkpoint decision records
-<cwd>/.pi/workflow/leases/<run-id>.lease.json
-<cwd>/.pi/workflow/trash/<yyyymmdd-hhmmss>/<run-id>/
+<agentDir>/workflow/<projectKey>/leases/<run-id>.lease.json
+<agentDir>/workflow/<projectKey>/trash/<yyyymmdd-hhmmss>/<run-id>/
   manifest.json                    canonical prune manifest + "\n"
   run/                             the whole runs/<run-id> directory, moved
   lease.json                       the moved leases/<run-id>.lease.json, if any
-<cwd>/.pi/workflow/dynamic/<sourceSha256>/
+<agentDir>/workflow/<projectKey>/dynamic/<sourceSha256>/
   source.workflow.ts               exact proposed source bytes
   current                          "<version>\n": the active record pair
   records/<version>/               one manifest.json + proposal.json pair
@@ -29,11 +60,8 @@
   decisions/                       definition-level source-approval record
 ```
 
-A bounded global pointer index may live under:
-
-```text
-<getAgentDir()>/workflow/run-index.json
-```
+A bounded global pointer index may live beside the project keys, under
+`<agentDir>/workflow/run-index.json`.
 
 Directories are mode `0700`; sensitive files are mode `0600`. Prompts, logs,
 checkpoint values, context, artifacts, and results are bounded. `service.json`
@@ -71,7 +99,7 @@ moved, never a half-moved run directory:
 ```json
 {
   "schema": "pi-workflow-prune",
-  "contractRevision": 18,
+  "contractRevision": 20,
   "runId": "workflow_…",
   "status": "failed",
   "prunedAt": "2026-03-04T05:06:07.000Z",
@@ -82,18 +110,20 @@ moved, never a half-moved run directory:
 Nothing is deleted and the trash is append-only; the runtime never reads it.
 A pruned run's evidence - its journal, snapshot, task execution records,
 artifacts, decisions, and definition copy - is exactly the bytes it had, under
-`run/`, and is recoverable by hand: move `run/` back to
-`runs/<run-id>` and `lease.json` back to `leases/<run-id>.lease.json`, and the
-run is readable again. Until then `listRuns` does not see it, because
+`run/`, and is recoverable by hand: with `<store>` for the project's store
+root `<agentDir>/workflow/<projectKey>`, move
+`<store>/trash/<batch>/<run-id>/run/` back to `<store>/runs/<run-id>` and
+`<store>/trash/<batch>/<run-id>/lease.json` back to
+`<store>/leases/<run-id>.lease.json`, and the run is readable again. Until then `listRuns` does not see it, because
 `listRuns` scans `runs/` alone.
 
 ## Journal and snapshot
 
 Lifecycle events are append-only, versioned, and the source of truth. Revision
-18 rejects revision 1 through revision 17 leases, journals, snapshots, run
+20 rejects revision 1 through revision 19 leases, journals, snapshots, run
 records, decision records, and dynamic proposal records; no migration or
 dual-format reader is provided.
-Revision 18 accepts only the declared run, workflow phase/log effect, task,
+Revision 20 accepts only the declared run, workflow phase/log effect, task,
 artifact, barrier, output-commit, and task-execution events. Agent task-execution evidence records
 generation creation, the latest preflight before launch intent (carrying the
 launch plan's `workspaceMode` and `workspaceBaselineSha256`), uncertain launch
@@ -202,7 +232,7 @@ valid prefix fail closed.
 ## Task execution records
 
 A logical task may have multiple execution generations after explicit
-invalidation. Revision 18 admits generations 1 through
+invalidation. Revision 20 admits generations 1 through
 `MAX_TASK_EXECUTION_GENERATIONS = 16`. `task-execution-created` requires the
 generation to equal one more than the executions already recorded for the
 task, the task to be `ready` and on-path, and no current execution:
@@ -474,7 +504,7 @@ thrown rather than converted into task failure.
 ```ts
 interface WorkflowDecisionRecord {
 	schema: "pi-workflow-decision";
-	contractRevision: 19;
+	contractRevision: 20;
 	binding: { kind: "checkpoint"; runId; taskId; executionId; effectSha256 };
 	source: "operator" | "default";
 	decidedBy?: string; // 1..256; present iff source is "operator"
@@ -510,7 +540,7 @@ through the ordinary verified input path.
 The binding union is discriminated by `kind`. The second member is the
 definition-level `source-approval` binding of the dynamic-workflows half,
 `{ kind: "source-approval"; definitionIdentitySha256; sourceSha256;
-contractRevision: 19 }`, stored in the same record format under
+contractRevision: 20 }`, stored in the same record format under
 `<storeRoot>/dynamic/<sourceSha256>/decisions/<bindingSha256>.json` through
 `WorkflowDecisionRecordStore.openRoot({ directory })`: outside any run, with
 no journal and no lease fence, created owner-only if absent, and refusing a
