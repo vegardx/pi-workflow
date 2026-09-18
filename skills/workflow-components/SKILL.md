@@ -87,7 +87,9 @@ finding forces `request-changes` even from a lens that approved.
 
 What `plan-to-ship` compiles a plan into and `plan-review` reads —
 `CompiledStageDocumentSchema`, exported from the same entry point. It is the
-**graph, not prose**, and it is closed (`additionalProperties: false`).
+**graph, not prose**, and it is closed (`additionalProperties: false`). A plan
+never authors it: the compiler derives each deliverable's stages from the
+deliverable's `reviews` list and the plan's `policy`.
 
 ```jsonc
 { "deliverables": [ { "id": "<plan deliverable id>", "stages": [ /* below */ ] } ],
@@ -102,8 +104,11 @@ What `plan-to-ship` compiles a plan into and `plan-review` reads —
 | `review-fan-out` | `id`, `lenses` (≤16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` |
 | `gate` | `id`, `question`, `show?` |
 
-`dynamic` and `sub-workflow` cannot appear: the compiler refuses the first and
-the second does not exist.
+`dynamic` and `sub-workflow` cannot appear: the plan has no stage vocabulary to
+name them with, and the second does not exist. Nor does a `gate`, in practice:
+`gates` alone says where a person is asked, so `plan-to-ship` derives
+`implement`, `verify-and-fix` and — only when the deliverable's `reviews` list
+is non-empty — `review-fan-out`, and nothing else.
 
 ## Builtin workflows assembled from the library
 
