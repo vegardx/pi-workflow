@@ -617,6 +617,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				finalizers: Type.Boolean(),
 				operatorAttempts: Type.Boolean(),
 				checkpoints: Type.Boolean(),
+				serviceProviderStart: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -684,6 +685,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			finalizers: true,
 			operatorAttempts: true,
 			checkpoints: true,
+			serviceProviderStart: true,
 		}),
 	},
 );

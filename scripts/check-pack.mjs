@@ -393,7 +393,7 @@ if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.retryAttempts !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.resumeAttempts !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.executionGenerations !== true ||
-	workflow.WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.finalizers !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts !== true || !workflow.TaskRoleSchema ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.finalizers !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart !== true || !workflow.TaskRoleSchema ||
 	typeof runtime.invalidationClosure !== "function" ||
 	typeof runtime.createWorkflowTaskRetrier !== "function" ||
 	!workflow.AgentRetryPolicySchema ||
