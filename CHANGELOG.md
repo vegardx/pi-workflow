@@ -214,6 +214,21 @@ for the request field the agent-template fix needs.
 
 ### Changed
 
+- **Plan document v4: `tasks[].by` is `tasks[].review`.** pi-maestro's plan
+  document moves from `schemaVersion: 3` to `4`, renaming a review task's
+  delegation block from `by` to `review` (same shape,
+  `{lens, tier?, diverse?, skill?, model?}`): a task that carries `review` is a
+  review and seeds a lens, a task without one is done by the deliverable's own
+  worker. pi-workflow mirrors the rename in `plan-to-ship`'s and
+  `plan-review`'s plan schemas, in the blind reviewer's instructions and in the
+  `plan-schema` skill. There is **no migration**: `plan-to-ship` admits a task
+  carrying `by` only to refuse it at compile, by name, rather than compiling a
+  version 3 document without its reviewers —
+  ``plan-to-ship: deliverable "<id>" task "<id>" carries `by`, which plan schema
+  v4 renamed to `review`: this is a version 3 document and there is no
+  migration. Rename `by` to `review` on every review task and store the plan at
+  `schemaVersion: 4`.`` Both plan mirrors stay tolerant of plan fields this
+  runtime does not read, so pi-maestro owns the schema as before.
 - **`@vegardx/pi-subagent` `0.12.0` (exact) is required**, up from `0.11.0`.
   The release adds optional `agentRoots` to the launch request, which is what
   lets a builtin definition's agent templates resolve; the contract revision is
