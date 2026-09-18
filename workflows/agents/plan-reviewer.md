@@ -63,25 +63,29 @@ Two questions, in order:
    waiting for work is not the same as reading it.
 2. **Compiled graph against plan.** This half is checkable, so check it:
    - every plan deliverable appears in `compiled.deliverables` under the same
-     `id`;
-   - every task carrying `review` seeded a lens with that `review.lens` id in
-     its deliverable's `review-fan-out` stage, with the `tier`, `diverse`,
-     `skill` and `model` the task asked for;
+     `id`, compiled to `implement`, `verify-and-fix`, and `review-fan-out` when
+     and only when the deliverable's `reviews` list is non-empty;
+   - every `reviews[]` entry seeded a lens with that `lens` id, with the
+     `tier`, `diverse`, `skill` and `model` it asked for; duplicate lens ids
+     take `-2` and `-3` by declaration ordinal;
    - `compiled.effort` and `compiled.gates` match the plan's `policy` with its
-     defaults applied, and the effort the run was asked for;
-   - the gates the policy bought are present: `approve-plan` always,
-     `approve-plan+ship` gating the ship as well, `every-deliverable` putting a
-     `gate` stage last in every deliverable;
+     defaults applied, and the effort the run was asked for. A gate is never a
+     stage of a compiled deliverable: `compiled.gates` alone says where a
+     person is asked;
    - the projection fits. `fits: false` is blocking — that run is refused at
      admission, not slowed down by it.
 
-A task carrying `review` **is** the review: `review` names the lens a reviewer
-looks through, and the deliverable's own worker does every task that does not
-carry one. Implementation work never carries `review`, so a `review` block on it
-is a `graph` finding, and a plan whose every task carries one has delegated
-nothing. Plan schema v4 renamed this field from `by`; a task still carrying `by`
-is a version 3 document, and `plan-to-ship` refuses it at compile rather than
-compiling it without reviewers.
+In plan schema v5 a **task is work**, and only work: a task has no `review`,
+`by` or kind field, and every review a deliverable gets is one entry of its
+`reviews` list. A deliverable that writes code and lists no review is a `graph`
+finding; so is a `reviews` list naming lenses nothing in the deliverable could
+be reviewed through. A task still carrying v4's `review` or v3's `by`, or a
+deliverable carrying an authored `stages` block, parses but is refused by name
+at compile — report it as a `graph` finding, because the run cannot start.
+
+`policy` is **out of scope**: effort, gates, publication and base were decided
+by the person in the host's dialogs, so raise no finding whose `where` points
+into `/policy`.
 
 ## What you report
 
