@@ -73,8 +73,8 @@ describe("gate lowering", () => {
 	it("declares exactly what the hand-written checkpoint declares", () => {
 		const lowered = materializer();
 		const producer = lowered.agent("plan", agentRequest());
-		const loweredHandle = gate(lowered, "approve-plan", {
-			prompt: "Approve the plan before the writer runs?",
+		const loweredHandle = gate(lowered, "approve-draft", {
+			prompt: "Approve the draft before the writer runs?",
 			schema: DECISION,
 			inputs: { plan: producer.output },
 			headless: "block",
@@ -83,9 +83,9 @@ describe("gate lowering", () => {
 
 		const authored = materializer();
 		const authoredProducer = authored.agent("plan", agentRequest());
-		const authoredHandle = authored.checkpoint("approve-plan", {
+		const authoredHandle = authored.checkpoint("approve-draft", {
 			schema: DECISION,
-			prompt: "Approve the plan before the writer runs?",
+			prompt: "Approve the draft before the writer runs?",
 			headless: "block",
 			timeoutMs: 3_600_000,
 			inputs: { plan: authoredProducer.output },

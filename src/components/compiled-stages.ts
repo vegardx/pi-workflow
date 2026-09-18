@@ -190,10 +190,13 @@ export const CompiledEffortSchema = Type.Union([
 	Type.Literal("deep"),
 ]);
 
-/** How the run is gated. `approve-plan` is never optional. */
+/**
+ * How the run is gated. The `ship` decision is never optional: publication
+ * proof is a durable decision. There is no gate before the work, because the
+ * start of the run is the approval.
+ */
 export const CompiledGatesSchema = Type.Union([
-	Type.Literal("approve-plan"),
-	Type.Literal("approve-plan+ship"),
+	Type.Literal("ship"),
 	Type.Literal("every-deliverable"),
 ]);
 

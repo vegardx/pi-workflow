@@ -170,11 +170,7 @@ const PlanPolicySchema = Type.Object(
 			]),
 		),
 		gates: Type.Optional(
-			Type.Union([
-				Type.Literal("approve-plan"),
-				Type.Literal("approve-plan+ship"),
-				Type.Literal("every-deliverable"),
-			]),
+			Type.Union([Type.Literal("ship"), Type.Literal("every-deliverable")]),
 		),
 		reviewDefault: Type.Optional(Type.Unknown()),
 		maxFixRounds: Type.Optional(Type.Integer({ minimum: 0, maximum: 2 })),
