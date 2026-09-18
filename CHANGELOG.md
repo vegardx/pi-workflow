@@ -58,6 +58,52 @@ was widened; the required pi-subagent contract stays revision 7, now pinned to
 
 ### Added
 
+- **`startBuiltin` on the service-provider client: a host starts
+  `plan-to-ship` itself.** `WorkflowReadClient` gains
+  `startBuiltin(ref, {input, effort?}): Promise<{runId}>`, over the same
+  request channel and the same acquired client as the rest of the seam. It
+  creates the durable run and returns; it never awaits and never observes. Its
+  allowlist is the new frozen `BUILTIN_STARTABLE_WORKFLOWS`, today
+  `["plan-to-ship"]`, separate from `BUILTIN_HEADLESS_WORKFLOWS` and disjoint
+  from it: `plan-review` is refused here and `plan-to-ship` is still refused by
+  `runBuiltin`. Every other ref — a project definition that took an allowlisted
+  name, a `dynamic:<sha256>` proposal, anything else — is refused with
+  "Workflow `<ref>` is not a builtin a service consumer may start; use
+  workflow_run." `input` is validated against the definition's `inputSchema`
+  exactly as `workflow_run` validates its own, with the same refusals and no
+  run created by a refused one; the optional `effort` (`"cheap" | "standard" |
+  "deep"`) is written onto the input object before that one validation, and an
+  `effort` with a non-object input is refused with "Workflow input must be a
+  JSON object to carry an effort." The run it creates is an ordinary run —
+  same journal, same checkpoints, visible in `/workflow` and the widget,
+  decided with `/workflow decide`, readable through this client's `runs` and
+  `inspect` — and `awaitRun` is permitted on it, because this client started
+  it. **Why it exists:** the decision is a person's, taken in the host's own
+  dialog, and sending the model a turn so that it calls `workflow_run` adds a
+  turn and no authority. Nothing else about the seam widens: there is still no
+  `decide`, no `stop`, no `invalidate`, and no general `run`.
+- **`serviceProviderStart: true` on the runtime contract.** The new feature
+  flag is what a consumer pins to know the seam has `startBuiltin`.
+  `isCompatibleWorkflowProvider` compares every feature key, so a consumer
+  built against the previous feature set fails discovery loudly rather than
+  calling a method that is not there. `WORKFLOW_CONTRACT_REVISION` stays 20:
+  the flag is additive and the one persisted change under it is an optional
+  field (below).
+- **`run-created` records how the run was started.** The event data gains the
+  optional `origin`, whose only value is `"service-provider"`, written by
+  `startBuiltin` and by nothing else. `WorkflowService.run` takes an optional
+  third argument, `WorkflowServiceRunOptions`, to carry it; it changes no
+  validation, no identity derivation, and no execution. A run started by the
+  `workflow_run` tool and one started by the `/workflow run` command reach
+  `run` through the same call with nothing to tell them apart, so neither
+  records an origin — absent means "started in the open, with a transcript or
+  a command line to show for it". A service-provider start has neither, which
+  is why it is the value worth journalling. It carries no extension id: the
+  request channel carries none and `ExtensionContext` has none, so one would be
+  a guess. **The revision does not advance.** The field is optional on an
+  `additionalProperties: false` event, the reducer does not read it, and
+  nothing derives identity from it — revision-20 additive on exactly the terms
+  `WorkflowRunRecordSchema.modelRouting` already is.
 - **`/workflow prune [--apply] [--older-than <duration>]` and
   `service.prune`.** Store-level retention, not a run action (`<store>` below
   is the project's store root, `<agentDir>/workflow/<project key>`): it takes

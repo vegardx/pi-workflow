@@ -203,13 +203,13 @@ const workflows = await acquireWorkflowService(pi.events, context);
 ```
 
 and receives a `WorkflowReadClient`, not the `WorkflowService`. What crosses
-the seam is **read, validate, project, observe, and start one allowlisted
-headless builtin**: `list`, `validate`, `project`, `inspect`, `runs`,
-`observe`, `runBuiltin`, and `awaitRun`. There is no `decide`, no `stop`, no
-`invalidate`, and no general `run` — starting a workflow that writes stays the
-model's own `workflow_run` call, in the open, in the transcript
-([Authority model](docs/authority.md)). A run this client did not start cannot
-be awaited through it either.
+the seam is **read, validate, project, observe, and start an allowlisted
+builtin**: `list`, `validate`, `project`, `inspect`, `runs`, `observe`,
+`runBuiltin`, `startBuiltin`, and `awaitRun`. There is no `decide`, no `stop`,
+no `invalidate`, and no general `run` — starting an arbitrary workflow that
+writes stays the model's own `workflow_run` call, in the open, in the
+transcript ([Authority model](docs/authority.md)). A run this client did not
+start cannot be awaited through it either.
 
 `runBuiltin` is gated by `BUILTIN_HEADLESS_WORKFLOWS`, a frozen allowlist that
 belongs to this package rather than to the caller; anything else is refused
@@ -220,6 +220,42 @@ why `headlessBuiltinViolations` exists and the package's own tests run it over
 the allowlist. Failures that are not a `WorkflowServiceError` are flattened to
 one fixed message, so a consumer never sees an internal error string or a
 stack.
+
+`startBuiltin(ref, {input, effort?})` is the other, opposite gate, and its own
+frozen allowlist is `BUILTIN_STARTABLE_WORKFLOWS` — today exactly
+`["plan-to-ship"]`. Anything not on it, `plan-review` and every project or
+`dynamic:<sha256>` ref included, is refused with "Workflow `<ref>` is not a
+builtin a service consumer may start; use `workflow_run`.", and the two
+allowlists never overlap: a headless builtin may not be started with
+`startBuiltin` and a startable one may not be started with `runBuiltin`.
+
+```ts
+const { runId } = await workflows.startBuiltin("plan-to-ship", {
+	input: { plan, planDigest },
+	effort: "deep",
+});
+```
+
+What qualifies a name here is not a property of the definition — a startable
+builtin parks, writes and hands off, which is exactly what the headless list
+forbids — but that **a person already decided, in a host dialog, one step
+ago**. Routing that answer back through the model so it calls `workflow_run`
+adds a turn and no authority. So `startBuiltin` creates the durable run and
+returns its id: it never awaits and never observes. `input` is validated
+against the definition's `inputSchema` with the same refusals `workflow_run`
+raises and no run created by a refused one; `effort` (`"cheap" | "standard" |
+"deep"`) is written onto the input object before that one validation, and
+refuses a non-object input with "Workflow input must be a JSON object to carry
+an effort."
+
+The run is an ordinary run: same journal, same checkpoints, visible in
+`/workflow` and the widget, decided with `/workflow decide`, and readable
+through this same client's `runs` and `inspect`. `awaitRun` is permitted on
+it, because this client started it. The one thing that marks it is provenance:
+its `run-created` event records `origin: "service-provider"`, because no model
+turn and no `/workflow` command is in the transcript to show where it came
+from. A run started by the tool or by the UI command records no origin — the
+runtime cannot tell those two apart.
 
 `project(ref, input)` is the lease-free half of the seam: it runs the
 definition's `run(ctx)` against a context that declares nothing durable — no
@@ -443,6 +479,12 @@ document's canonical JSON, and an effort dial that now falls back to
 ```text
 workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort? } }
 ```
+
+It is also the one name on `BUILTIN_STARTABLE_WORKFLOWS`, so a host that has
+already asked a person "Start the run?" can start it through the service
+provider's `startBuiltin` instead of sending the model a turn to call
+`workflow_run` ([Service provider](#service-provider)). The run is the same
+run either way; only `run-created`'s `origin` differs.
 
 **The stage walk.** A plan schema v5 document **authors no stages**. The
 compiler derives them, the same list for every deliverable: `implement`,
