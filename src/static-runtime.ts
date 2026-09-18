@@ -43,6 +43,7 @@ import {
 	type WorktreeTaskHandle,
 } from "./definition.js";
 import type {
+	WorkflowRunOrigin,
 	WorkflowStateProjection,
 	WorkflowTaskProjection,
 } from "./events.js";
@@ -267,6 +268,13 @@ export interface StaticWorkflowRuntimeOptions<TInput, TOutput> {
 	readonly scheduler: WorkflowSequentialScheduler;
 	readonly signal?: AbortSignal;
 	/**
+	 * How this run was started, recorded verbatim on `run-created`. Absent
+	 * means the runtime cannot tell (a `workflow_run` tool call or a
+	 * `/workflow run` command); see {@link WorkflowRunOriginSchema}. Ignored on
+	 * replay, where `run-created` already exists.
+	 */
+	readonly origin?: WorkflowRunOrigin;
+	/**
 	 * The host's model router, handed to every materializer this runtime makes.
 	 * Absent means a `modelRole` declaration fails materialization rather than
 	 * resolving to a guess.
@@ -455,6 +463,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			await journal.append("run-created", {
 				definitionIdentitySha256,
 				inputSha256,
+				...(options.origin === undefined ? {} : { origin: options.origin }),
 			});
 			return;
 		}

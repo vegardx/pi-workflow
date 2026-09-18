@@ -100,6 +100,7 @@ import {
 } from "./dynamic/vm-host.js";
 import type {
 	TaskExecutionProjection,
+	WorkflowRunOrigin,
 	WorkflowStateProjection,
 } from "./events.js";
 import {
@@ -315,6 +316,16 @@ const NO_HANDOFF_ARTIFACT_MESSAGE = "Workflow task has no handoff artifact.";
 const CHECKPOINT_DECISION_UNVERIFIED_MESSAGE =
 	"Checkpoint decision could not be read and verified.";
 
+/**
+ * The options `run` takes beyond the reference and the input. `origin` is
+ * provenance only: it names a start the runtime can tell apart from an
+ * ordinary `workflow_run` tool call or `/workflow run` command, and is
+ * journalled on `run-created`. It changes nothing about how the run executes.
+ */
+export interface WorkflowServiceRunOptions {
+	readonly origin?: WorkflowRunOrigin;
+}
+
 export interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
 	list(): Promise<readonly WorkflowDefinitionSummary[]>;
@@ -328,7 +339,16 @@ export interface WorkflowService {
 	 * dynamic proposal's source is VM code and is never executed here.
 	 */
 	project(ref: string, input: unknown): Promise<WorkflowBudgetProjection>;
-	run(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;
+	/**
+	 * Creates a durable run and returns its id; it does not drive it. With
+	 * `options.origin`, the caller names how the start was decided and the
+	 * value is recorded on `run-created` (see {@link WorkflowServiceRunOptions}).
+	 */
+	run(
+		ref: string,
+		input: unknown,
+		options?: WorkflowServiceRunOptions,
+	): Promise<WorkflowServiceRunReceipt>;
 	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	/**
 	 * Drives the run to a durable terminal state. With `timeoutMs`, returns
@@ -1209,6 +1229,7 @@ export async function createWorkflowService(
 		lease: WorkflowRunLease,
 		binding: WorkflowSubagentBinding,
 		discovered: readonly DiscoveredWorkflow[],
+		origin?: WorkflowRunOrigin,
 	): Promise<OwnedRun> {
 		const journal = await WorkflowRunJournal.open(
 			storeRoot,
@@ -1309,6 +1330,7 @@ export async function createWorkflowService(
 				artifacts,
 				scheduler,
 				signal: controller.signal,
+				...(origin === undefined ? {} : { origin }),
 				...(options.modelRouting === undefined
 					? {}
 					: { modelRouting: options.modelRouting }),
@@ -2242,7 +2264,7 @@ export async function createWorkflowService(
 				fits: projectionFits(projection, budget),
 			});
 		},
-		run(ref: string, input: unknown) {
+		run(ref: string, input: unknown, runOptions?: WorkflowServiceRunOptions) {
 			return exclusive(async () => {
 				assertOpen();
 				// The run's `createdAt` fixes the dynamic VM clock, so it is chosen
@@ -2323,6 +2345,7 @@ export async function createWorkflowService(
 						lease,
 						binding,
 						discovered,
+						runOptions?.origin,
 					);
 					owned.set(id, run);
 					return { runId: id, status: "created" as const };

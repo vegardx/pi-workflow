@@ -276,6 +276,7 @@ export {
 	WorkflowServiceError,
 	type WorkflowServiceHandoffExport,
 	type WorkflowServiceOptions,
+	type WorkflowServiceRunOptions,
 	type WorkflowServiceRunReceipt,
 	type WorkflowValidationResult,
 } from "./service.js";
