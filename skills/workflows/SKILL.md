@@ -48,19 +48,21 @@ holds `plan-review` alone, because it declares no checkpoint, no worktree, and
 no handoff — a run nobody can be asked to decide. That is the host's path, not
 yours: you start a workflow with `workflow_run`.
 
-**A workflow run is allowed from plan mode when the person asks for one.** A
-workflow never mutates the working tree or the host: writers run in an isolated
-pi-subagent worktree and produce a handoff descriptor, which the runtime never
-applies, and the run's own state lives under `.pi/workflow/`. So the host's plan
-mode is no obstacle — starting, waiting on, and inspecting a run is legal while
-planning; applying a handoff is not, and neither is deciding a checkpoint on the
-human's behalf.
+**Whether you may start a run inside a host's plan mode is the HOST's rule, not
+this package's.** A workflow never mutates the working tree or the host: writers
+run in an isolated pi-subagent worktree and produce a handoff descriptor, which
+the runtime never applies, and the run's own state lives under `.pi/workflow/`.
+Nothing here makes a run unsafe to start while planning — and safe is not the
+same as permitted. pi-maestro refuses it: `workflow_run` and `workflow_propose`
+are blocked in its plan mode, the person starts runs there with `/workflow run`,
+and its plan-mode exit starts the plan's own run. Reads stay legal in every
+host: listing, validating, inspecting, waiting on a run and its logs. Applying a
+handoff is not, and neither is deciding a checkpoint on the human's behalf.
 
-That is a permission, not an invitation. In the host's plan mode you explore and
-converse; a run starts when the person asks for one. Do not start a workflow to
-review, verify, or research your own plan: the plan is checked after it is
-stored, by a blind reviewer that has not seen your reasoning, and a plan reviewed
-by its author is not reviewed.
+Whatever the host allows, a run starts because the person asked for one. Do not
+start a workflow to review, verify, or research your own plan: the plan is
+checked after it is stored, by a blind reviewer that has not seen your
+reasoning, and a plan reviewed by its author is not reviewed.
 
 ## The operating loop
 

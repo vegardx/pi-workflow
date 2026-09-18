@@ -43,7 +43,7 @@ admits the rest, so a plan may carry fields not listed here.
 | `id` | string | id pattern, unique within the deliverable |
 | `title` | string | non-empty |
 | `body` | string? | |
-| `by` | `{lens, tier?, diverse?, skill?, model?}?` | present ⇒ this task is a **review**, and seeds a lens; absent ⇒ the deliverable's own worker does it |
+| `by` | `{lens, tier?, diverse?, skill?, model?}?` | present ⇒ this task is a **review**, and seeds a lens; absent ⇒ the deliverable's own worker does it. `by` marks a REVIEW task; an implementation task must not carry it — a deliverable whose every task carries `by` is one that nothing writes |
 
 ### `by`, field by field
 
