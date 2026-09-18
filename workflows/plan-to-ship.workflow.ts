@@ -85,7 +85,9 @@ import { type Static, Type } from "typebox";
  *     gate            `gate`: a human decides; nothing runs after one. Only
  *                     `policy.gates: every-deliverable` buys one here.
  *   ship              THE decision: one gate over every handoff, always, and
- *                     the only thing a receipt may be checked against.
+ *                     the only thing a receipt may be checked against. It is
+ *                     shown the refined plan, so the refiner's `blockers` are
+ *                     read by the person who decides.
  *   receipt           a required finalizer that records what shipped.
  * ```
  *
@@ -1558,7 +1560,13 @@ export default defineWorkflow({
 		// stop.
 		if (!stopped) {
 			ctx.phase("ship");
-			const shipInputs: Record<string, TaskInputHandle> = {};
+			// `plan` is the REFINED plan, and it carries the refiner's `blockers`:
+			// the one thing in this run a person must read that no summary and no
+			// review reports. It was read at the gate that is gone, so it is read
+			// here, at the one decision the run still asks for.
+			const shipInputs: Record<string, TaskInputHandle> = {
+				plan: refine.output,
+			};
 			for (const entry of outcomes) {
 				shipInputs[`summary-${entry.id}`] = entry.summaryInput;
 				if (entry.reviewInput)
@@ -1568,7 +1576,7 @@ export default defineWorkflow({
 				prompt: [
 					`${descriptors.length} handoff patch(es); the repository check ran for ${checked} of ${outcomes.length} and passed for ${passed}.`,
 					`Reviews: ${reviews.length} lens report(s), ${blocking} blocking finding(s).`,
-					"The `summary-*` and `review-*` inputs carry the full reports. Verify the exported patch yourself: the in-worktree check is evidence, not a gate.",
+					"The `plan` input is the refined executable plan; read its blockers. The `summary-*` and `review-*` inputs carry the full reports. Verify the exported patch yourself: the in-worktree check is evidence, not a gate.",
 					'Answer {"ship":true} to record a receipt naming each handoff ref, or {"ship":false} to end the run without one. Nothing is pushed, merged, or published either way.',
 					`Ship "${plan.title}" (${plan.slug})?`,
 				].join("\n"),

@@ -47,7 +47,10 @@ so neither moves `WORKFLOW_CONTRACT_REVISION` on its own.
   is ready the moment `run-created` is written. The `approve-<deliverable>`
   keys are unchanged under `every-deliverable`; the `approve-plan` task key no
   longer exists and no receipt note says "no ship gate was declared" any more.
-  There is no migration and no alias.
+  The `ship` gate gains a `plan` input carrying the refined executable plan, so
+  the refiner's `blockers` are still read by the person who decides — that was
+  the one thing the removed gate showed and nothing else reports. There is no
+  migration and no alias.
 - **`CompiledGatesSchema` narrows to `"ship" | "every-deliverable"`.** It is
   the `gates` field of `CompiledStageDocumentSchema` on
   `@vegardx/pi-workflow/components` — the resolved `policy.gates` a compiled
