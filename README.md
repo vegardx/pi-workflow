@@ -399,9 +399,8 @@ lets a builtin definition name `lens-reviewer` and run in a project that has no
 ### `plan-to-ship`
 
 `workflows/plan-to-ship.workflow.ts` is the first builtin and the only one that
-writes: a **compiler** over a pi-maestro plan's `deliverables[].stages` and
-`policy`, lowered onto the component library into one graph with one approval up
-front. Its input is the plan document by value, the sha256 digest of that
+writes: a **compiler** over a pi-maestro plan's `deliverables` and `policy`,
+lowered onto the component library into one graph with one approval up front. Its input is the plan document by value, the sha256 digest of that
 document's canonical JSON, and an effort dial that now falls back to
 `plan.policy.effort`:
 
@@ -409,33 +408,37 @@ document's canonical JSON, and an effort dial that now falls back to
 workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort? } }
 ```
 
-**The stage walk.** A deliverable that declares no `stages` gets the default
-list derived from `policy` — `implement`, `verify-and-fix` with
-`policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at `deep`), and, when
-any task carries a `review`, `review-fan-out` over those lenses — so every plan
-written before stages existed compiles to what it always compiled to. A task
-still carrying plan schema v3's `by` is a **compile refusal**, named: there is no
-migration from version 3. Each stage lowers through one component, and a stage
-id is the compiled key's prefix:
+**The stage walk.** A plan schema v5 document **authors no stages**. The
+compiler derives them, the same list for every deliverable: `implement`,
+`verify-and-fix` with `policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at
+`deep`), and — only when the deliverable's `reviews` list is non-empty —
+`review-fan-out` over those lenses. Each stage lowers through one component, and
+the stage id is the compiled key's prefix:
 
 | stage | component | task keys |
 | --- | --- | --- |
-| `implement` | `ctx.agent` | `<stage>-<deliverable>` |
-| `verify-and-fix` | `verifyAndFix` | `<stage>-<deliverable>-verify-<n>`, `-fix-<n>` |
-| `review-fan-out` | `reviewFanOut` | `<stage>-<deliverable>/<lens>`, `<stage>-<deliverable>-synthesis` |
-| `gate` | `gate` | `<stage>-<deliverable>` |
+| `implement` | `ctx.agent` | `implement-<deliverable>` |
+| `verify-and-fix` | `verifyAndFix` | `verify-<deliverable>-verify-<n>`, `-fix-<n>` |
+| `review-fan-out` | `reviewFanOut` | `review-<deliverable>/<lens>`, `review-<deliverable>-synthesis` |
+| `gate` | `gate` | `approve-<deliverable>`, `ship` |
 
 The plan counts **fix** rounds and the component counts **verify** rounds, so
 the compiler maps `maxRounds = fixRounds + 1`: a fix is never left unchecked,
 and `maxFixRounds: 2` is three verifiers and two fixers. A verifier applies the
 handoff in its own worktree and runs the repository's check; `checkRan: false`
 is unverified rather than broken, so it stops the loop and goes to a person
-instead of starting a fix round. `use: "dynamic"` and `use: "sub-workflow"`
-parse and are refused by name — *"dynamic stages are not compiled yet"* and
-*"sub-workflows are not part of this slice"* — along with every other rule
-(`reads` between deliverables, a gate that is not last, two implement stages, a
-gate question that is not a question, escalation above `deep`), **before the
-first task is declared**, so a refusal costs nothing.
+instead of starting a fix round.
+
+**What v5 deleted is refused by name.** There is no migration from version 3 or
+4, so each deleted key parses — a TypeBox "unexpected property" is not something
+a person can act on — and the compiler then refuses it, one sentence each:
+`tasks[].review` and v3's `tasks[].by` with *"plan schema v5 moved review
+routing to `deliverables[].reviews`; a task is work only"*, and
+`deliverables[].stages` with *"plan schema v5 does not author stages; the
+compiler derives them from `reviews` and `policy`"*. That refusal, and every
+other rule (`reads` between deliverables, more than 16 reviews, an `after` that
+points forwards), lands **before the first task is declared**, so it costs
+nothing.
 
 **The gates come from `policy.gates`, and only from there.**
 
@@ -445,11 +448,10 @@ first task is declared**, so a refusal costs nothing.
 | `approve-plan+ship` (default) | `approve-plan`, then one `ship` over every handoff. |
 | `every-deliverable` | `approve-plan`, a gate after each deliverable but the last, then `ship`. Answering `{"proceed":false}` stops the walk and declares nothing after it. |
 
-A `gate` **stage** the plan declares is compiled where it stands, shown what its
-`show` names, and is independent of `policy.gates`. When no gate can stop the
-walk part-way the implementers are declared up front and run concurrently; a
-plan with a mid-run gate is walked strictly deliverable by deliverable, because
-work nobody approved must not already be running when a person says stop.
+A plan cannot declare a gate of its own. When no gate can stop the walk
+part-way the implementers are declared up front and run concurrently;
+`every-deliverable` is walked strictly deliverable by deliverable, because work
+nobody approved must not already be running when a person says stop.
 
 **The compiled stage document, and the lowering.** One compilation, two views,
 so they cannot drift. `compileStageDocument(plan, policy)` returns the
@@ -458,9 +460,9 @@ plan-facing `CompiledStageDocument` typed by `CompiledStageDocumentSchema` on
 plan's own vocabulary — which is what a host shows a person before starting,
 what `plan-review` validates its `compiled` input against, and what pi-maestro
 derives from the stored plan for itself. `compileStages(plan, policy)` returns
-the lowering: every task key the run will declare, in order, with each stage's
-origin and the gate keys it parks on, so a finding can point at
-`verify-d0-fix-1` rather than at a paragraph. Both are exported from the
+the lowering: every task key the run will declare, in order, with the gate keys
+it parks on, so a finding can point at `verify-d0-fix-1` rather than at a
+paragraph. Both are exported from the
 definition; only the first is a shared contract.
 
 **What "ship" means.** Nothing is pushed, merged, published, or turned into a
@@ -476,7 +478,8 @@ there with `git cherry-pick <handoffCommit>`.
 **The effort dial.** `effort` is `cheap`, `standard`, or `deep`, and it is the
 component library's `envelope` table: a per-stage model, thinking level, token,
 cost and runtime budget, the worktree memory grant (1, 2 and 4 GiB), and how
-long each gate waits. It no longer selects lenses — the plan's stages do that —
+long each gate waits. It no longer selects lenses — `deliverables[].reviews` does
+that —
 and a lens's `tier`/`diverse` resolve through `policy.reviewDefault` when the
 lens says nothing. The model ids are a marked stand-in until routing lands;
 `by.model` still pins an exact route.

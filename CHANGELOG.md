@@ -214,21 +214,42 @@ for the request field the agent-template fix needs.
 
 ### Changed
 
-- **Plan document v4: `tasks[].by` is `tasks[].review`.** pi-maestro's plan
-  document moves from `schemaVersion: 3` to `4`, renaming a review task's
-  delegation block from `by` to `review` (same shape,
-  `{lens, tier?, diverse?, skill?, model?}`): a task that carries `review` is a
-  review and seeds a lens, a task without one is done by the deliverable's own
-  worker. pi-workflow mirrors the rename in `plan-to-ship`'s and
-  `plan-review`'s plan schemas, in the blind reviewer's instructions and in the
-  `plan-schema` skill. There is **no migration**: `plan-to-ship` admits a task
-  carrying `by` only to refuse it at compile, by name, rather than compiling a
-  version 3 document without its reviewers —
-  ``plan-to-ship: deliverable "<id>" task "<id>" carries `by`, which plan schema
-  v4 renamed to `review`: this is a version 3 document and there is no
-  migration. Rename `by` to `review` on every review task and store the plan at
-  `schemaVersion: 4`.`` Both plan mirrors stay tolerant of plan fields this
-  runtime does not read, so pi-maestro owns the schema as before.
+- **Plan document v5: a task is work, reviews are a list, stages are never
+  authored.** pi-maestro's plan document moves to `schemaVersion: 5`. A task is
+  `{id, title, body?}` and nothing else — there is no `review`, `by` or kind
+  field on it — and every review a deliverable gets is one entry of
+  `deliverables[].reviews` (0–16 of `{lens, tier?, diverse?, skill?, model?}`,
+  absent == none, duplicate lens ids keeping the `-2`/`-3` ordinal rule). A plan
+  no longer authors `stages` at all: `plan-to-ship` derives each deliverable's
+  stage list — implement, verify-and-fix, and a review fan-out when and only
+  when `reviews` is non-empty — from `reviews` and `policy`, and `policy.gates`
+  alone says where a person is asked. The plan mirrors, the blind reviewer's
+  instructions, the `plan-reviewer` template and the `plan-schema` skill all
+  move with it.
+
+  There is **no migration**, from version 3 or from yesterday's version 4. Each
+  deleted key is admitted by the input schema only so the compiler can refuse it
+  BY NAME — refused by TypeBox it would read as an unexpected property, which a
+  person cannot act on — so `workflow_validate` still answers `valid: true` and
+  the compilation refuses, before the first task is declared:
+
+  - ``plan-to-ship: deliverable "<id>" task "<id>" carries `review`: plan schema
+    v5 moved review routing to `deliverables[].reviews`; a task is work only, so
+    move it to the deliverable's `reviews` list and store the plan at
+    `schemaVersion: 5`.``
+  - ``plan-to-ship: deliverable "<id>" task "<id>" carries `by`, plan schema
+    v3's name for a task review: plan schema v5 moved review routing to
+    `deliverables[].reviews`; a task is work only, so move it to the
+    deliverable's `reviews` list and store the plan at `schemaVersion: 5`.``
+  - ``plan-to-ship: deliverable "<id>" declares `stages`: plan schema v5 does
+    not author stages; the compiler derives them from `reviews` and `policy`, so
+    drop the block and store the plan at `schemaVersion: 5`.``
+
+  The blind reviewer is also told that **`policy` is out of scope**: effort,
+  gates, publication and base were decided by the person in the host's dialogs,
+  so it raises no finding whose `where` points into `/policy`. Both plan mirrors
+  stay tolerant of plan fields this runtime does not read, so pi-maestro owns
+  the schema as before.
 - **`@vegardx/pi-subagent` `0.12.0` (exact) is required**, up from `0.11.0`.
   The release adds optional `agentRoots` to the launch request, which is what
   lets a builtin definition's agent templates resolve; the contract revision is
@@ -237,29 +258,28 @@ for the request field the agent-template fix needs.
   `.github/workflows/ci.yml` move the pinned pi-subagent commit to
   `8d0c344ce4e86831567b5831fb9eb490d7adde73` so CI builds a source tree whose
   version matches the pin.
-- **`plan-to-ship` compiles a plan's stages.** The builtin is now a compiler
-  over `plan.deliverables[].stages` and `plan.policy` rather than a fixed
-  five-stage pipeline, lowered entirely onto the component library — `gate` for
-  every human decision, `envelope` for the whole effort dial, `verifyAndFix` for
-  the bounded check-and-fix loop, `reviewFanOut` for the review stage. A
-  deliverable that declares no `stages` gets the default list derived from
-  `policy`, so **every plan written before stages existed compiles to what it
-  always compiled to** and keeps the task key `implement-<deliverable>`. What is
-  new for such a plan is a `verify-and-fix` stage: `policy.maxFixRounds`
-  defaults to 0 at `cheap`, 1 at `standard` and 2 at `deep`, and the compiler
-  maps a plan's FIX rounds to the component's VERIFY rounds as
-  `maxRounds = fixRounds + 1`, so a fix is never left unchecked.
+- **`plan-to-ship` compiles a plan into stages.** The builtin is now a compiler
+  over `plan.deliverables` and `plan.policy` rather than a fixed five-stage
+  pipeline, lowered entirely onto the component library — `gate` for every human
+  decision, `envelope` for the whole effort dial, `verifyAndFix` for the bounded
+  check-and-fix loop, `reviewFanOut` for the review stage. The stage list is
+  DERIVED, never authored, so every deliverable compiles to the same shape and
+  keeps the task key `implement-<deliverable>`. What is new is a
+  `verify-and-fix` stage: `policy.maxFixRounds` defaults to 0 at `cheap`, 1 at
+  `standard` and 2 at `deep`, and the compiler maps a plan's FIX rounds to the
+  component's VERIFY rounds as `maxRounds = fixRounds + 1`, so a fix is never
+  left unchecked.
   - `input.effort` is now **optional**, falling back to `plan.policy.effort` and
     then to `standard`; `{ plan, planDigest, effort }` keeps working unchanged.
   - The gates come from `policy.gates` alone: `approve-plan` (no ship gate, so
     nothing ships and the receipt names no ref), `approve-plan+ship` (the
     default), or `every-deliverable` (a gate after each deliverable but the
-    last, whose gate is `ship`). A `gate` stage the plan declares is compiled
-    where it stands. A gate answered `{"proceed":false}` stops the walk and
-    declares nothing after it.
+    last, whose gate is `ship`). A plan cannot declare a gate of its own, and a
+    compiled deliverable therefore never carries a `gate` stage. A gate answered
+    `{"proceed":false}` stops the walk and declares nothing after it.
   - The effort dial no longer selects review lenses — it ran the first lens at
-    `cheap` and every lens twice at `deep` — because the plan's stages and
-    `policy.reviewDefault` now say which lenses run and what each is worth.
+    `cheap` and every lens twice at `deep` — because `deliverables[].reviews`
+    and `policy.reviewDefault` now say which lenses run and what each is worth.
     A `deep` run of a two-lens plan therefore declares two reviewers, not four.
   - Reviewers report the shared `Finding` shape (`ReviewReportSchema`) instead
     of the definition's own `{severity, summary}`, so findings merge on the
@@ -270,18 +290,17 @@ for the request field the agent-template fix needs.
     they cannot drift. `compileStageDocument(plan, policy)` returns the
     plan-facing `CompiledStageDocument` — the stages each deliverable got, in
     the plan's own vocabulary, which is what `plan-review` validates its
-    `compiled` input against and what pi-maestro derives for itself; the
-    default stage list it fills in is `defaultStagesFor`'s, field for field,
-    and the one translation is `maxRounds`, which a compiled document records
-    in VERIFY rounds. `compileStages(plan, policy)` returns the LOWERING
-    (`StageLowering`, declared in the definition and deliberately not part of
-    the component library): every task key the run will declare, in order, with
-    each stage's origin and the gate keys it parks on.
+    `compiled` input against and what pi-maestro derives for itself; the derived
+    stage list is the same one pi-maestro derives, field for field, and the one
+    translation is `maxRounds`, which a compiled document records in VERIFY
+    rounds. `compileStages(plan, policy)` returns the LOWERING (`StageLowering`,
+    declared in the definition and deliberately not part of the component
+    library): every task key the run will declare, in order, with the gate keys
+    it parks on.
   - Every rule is refused in that one compilation, before the first task is
-    declared, including `use: "dynamic"` ("dynamic stages are not compiled
-    yet"), `use: "sub-workflow"` ("sub-workflows are not part of this slice"),
-    and a non-empty `reads` between deliverables, which was silently dropped
-    before.
+    declared, including the three deleted plan keys above, more than 16 reviews
+    on one deliverable, and a non-empty `reads` between deliverables, which was
+    silently dropped before.
   - The run output gains `deliverables[].verifyRounds`, `reviews[].deliverable`
     and a merged `findings` array. `meta.version` becomes 2.
 

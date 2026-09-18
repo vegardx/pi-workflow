@@ -133,14 +133,14 @@ for one project; use a project root for that.
 
 The shipped builtin that writes is `plan-to-ship`, and it is a **compiler**:
 `refine` (read-only agent) -> `approve-plan` (checkpoint, `headless: "block"`)
--> each deliverable's `stages`, in plan order -> `ship` (checkpoint) -> a
-required `receipt` finalizer. A deliverable's stages lower one-for-one onto the
-component library — `implement` to one worktree agent
-(`<stage>-<deliverable>`, `handoff: "required"`), `verify-and-fix` to
+-> each deliverable's derived stages, in plan order -> `ship` (checkpoint) -> a
+required `receipt` finalizer. A plan authors no stages: the compiler derives
+them from the deliverable's `reviews` list and the plan's `policy`, and each
+lowers onto the component library — `implement` to one worktree agent
+(`implement-<deliverable>`, `handoff: "required"`), `verify-and-fix` to
 `verifyAndFix`'s bounded `-verify-<n>`/`-fix-<n>` rounds, `review-fan-out` to
-`reviewFanOut`, `gate` to `gate` — and a deliverable that declares none gets
-the default list derived from the plan's `policy`. `policy.gates` decides which
-gates exist and nothing else does. It takes a pi-maestro plan by value with its
+`reviewFanOut` (omitted when `reviews` is empty), and every gate to `gate`.
+`policy.gates` decides which gates exist and nothing else does. It takes a pi-maestro plan by value with its
 sha256 digest and an effort dial, and returns a receipt naming each durable
 handoff ref plus the approved digest; it never pushes, merges, or applies
 anything. Read it as the worked example of compiling a document into a graph:
