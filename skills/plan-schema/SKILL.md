@@ -6,8 +6,13 @@ description: Reference tables for the pi-maestro plan document — deliverables,
 # The pi-maestro plan document
 
 A **reference**, not a tutorial: tables only. A plan is *what was authored* —
-never run state. It is stored at `schemaVersion: 3`; `stages` and `policy` are
+never run state. It is stored at `schemaVersion: 4`; `stages` and `policy` are
 optional, and a document with neither is valid and gets the defaults below.
+
+**Version 4** renamed `tasks[].by` to `tasks[].review`. There is no migration:
+`schemaVersion: 3`, or any task still carrying `by`, is **refused by name** —
+`plan-to-ship` refuses such a plan at compile rather than compiling it without
+reviewers.
 
 pi-workflow does not own this schema. It mirrors what it needs
 (`workflows/plan-to-ship.workflow.ts`, `workflows/plan-review.workflow.ts`) and
@@ -43,9 +48,9 @@ admits the rest, so a plan may carry fields not listed here.
 | `id` | string | id pattern, unique within the deliverable |
 | `title` | string | non-empty |
 | `body` | string? | |
-| `by` | `{lens, tier?, diverse?, skill?, model?}?` | present ⇒ this task is a **review**, and seeds a lens; absent ⇒ the deliverable's own worker does it. `by` marks a REVIEW task; an implementation task must not carry it — a deliverable whose every task carries `by` is one that nothing writes |
+| `review` | `{lens, tier?, diverse?, skill?, model?}?` | present ⇒ this task is a **review**, and seeds a lens; absent ⇒ the deliverable's own worker does it. Implementation work never carries `review` — a deliverable whose every task carries it is one that nothing writes. v3 called this field `by` |
 
-### `by`, field by field
+### `review`, field by field
 
 | Field | Required | Values |
 | --- | --- | --- |
@@ -67,7 +72,7 @@ the library that lowers it may diverge.
 | --- | --- | --- |
 | `implement` | `id`, `tools?` | exactly one per stage list; `tools` are tool **names**, never commands or paths |
 | `verify-and-fix` | `id`, `maxRounds?` (0\|1\|2 **fix** rounds), `escalate?` (`thinking`\|`none`) | must come after `implement` |
-| `review-fan-out` | `id`, `lenses` (1–16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` (`required`\|`optional`\|`none`) | each `lenses[].id` is **required** and matches the lens id pattern `^[a-z][a-z0-9-]{0,63}$`; `tier`/`diverse`/`skill`/`model` are exactly the `by` fields above, `model` only ever `provider/model`; duplicate lens ids get `-2`, `-3` by declaration ordinal |
+| `review-fan-out` | `id`, `lenses` (1–16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` (`required`\|`optional`\|`none`) | each `lenses[].id` is **required** and matches the lens id pattern `^[a-z][a-z0-9-]{0,63}$`; `tier`/`diverse`/`skill`/`model` are exactly the `review` fields above, `model` only ever `provider/model`; duplicate lens ids get `-2`, `-3` by declaration ordinal |
 | `gate` | `id`, `question`, `show?` | **last** in its deliverable; `show` names sibling stages declared *earlier*; `question` may not contain a path or code |
 | `dynamic` | `id`, `brief` | **reserved**: validation refuses it with "dynamic stages are not compiled yet" |
 
@@ -94,8 +99,9 @@ A deliverable with no `stages` compiles as if it declared, in order:
 1. `{use: "implement", id: "implement"}`
 2. `{use: "verify-and-fix", id: "verify", maxRounds: <policy.maxFixRounds>}`
 3. `{use: "review-fan-out", id: "review", synthesis: "optional", lenses: […]}` —
-   one lens per task carrying `by`, with `tier`/`diverse` from `by` falling back
-   to `policy.reviewDefault`. **Omitted entirely when no task carries `by`.**
+   one lens per task carrying `review`, with `tier`/`diverse` from `review`
+   falling back to `policy.reviewDefault`. **Omitted entirely when no task
+   carries `review`.**
 
 Gates are *not* in the default list: `approve-plan` and `ship` come from
 `policy.gates`, applied by the compiler.
@@ -120,6 +126,7 @@ graph this plan describes.
 
 A finding's `patch` is RFC 6902-shaped — `{op: "add" | "replace" | "remove",
 path, value?}` — and `path`, like a finding's `where`, is an RFC 6901 pointer
-into the plan document (`/deliverables/0/tasks/1/by/tier`). Accepting a finding
-applies the patch to the stored plan and re-runs `inspectPlan`; it is never a
-re-prompt, so a patch that needs a human to fill in a blank is not a patch.
+into the plan document (`/deliverables/0/tasks/1/review/tier`). Accepting a
+finding applies the patch to the stored plan and re-runs `inspectPlan`; it is
+never a re-prompt, so a patch that needs a human to fill in a blank is not a
+patch.

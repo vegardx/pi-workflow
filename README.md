@@ -412,9 +412,11 @@ workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort? } }
 **The stage walk.** A deliverable that declares no `stages` gets the default
 list derived from `policy` — `implement`, `verify-and-fix` with
 `policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at `deep`), and, when
-any task carries a `by`, `review-fan-out` over those lenses — so every plan
-written before stages existed compiles to what it always compiled to. Each stage
-lowers through one component, and a stage id is the compiled key's prefix:
+any task carries a `review`, `review-fan-out` over those lenses — so every plan
+written before stages existed compiles to what it always compiled to. A task
+still carrying plan schema v3's `by` is a **compile refusal**, named: there is no
+migration from version 3. Each stage lowers through one component, and a stage
+id is the compiled key's prefix:
 
 | stage | component | task keys |
 | --- | --- | --- |
