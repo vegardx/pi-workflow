@@ -604,7 +604,7 @@ function examplePlan(): PlanInput {
 		repos: [{ key: "wf", path: "/repo" }],
 		policy: {
 			effort: "standard",
-			gates: "approve-plan+ship",
+			gates: "ship",
 			maxFixRounds: 1,
 			publish: { mode: "pr", base: "main" },
 		},
@@ -641,7 +641,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 		check(document);
 		expect(document).toEqual({
 			effort: "standard",
-			gates: "approve-plan+ship",
+			gates: "ship",
 			deliverables: [
 				{
 					id: "d0",
@@ -667,7 +667,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 		check(document);
 		expect(document).toEqual({
 			effort: "standard",
-			gates: "approve-plan+ship",
+			gates: "ship",
 			deliverables: [
 				{
 					id: "catalogue",
@@ -689,7 +689,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 		});
 	});
 
-	it.each(["approve-plan", "approve-plan+ship", "every-deliverable"] as const)(
+	it.each(["ship", "every-deliverable"] as const)(
 		"carries the gate policy %s without inventing a stage for it",
 		(gates) => {
 			const document = compileStageDocument(plan({ deliverables: 3 }), {
@@ -709,11 +709,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 			}
 			// The lowering, from the same compilation, is where the gates are named.
 			expect(compileStages(plan({ deliverables: 3 }), { gates }).gates).toEqual(
-				gates === "approve-plan"
-					? ["approve-plan"]
-					: gates === "approve-plan+ship"
-						? ["approve-plan", "ship"]
-						: ["approve-plan", "approve-d0", "approve-d1", "ship"],
+				gates === "ship" ? ["ship"] : ["approve-d0", "approve-d1", "ship"],
 			);
 		},
 	);
@@ -740,7 +736,7 @@ describe("plan-to-ship: the compiler", () => {
 		// and the stage list is derived, never authored.
 		const document = compileStages(plan());
 		expect(document.effort).toBe("standard");
-		expect(document.gates).toEqual(["approve-plan", "ship"]);
+		expect(document.gates).toEqual(["ship"]);
 		expect(document.deliverables).toEqual([
 			{
 				id: "d0",
@@ -837,17 +833,12 @@ describe("plan-to-ship: the compiler", () => {
 	});
 
 	it.each([
-		["approve-plan", ["approve-plan"]],
-		["approve-plan+ship", ["approve-plan", "ship"]],
-		["every-deliverable", ["approve-plan", "approve-d0", "approve-d1", "ship"]],
+		["ship", ["ship"]],
+		["every-deliverable", ["approve-d0", "approve-d1", "ship"]],
 	] as const)("compiles the gate policy %s", (gates, expected) => {
 		const document = compileStages(plan({ deliverables: 3 }), { gates });
-		expect(document.gates).toEqual(
-			gates === "every-deliverable"
-				? expected
-				: // Three deliverables, and still exactly the gates the policy names.
-					expected,
-		);
+		// Three deliverables, and still exactly the gates the policy names.
+		expect(document.gates).toEqual(expected);
 		// A per-deliverable gate is a stage of the deliverable it follows; the
 		// ship gate is a run-level gate over every handoff.
 		const perDeliverable = document.deliverables.map((deliverable) =>
@@ -861,6 +852,22 @@ describe("plan-to-ship: the compiler", () => {
 				: [[], [], []],
 		);
 	});
+
+	it.each(["approve-plan", "approve-plan+ship"] as const)(
+		"refuses the removed gate policy %s by name",
+		(gates) => {
+			// The start of the run IS the approval, so the up-front gate is gone
+			// and its two policies are refused rather than silently remapped.
+			expect(() => compileStages(plan(), { gates })).toThrow(
+				`plan-to-ship: \`policy.gates\` is "${gates}", which was removed because the start of the run IS the approval — the plan-mode exit's yes, or a deliberate \`/plan run\` — so ask for "ship", one decision after all the work and before publication, or "every-deliverable", which adds one after each deliverable.`,
+			);
+			// The plan-facing document comes out of the same compilation, so it
+			// refuses the same value rather than showing a gate that is gone.
+			expect(() => compileStageDocument(plan(), { gates })).toThrow(
+				"which was removed because the start of the run IS the approval",
+			);
+		},
+	);
 
 	it("seeds review lenses from `deliverables[].reviews` and resolves tier and diversity from the policy", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: ["a", "b"] }), {
@@ -980,68 +987,70 @@ describe("plan-to-ship: the compiler", () => {
 	});
 });
 
-describe("plan-to-ship: the approval gate", () => {
-	it("returns approved: false and launches no implementer when the plan is declined", async () => {
+describe("plan-to-ship: the start is the approval", () => {
+	// A run exists because a person said yes to the plan it carries:
+	// pi-maestro's plan-mode exit agrees the description, shows the compiled
+	// document, has it blind-reviewed and asks "Start the run?" before calling
+	// `startBuiltin`, and `/plan run` is that same yes said deliberately. So
+	// there is no gate before the work, and no approve-plan task at all.
+	it("declares no approve task and makes the first task ready at once", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
-		const receipt = await service.run("plan-to-ship", input());
-		const parked = await park(service, receipt.runId, "approve-plan");
+		const run = await service.run("plan-to-ship", input());
 
-		// The approver is shown the refined plan, not the authored one.
-		expect(taskByKey(parked, "approve-plan").checkpoint?.inputs).toMatchObject({
-			plan: { summary: "Refined." },
-		});
-		// The prompt names the compiled graph, which is what was approved.
-		expect(taskByKey(parked, "approve-plan").checkpoint?.prompt).toContain(
-			"approve-plan -> ship",
+		// The first task the run declares is runnable at once: nothing waits on a
+		// person between `run-created` and the first work task, so no scan of the
+		// run ever sees a pending checkpoint before that task exists.
+		const created = await bounded(
+			(async () => {
+				for (;;) {
+					const view = await service.status(run.runId);
+					expect(view.pendingCheckpoints ?? []).toEqual([]);
+					const first = (view.tasks ?? [])[0];
+					if (first && first.status !== "pending") return view;
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+			})(),
+			"the first task",
 		);
-		// Only the refiner has run; nothing has been written anywhere.
-		expect(delegated.requests).toHaveLength(1);
-		expect(delegated.requests[0]?.workspace.mode).toBe("read-only");
+		expect(taskPaths(created)[0]).toBe("refine");
+		const refine = taskByKey(created, "refine");
+		expect(refine.dependsOn ?? []).toEqual([]);
+		expect(["ready", "running", "completed"]).toContain(refine.status);
 
-		await decide(service, parked, "approve-plan", {
-			proceed: false,
-			note: "not now",
-		});
-		const finished = await bounded(service.wait(receipt.runId), "wait");
-		expect(finished).toMatchObject({
-			status: "completed",
-			output: {
-				approved: false,
-				shipped: false,
-				deliverables: [],
-				reviews: [],
-				findings: [],
-				receipt: { planDigest: PLAN_DIGEST, refs: [], note: "not now" },
-			},
-		});
-		// No worktree task was ever declared, so no tree was touched.
+		// The FIRST park is the ship gate, so every deliverable ran without a
+		// second person-facing decision.
+		const ship = await park(service, run.runId, "ship");
+		expect(taskPaths(ship)).not.toContain("approve-plan");
+		expect(taskByKey(ship, "implement-d0").status).toBe("completed");
+
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.status).toBe("completed");
+		// The only checkpoint the default policy declares, over the whole run.
 		expect(
-			delegated.requests.some(
-				(request) => request.workspace.mode === "worktree",
-			),
-		).toBe(false);
-		expect(taskPaths(finished)).toEqual(["refine", "approve-plan"]);
+			(finished.tasks ?? [])
+				.filter((task) => task.kind === "checkpoint")
+				.map((task) => task.key),
+		).toEqual(["ship"]);
+		expect(finished.output).toMatchObject({ approved: true, shipped: true });
 	});
 });
 
 describe("plan-to-ship: the stage walk", () => {
-	async function approvedRun(options: PlanOptions & { effort?: string } = {}) {
+	async function walkToShip(options: PlanOptions & { effort?: string } = {}) {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const receipt = await service.run("plan-to-ship", input(options));
-		const approve = await park(service, receipt.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const ship = await park(service, receipt.runId, "ship");
 		return { delegated, service, runId: receipt.runId, ship };
 	}
 
 	it("lowers the derived stage list to the compiled keys, in order", async () => {
-		const { ship } = await approvedRun();
-		// Exactly `compileStages`' own task list, plus the two run-level gates.
+		const { ship } = await walkToShip();
+		// Exactly `compileStages`' own task list, plus the run-level ship gate.
 		expect(taskPaths(ship)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
 			"verify-d0-verify-1",
 			"review-d0/correctness",
@@ -1051,13 +1060,12 @@ describe("plan-to-ship: the stage walk", () => {
 	});
 
 	it("declares every deliverable's implementer up front when no gate can stop the walk", async () => {
-		const { ship } = await approvedRun({
+		const { ship } = await walkToShip({
 			deliverables: 2,
 			lensesPerDeliverable: [],
 		});
 		expect(taskPaths(ship)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
 			"implement-d1",
 			"verify-d0-verify-1",
@@ -1067,7 +1075,7 @@ describe("plan-to-ship: the stage walk", () => {
 	});
 
 	it("launches the implementer with W1's limits and the cache instruction", async () => {
-		const { delegated } = await approvedRun();
+		const { delegated } = await walkToShip();
 		const [implement] = delegated.requestsFor("implementer");
 		if (!implement) throw new Error("no implementer request");
 
@@ -1097,7 +1105,7 @@ describe("plan-to-ship: the stage walk", () => {
 	});
 
 	it("verifies the implementer's own patch and takes the verify envelope", async () => {
-		const { delegated } = await approvedRun();
+		const { delegated } = await walkToShip();
 		const [verify] = delegated.requestsGoal("Verify deliverable");
 		if (!verify) throw new Error("no verifier request");
 		expect(verify.agent).toBe("implementer");
@@ -1117,13 +1125,10 @@ describe("plan-to-ship: the stage walk", () => {
 		const delegated = scripted({ check: "fail-then-pass" });
 		const service = await serviceFor(delegated);
 		const run = await service.run("plan-to-ship", input());
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const ship = await park(service, run.runId, "ship");
 
 		expect(taskPaths(ship)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
 			"verify-d0-verify-1",
 			"verify-d0-fix-1",
@@ -1157,8 +1162,6 @@ describe("plan-to-ship: the stage walk", () => {
 		const delegated = scripted({ check: "not-run" });
 		const service = await serviceFor(delegated);
 		const run = await service.run("plan-to-ship", input());
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const ship = await park(service, run.runId, "ship");
 		// `checkRan: false` escalates to a human; it never declares a fixer.
 		expect(taskPaths(ship)).not.toContain("verify-d0-fix-1");
@@ -1170,7 +1173,7 @@ describe("plan-to-ship: the stage walk", () => {
 	});
 
 	it("imports the handoff and hands its descriptor to the reviewer", async () => {
-		const { delegated, service, runId, ship } = await approvedRun();
+		const { delegated, service, runId, ship } = await walkToShip();
 		const child = delegated.childFor("Implement deliverable");
 		const patch = patchFor(commitFor(child.attemptId));
 
@@ -1204,7 +1207,7 @@ describe("plan-to-ship: the stage walk", () => {
 	});
 
 	it("records a receipt naming the handoff ref, its digest, and the plan digest", async () => {
-		const { delegated, service, runId, ship } = await approvedRun();
+		const { delegated, service, runId, ship } = await walkToShip();
 		const child = delegated.childFor("Implement deliverable");
 		await decide(service, ship, "ship", { ship: true, note: "cherry-picked" });
 		const finished = await bounded(service.wait(runId), "wait");
@@ -1247,7 +1250,7 @@ describe("plan-to-ship: the stage walk", () => {
 	});
 
 	it("completes with shipped: false and no refs when the ship gate says no", async () => {
-		const { service, runId, ship } = await approvedRun();
+		const { service, runId, ship } = await walkToShip();
 		await decide(service, ship, "ship", {
 			ship: false,
 			note: "patch is wrong",
@@ -1268,36 +1271,44 @@ describe("plan-to-ship: the stage walk", () => {
 });
 
 describe("plan-to-ship: the gate policies", () => {
-	it("asks only for the approval when `policy.gates` is approve-plan", async () => {
+	it("asks one decision — the ship gate — when the policy is the default", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
-			input({ policy: { gates: "approve-plan" }, lensesPerDeliverable: [] }),
+			input({ deliverables: 2, lensesPerDeliverable: [] }),
 		);
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
+		// `ship` is the default, so every deliverable is done before the one
+		// person-facing decision, and both summaries are in front of it.
+		const ship = await park(service, run.runId, "ship");
+		expect(
+			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}),
+		).toEqual(["summary-d0", "summary-d1"]);
+		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
 
 		expect(finished.status).toBe("completed");
 		expect(taskPaths(finished)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
+			"implement-d1",
 			"verify-d0-verify-1",
+			"verify-d1-verify-1",
+			"ship",
 			"receipt",
 		]);
-		// No ship gate means no ship decision, so nothing is shipped and the
-		// receipt names no ref: the handoff is still in the run to cherry-pick.
+		// The ship decision is the durable one a receipt is checked against.
 		expect(finished.output).toMatchObject({
 			approved: true,
-			shipped: false,
-			deliverables: [{ id: "d0", handoff: { mediaType: PATCH_MEDIA_TYPE } }],
-			receipt: { refs: [] },
+			shipped: true,
+			deliverables: [
+				{ id: "d0", handoff: { mediaType: PATCH_MEDIA_TYPE } },
+				{ id: "d1", handoff: { mediaType: PATCH_MEDIA_TYPE } },
+			],
 		});
 		expect(
-			(finished.output as { receipt: { note: string } }).receipt.note,
-		).toContain("no ship gate was declared");
+			(finished.output as { receipt: { refs: string[] } }).receipt.refs,
+		).toHaveLength(2);
 	});
 
 	it("gates after every deliverable but the last, whose gate is the ship gate", async () => {
@@ -1311,14 +1322,11 @@ describe("plan-to-ship: the gate policies", () => {
 				policy: { gates: "every-deliverable" },
 			}),
 		);
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const first = await park(service, run.runId, "approve-d0");
 		// A per-deliverable gate is walked strictly in order: the second
 		// deliverable is not implemented until a person allowed the first.
 		expect(taskPaths(first)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
 			"verify-d0-verify-1",
 			"approve-d0",
@@ -1330,7 +1338,6 @@ describe("plan-to-ship: the gate policies", () => {
 		expect(finished.status).toBe("completed");
 		expect(taskPaths(finished)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
 			"verify-d0-verify-1",
 			"approve-d0",
@@ -1352,8 +1359,6 @@ describe("plan-to-ship: the gate policies", () => {
 				policy: { gates: "every-deliverable" },
 			}),
 		);
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const first = await park(service, run.runId, "approve-d0");
 		await decide(service, first, "approve-d0", {
 			proceed: false,
@@ -1403,8 +1408,6 @@ describe("plan-to-ship: replay", () => {
 			"plan-to-ship",
 			input({ deliverables: 2, policy: { gates: "every-deliverable" } }),
 		);
-		const approve = await park(first, run.runId, "approve-plan");
-		await decide(first, approve, "approve-plan", { proceed: true });
 		const gateOne = await park(first, run.runId, "approve-d0");
 		const prefix = taskPaths(gateOne);
 		await decide(first, gateOne, "approve-d0", { proceed: true });
@@ -1424,7 +1427,6 @@ describe("plan-to-ship: replay", () => {
 		expect(taskPaths(finished).slice(0, prefix.length)).toEqual(prefix);
 		expect(taskPaths(finished)).toEqual([
 			"refine",
-			"approve-plan",
 			"implement-d0",
 			"verify-d0-verify-1",
 			"verify-d0-fix-1",
@@ -1456,8 +1458,6 @@ describe("plan-to-ship: a reviewer that dies", () => {
 		const delegated = scripted({ failReview: true });
 		const service = await serviceFor(delegated);
 		const run = await service.run("plan-to-ship", input());
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const ship = await park(service, run.runId, "ship");
 
 		// No lens reported, so `synthesis: "optional"` declared no reducer and the
@@ -1497,8 +1497,6 @@ describe("plan-to-ship: a reviewer that dies", () => {
 			"plan-to-ship",
 			input({ lensesPerDeliverable: ["a", "b"] }),
 		);
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
 		const ship = await park(service, run.runId, "ship");
 		expect(taskByKey(ship, "review-d0/a").status).toBe("completed");
 		expect(taskByKey(ship, "review-d0/b").status).toBe("failed");
@@ -1522,8 +1520,6 @@ describe("plan-to-ship: the effort dial", () => {
 				"plan-to-ship",
 				input({ effort, lensesPerDeliverable: ["a", "b"] }),
 			);
-			const gate = await park(service, run.runId, "approve-plan");
-			await decide(service, gate, "approve-plan", { proceed: true });
 			await park(service, run.runId, "ship");
 			runs[effort] = delegated;
 		}
@@ -1557,8 +1553,6 @@ describe("plan-to-ship: the effort dial", () => {
 			"plan-to-ship",
 			input({ lensesPerDeliverable: ["a"], diverse: true }),
 		);
-		const gate = await park(service, run.runId, "approve-plan");
-		await decide(service, gate, "approve-plan", { proceed: true });
 		await park(service, run.runId, "ship");
 		const [review] = delegated.requestsFor("reviewer");
 		expect(review?.model?.id).toBe(DIVERSE_MODEL_ID);
@@ -1576,8 +1570,6 @@ describe("plan-to-ship: the effort dial", () => {
 				pinnedModel: "github-copilot/gpt-5.6-luna",
 			}),
 		);
-		const gate = await park(service, run.runId, "approve-plan");
-		await decide(service, gate, "approve-plan", { proceed: true });
 		await park(service, run.runId, "ship");
 		expect(delegated.requestsFor("reviewer")[0]?.model).toEqual({
 			provider: "github-copilot",
@@ -1594,7 +1586,7 @@ describe("plan-to-ship: the input contract", () => {
 		for (const value of [
 			input(),
 			input({ effort: "deep" }),
-			input({ policy: { effort: "cheap", gates: "approve-plan" } }),
+			input({ policy: { effort: "cheap", gates: "ship" } }),
 			input({ lensesPerDeliverable: [] }),
 			{ ...input(), plan: { ...plan(), body: "Why this plan exists." } },
 			input({
@@ -1625,6 +1617,16 @@ describe("plan-to-ship: the input contract", () => {
 			"deliverables[].stages",
 			() => withStages(plan(), [{ use: "implement", id: "build" }]),
 			"plan schema v5 does not author stages",
+		],
+		[
+			"policy.gates: approve-plan",
+			() => ({ ...plan(), policy: { gates: "approve-plan" as const } }),
+			"which was removed because the start of the run IS the approval",
+		],
+		[
+			"policy.gates: approve-plan+ship",
+			() => ({ ...plan(), policy: { gates: "approve-plan+ship" as const } }),
+			"which was removed because the start of the run IS the approval",
 		],
 	])(
 		"admits %s at validate, so the refusal is the compiler's",
@@ -1697,8 +1699,6 @@ describe("plan-to-ship: the memory dial", () => {
 			const delegated = scripted();
 			const service = await serviceFor(delegated);
 			const run = await service.run("plan-to-ship", input({ effort }));
-			const gate = await park(service, run.runId, "approve-plan");
-			await decide(service, gate, "approve-plan", { proceed: true });
 			const ship = await park(service, run.runId, "ship");
 			await decide(service, ship, "ship", { ship: true });
 			await bounded(service.wait(run.runId), "wait");
@@ -1765,8 +1765,6 @@ describe("plan-to-ship: the agent templates", () => {
 			"plan-to-ship",
 			input({ effort: "deep", lensesPerDeliverable: ["a", "b"] }),
 		);
-		const gate = await park(service, run.runId, "approve-plan");
-		await decide(service, gate, "approve-plan", { proceed: true });
 		const ship = await park(service, run.runId, "ship");
 		await decide(service, ship, "ship", { ship: true });
 		await bounded(service.wait(run.runId), "wait");

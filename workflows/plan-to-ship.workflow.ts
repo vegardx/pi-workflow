@@ -2,6 +2,7 @@ import {
 	DEFAULT_MAX_WORKFLOW_COST,
 	defineWorkflow,
 	type TaskInputHandle,
+	type TaskRef,
 	type WorkflowHandoffDescriptor,
 	WorkflowHandoffDescriptorSchema,
 	type WorktreeTaskHandle,
@@ -32,8 +33,9 @@ import {
 import { type Static, Type } from "typebox";
 
 /**
- * The builtin `plan -> approve -> stages -> ship` pipeline: pi-maestro's plan
- * document, compiled.
+ * The builtin `plan -> stages -> ship` pipeline: pi-maestro's plan document,
+ * compiled. The start of the run is the approval, so there is no gate before
+ * the work: the first task is ready the moment the run exists.
  *
  * This file is the package-provided (`builtin` scope) definition registered by
  * the shipped extension; it needs no Pi project trust and is discovered from
@@ -68,9 +70,6 @@ import { type Static, Type } from "typebox";
  * ```text
  *   refine            one read-only planner turns the authored plan into an
  *                     executable one (goal, files, acceptance, risks).
- *   approve-plan      THE approval. One gate, up front, always. A
- *                     `{proceed:false}` returns `approved: false` and touches
- *                     no tree.
  *   per deliverable, in plan order, always in this order:
  *     implement       `implement-<deliverable>`: one worktree agent,
  *                     `handoff: "required"`.
@@ -85,7 +84,8 @@ import { type Static, Type } from "typebox";
  *                     optional synthesis. OMITTED when `reviews` is empty.
  *     gate            `gate`: a human decides; nothing runs after one. Only
  *                     `policy.gates: every-deliverable` buys one here.
- *   ship              the last gate, when `policy.gates` asks for one.
+ *   ship              THE decision: one gate over every handoff, always, and
+ *                     the only thing a receipt may be checked against.
  *   receipt           a required finalizer that records what shipped.
  * ```
  *
@@ -103,19 +103,27 @@ import { type Static, Type } from "typebox";
  *
  * ## Gates come from `policy.gates`, and only from there
  *
- * - `approve-plan` — the approval, and nothing else. No ship gate, so no ship
- *   decision, so `shipped` is false and the receipt names no refs. The
- *   handoffs are still imported and still in the run for a person to
- *   cherry-pick; what is missing is the durable decision that a receipt — and
- *   pi-maestro's publication — is allowed to be checked against.
- * - `approve-plan+ship` (the default) — the approval and one `ship` gate at
- *   the end.
- * - `every-deliverable` — the approval, one gate after each deliverable's
- *   stages, and the last of those IS the `ship` gate.
+ * - `ship` (the default) — one `ship` gate at the end: the single human
+ *   decision, taken after every deliverable is done and before anything is
+ *   published.
+ * - `every-deliverable` — one gate after each deliverable's stages, and the
+ *   last of those IS the `ship` gate.
+ *
+ * There is no "no gates" value: publication proof is a durable decision, so
+ * the ship gate is not optional.
+ *
+ * THE START OF THE RUN IS THE APPROVAL. `approve-plan` and `approve-plan+ship`
+ * are gone and are refused by name at compile time. A run of this definition
+ * exists because a person said yes to the plan it carries — pi-maestro's
+ * plan-mode exit agrees the description, shows the compiled document, has it
+ * blind-reviewed and asks "Start the run?" before calling `startBuiltin`, and
+ * `/plan run` is that same yes said deliberately — so an up-front gate asked
+ * the same person to approve the same digest seconds later and bought nothing.
  *
  * A plan cannot declare a gate of its own: plan schema v5 authors no stages,
  * and `deliverables[].stages` is admitted by the input schema only so the
- * compiler can refuse it by name.
+ * compiler can refuse it by name. The two removed `policy.gates` values are
+ * admitted by the input schema for the same reason, and for that reason only.
  *
  * ## Publication is not here
  *
@@ -317,11 +325,16 @@ const DeliverableSchema = Type.Object(
 const PolicySchema = Type.Object(
 	{
 		effort: Type.Optional(EffortSchema),
+		/**
+		 * `ship` or `every-deliverable`. The two removed values are admitted
+		 * here only so `compilePlan` can refuse them by name.
+		 */
 		gates: Type.Optional(
 			stringEnum([
+				"ship",
+				"every-deliverable",
 				"approve-plan",
 				"approve-plan+ship",
-				"every-deliverable",
 			] as const),
 		),
 		reviewDefault: Type.Optional(
@@ -505,7 +518,7 @@ type Finding = Static<typeof FindingSchema>;
 /** A policy with every question answered; what the compiler actually reads. */
 interface ResolvedPolicy {
 	readonly effort: Effort;
-	readonly gates: "approve-plan" | "approve-plan+ship" | "every-deliverable";
+	readonly gates: "ship" | "every-deliverable";
 	readonly reviewDefault: {
 		readonly tier: ReviewTier;
 		readonly diverse: boolean;
@@ -650,9 +663,10 @@ function pick<T>(value: unknown, allowed: readonly T[], fallback: T): T {
 }
 
 /**
- * The policy, with every default filled in (spec §2.1). Total on purpose: a
- * value the schema already refused cannot reach here, and a value it admits
- * always has a default behind it.
+ * The policy, with every default filled in (spec §2.1). Total on purpose for
+ * every value the schema still means: a value it admits always has a default
+ * behind it. The exception is the pair of REMOVED gate policies, which the
+ * schema admits only so this function can refuse them by name.
  */
 function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 	const effort = pick<Effort>(
@@ -660,12 +674,20 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 		["cheap", "standard", "deep"],
 		"standard",
 	);
+	if (
+		policy?.gates === "approve-plan" ||
+		policy?.gates === "approve-plan+ship"
+	) {
+		refuse(
+			`\`policy.gates\` is "${policy.gates}", which was removed because the start of the run IS the approval — the plan-mode exit's yes, or a deliberate \`/plan run\` — so ask for "ship", one decision after all the work and before publication, or "every-deliverable", which adds one after each deliverable.`,
+		);
+	}
 	return {
 		effort,
 		gates: pick(
 			policy?.gates,
-			["approve-plan", "approve-plan+ship", "every-deliverable"] as const,
-			"approve-plan+ship" as const,
+			["ship", "every-deliverable"] as const,
+			"ship" as const,
 		),
 		reviewDefault: {
 			tier: pick<ReviewTier>(
@@ -924,13 +946,14 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 		);
 		return policyGate ? { ...entry, policyGate } : entry;
 	});
-	const gateKeys: string[] = ["approve-plan"];
+	const gateKeys: string[] = [];
 	for (const entry of withPolicyGates) {
 		for (const stage of loweredStages(entry)) {
 			if (stage.use === "gate") gateKeys.push(stage.key);
 		}
 	}
-	if (resolved.gates !== "approve-plan") gateKeys.push("ship");
+	// Always: the ship decision is the one a receipt is checked against.
+	gateKeys.push("ship");
 
 	return {
 		policy: resolved,
@@ -1163,40 +1186,6 @@ export default defineWorkflow({
 			retry: { attempts: 1, on: ["backoff"] },
 		});
 
-		ctx.phase("approve");
-		const approve = gate(ctx, "approve-plan", {
-			prompt: [
-				`${plan.deliverables.length} deliverable(s), effort ${effort}, gates ${policy.gates}, plan digest ${planDigest.slice(0, 12)}.`,
-				`The compiled graph: ${compiled.lowering.gates.join(" -> ")} around ${compiled.lowering.deliverables.flatMap((entry) => entry.stages.flatMap((stage) => stage.tasks)).length} task(s).`,
-				"The `plan` input is the refined executable plan; read its blockers first.",
-				'Approving starts one worktree agent per deliverable. Nothing has been written yet, and {"proceed":false} stops without touching any tree.',
-				`Approve "${plan.title}" (${plan.slug}) for implementation?`,
-			].join("\n"),
-			schema: ApprovalSchema,
-			headless: "block",
-			timeoutMs: decisionTimeoutMs,
-			inputs: { plan: refine.output },
-		});
-
-		const approval = await ctx.result(approve);
-		if (!approval.proceed) {
-			// Only the refiner and the gate were ever declared, so nothing ran in a
-			// worktree and there is nothing to record.
-			ctx.log("Plan approval declined; no worktree task was declared.");
-			return {
-				approved: false,
-				shipped: false,
-				deliverables: [],
-				reviews: [],
-				findings: [],
-				receipt: {
-					planDigest,
-					refs: [],
-					...(approval.note ? { note: approval.note } : {}),
-				},
-			};
-		}
-
 		/** Declares one `implement` stage. Called up front, or in the walk. */
 		const implementers = new Map<string, WorktreeTaskHandle<Implementation>>();
 		const declareImplement = (
@@ -1206,8 +1195,8 @@ export default defineWorkflow({
 			const deliverable = entry.deliverable;
 			// `after` is ORDER only: a predecessor's patch is never applied, so the
 			// successor still starts from the same baseline. With no edges at all
-			// these run as a fan-out.
-			const order = [approve.ref];
+			// these run as a fan-out, waiting only on the refined plan they read.
+			const order: TaskRef[] = [];
 			for (const predecessorId of deliverable.after ?? []) {
 				const predecessor = implementers.get(predecessorId);
 				if (!predecessor) {
@@ -1564,10 +1553,10 @@ export default defineWorkflow({
 			.slice(0, MAX_FINDINGS);
 		const blocking = reviews.filter((review) => review.blocking).length;
 
-		// The ship gate: one, over every handoff, for every policy but
-		// `approve-plan` — and not at all when an earlier gate stopped the walk,
-		// because nothing is declared after a person said stop.
-		if (!stopped && policy.gates !== "approve-plan") {
+		// The ship gate: one, over every handoff, always — except when an earlier
+		// gate stopped the walk, because nothing is declared after a person said
+		// stop.
+		if (!stopped) {
 			ctx.phase("ship");
 			const shipInputs: Record<string, TaskInputHandle> = {};
 			for (const entry of outcomes) {
@@ -1603,9 +1592,6 @@ export default defineWorkflow({
 			`checks ${passed}/${outcomes.length} passed`,
 			`${blocking} blocking finding(s)`,
 			...(stopped ? [`stopped at gate ${stopped.key}`] : []),
-			...(policy.gates === "approve-plan"
-				? ["no ship gate was declared: policy.gates is approve-plan"]
-				: []),
 			...(stopped?.note ? [stopped.note] : []),
 			...(shipDecision?.note ? [shipDecision.note] : []),
 		].join("; ");

@@ -81,7 +81,7 @@ function planFixture(): Record<string, unknown> {
 		repos: [{ key: "wf", path: "/repos/pi-workflow" }],
 		policy: {
 			effort: "standard",
-			gates: "approve-plan+ship",
+			gates: "ship",
 			maxFixRounds: 1,
 			publish: { mode: "pr", base: "main" },
 		},
@@ -121,7 +121,7 @@ function compiledFixture(): Record<string, unknown> {
 			},
 		],
 		effort: "standard",
-		gates: "approve-plan+ship",
+		gates: "ship",
 	};
 }
 

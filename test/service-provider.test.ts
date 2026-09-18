@@ -317,7 +317,7 @@ function planReviewInput(deliverables = 1) {
 				],
 			})),
 			effort: "standard",
-			gates: "approve-plan+ship",
+			gates: "ship",
 		},
 		projection: {
 			cost: 30,
@@ -754,9 +754,10 @@ const SUBAGENT_CLIENT_METHODS = [
 
 /**
  * A subagent provider that answers `plan-to-ship`'s refiner and nothing else.
- * The run therefore reaches the `approve-plan` gate and parks there, which is
- * as far as a start without a decision can go - and as far as this file needs
- * to look to see that `startBuiltin` made an ordinary run.
+ * The start of a run IS its approval, so there is no gate before the work: the
+ * run refines the plan and goes straight on to the first implementer, which
+ * this provider has no script for. That is as far as this file needs to look
+ * to see that `startBuiltin` made an ordinary run that begins working at once.
  */
 function scriptedPlanner(): WorkflowSubagentProvider {
 	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
@@ -1036,7 +1037,7 @@ describe("startBuiltin", () => {
 		await expect(client.runs()).resolves.toMatchObject({ runs: [] });
 	});
 
-	it("creates an ordinary plan-to-ship run parked at approve-plan", async () => {
+	it("creates an ordinary plan-to-ship run that starts working at once", async () => {
 		const service = await realService(scriptedPlanner());
 		const { client } = await acquire(service);
 		const { runId } = await client.startBuiltin("plan-to-ship", {
@@ -1050,13 +1051,21 @@ describe("startBuiltin", () => {
 		const page = await client.runs();
 		expect(page.runs.map((summary) => summary.runId)).toEqual([runId]);
 
-		// `awaitRun` is permitted, because this client started it, and the run
-		// parks on the gate every other plan-to-ship run parks on.
+		// `awaitRun` is permitted, because this client started it. No decision is
+		// asked for before the work: the refiner runs and the first implementer
+		// is declared and executed straight after it, with no checkpoint in
+		// between. This provider scripts only the refiner, so the implementer is
+		// where the run stops - what matters is that it got that far unattended.
 		const view = await client.awaitRun(runId, { timeoutMs: 60_000 });
-		expect(view).toMatchObject({ status: "waiting", parked: true });
-		expect(
-			(view.pendingCheckpoints ?? []).map((checkpoint) => checkpoint.key),
-		).toEqual(["approve-plan"]);
+		expect(view.parked ?? false).toBe(false);
+		const tasks = view.tasks ?? [];
+		expect(tasks.map((task) => task.key)).toContain("refine");
+		expect(tasks.find((task) => task.key === "refine")?.status).toBe(
+			"completed",
+		);
+		expect(tasks.map((task) => task.key)).toContain("implement-d0");
+		// The gate the run used to park on before doing anything is gone.
+		expect(tasks.filter((task) => task.kind === "checkpoint")).toEqual([]);
 		await expect(client.inspect(runId)).resolves.toMatchObject({
 			run: { runId, definitionName: "plan-to-ship" },
 		});
@@ -1265,10 +1274,11 @@ describe("project", () => {
 		const service = await realService();
 		const projection = await service.project("plan-to-ship", planInput(1));
 		// refine + implement + one verifier + one lens + the review synthesis +
-		// the receipt finalizer, and the two gates, which reserve nothing. The
-		// verifier is one because a barrier synthesizes a boolean as `true`, so
-		// the projected check passes in round 1 and declares no fixer.
-		expect(projection.tasks).toBe(8);
+		// the receipt finalizer, and the one `ship` gate, which reserves
+		// nothing. The verifier is one because a barrier synthesizes a boolean
+		// as `true`, so the projected check passes in round 1 and declares no
+		// fixer.
+		expect(projection.tasks).toBe(7);
 		expect(projection.cost).toBeGreaterThan(0);
 		expect(projection.totalTokens).toBeGreaterThan(0);
 		expect(projection.childRuntimeMs).toBeGreaterThan(0);
