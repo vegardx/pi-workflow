@@ -44,12 +44,15 @@ import { type Static, Type } from "typebox";
  *
  * ## What this definition is
  *
- * A COMPILER over `plan.deliverables[].stages` and `plan.policy` (plan-loop
- * spec §1.3 and §2.1), and no graph of its own. Every stage lowers through the
- * component library (`@vegardx/pi-workflow/components`); there is no
- * hand-written `ctx.fanOut` and no effort table on the side. The compilation is
- * available as DATA in two views, from one derivation, and `run` walks exactly
- * what they describe:
+ * A COMPILER over `plan.deliverables` and `plan.policy` (plan-loop spec §1.3
+ * and §2.1), and no graph of its own. A plan schema v5 document NEVER AUTHORS
+ * STAGES: the compiler derives them, per deliverable, from the deliverable's
+ * `reviews` list and the policy — implement, verify-and-fix, a review fan-out
+ * when `reviews` is non-empty, and the gates `policy.gates` asks for. Every
+ * stage lowers through the component library
+ * (`@vegardx/pi-workflow/components`); there is no hand-written `ctx.fanOut`
+ * and no effort table on the side. The compilation is available as DATA in two
+ * views, from one derivation, and `run` walks exactly what they describe:
  *
  * - `compileStageDocument(plan, policy)` — the PLAN-FACING
  *   `CompiledStageDocument` (`@vegardx/pi-workflow/components`): the stages
@@ -68,18 +71,20 @@ import { type Static, Type } from "typebox";
  *   approve-plan      THE approval. One gate, up front, always. A
  *                     `{proceed:false}` returns `approved: false` and touches
  *                     no tree.
- *   per deliverable, per stage, in plan order:
- *     implement       `<stage>-<deliverable>`: one worktree agent,
+ *   per deliverable, in plan order, always in this order:
+ *     implement       `implement-<deliverable>`: one worktree agent,
  *                     `handoff: "required"`.
- *     verify-and-fix  `verifyAndFix`: `<stage>-<deliverable>-verify-<n>` and
+ *     verify-and-fix  `verifyAndFix`: `verify-<deliverable>-verify-<n>` and
  *                     `-fix-<n>`, bounded. The plan counts FIX rounds; the
  *                     component counts VERIFY rounds, and the compiler maps
  *                     `maxRounds = fixRounds + 1` so a fix is never left
  *                     unchecked.
- *     review-fan-out  `reviewFanOut`: the namespace `<stage>-<deliverable>`
- *                     with one read-only reviewer per lens (`key = lens.id`),
- *                     a `ctx.settled` barrier, and an optional synthesis.
- *     gate            `gate`: a human decides; nothing runs after one.
+ *     review-fan-out  `reviewFanOut`: the namespace `review-<deliverable>`
+ *                     with one read-only reviewer per `reviews[]` entry
+ *                     (`key = lens id`), a `ctx.settled` barrier, and an
+ *                     optional synthesis. OMITTED when `reviews` is empty.
+ *     gate            `gate`: a human decides; nothing runs after one. Only
+ *                     `policy.gates: every-deliverable` buys one here.
  *   ship              the last gate, when `policy.gates` asks for one.
  *   receipt           a required finalizer that records what shipped.
  * ```
@@ -89,10 +94,12 @@ import { type Static, Type } from "typebox";
  * A stage id is a namespace in the plan's vocabulary and unique only inside its
  * deliverable, so the compiled key is the flattened `<stage id>-<deliverable
  * id>` — the same flattening `verifyAndFix` documents for its own rounds, and
- * the reason the default stage list still names the task `implement-d0` it
+ * the reason the derived stage list still names the task `implement-d0` it
  * always named. A `review-fan-out` stage's key is a real namespace, so its
- * members are `<stage>-<deliverable>/<lens>`. Every key is a pure function of
+ * members are `review-<deliverable>/<lens>`. Every key is a pure function of
  * the plan (replay law 1): nothing is numbered by a counter over runtime data.
+ * The stage ids are fixed (`implement`, `verify`, `review`, `approve-<id>`,
+ * `ship`), so two derived keys cannot collide.
  *
  * ## Gates come from `policy.gates`, and only from there
  *
@@ -106,9 +113,9 @@ import { type Static, Type } from "typebox";
  * - `every-deliverable` — the approval, one gate after each deliverable's
  *   stages, and the last of those IS the `ship` gate.
  *
- * A `gate` STAGE the plan declares is compiled where it stands and is
- * independent of `policy.gates`: a plan that declares its own gate and also
- * asks for `every-deliverable` gets both, because both were asked for.
+ * A plan cannot declare a gate of its own: plan schema v5 authors no stages,
+ * and `deliverables[].stages` is admitted by the input schema only so the
+ * compiler can refuse it by name.
  *
  * ## Publication is not here
  *
@@ -131,10 +138,10 @@ import { type Static, Type } from "typebox";
  *   stage id the deliverables do not share. `gate`, `envelope`, `reviewFanOut`
  *   and `verifyAndFix` carry the whole graph.
  * - The implementers of a plan with no mid-run gate are declared up front, so
- *   they run concurrently exactly as they did before stages existed. A plan
- *   with a mid-run gate (`every-deliverable`, or a declared `gate` stage) is
- *   walked strictly deliverable by deliverable instead — a gate that a person
- *   may answer "stop" to must not leave work running that nobody approved.
+ *   they run concurrently. A plan whose `policy.gates` is `every-deliverable`
+ *   is walked strictly deliverable by deliverable instead — a gate that a
+ *   person may answer "stop" to must not leave work running that nobody
+ *   approved.
  * - A reviewer that fails degrades the run rather than failing it:
  *   `reviewFanOut` declares them `optional` and reads `ctx.settled`, the
  *   verdict and the findings are computed on a deterministic rail from the
@@ -159,9 +166,6 @@ import { type Static, Type } from "typebox";
  */
 
 const IDENTIFIER = "^[a-z0-9][a-z0-9-]{0,63}$";
-/** A stage id is also a task key or a namespace, so it starts with a letter. */
-const STAGE_ID_RE = /^[a-z][a-z0-9-]*$/;
-
 /** The three agents this definition names; all three must be installed. */
 const PLANNER_AGENT = "planner";
 const IMPLEMENTER_AGENT = "implementer";
@@ -243,13 +247,13 @@ const EffortSchema = stringEnum(["cheap", "standard", "deep"] as const);
 const ReviewTierSchema = stringEnum(["light", "standard", "heavy"] as const);
 
 /**
- * A review task's `review` block, mirroring the delegation shape pi-maestro's
- * plan document declares: `model` is optional and `tier`/`diverse` express the
- * intent a host can route.
+ * One entry of a deliverable's `reviews` list: the point of view a reviewer
+ * looks through, and the routing intent a host can honour. `model` is optional
+ * and `tier`/`diverse` express what to reach for.
  * Closed, so a plan that names a field this runtime cannot honour is refused by
  * `workflow_validate` instead of ignored at run time.
  */
-const DelegationSchema = Type.Object(
+const ReviewSchema = Type.Object(
 	{
 		lens: Type.String({ minLength: 1, maxLength: 128 }),
 		skill: Type.Optional(Type.String({ pattern: IDENTIFIER })),
@@ -260,107 +264,27 @@ const DelegationSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * A task is WORK, and only work: plan schema v5 has no review, `by` or kind
+ * field on a task, and review routing lives on `deliverables[].reviews`.
+ *
+ * `review` and `by` are admitted here as unknown values for one reason: refused
+ * by TypeBox they would read as an unexpected property, which a person cannot
+ * act on. They parse, and `compilePlan` then refuses them BY NAME. There is no
+ * migration from v3 or v4.
+ */
 const PlanTaskSchema = Type.Object(
 	{
 		id: Type.String({ pattern: IDENTIFIER }),
 		title: Type.String({ minLength: 1 }),
 		body: Type.Optional(Type.String()),
-		/** Present = this task is a review, not implementation work. */
-		review: Type.Optional(DelegationSchema),
-		/**
-		 * Plan schema v3's name for `review`. Admitted by the schema only so the
-		 * compiler can refuse a version 3 document by name instead of leaving a
-		 * TypeBox error about an unexpected property; there is no migration.
-		 */
-		by: Type.Optional(DelegationSchema),
+		/** Plan schema v4's review block; refused by name at compile. */
+		review: Type.Optional(Type.Unknown()),
+		/** Plan schema v3's name for the same block; refused by name at compile. */
+		by: Type.Optional(Type.Unknown()),
 	},
 	{ additionalProperties: false },
 );
-
-/** One point of view in a `review-fan-out` stage; the fan-out key is `id`. */
-const PlanLensSchema = Type.Object(
-	{
-		id: Type.String({ pattern: IDENTIFIER }),
-		tier: Type.Optional(ReviewTierSchema),
-		diverse: Type.Optional(Type.Boolean()),
-		skill: Type.Optional(Type.String({ pattern: IDENTIFIER })),
-		model: Type.Optional(Type.String({ pattern: "^\\S+/\\S+$" })),
-	},
-	{ additionalProperties: false },
-);
-
-const StageIdSchema = Type.String({ pattern: IDENTIFIER });
-
-/**
- * The stage kinds, spec §2.1. `dynamic` and `sub-workflow` are RESERVED here on
- * purpose: they parse, so a document written against them is a compiler
- * refusal with a sentence a person can act on rather than a schema error about
- * a union.
- */
-const StageSchema = Type.Union([
-	Type.Object(
-		{
-			use: Type.Literal("implement"),
-			id: StageIdSchema,
-			tools: Type.Optional(
-				Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" }), {
-					maxItems: 32,
-				}),
-			),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			use: Type.Literal("verify-and-fix"),
-			id: StageIdSchema,
-			/** FIX rounds, 0..2. The loop runs one more VERIFY round than this. */
-			maxRounds: Type.Optional(Type.Integer({ minimum: 0, maximum: 2 })),
-			escalate: Type.Optional(stringEnum(["thinking", "none"] as const)),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			use: Type.Literal("review-fan-out"),
-			id: StageIdSchema,
-			/** Absent or empty = seeded from the deliverable's `tasks[].review`. */
-			lenses: Type.Optional(
-				Type.Array(PlanLensSchema, { maxItems: MAX_REVIEW_LENSES }),
-			),
-			synthesis: Type.Optional(
-				stringEnum(["required", "optional", "none"] as const),
-			),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			use: Type.Literal("gate"),
-			id: StageIdSchema,
-			question: Type.String({ minLength: 1, maxLength: 1024 }),
-			show: Type.Optional(Type.Array(StageIdSchema, { maxItems: 8 })),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			use: Type.Literal("sub-workflow"),
-			id: StageIdSchema,
-			workflow: Type.String({ minLength: 1, maxLength: 128 }),
-			input: Type.Optional(Type.Unknown()),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			use: Type.Literal("dynamic"),
-			id: StageIdSchema,
-			brief: Type.String({ minLength: 1, maxLength: 4096 }),
-		},
-		{ additionalProperties: false },
-	),
-]);
 
 const DeliverableSchema = Type.Object(
 	{
@@ -370,11 +294,17 @@ const DeliverableSchema = Type.Object(
 		after: Type.Optional(Type.Array(Type.String({ pattern: IDENTIFIER }))),
 		reads: Type.Optional(Type.Array(Type.String({ pattern: IDENTIFIER }))),
 		repo: Type.Optional(Type.String({ pattern: IDENTIFIER })),
-		tasks: Type.Optional(Type.Array(PlanTaskSchema)),
-		/** Absent = the §2.1 default stage list, derived from `policy`. */
-		stages: Type.Optional(
-			Type.Array(StageSchema, { maxItems: MAX_COMPILED_STAGES }),
+		/** A deliverable is work, or it is nothing. Work only: see the task. */
+		tasks: Type.Array(PlanTaskSchema, { minItems: 1 }),
+		/** The review lenses this deliverable's fan-out runs; absent == none. */
+		reviews: Type.Optional(
+			Type.Array(ReviewSchema, { maxItems: MAX_REVIEW_LENSES }),
 		),
+		/**
+		 * Plan schema v4 and earlier authored a stage list here. v5 does not, and
+		 * this key is admitted only so `compilePlan` can refuse it by name.
+		 */
+		stages: Type.Optional(Type.Unknown()),
 	},
 	{ additionalProperties: false },
 );
@@ -423,6 +353,7 @@ const PlanSchema = Type.Object(
 	{
 		slug: Type.String({ pattern: IDENTIFIER }),
 		title: Type.String({ minLength: 1 }),
+		body: Type.Optional(Type.String()),
 		deliverables: Type.Array(DeliverableSchema, {
 			minItems: 1,
 			maxItems: MAX_DELIVERABLES,
@@ -565,10 +496,8 @@ const OutputSchema = Type.Object(
 
 type Plan = Static<typeof PlanSchema>;
 type Deliverable = Static<typeof DeliverableSchema>;
-type Delegation = Static<typeof DelegationSchema>;
+type Review = Static<typeof ReviewSchema>;
 type PlanPolicy = Static<typeof PolicySchema>;
-type Stage = Static<typeof StageSchema>;
-type PlanLens = Static<typeof PlanLensSchema>;
 type Implementation = Static<typeof ImplementationSchema>;
 type Output = Static<typeof OutputSchema>;
 type Finding = Static<typeof FindingSchema>;
@@ -595,22 +524,17 @@ interface ResolvedPolicy {
  * because the plan does not have any.
  *
  * The lowering is the same compilation seen from the runtime side: which task
- * keys each stage will declare, in declaration order, and where each stage came
- * from. It is what a host shows next to a projected budget ("this run declares
- * these 14 tasks and parks here"), and what a finding can point at by name.
- * Both come out of ONE compilation (`compilePlan`), so the two views cannot
- * drift: `compileStages` returns this one and `compileStageDocument` returns
- * the plan-facing one.
+ * keys each stage will declare, in declaration order. It is what a host shows
+ * next to a projected budget ("this run declares these 14 tasks and parks
+ * here"), and what a finding can point at by name. Both come out of ONE
+ * compilation (`compilePlan`), so the two views cannot drift: `compileStages`
+ * returns this one and `compileStageDocument` returns the plan-facing one.
  *
  * It lives here rather than in the component library because nothing else
  * produces it and nothing else should have to type against it: a second
  * builtin reading this shape would be reading `plan-to-ship`'s lowering
  * choices, which are exactly what a compiler is allowed to change.
  */
-
-/** Where a lowered stage came from: the plan's `stages`, or its `policy`. */
-const LOWERED_STAGE_ORIGINS = ["plan", "policy"] as const;
-export type LoweredStageOrigin = (typeof LOWERED_STAGE_ORIGINS)[number];
 
 /** A task key, or one member of a fan-out namespace as `namespace/key`. */
 const LoweredTaskPathSchema = Type.String({
@@ -639,20 +563,18 @@ export const LoweredStageSchema = Type.Object(
 			"review-fan-out",
 			"gate",
 		] as const),
-		/** The plan's stage id. */
+		/** The derived stage id: `implement`, `verify`, `review`, or a gate's. */
 		id: Type.String({ pattern: "^[a-z][a-z0-9-]*$", maxLength: 128 }),
 		/** `<stage id>-<deliverable id>`: the task key, or the fan-out namespace. */
 		key: Type.String({ pattern: "^[a-z][a-z0-9-]*$", maxLength: 128 }),
-		origin: stringEnum(LOWERED_STAGE_ORIGINS),
 		/** Every task key this stage may declare, worst case, in order. */
 		tasks: Type.Array(LoweredTaskPathSchema, { maxItems: 32 }),
-		/** `verify-and-fix`: the FIX rounds the plan or the policy asked for. */
+		/** `verify-and-fix`: the FIX rounds `policy.maxFixRounds` asked for. */
 		fixRounds: Type.Optional(Type.Integer({ minimum: 0, maximum: 2 })),
 		/** `verify-and-fix`: the VERIFY rounds the loop declares, `fixRounds + 1`. */
 		verifyRounds: Type.Optional(
 			Type.Integer({ minimum: 1, maximum: MAX_VERIFY_ROUNDS }),
 		),
-		escalate: Type.Optional(stringEnum(["thinking", "none"] as const)),
 		lenses: Type.Optional(
 			Type.Array(LoweredLensSchema, { maxItems: MAX_REVIEW_LENSES }),
 		),
@@ -691,19 +613,18 @@ export const StageLoweringSchema = Type.Object(
 );
 export type StageLowering = Static<typeof StageLoweringSchema>;
 
-/** A lowered stage: the runtime view, plus the plan stage it came from. */
+/** One derived stage, in both views: the lowering, and the plan-facing one. */
 interface LoweredStageEntry {
 	readonly lowered: LoweredStage;
-	readonly stage: Stage;
-	/** A review stage's lenses as the PLAN has them, authored or seeded. */
-	readonly lenses?: readonly PlanLens[];
+	/** The plan-facing view. A gate has none: `gates` already names it. */
+	readonly compiled?: CompiledStage;
 }
 
 interface LoweredDeliverableEntry {
 	readonly deliverable: Deliverable;
-	/** The plan's own stages, which are what the plan-facing document shows. */
+	/** The derived stages, which are what the plan-facing document shows. */
 	readonly stages: readonly LoweredStageEntry[];
-	/** The gate `policy.gates` added after them, which the plan does not have. */
+	/** The gate `policy.gates` added after them; not a stage of the document. */
 	readonly policyGate?: LoweredStageEntry;
 }
 
@@ -763,70 +684,27 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 }
 
 /**
- * A deliverable's review lenses, seeded from its `tasks[].review` with the
+ * A deliverable's review lenses, seeded from its `reviews` list with the
  * policy's review defaults resolved — the same list pi-maestro's own
- * `defaultStagesFor` produces, field for field, so a host that derives the
- * compiled document for itself gets the document this compiler produces.
+ * derivation produces, field for field, so a host that derives the compiled
+ * document for itself gets the document this compiler produces.
  */
 function seedLenses(
 	deliverable: Deliverable,
 	policy: ResolvedPolicy,
-): PlanLens[] {
-	const lenses: PlanLens[] = [];
-	for (const task of deliverable.tasks ?? []) {
-		const review: Delegation | undefined = task.review;
-		if (!review) continue;
+): LoweredLens[] {
+	const lenses: LoweredLens[] = [];
+	for (const review of deliverable.reviews ?? []) {
+		const entry: Review = review;
 		lenses.push({
-			id: review.lens,
-			tier: review.tier ?? policy.reviewDefault.tier,
-			diverse: review.diverse ?? policy.reviewDefault.diverse,
-			...(review.skill ? { skill: review.skill } : {}),
-			...(review.model ? { model: review.model } : {}),
+			id: entry.lens,
+			tier: entry.tier ?? policy.reviewDefault.tier,
+			diverse: entry.diverse ?? policy.reviewDefault.diverse,
+			...(entry.skill ? { skill: entry.skill } : {}),
+			...(entry.model ? { model: entry.model } : {}),
 		});
 	}
 	return lenses;
-}
-
-/**
- * What a deliverable that declared no stages compiles to (spec §2.1). The
- * review stage is omitted rather than declared empty when nothing in the
- * deliverable asked for a review: a fan-out over zero lenses is not a cheaper
- * review, it is a stage that cannot be compiled.
- */
-function defaultStagesFor(
-	deliverable: Deliverable,
-	policy: ResolvedPolicy,
-): readonly Stage[] {
-	const lenses = seedLenses(deliverable, policy);
-	const stages: Stage[] = [
-		{ use: "implement", id: "implement" },
-		{ use: "verify-and-fix", id: "verify", maxRounds: policy.maxFixRounds },
-	];
-	if (lenses.length > 0) {
-		stages.push({
-			use: "review-fan-out",
-			id: "review",
-			lenses,
-			synthesis: "optional",
-		});
-	}
-	return stages;
-}
-
-/** `<stage id>-<deliverable id>`: the task key, or the fan-out namespace. */
-function stageKey(stage: Stage, deliverable: Deliverable): string {
-	return `${stage.id}-${deliverable.id}`;
-}
-
-/** A lens with the policy's defaults resolved; nothing is left implied. */
-function resolveLens(lens: PlanLens, policy: ResolvedPolicy): LoweredLens {
-	return {
-		id: lens.id,
-		tier: lens.tier ?? policy.reviewDefault.tier,
-		diverse: lens.diverse ?? policy.reviewDefault.diverse,
-		...(lens.skill ? { skill: lens.skill } : {}),
-		...(lens.model ? { model: lens.model } : {}),
-	};
 }
 
 /**
@@ -841,6 +719,93 @@ function dedupeLensKeys(lenses: readonly LoweredLens[]): readonly string[] {
 		seen.set(lens.id, count);
 		return count === 1 ? lens.id : `${lens.id}-${count}`;
 	});
+}
+
+/**
+ * THE DERIVATION, and the only one: what a deliverable compiles to, in both
+ * views at once (spec §2.1). A plan authors no stages, so this list is a pure
+ * function of the deliverable's `reviews` and the policy — implement, then
+ * verify-and-fix, then a review fan-out.
+ *
+ * The review stage is OMITTED rather than declared empty when the deliverable
+ * asked for no review: a fan-out over zero lenses is not a cheaper review, it
+ * is a stage that cannot be compiled.
+ */
+function derivedStagesFor(
+	deliverable: Deliverable,
+	policy: ResolvedPolicy,
+	where: string,
+): readonly LoweredStageEntry[] {
+	const key = (id: string) => `${id}-${deliverable.id}`;
+	const entries: LoweredStageEntry[] = [
+		{
+			lowered: {
+				use: "implement",
+				id: "implement",
+				key: key("implement"),
+				tasks: [key("implement")],
+			},
+			compiled: { use: "implement", id: "implement" },
+		},
+	];
+
+	// The plan counts FIX rounds; the component counts VERIFY rounds, and a fix
+	// is never left unchecked, so the loop runs one more than the policy asked
+	// for (wave-2 decision of 2026-09-16).
+	const fixRounds = policy.maxFixRounds;
+	const verifyRounds = fixRounds + 1;
+	const verifyKey = key("verify");
+	const rounds: string[] = [];
+	for (let round = 1; round <= verifyRounds; round += 1) {
+		rounds.push(`${verifyKey}-verify-${round}`);
+		if (round < verifyRounds) rounds.push(`${verifyKey}-fix-${round}`);
+	}
+	entries.push({
+		lowered: {
+			use: "verify-and-fix",
+			id: "verify",
+			key: verifyKey,
+			tasks: rounds,
+			fixRounds,
+			verifyRounds,
+		},
+		compiled: { use: "verify-and-fix", id: "verify", maxRounds: verifyRounds },
+	});
+
+	const lenses = seedLenses(deliverable, policy);
+	if (lenses.length === 0) return entries;
+	if (lenses.length > MAX_REVIEW_LENSES) {
+		refuse(
+			`${where} declares ${lenses.length} reviews; at most ${MAX_REVIEW_LENSES} fan out at once.`,
+		);
+	}
+	const reviewKey = key("review");
+	entries.push({
+		lowered: {
+			use: "review-fan-out",
+			id: "review",
+			key: reviewKey,
+			tasks: [
+				...dedupeLensKeys(lenses).map((lensKey) => `${reviewKey}/${lensKey}`),
+				`${reviewKey}-synthesis`,
+			],
+			lenses,
+			synthesis: "optional",
+		},
+		compiled: {
+			use: "review-fan-out",
+			id: "review",
+			lenses: lenses.map((lens) => ({
+				id: lens.id,
+				tier: lens.tier,
+				diverse: lens.diverse,
+				...(lens.skill ? { skill: lens.skill } : {}),
+				...(lens.model ? { model: lens.model } : {}),
+			})),
+			synthesis: "optional",
+		},
+	});
+	return entries;
 }
 
 /**
@@ -871,12 +836,12 @@ export function compileStages(
  *
  * ONE derivation, two views. This is the document `plan-review` validates its
  * `compiled` input against and the one pi-maestro derives for itself from the
- * stored plan, so the two must agree: the stage list is the plan's own, with
- * the §2.1 defaults filled in exactly as `defaultStagesFor` fills them, and the
- * gates `policy.gates` adds are NOT stages — `gates` already says where a
- * person is asked. The one translation is `maxRounds`, which the plan counts in
- * FIX rounds and a compiled document records in VERIFY rounds (`fixRounds + 1`),
- * because that is what the component was actually asked for.
+ * stored plan, so the two must agree: the stage list is the derived one,
+ * `derivedStagesFor`'s, field for field, and the gates `policy.gates` adds are
+ * NOT stages — `gates` already says where a person is asked, so a compiled
+ * deliverable never carries a `gate`. The one translation is `maxRounds`, which
+ * the plan counts in FIX rounds and a compiled document records in VERIFY
+ * rounds (`fixRounds + 1`), because that is what the component was asked for.
  */
 export function compileStageDocument(
 	plan: Plan,
@@ -886,76 +851,22 @@ export function compileStageDocument(
 	return {
 		deliverables: compiled.deliverables.map((entry) => ({
 			id: entry.deliverable.id,
-			stages: entry.stages.map((stage) => planFacingStage(stage)),
+			stages: entry.stages.flatMap((stage) =>
+				stage.compiled ? [stage.compiled] : [],
+			),
 		})),
 		effort: compiled.policy.effort,
 		gates: compiled.policy.gates,
 	};
 }
 
-/** One stage in the plan's own vocabulary, from the compilation that lowered it. */
-function planFacingStage(entry: LoweredStageEntry): CompiledStage {
-	const stage = entry.stage;
-	if (stage.use === "implement") {
-		return {
-			use: "implement",
-			id: stage.id,
-			...(stage.tools?.length ? { tools: [...stage.tools] } : {}),
-		};
-	}
-	if (stage.use === "verify-and-fix") {
-		return {
-			use: "verify-and-fix",
-			id: stage.id,
-			// VERIFY rounds: what the component was asked for, not what the plan
-			// counted.
-			maxRounds: entry.lowered.verifyRounds ?? 1,
-			...(stage.escalate ? { escalate: stage.escalate } : {}),
-		};
-	}
-	if (stage.use === "review-fan-out") {
-		return {
-			use: "review-fan-out",
-			id: stage.id,
-			lenses: (entry.lenses ?? []).map((lens) => ({
-				id: lens.id,
-				...(lens.tier ? { tier: lens.tier } : {}),
-				...(lens.diverse === undefined ? {} : { diverse: lens.diverse }),
-				...(lens.skill ? { skill: lens.skill } : {}),
-				...(lens.model ? { model: lens.model } : {}),
-			})),
-			...(stage.synthesis ? { synthesis: stage.synthesis } : {}),
-		};
-	}
-	if (stage.use !== "gate") {
-		refuse(
-			`stage "${stage.id}" declares the kind "${stage.use}", which does not compile.`,
-		);
-	}
-	return {
-		use: "gate",
-		id: stage.id,
-		question: stage.question,
-		...(stage.show?.length ? { show: [...stage.show] } : {}),
-	};
-}
-
 function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 	const resolved = resolvePolicy(policy);
 	const declared = new Set<string>();
-	const keys = new Map<string, string>();
-	const claim = (key: string, what: string): void => {
-		const owner = keys.get(key);
-		if (owner !== undefined) {
-			refuse(
-				`${what} compiles to the task key "${key}", which ${owner} already claims; a stage id must be unique within its deliverable and a deliverable id unique within the plan.`,
-			);
-		}
-		keys.set(key, what);
-	};
-
 	const deliverables: LoweredDeliverableEntry[] = [];
-	let serial = resolved.gates === "every-deliverable";
+	// Only `every-deliverable` can stop the walk part-way: a plan declares no
+	// gate of its own.
+	const serial = resolved.gates === "every-deliverable";
 
 	for (const deliverable of plan.deliverables) {
 		const where = `deliverable "${deliverable.id}"`;
@@ -976,80 +887,28 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 				`${where} reads ${(deliverable.reads ?? []).map((id) => `"${id}"`).join(", ")}, but a handoff is never applied to another worktree: every deliverable branches from the same baseline, so one cannot build on another's code. Drop \`reads\`, or merge the deliverables into one.`,
 			);
 		}
-		for (const task of deliverable.tasks ?? []) {
-			if (!task.by) continue;
+		if (deliverable.stages !== undefined) {
 			refuse(
-				`${where} task "${task.id}" carries \`by\`, which plan schema v4 renamed to \`review\`: this is a version 3 document and there is no migration. Rename \`by\` to \`review\` on every review task and store the plan at \`schemaVersion: 4\`.`,
+				`${where} declares \`stages\`: plan schema v5 does not author stages; the compiler derives them from \`reviews\` and \`policy\`, so drop the block and store the plan at \`schemaVersion: 5\`.`,
 			);
+		}
+		for (const task of deliverable.tasks) {
+			if (task.by !== undefined) {
+				refuse(
+					`${where} task "${task.id}" carries \`by\`, plan schema v3's name for a task review: plan schema v5 moved review routing to \`deliverables[].reviews\`; a task is work only, so move it to the deliverable's \`reviews\` list and store the plan at \`schemaVersion: 5\`.`,
+				);
+			}
+			if (task.review !== undefined) {
+				refuse(
+					`${where} task "${task.id}" carries \`review\`: plan schema v5 moved review routing to \`deliverables[].reviews\`; a task is work only, so move it to the deliverable's \`reviews\` list and store the plan at \`schemaVersion: 5\`.`,
+				);
+			}
 		}
 		declared.add(deliverable.id);
-
-		const stages =
-			deliverable.stages ?? defaultStagesFor(deliverable, resolved);
-		const origin: LoweredStageOrigin = deliverable.stages ? "plan" : "policy";
-		const ids = new Set<string>();
-		const compiled: LoweredStageEntry[] = [];
-		let implementAt = -1;
-
-		stages.forEach((stage, index) => {
-			const at = `${where} stage "${stage.id}"`;
-			if (!STAGE_ID_RE.test(stage.id)) {
-				refuse(
-					`${at} becomes a workflow namespace and a task key, so its id must match ^[a-z][a-z0-9-]*$ — a leading digit is not a task key.`,
-				);
-			}
-			if (ids.has(stage.id)) {
-				refuse(
-					`${at} is declared twice; a stage id is unique within its deliverable.`,
-				);
-			}
-			ids.add(stage.id);
-			if (stage.use === "dynamic")
-				refuse(`${at}: dynamic stages are not compiled yet`);
-			if (stage.use === "sub-workflow") {
-				refuse(`${at}: sub-workflows are not part of this slice`);
-			}
-			if (stage.use === "gate" && index !== stages.length - 1) {
-				refuse(
-					`${at} is a gate but not the last stage; nothing runs after a human decided.`,
-				);
-			}
-			if (stage.use === "implement") {
-				if (implementAt >= 0) {
-					refuse(
-						`${where} declares a second \`implement\` stage; a deliverable produces one handoff, so it implements once.`,
-					);
-				}
-				implementAt = index;
-			}
-			if (stage.use === "verify-and-fix" && implementAt < 0) {
-				refuse(
-					`${at} verifies before anything was implemented; a \`verify-and-fix\` stage follows the \`implement\` stage.`,
-				);
-			}
-
-			const key = stageKey(stage, deliverable);
-			claim(key, at);
-			const lenses =
-				stage.use === "review-fan-out"
-					? stage.lenses?.length
-						? stage.lenses
-						: seedLenses(deliverable, resolved)
-					: undefined;
-			compiled.push({
-				stage,
-				...(lenses ? { lenses } : {}),
-				lowered: lowerStage(stage, key, origin, lenses, resolved, at),
-			});
-			if (stage.use === "gate") serial = true;
+		deliverables.push({
+			deliverable,
+			stages: derivedStagesFor(deliverable, resolved, where),
 		});
-
-		if (implementAt < 0) {
-			refuse(
-				`${where} declares no \`implement\` stage; a deliverable is work, or it is nothing.`,
-			);
-		}
-		deliverables.push({ deliverable, stages: compiled });
 	}
 
 	// The gates `policy.gates` adds. `every-deliverable` puts one after each
@@ -1063,9 +922,7 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 			entry.deliverable,
 			index === deliverables.length - 1,
 		);
-		if (!policyGate) return entry;
-		claim(policyGate.lowered.key, `policy gate "${policyGate.lowered.key}"`);
-		return { ...entry, policyGate };
+		return policyGate ? { ...entry, policyGate } : entry;
 	});
 	const gateKeys: string[] = ["approve-plan"];
 	for (const entry of withPolicyGates) {
@@ -1073,10 +930,7 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 			if (stage.use === "gate") gateKeys.push(stage.key);
 		}
 	}
-	if (resolved.gates !== "approve-plan") {
-		claim("ship", "the ship gate");
-		gateKeys.push("ship");
-	}
+	if (resolved.gates !== "approve-plan") gateKeys.push("ship");
 
 	return {
 		policy: resolved,
@@ -1122,109 +976,10 @@ function policyGateFor(
 	if (policy.gates !== "every-deliverable" || last) return undefined;
 	const key = `approve-${deliverable.id}`;
 	const question = `Continue past deliverable "${deliverable.id}"?`;
-	const stage: Stage = { use: "gate", id: key, question };
+	// No `compiled` view: a policy gate is not a stage of the plan-facing
+	// document, because `gates` already says where a person is asked.
 	return {
-		stage,
-		lowered: {
-			use: "gate",
-			id: key,
-			key,
-			origin: "policy",
-			tasks: [key],
-			question,
-		},
-	};
-}
-
-/** One stage as the lowering describes it: its key, and every task it declares. */
-function lowerStage(
-	stage: Stage,
-	key: string,
-	origin: LoweredStageOrigin,
-	planLenses: readonly PlanLens[] | undefined,
-	policy: ResolvedPolicy,
-	at: string,
-): LoweredStage {
-	if (stage.use === "implement") {
-		return { use: "implement", id: stage.id, key, origin, tasks: [key] };
-	}
-	if (stage.use === "verify-and-fix") {
-		const fixRounds = (stage.maxRounds ?? policy.maxFixRounds) as 0 | 1 | 2;
-		// The plan counts FIX rounds; the component counts VERIFY rounds, and a
-		// fix is never left unchecked, so the loop runs one more than the plan
-		// asked for (wave-2 decision of 2026-09-16).
-		const verifyRounds = fixRounds + 1;
-		if (stage.escalate === "thinking" && policy.effort === "deep") {
-			refuse(
-				`${at} asks to escalate a fixer one rung above "deep", where the effort ladder ends; drop \`escalate\` or lower the run's effort.`,
-			);
-		}
-		const tasks: string[] = [];
-		for (let round = 1; round <= verifyRounds; round += 1) {
-			tasks.push(`${key}-verify-${round}`);
-			if (round < verifyRounds) tasks.push(`${key}-fix-${round}`);
-		}
-		return {
-			use: "verify-and-fix",
-			id: stage.id,
-			key,
-			origin,
-			tasks,
-			fixRounds,
-			verifyRounds,
-			...(stage.escalate ? { escalate: stage.escalate } : {}),
-		};
-	}
-	if (stage.use === "review-fan-out") {
-		const authored = planLenses ?? [];
-		if (authored.length === 0) {
-			refuse(
-				`${at} declares no lenses and the deliverable has no \`tasks[].review\` to seed from; a fan-out over nothing is not a cheaper review.`,
-			);
-		}
-		if (authored.length > MAX_REVIEW_LENSES) {
-			refuse(
-				`${at} declares ${authored.length} lenses; at most ${MAX_REVIEW_LENSES} fan out at once.`,
-			);
-		}
-		const lenses = authored.map((lens) => resolveLens(lens, policy));
-		const synthesis = stage.synthesis ?? "optional";
-		const tasks = dedupeLensKeys(lenses).map((lensKey) => `${key}/${lensKey}`);
-		if (synthesis !== "none") tasks.push(`${key}-synthesis`);
-		return {
-			use: "review-fan-out",
-			id: stage.id,
-			key,
-			origin,
-			tasks,
-			lenses,
-			synthesis,
-		};
-	}
-	// A gate the plan declared. `dynamic` and `sub-workflow` never reach here:
-	// `compilePlan` refuses them before it asks for a document.
-	if (stage.use !== "gate") {
-		refuse(
-			`${at} declares the stage kind "${stage.use}", which does not compile.`,
-		);
-	}
-	if (!stage.question.trim().endsWith("?")) {
-		refuse(
-			`${at} asks ${JSON.stringify(stage.question)}, which is not a question; a gate's prompt is the only text the approver is guaranteed to see, so it ends in "?".`,
-		);
-	}
-	for (const shown of stage.show ?? []) {
-		if (shown === stage.id) {
-			refuse(`${at} shows itself; a gate shows stages declared before it.`);
-		}
-	}
-	return {
-		use: "gate",
-		id: stage.id,
-		key,
-		origin,
-		tasks: [key],
-		question: stage.question,
+		lowered: { use: "gate", id: key, key, tasks: [key], question },
 	};
 }
 
@@ -1268,14 +1023,15 @@ function handoffRef(descriptor: WorkflowHandoffDescriptor): string {
 	return `refs/pi-subagent/handoffs/${descriptor.subagentRunId}/${descriptor.subagentAttemptId}`;
 }
 
-/** One deliverable as authored, for an agent's context entry (16 KiB bound). */
+/**
+ * One deliverable as authored, for an agent's context entry (16 KiB bound).
+ * Every task is work — plan schema v5 has no review task — so none is filtered.
+ */
 function planText(deliverable: Deliverable): string {
-	const tasks = (deliverable.tasks ?? [])
-		.filter((task) => !task.review)
-		.map(
-			(task) =>
-				`- ${task.id}: ${task.title}${task.body ? ` — ${task.body}` : ""}`,
-		);
+	const tasks = deliverable.tasks.map(
+		(task) =>
+			`- ${task.id}: ${task.title}${task.body ? ` — ${task.body}` : ""}`,
+	);
 	return [
 		`Deliverable ${deliverable.id}: ${deliverable.title}`,
 		deliverable.body ?? "",
@@ -1461,10 +1217,7 @@ export default defineWorkflow({
 				}
 				order.push(predecessor.ref);
 			}
-			const tools =
-				stage.stage.use === "implement" && stage.stage.tools?.length
-					? [...stage.stage.tools]
-					: [...DEFAULT_IMPLEMENT_TOOLS];
+			const tools = [...DEFAULT_IMPLEMENT_TOOLS];
 			const handle = ctx.agent(stage.lowered.key, {
 				agent: IMPLEMENTER_AGENT,
 				task: {
@@ -1530,8 +1283,6 @@ export default defineWorkflow({
 			let reviews: DeliverableOutcome["reviews"] = [];
 			let findings: readonly Finding[] = [];
 			let reviewInput: TaskInputHandle | undefined;
-			/** What a `gate` stage's `show` may name, by stage id. */
-			const shown = new Map<string, TaskInputHandle>();
 
 			for (const stage of stageEntries(entry)) {
 				if (stopped) break;
@@ -1541,7 +1292,6 @@ export default defineWorkflow({
 				if (lowered.use === "implement") {
 					handle = handle ?? declareImplement(entry, stage);
 					final = handle;
-					shown.set(lowered.id, handle.output);
 					continue;
 				}
 
@@ -1560,7 +1310,6 @@ export default defineWorkflow({
 							check: { command: CHECK_COMMAND, install: INSTALL_COMMAND },
 							effort,
 							maxRounds: (lowered.verifyRounds ?? 1) as 0 | 1 | 2 | 3,
-							...(lowered.escalate ? { escalate: lowered.escalate } : {}),
 							budget: RUN_BUDGET,
 							verify: (round) => ({
 								agent: IMPLEMENTER_AGENT,
@@ -1616,7 +1365,6 @@ export default defineWorkflow({
 					verifyRounds = loop.rounds;
 					verified = { checkRan: loop.checkRan, passed: loop.passed };
 					final = loop.handoff as WorktreeTaskHandle<Implementation>;
-					shown.set(lowered.id, final.output);
 					continue;
 				}
 
@@ -1724,7 +1472,6 @@ export default defineWorkflow({
 						const [reduced] = await ctx.settled([fanOut.synthesis]);
 						if (reduced?.status === "fulfilled") {
 							reviewInput = fanOut.synthesis.output;
-							shown.set(lowered.id, fanOut.synthesis.output);
 						} else {
 							ctx.log(
 								`plan-to-ship: the synthesis of "${lowered.key}" did not run (${reduced?.outcome ?? "absent"}); the verdict, the findings and the coverage stand without it.`,
@@ -1734,16 +1481,11 @@ export default defineWorkflow({
 					continue;
 				}
 
-				// A gate: the plan's own, or the one `policy.gates` asked for.
+				// The one gate `policy.gates` asked for after this deliverable.
 				const inputs: Record<string, TaskInputHandle> = {
 					summary: final.output,
 				};
-				for (const name of (stage.stage.use === "gate" && stage.stage.show) ||
-					[]) {
-					const handleForStage = shown.get(name);
-					if (handleForStage) inputs[`stage-${name}`] = handleForStage;
-				}
-				if (reviewInput && !inputs["stage-review"]) inputs.review = reviewInput;
+				if (reviewInput) inputs.review = reviewInput;
 				const blocking = reviews.filter((review) => review.blocking).length;
 				const decision = gate(ctx, lowered.key, {
 					prompt: [
@@ -1752,7 +1494,7 @@ export default defineWorkflow({
 							? `The check ${verified.checkRan ? (verified.passed ? "ran and passed" : "ran and failed") : "did not run, so the change is unverified"} after ${verifyRounds} verify round(s).`
 							: "No verify stage was compiled for this deliverable, so the only check is the implementer's own report.",
 						`Reviews: ${reviews.length} lens(es) reported, ${blocking} blocking finding(s).`,
-						"The `summary` input carries the implementation report; a `review` or `stage-*` input carries what the stage it names produced. Verify the exported patch yourself: the in-worktree check is evidence, not a gate.",
+						"The `summary` input carries the implementation report; a `review` input carries the review synthesis, when one ran. Verify the exported patch yourself: the in-worktree check is evidence, not a gate.",
 						'Answer {"proceed":false} to stop the run here; the deliverables already implemented keep their handoffs, and nothing after this gate is declared.',
 						lowered.question ?? `Continue past "${deliverable.id}"?`,
 					].join("\n"),

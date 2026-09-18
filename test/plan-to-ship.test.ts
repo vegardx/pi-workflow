@@ -34,9 +34,9 @@ import {
 	compileStages,
 } from "../workflows/plan-to-ship.workflow.js";
 
-// W2-PTS acceptance: the builtin plan-to-ship definition, now a COMPILER over
-// `plan.deliverables[].stages` and `plan.policy`, driven through the real
-// service with a scripted subagent. Every expectation below is the plan-loop
+// W2-PTS acceptance: the builtin plan-to-ship definition, a COMPILER over
+// `plan.deliverables` and `plan.policy` that DERIVES every stage, driven
+// through the real service with a scripted subagent. Every expectation below is the plan-loop
 // spec (sections 1.3, 2.1, 2.3 and 5), the plan-to-ship spec, experiment W1's
 // verdict, or a component's documented rule — never the definition's
 // implementation.
@@ -59,9 +59,6 @@ const CACHE_MARKER = "npm_config_cache=/tmp/npm-cache";
 /** The compiler's own input types, so a fixture cannot drift from the schema. */
 type PlanInput = Parameters<typeof compileStages>[0];
 type PolicyInput = NonNullable<Parameters<typeof compileStages>[1]>;
-type PlanStage = NonNullable<
-	PlanInput["deliverables"][number]["stages"]
->[number];
 
 interface PlanOptions {
 	readonly deliverables?: number;
@@ -70,10 +67,10 @@ interface PlanOptions {
 	readonly pinnedModel?: string;
 	readonly tier?: "light" | "standard" | "heavy";
 	readonly policy?: PolicyInput;
-	readonly stages?: readonly PlanStage[];
 	readonly after?: boolean;
 }
 
+/** A plan schema v5 document: tasks are work, reviews are the lens list. */
 function plan(options: PlanOptions = {}): PlanInput {
 	const count = options.deliverables ?? 1;
 	const lenses = options.lensesPerDeliverable ?? ["correctness"];
@@ -85,25 +82,47 @@ function plan(options: PlanOptions = {}): PlanInput {
 			title: `Deliverable ${index}`,
 			after: options.after && index > 0 ? [`d${index - 1}`] : [],
 			reads: [],
-			tasks: [
-				{ id: `w${index}`, title: "Write the code" },
-				...lenses.map((lens, lensIndex) => ({
-					id: `r${index}-${lensIndex}`,
-					title: `Review: ${lens}`,
-					review: {
-						lens,
-						...(options.diverse === undefined
-							? {}
-							: { diverse: options.diverse }),
-						...(options.tier ? { tier: options.tier } : {}),
-						...(options.pinnedModel ? { model: options.pinnedModel } : {}),
-					},
-				})),
-			],
-			...(options.stages ? { stages: [...options.stages] } : {}),
+			tasks: [{ id: `w${index}`, title: "Write the code" }],
+			...(lenses.length > 0
+				? {
+						reviews: lenses.map((lens) => ({
+							lens,
+							...(options.diverse === undefined
+								? {}
+								: { diverse: options.diverse }),
+							...(options.tier ? { tier: options.tier } : {}),
+							...(options.pinnedModel ? { model: options.pinnedModel } : {}),
+						})),
+					}
+				: {}),
 		})),
 		repos: [{ key: "main", path: "/repo" }],
 		...(options.policy ? { policy: options.policy } : {}),
+	};
+}
+
+/** The same plan with a plan schema v4 `stages` block on its first deliverable. */
+function withStages(document: PlanInput, stages: unknown): PlanInput {
+	const [first, ...rest] = document.deliverables;
+	if (!first) throw new Error("fixture has no deliverable");
+	return { ...document, deliverables: [{ ...first, stages }, ...rest] };
+}
+
+/** The same plan with a refused routing key on its first deliverable's task. */
+function withTaskKey(
+	document: PlanInput,
+	key: "review" | "by",
+	value: unknown,
+): PlanInput {
+	const [first, ...rest] = document.deliverables;
+	const [task, ...others] = first?.tasks ?? [];
+	if (!first || !task) throw new Error("fixture has no task");
+	return {
+		...document,
+		deliverables: [
+			{ ...first, tasks: [{ ...task, [key]: value }, ...others] },
+			...rest,
+		],
 	};
 }
 
@@ -595,31 +614,10 @@ function examplePlan(): PlanInput {
 				title: "Ship the component catalogue",
 				after: [],
 				reads: [],
-				tasks: [
-					{ id: "impl", title: "Write src/components/*.ts" },
-					{
-						id: "rev-contracts",
-						title: "Contract review",
-						review: { lens: "contracts", tier: "heavy", diverse: true },
-					},
-				],
-				stages: [
-					{ use: "implement", id: "build" },
-					{
-						use: "verify-and-fix",
-						id: "green",
-						maxRounds: 2,
-						escalate: "thinking",
-					},
-					{
-						use: "review-fan-out",
-						id: "review",
-						synthesis: "required",
-						lenses: [
-							{ id: "contracts", tier: "heavy", diverse: true },
-							{ id: "replay", tier: "standard" },
-						],
-					},
+				tasks: [{ id: "impl", title: "Write src/components/*.ts" }],
+				reviews: [
+					{ lens: "contracts", tier: "heavy", diverse: true },
+					{ lens: "replay", tier: "standard" },
 				],
 			},
 		],
@@ -630,15 +628,15 @@ describe("plan-to-ship: the compiled stage document", () => {
 	// The plan-facing view of the SAME compilation the run walks: what
 	// `plan-review` validates its `compiled` input against and what pi-maestro
 	// derives for itself from the stored plan. It must therefore be exactly the
-	// plan's stage list with the 2.1 defaults filled in - no task keys, no
-	// policy gates, and `maxRounds` in the component's VERIFY rounds.
+	// derived stage list of spec 2.1 - no task keys, no policy gates, and
+	// `maxRounds` in the component's VERIFY rounds.
 	function check(document: unknown): void {
 		const errors = [...Value.Errors(CompiledStageDocumentSchema, document)];
 		expect(errors.map((error) => error.message)).toEqual([]);
 		expect(Value.Check(CompiledStageDocumentSchema, document)).toBe(true);
 	}
 
-	it("derives the default stage list as pi-maestro's `defaultStagesFor` does", () => {
+	it("derives the stage list pi-maestro derives, from `reviews` and `policy`", () => {
 		const document = compileStageDocument(plan());
 		check(document);
 		expect(document).toEqual({
@@ -674,20 +672,15 @@ describe("plan-to-ship: the compiled stage document", () => {
 				{
 					id: "catalogue",
 					stages: [
-						{ use: "implement", id: "build" },
-						{
-							use: "verify-and-fix",
-							id: "green",
-							maxRounds: 3,
-							escalate: "thinking",
-						},
+						{ use: "implement", id: "implement" },
+						{ use: "verify-and-fix", id: "verify", maxRounds: 2 },
 						{
 							use: "review-fan-out",
 							id: "review",
-							synthesis: "required",
+							synthesis: "optional",
 							lenses: [
 								{ id: "contracts", tier: "heavy", diverse: true },
-								{ id: "replay", tier: "standard" },
+								{ id: "replay", tier: "standard", diverse: false },
 							],
 						},
 					],
@@ -725,47 +718,26 @@ describe("plan-to-ship: the compiled stage document", () => {
 		},
 	);
 
-	it("keeps a declared gate stage, because the plan declared it", () => {
-		const document = compileStageDocument(
-			plan({
-				lensesPerDeliverable: [],
-				stages: [
-					{ use: "implement", id: "build" },
-					{
-						use: "gate",
-						id: "look",
-						question: "Is the patch worth verifying?",
-						show: ["build"],
-					},
-				],
-			}),
-		);
+	it("omits the review stage when the deliverable lists no review", () => {
+		const document = compileStageDocument(plan({ lensesPerDeliverable: [] }));
 		check(document);
-		expect(document.deliverables[0]?.stages[1]).toEqual({
-			use: "gate",
-			id: "look",
-			question: "Is the patch worth verifying?",
-			show: ["build"],
-		});
+		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
+			"implement",
+			"verify-and-fix",
+		]);
 	});
 
 	it("refuses what the lowering refuses, from the same compilation", () => {
 		expect(() =>
-			compileStageDocument(
-				plan({
-					stages: [
-						{ use: "dynamic", id: "invent", brief: "Work it out." },
-					] as unknown as readonly PlanStage[],
-				}),
-			),
-		).toThrow("dynamic stages are not compiled yet");
+			compileStageDocument(withStages(plan(), [{ use: "implement", id: "x" }])),
+		).toThrow("plan schema v5 does not author stages");
 	});
 });
 
 describe("plan-to-ship: the compiler", () => {
-	it("compiles a v3 plan with neither `stages` nor `policy` to the default stage list", () => {
-		// Spec 2.1: a plan with neither field is valid and gets the defaults, so
-		// every stored v3 document still compiles to what it always compiled to.
+	it("compiles a plan with no `policy` to the derived stage list", () => {
+		// Spec 2.1: a plan that sets no policy is valid and gets the defaults,
+		// and the stage list is derived, never authored.
 		const document = compileStages(plan());
 		expect(document.effort).toBe("standard");
 		expect(document.gates).toEqual(["approve-plan", "ship"]);
@@ -777,14 +749,12 @@ describe("plan-to-ship: the compiler", () => {
 						use: "implement",
 						id: "implement",
 						key: "implement-d0",
-						origin: "policy",
 						tasks: ["implement-d0"],
 					},
 					{
 						use: "verify-and-fix",
 						id: "verify",
 						key: "verify-d0",
-						origin: "policy",
 						// `standard` pays for one FIX round, which is two VERIFY rounds.
 						fixRounds: 1,
 						verifyRounds: 2,
@@ -798,8 +768,7 @@ describe("plan-to-ship: the compiler", () => {
 						use: "review-fan-out",
 						id: "review",
 						key: "review-d0",
-						origin: "policy",
-						// Seeded from `tasks[].review`, with the policy's review defaults.
+						// Seeded from `reviews`, with the policy's review defaults.
 						lenses: [{ id: "correctness", tier: "standard", diverse: false }],
 						synthesis: "optional",
 						tasks: ["review-d0/correctness", "review-d0-synthesis"],
@@ -809,7 +778,7 @@ describe("plan-to-ship: the compiler", () => {
 		]);
 	});
 
-	it("omits the review stage when nothing in the deliverable asked for one", () => {
+	it("omits the review stage when the deliverable lists no review", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: [] }));
 		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
 			"implement",
@@ -846,28 +815,23 @@ describe("plan-to-ship: the compiler", () => {
 		},
 	);
 
-	it("honours a stage's own maxRounds over the policy's", () => {
+	it("honours `policy.maxFixRounds` over the effort column's default", () => {
 		// `maxFixRounds: 2` is the plan vocabulary's maximum and compiles to the
 		// component's cap of 3 VERIFY rounds: a fix is never left unchecked.
-		const document = compileStages(
-			plan({
-				stages: [
-					{ use: "implement", id: "build" },
-					{ use: "verify-and-fix", id: "green", maxRounds: 2 },
-				],
-			}),
-			{ effort: "cheap" },
-		);
+		const document = compileStages(plan(), {
+			effort: "cheap",
+			maxFixRounds: 2,
+		});
 		expect(document.deliverables[0]?.stages[1]).toMatchObject({
-			key: "green-d0",
+			key: "verify-d0",
 			fixRounds: 2,
 			verifyRounds: MAX_VERIFY_ROUNDS,
 			tasks: [
-				"green-d0-verify-1",
-				"green-d0-fix-1",
-				"green-d0-verify-2",
-				"green-d0-fix-2",
-				"green-d0-verify-3",
+				"verify-d0-verify-1",
+				"verify-d0-fix-1",
+				"verify-d0-verify-2",
+				"verify-d0-fix-2",
+				"verify-d0-verify-3",
 			],
 		});
 	});
@@ -898,32 +862,7 @@ describe("plan-to-ship: the compiler", () => {
 		);
 	});
 
-	it("compiles a declared gate stage where it stands, with its own question", () => {
-		const document = compileStages(
-			plan({
-				stages: [
-					{ use: "implement", id: "build" },
-					{
-						use: "gate",
-						id: "look",
-						question: "Did it do the right thing?",
-						show: ["build"],
-					},
-				],
-			}),
-		);
-		expect(document.deliverables[0]?.stages[1]).toEqual({
-			use: "gate",
-			id: "look",
-			key: "look-d0",
-			origin: "plan",
-			tasks: ["look-d0"],
-			question: "Did it do the right thing?",
-		});
-		expect(document.gates).toEqual(["approve-plan", "look-d0", "ship"]);
-	});
-
-	it("seeds review lenses from `tasks[].review` and resolves tier and diversity from the policy", () => {
+	it("seeds review lenses from `deliverables[].reviews` and resolves tier and diversity from the policy", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: ["a", "b"] }), {
 			reviewDefault: { tier: "heavy", diverse: true },
 		});
@@ -943,141 +882,73 @@ describe("plan-to-ship: the compiler", () => {
 		});
 	});
 
-	it("refuses a plan schema v3 task that still carries `by`, by name", () => {
-		const v3 = plan();
-		const deliverable = v3.deliverables[0];
-		if (!deliverable) throw new Error("fixture");
-		const tasks = [
-			{ id: "w0", title: "Write the code" },
-			{
-				id: "r0-0",
-				title: "Review: correctness",
-				by: { lens: "correctness" },
-			},
-		];
-		const document = {
-			...v3,
-			deliverables: [{ ...deliverable, tasks }],
-		} satisfies PlanInput;
-		expect(() => compileStages(document)).toThrow(
-			'deliverable "d0" task "r0-0" carries `by`, which plan schema v4 renamed to `review`',
+	// Plan schema v5 moved review routing off the task and deleted authored
+	// stages. There is no migration from v3 or v4, so each key is admitted by
+	// the input schema ONLY so the compiler can refuse it by name: refused by
+	// TypeBox a person would read "unexpected property" and could not act on
+	// it. The schema/compiler split is asserted in "the input contract".
+	it.each([
+		[
+			"a task carrying plan schema v4's `review`",
+			() => withTaskKey(plan(), "review", { lens: "correctness" }),
+			'deliverable "d0" task "w0" carries `review`: plan schema v5 moved review routing to `deliverables[].reviews`; a task is work only, so move it to the deliverable\'s `reviews` list and store the plan at `schemaVersion: 5`.',
+		],
+		[
+			"a task carrying plan schema v3's `by`",
+			() => withTaskKey(plan(), "by", { lens: "correctness" }),
+			'deliverable "d0" task "w0" carries `by`, plan schema v3\'s name for a task review: plan schema v5 moved review routing to `deliverables[].reviews`; a task is work only, so move it to the deliverable\'s `reviews` list and store the plan at `schemaVersion: 5`.',
+		],
+		[
+			"a deliverable that authors `stages`",
+			() =>
+				withStages(plan(), [
+					{ use: "implement", id: "build" },
+					{ use: "verify-and-fix", id: "green" },
+				]),
+			'deliverable "d0" declares `stages`: plan schema v5 does not author stages; the compiler derives them from `reviews` and `policy`, so drop the block and store the plan at `schemaVersion: 5`.',
+		],
+	])(
+		"refuses %s by name, and compiles the same plan without it",
+		(_name, document, message) => {
+			expect(() => compileStages(document())).toThrow(message);
+			// The refusal is the compiler's, not the schema's, and it is the ONLY
+			// thing wrong with this plan: the same document without the key compiles.
+			expect(() => compileStages(plan())).not.toThrow();
+		},
+	);
+
+	it("names the key even when its value is the empty object the model wrote", () => {
+		// The seat model answered "remove `review` from work tasks" with
+		// `review: {lens: ""}`. A value-shaped refusal would have missed it; the
+		// compiler refuses the KEY, whatever it carries.
+		expect(() => compileStages(withTaskKey(plan(), "review", {}))).toThrow(
+			"a task is work only",
 		);
-		expect(() => compileStages(document)).toThrow(
-			"this is a version 3 document and there is no migration",
+		expect(() => compileStages(withStages(plan(), []))).toThrow(
+			"plan schema v5 does not author stages",
 		);
-		// The refusal is the compiler's, not the schema's: a v3 document parses,
-		// so the person is told what is wrong instead of reading a TypeBox error,
-		// and it is never compiled without the reviewers it asked for.
-		expect(() =>
-			compileStages({ ...v3, deliverables: [deliverable] }),
-		).not.toThrow();
 	});
 
 	it("de-duplicates repeated lens ids by declaration ordinal", () => {
 		const document = compileStages(
-			plan({
-				stages: [
-					{ use: "implement", id: "build" },
-					{
-						use: "review-fan-out",
-						id: "review",
-						lenses: [{ id: "risk" }, { id: "risk" }, { id: "risk" }],
-						synthesis: "none",
-					},
-				],
-			}),
+			plan({ lensesPerDeliverable: ["risk", "risk", "risk"] }),
 		);
-		expect(document.deliverables[0]?.stages[1]?.tasks).toEqual([
+		expect(document.deliverables[0]?.stages[2]?.tasks).toEqual([
 			"review-d0/risk",
 			"review-d0/risk-2",
 			"review-d0/risk-3",
+			"review-d0-synthesis",
 		]);
 	});
 
-	it.each([
-		[
-			"dynamic stages are not compiled yet",
-			[{ use: "dynamic", id: "invent", brief: "Work it out." }],
-		],
-		[
-			"sub-workflows are not part of this slice",
-			[{ use: "sub-workflow", id: "child", workflow: "deep-review" }],
-		],
-		[
-			"declares no `implement` stage",
-			[{ use: "review-fan-out", id: "review", lenses: [{ id: "a" }] }],
-		],
-		[
-			"declares a second `implement` stage",
-			[
-				{ use: "implement", id: "one" },
-				{ use: "implement", id: "two" },
-			],
-		],
-		[
-			"verifies before anything was implemented",
-			[
-				{ use: "verify-and-fix", id: "green" },
-				{ use: "implement", id: "build" },
-			],
-		],
-		[
-			"is a gate but not the last stage",
-			[
-				{ use: "gate", id: "look", question: "Now?" },
-				{ use: "implement", id: "build" },
-			],
-		],
-		[
-			"is declared twice",
-			[
-				{ use: "implement", id: "build" },
-				{ use: "verify-and-fix", id: "build" },
-			],
-		],
-		["a leading digit is not a task key", [{ use: "implement", id: "1st" }]],
-		[
-			"which is not a question",
-			[
-				{ use: "implement", id: "build" },
-				{ use: "gate", id: "look", question: "Decide." },
-			],
-		],
-		[
-			"a fan-out over nothing is not a cheaper review",
-			[
-				{ use: "implement", id: "build" },
-				{ use: "review-fan-out", id: "review", lenses: [] },
-			],
-		],
-	] as const)("refuses at compile time: %s", (message, stages) => {
+	it("refuses more reviews than a fan-out admits", () => {
 		expect(() =>
 			compileStages(
 				plan({
-					stages: stages as unknown as readonly PlanStage[],
-					lensesPerDeliverable: [],
-				}),
-			),
-		).toThrow(message);
-	});
-
-	it("refuses more lenses than a fan-out admits", () => {
-		expect(() =>
-			compileStages(
-				plan({
-					stages: [
-						{ use: "implement", id: "build" },
-						{
-							use: "review-fan-out",
-							id: "review",
-							lenses: Array.from(
-								{ length: MAX_REVIEW_LENSES + 1 },
-								(_x, i) => ({
-									id: `lens${i}`,
-								}),
-							),
-						},
-					],
+					lensesPerDeliverable: Array.from(
+						{ length: MAX_REVIEW_LENSES + 1 },
+						(_x, index) => `lens${index}`,
+					),
 				}),
 			),
 		).toThrow(`at most ${MAX_REVIEW_LENSES} fan out at once`);
@@ -1106,58 +977,6 @@ describe("plan-to-ship: the compiler", () => {
 				],
 			} as never),
 		).toThrow(/is not declared before it/);
-	});
-
-	it("refuses escalation above the top of the effort ladder", () => {
-		expect(() =>
-			compileStages(
-				plan({
-					stages: [
-						{ use: "implement", id: "build" },
-						{ use: "verify-and-fix", id: "green", escalate: "thinking" },
-					],
-				}),
-				{ effort: "deep" },
-			),
-		).toThrow(/where the effort ladder ends/);
-	});
-
-	it("refuses two stages that compile to the same task key", () => {
-		const document = plan({ deliverables: 2, lensesPerDeliverable: [] });
-		expect(() =>
-			compileStages({
-				...document,
-				deliverables: [
-					{
-						...document.deliverables[0],
-						id: "a",
-						stages: [{ use: "implement", id: "b-c" }],
-					},
-					{
-						...document.deliverables[1],
-						id: "c",
-						stages: [{ use: "implement", id: "a-b" }],
-					},
-				],
-			} as never),
-		).not.toThrow();
-		expect(() =>
-			compileStages({
-				...document,
-				deliverables: [
-					{
-						...document.deliverables[0],
-						id: "c",
-						stages: [{ use: "implement", id: "a-b" }],
-					},
-					{
-						...document.deliverables[1],
-						id: "b-c",
-						stages: [{ use: "implement", id: "a" }],
-					},
-				],
-			} as never),
-		).toThrow(/already claims/);
 	});
 });
 
@@ -1217,7 +1036,7 @@ describe("plan-to-ship: the stage walk", () => {
 		return { delegated, service, runId: receipt.runId, ship };
 	}
 
-	it("lowers the default stage list to the compiled keys, in order", async () => {
+	it("lowers the derived stage list to the compiled keys, in order", async () => {
 		const { ship } = await approvedRun();
 		// Exactly `compileStages`' own task list, plus the two run-level gates.
 		expect(taskPaths(ship)).toEqual([
@@ -1554,40 +1373,6 @@ describe("plan-to-ship: the gate policies", () => {
 			(finished.output as { receipt: { note: string } }).receipt.note,
 		).toContain("stopped at gate approve-d0");
 	});
-
-	it("shows a declared gate stage what its `show` names", async () => {
-		const delegated = scripted();
-		const service = await serviceFor(delegated);
-		const run = await service.run(
-			"plan-to-ship",
-			input({
-				lensesPerDeliverable: [],
-				stages: [
-					{ use: "implement", id: "build" },
-					{
-						use: "gate",
-						id: "look",
-						question: "Is the patch worth verifying?",
-						show: ["build"],
-					},
-				],
-			}),
-		);
-		const approve = await park(service, run.runId, "approve-plan");
-		await decide(service, approve, "approve-plan", { proceed: true });
-		const look = await park(service, run.runId, "look-d0");
-		const checkpoint = taskByKey(look, "look-d0").checkpoint;
-		expect(checkpoint?.prompt).toContain("Is the patch worth verifying?");
-		expect(checkpoint?.inputs).toMatchObject({
-			"stage-build": { files: ["a.txt"] },
-		});
-		await decide(service, look, "look-d0", { proceed: true });
-		const ship = await park(service, run.runId, "ship");
-		await decide(service, ship, "ship", { ship: true });
-		expect((await bounded(service.wait(run.runId), "wait")).status).toBe(
-			"completed",
-		);
-	});
 });
 
 describe("plan-to-ship: replay", () => {
@@ -1804,28 +1589,19 @@ describe("plan-to-ship: the effort dial", () => {
 });
 
 describe("plan-to-ship: the input contract", () => {
-	it("accepts the v4 shape, with and without `effort`", async () => {
+	it("accepts the v5 shape, with and without `effort`", async () => {
 		const service = await serviceFor(scripted());
 		for (const value of [
 			input(),
 			input({ effort: "deep" }),
 			input({ policy: { effort: "cheap", gates: "approve-plan" } }),
+			input({ lensesPerDeliverable: [] }),
+			{ ...input(), plan: { ...plan(), body: "Why this plan exists." } },
 			input({
-				stages: [
-					{ use: "implement", id: "build", tools: ["read", "edit", "write"] },
-					{
-						use: "verify-and-fix",
-						id: "green",
-						maxRounds: 2,
-						escalate: "thinking",
-					},
-					{
-						use: "review-fan-out",
-						id: "review",
-						lenses: [{ id: "contracts", tier: "heavy", diverse: true }],
-						synthesis: "required",
-					},
-				],
+				lensesPerDeliverable: ["contracts", "replay"],
+				tier: "heavy",
+				diverse: true,
+				pinnedModel: "github-copilot/gpt-5.6-sol",
 			}),
 		]) {
 			await expect(
@@ -1834,36 +1610,36 @@ describe("plan-to-ship: the input contract", () => {
 		}
 	});
 
-	it("admits `by` at validate, so the version 3 refusal is the compiler's", async () => {
-		// The plan mirror carries `by` on purpose: refused by TypeBox it would
-		// read as an unexpected property, and a person cannot act on that. It
-		// parses, and the compiler then names it.
-		const service = await serviceFor(scripted());
-		const v3 = {
-			...input(),
-			plan: {
-				...plan(),
-				deliverables: [
-					{
-						id: "d0",
-						title: "t",
-						after: [],
-						reads: [],
-						tasks: [
-							{ id: "w0", title: "Write the code" },
-							{ id: "r0", title: "Review", by: { lens: "correctness" } },
-						],
-					},
-				],
-			},
-		};
-		await expect(service.validate("plan-to-ship", v3)).resolves.toMatchObject({
-			valid: true,
-		});
-		expect(() => compileStages(v3.plan as PlanInput)).toThrow(
-			'deliverable "d0" task "r0" carries `by`, which plan schema v4 renamed to `review`',
-		);
-	});
+	it.each([
+		[
+			"tasks[].review",
+			() => withTaskKey(plan(), "review", { lens: "correctness" }),
+			"plan schema v5 moved review routing to `deliverables[].reviews`",
+		],
+		[
+			"tasks[].by",
+			() => withTaskKey(plan(), "by", { lens: "correctness" }),
+			"plan schema v3's name for a task review",
+		],
+		[
+			"deliverables[].stages",
+			() => withStages(plan(), [{ use: "implement", id: "build" }]),
+			"plan schema v5 does not author stages",
+		],
+	])(
+		"admits %s at validate, so the refusal is the compiler's",
+		async (_key, document, message) => {
+			// The plan mirror carries the refused keys on purpose: refused by
+			// TypeBox they would read as an unexpected property, and a person
+			// cannot act on that. They parse, and the compiler then names them.
+			const service = await serviceFor(scripted());
+			const value = { ...input(), plan: document() };
+			await expect(
+				service.validate("plan-to-ship", value),
+			).resolves.toMatchObject({ valid: true });
+			expect(() => compileStages(value.plan)).toThrow(message);
+		},
+	);
 
 	it("refuses a bad digest, a bad effort, and an unknown plan field", async () => {
 		const service = await serviceFor(scripted());
@@ -1872,20 +1648,14 @@ describe("plan-to-ship: the input contract", () => {
 			{ ...input(), effort: "standrd" },
 			{ ...input(), extra: true },
 			{ ...input(), plan: { ...plan(), policy: { gates: "sometimes" } } },
+			// A deliverable is work, or it is nothing: `tasks` is required and
+			// non-empty, and `reviews` is a closed list of lens entries.
 			{
 				...input(),
 				plan: {
 					...plan(),
 					deliverables: [
-						{
-							id: "d0",
-							title: "t",
-							after: [],
-							reads: [],
-							tasks: [
-								{ id: "r0", title: "Review", review: { verdict: "nope" } },
-							],
-						},
+						{ id: "d0", title: "t", after: [], reads: [], tasks: [] },
 					],
 				},
 			},
@@ -1899,8 +1669,8 @@ describe("plan-to-ship: the input contract", () => {
 							title: "t",
 							after: [],
 							reads: [],
-							tasks: [],
-							stages: [{ use: "teleport", id: "x" }],
+							tasks: [{ id: "w0", title: "Write the code" }],
+							reviews: [{ lens: "correctness", verdict: "nope" }],
 						},
 					],
 				},

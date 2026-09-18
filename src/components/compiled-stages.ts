@@ -13,9 +13,9 @@ import { type Static, Type } from "typebox";
  * This is the **graph, not prose**. It says which stages each deliverable
  * compiled into, in order, with the identifiers the workflow namespaces are
  * derived from - so "every deliverable was compiled", "the lenses were seeded
- * from `tasks[].review`" and "the gates the policy asked for are present" are
- * questions a reader answers by comparing two documents, not by trusting a
- * summary.
+ * from `deliverables[].reviews`" and "the gates the policy asked for are
+ * present" are questions a reader answers by comparing two documents, not by
+ * trusting a summary.
  *
  * Vocabulary note (decision D4). `use` names a **plan stage kind**, not a
  * component: the plan's vocabulary and the library that lowers it are allowed
