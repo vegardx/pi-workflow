@@ -143,8 +143,12 @@ const PlanTaskSchema = Type.Object(
 		id: Type.String({ pattern: IDENTIFIER }),
 		title: Type.String({ minLength: 1 }),
 		body: Type.Optional(Type.String()),
-		/** Present = this task is a review, and seeds a compiled lens. */
-		by: Type.Optional(PlanDelegationSchema),
+		/**
+		 * Present = this task is a review, and seeds a compiled lens. Absent =
+		 * the deliverable's own worker does it. Plan schema v4's name; v3 called
+		 * this `by` and `plan-to-ship` refuses such a document at compile.
+		 */
+		review: Type.Optional(PlanDelegationSchema),
 	},
 	{ additionalProperties: true },
 );
@@ -399,8 +403,9 @@ export default defineWorkflow({
 				instructions: [
 					"You are a BLIND reviewer. You do not have the planning conversation, the session transcript, `AGENTS.md`, or any other project context file, and you will not be given them. That is deliberate: a reviewer who inherited the conversation would only ever agree with it. Judge from the plan, the compiled stage document, the projection and the one line of intent you were given, plus anything you choose to read in the repository.",
 					"Answer two questions, in this order. (1) Does the PLAN do what the intent asks — is anything the intent names missing, is anything in the plan not asked for, and is the work split into deliverables that can actually be built and reviewed independently? (2) Does the COMPILED STAGE DOCUMENT faithfully lower that plan?",
-					"The compiled document is checkable, so check it rather than impressionistically approving it: every plan deliverable must appear in `compiled.deliverables` by the same `id`; every task carrying `by` must have seeded a lens with that `by.lens` id in its deliverable's `review-fan-out` stage, with the `tier`, `diverse`, `skill` and `model` the task asked for; `compiled.effort` and `compiled.gates` must match the plan's `policy` (with its defaults) and the requested effort; `approve-plan` must always be gated, `approve-plan+ship` must gate the ship as well, and `every-deliverable` must put a `gate` stage last in every deliverable.",
+					"The compiled document is checkable, so check it rather than impressionistically approving it: every plan deliverable must appear in `compiled.deliverables` by the same `id`; every task carrying `review` must have seeded a lens with that `review.lens` id in its deliverable's `review-fan-out` stage, with the `tier`, `diverse`, `skill` and `model` the task asked for; `compiled.effort` and `compiled.gates` must match the plan's `policy` (with its defaults) and the requested effort; `approve-plan` must always be gated, `approve-plan+ship` must gate the ship as well, and `every-deliverable` must put a `gate` stage last in every deliverable.",
 					"The projection is the compiled graph's declared cost, not a guess. `fits: false` is a BLOCKING budget finding: the run would be refused at admission. `fits: true` with the cost close to the budget is at most a `major` one, and say by how much.",
+					"A task carrying `review` IS the review: `review` names the lens a reviewer looks through, and the deliverable's own worker does every task that does not carry it. A `review` block on implementation work is a `graph` finding, and a plan whose every task carries one has delegated nothing. (Plan schema v4 renamed this field from `by`; a task still carrying `by` is a version 3 document and `plan-to-ship` refuses it at compile.)",
 					"Report findings, not prose. Each finding carries a stable lowercase `id`, a `severity` of blocking, major or minor, a `kind` of gap, graph, budget, risk or ambiguity, a `where` that is an RFC 6901 JSON pointer into the PLAN (for example `/deliverables/0/tasks/1`), and a `what` a reader can act on in one reading.",
 					'Add a `patch` only when accepting the finding is a MECHANICAL edit to the plan: `{ op: "add" | "replace" | "remove", path, value? }`, RFC 6902-shaped, with `path` an RFC 6901 pointer into the same plan document you were given. It is applied to the stored plan and re-validated, never re-prompted, so a patch that needs a human to fill in a blank is not a patch — state it in `what` instead.',
 					"`severity` is what the human's dialog does with it: BLOCKING is asked about one finding at a time and stops the run until it is accepted or dismissed with a reason; `major` and `minor` are shown and never asked. Mark blocking only what must change before this plan runs.",
