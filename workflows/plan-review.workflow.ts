@@ -107,21 +107,13 @@ const MAX_CONTEXT_ENTRIES = 56;
 
 /**
  * The stored `Plan`, mirroring only what the reviewer reads and admitting
- * whatever else pi-maestro's document carries. `deliverables` and `tasks` are
- * bounded because an unbounded list is a context bomb, not because the plan
- * schema bounds them; `stages` is deliberately loose - the reviewer compares
- * it to the compiled document rather than interpreting it, and the plan's
- * stage vocabulary (which reserves `dynamic`) is pi-maestro's to grow.
+ * whatever else pi-maestro's document carries. `deliverables`, `tasks` and
+ * `reviews` are bounded because an unbounded list is a context bomb, not
+ * because the plan schema bounds them. There is no `stages` mirror: plan
+ * schema v5 authors no stages, and the reviewer compares the deliverable's
+ * `reviews` to the compiled document the compiler derived from them.
  */
-const PlanStageSchema = Type.Object(
-	{
-		use: Type.String({ minLength: 1, maxLength: 64 }),
-		id: Type.String({ pattern: IDENTIFIER }),
-	},
-	{ additionalProperties: true },
-);
-
-const PlanDelegationSchema = Type.Object(
+const PlanReviewEntrySchema = Type.Object(
 	{
 		lens: Type.String({ minLength: 1, maxLength: 128 }),
 		skill: Type.Optional(Type.String({ pattern: IDENTIFIER })),
@@ -138,17 +130,16 @@ const PlanDelegationSchema = Type.Object(
 	{ additionalProperties: true },
 );
 
+/**
+ * A task is WORK, and only work. Plan schema v5 has no review field on a task;
+ * a v3 `by`, a v4 `review` or an authored `stages` block still PARSES here —
+ * the mirror is open — and `plan-to-ship` refuses each by name at compile.
+ */
 const PlanTaskSchema = Type.Object(
 	{
 		id: Type.String({ pattern: IDENTIFIER }),
 		title: Type.String({ minLength: 1 }),
 		body: Type.Optional(Type.String()),
-		/**
-		 * Present = this task is a review, and seeds a compiled lens. Absent =
-		 * the deliverable's own worker does it. Plan schema v4's name; v3 called
-		 * this `by` and `plan-to-ship` refuses such a document at compile.
-		 */
-		review: Type.Optional(PlanDelegationSchema),
 	},
 	{ additionalProperties: true },
 );
@@ -162,7 +153,8 @@ const PlanDeliverableSchema = Type.Object(
 		reads: Type.Optional(Type.Array(Type.String({ pattern: IDENTIFIER }))),
 		repo: Type.Optional(Type.String({ pattern: IDENTIFIER })),
 		tasks: Type.Optional(Type.Array(PlanTaskSchema, { maxItems: 64 })),
-		stages: Type.Optional(Type.Array(PlanStageSchema, { maxItems: 16 })),
+		/** The lenses this deliverable's review fan-out runs; absent == none. */
+		reviews: Type.Optional(Type.Array(PlanReviewEntrySchema, { maxItems: 16 })),
 	},
 	{ additionalProperties: true },
 );
@@ -207,6 +199,7 @@ const PlanSchema = Type.Object(
 	{
 		slug: Type.String({ pattern: IDENTIFIER }),
 		title: Type.String({ minLength: 1 }),
+		body: Type.Optional(Type.String()),
 		deliverables: Type.Array(PlanDeliverableSchema, {
 			minItems: 1,
 			maxItems: 16,
@@ -403,9 +396,10 @@ export default defineWorkflow({
 				instructions: [
 					"You are a BLIND reviewer. You do not have the planning conversation, the session transcript, `AGENTS.md`, or any other project context file, and you will not be given them. That is deliberate: a reviewer who inherited the conversation would only ever agree with it. Judge from the plan, the compiled stage document, the projection and the one line of intent you were given, plus anything you choose to read in the repository.",
 					"Answer two questions, in this order. (1) Does the PLAN do what the intent asks — is anything the intent names missing, is anything in the plan not asked for, and is the work split into deliverables that can actually be built and reviewed independently? (2) Does the COMPILED STAGE DOCUMENT faithfully lower that plan?",
-					"The compiled document is checkable, so check it rather than impressionistically approving it: every plan deliverable must appear in `compiled.deliverables` by the same `id`; every task carrying `review` must have seeded a lens with that `review.lens` id in its deliverable's `review-fan-out` stage, with the `tier`, `diverse`, `skill` and `model` the task asked for; `compiled.effort` and `compiled.gates` must match the plan's `policy` (with its defaults) and the requested effort; `approve-plan` must always be gated, `approve-plan+ship` must gate the ship as well, and `every-deliverable` must put a `gate` stage last in every deliverable.",
+					"The compiled document is checkable, so check it rather than impressionistically approving it: every plan deliverable must appear in `compiled.deliverables` by the same `id`, with `implement`, `verify-and-fix` and — when and only when the deliverable has a non-empty `reviews` list — `review-fan-out`; every `reviews[]` entry must have seeded a lens with that `lens` id, with the `tier`, `diverse`, `skill` and `model` it asked for, duplicate ids taking `-2` and `-3` by declaration ordinal; and `compiled.effort` and `compiled.gates` must match the plan's `policy` (with its defaults) and the requested effort. A gate is never a stage of a compiled deliverable: `compiled.gates` alone says where a person is asked.",
 					"The projection is the compiled graph's declared cost, not a guess. `fits: false` is a BLOCKING budget finding: the run would be refused at admission. `fits: true` with the cost close to the budget is at most a `major` one, and say by how much.",
-					"A task carrying `review` IS the review: `review` names the lens a reviewer looks through, and the deliverable's own worker does every task that does not carry it. A `review` block on implementation work is a `graph` finding, and a plan whose every task carries one has delegated nothing. (Plan schema v4 renamed this field from `by`; a task still carrying `by` is a version 3 document and `plan-to-ship` refuses it at compile.)",
+					"In plan schema v5 a TASK IS WORK, and only work: a task has no `review`, `by` or kind field, and every review this deliverable gets is one entry of its `reviews` list. A deliverable that writes code and lists no review is a `graph` finding; so is a `reviews` list that names lenses nothing in the deliverable could be reviewed through. (A task still carrying v4's `review` or v3's `by`, or a deliverable carrying an authored `stages` block, parses but is refused by name at compile: report it as a `graph` finding, because the run cannot start.)",
+					"`policy` is OUT OF SCOPE: effort, gates, publication and base were decided by the person in the host's dialogs, so raise no finding whose `where` points into `/policy`.",
 					"Report findings, not prose. Each finding carries a stable lowercase `id`, a `severity` of blocking, major or minor, a `kind` of gap, graph, budget, risk or ambiguity, a `where` that is an RFC 6901 JSON pointer into the PLAN (for example `/deliverables/0/tasks/1`), and a `what` a reader can act on in one reading.",
 					'Add a `patch` only when accepting the finding is a MECHANICAL edit to the plan: `{ op: "add" | "replace" | "remove", path, value? }`, RFC 6902-shaped, with `path` an RFC 6901 pointer into the same plan document you were given. It is applied to the stored plan and re-validated, never re-prompted, so a patch that needs a human to fill in a blank is not a patch — state it in `what` instead.',
 					"`severity` is what the human's dialog does with it: BLOCKING is asked about one finding at a time and stops the run until it is accepted or dismissed with a reason; `major` and `minor` are shown and never asked. Mark blocking only what must change before this plan runs.",

@@ -73,7 +73,7 @@ interface Report {
 	readonly notes?: string;
 }
 
-/** The spec's own example plan, corrected to the shipped vocabulary. */
+/** The spec's own example plan at plan schema v5: tasks are work, reviews list. */
 function planFixture(): Record<string, unknown> {
 	return {
 		slug: "compose-catalogue",
@@ -91,29 +91,8 @@ function planFixture(): Record<string, unknown> {
 				title: "Ship the component catalogue",
 				after: [],
 				reads: [],
-				tasks: [
-					{ id: "impl", title: "Write the components" },
-					{
-						id: "rev-contracts",
-						title: "Contract review",
-						review: { lens: "contracts", tier: "heavy", diverse: true },
-					},
-				],
-				stages: [
-					{ use: "implement", id: "build" },
-					{
-						use: "verify-and-fix",
-						id: "green",
-						maxRounds: 2,
-						escalate: "thinking",
-					},
-					{
-						use: "review-fan-out",
-						id: "review",
-						synthesis: "required",
-						lenses: [{ id: "contracts", tier: "heavy", diverse: true }],
-					},
-				],
+				tasks: [{ id: "impl", title: "Write the components" }],
+				reviews: [{ lens: "contracts", tier: "heavy", diverse: true }],
 			},
 		],
 	};
@@ -125,21 +104,19 @@ function compiledFixture(): Record<string, unknown> {
 			{
 				id: "catalogue",
 				stages: [
-					{ use: "implement", id: "build" },
+					{ use: "implement", id: "implement" },
 					{
-						use: "verify-and-fix",
-						id: "green",
 						// Plan fix rounds + 1: the component counts VERIFY rounds.
-						maxRounds: 3,
-						escalate: "thinking",
+						use: "verify-and-fix",
+						id: "verify",
+						maxRounds: 2,
 					},
 					{
 						use: "review-fan-out",
 						id: "review",
-						synthesis: "required",
+						synthesis: "optional",
 						lenses: [{ id: "contracts", tier: "heavy", diverse: true }],
 					},
-					{ use: "gate", id: "ship", question: "Ship it?", show: ["review"] },
 				],
 			},
 		],
@@ -611,14 +588,17 @@ describe("plan-review: the lowered graph", () => {
 		expect(instructions).toContain("BLIND");
 		expect(instructions).toContain("AGENTS.md");
 		expect(instructions).toContain("RFC 6902");
-		// The plan mirror is v4: the reviewer checks `review`, and is told what
-		// the field means and that a task still carrying `by` is a v3 document.
-		expect(context).toContain('"review":{"lens":"contracts"');
-		expect(instructions).toContain("every task carrying `review`");
+		// The plan mirror is v5: the reviewer checks `deliverables[].reviews`,
+		// is told that a task is work only, and is told that `policy` was the
+		// person's decision and is not its business.
+		expect(context).toContain('"reviews":[{"lens":"contracts"');
+		expect(instructions).toContain("every `reviews[]` entry must have seeded");
 		expect(instructions).toContain(
-			"the deliverable's own worker does every task that does not carry it",
+			"In plan schema v5 a TASK IS WORK, and only work",
 		);
-		expect(instructions).toContain("renamed this field from `by`");
+		expect(instructions).toContain(
+			"`policy` is OUT OF SCOPE: effort, gates, publication and base were decided by the person in the host's dialogs, so raise no finding whose `where` points into `/policy`.",
+		);
 	});
 
 	it("spends the effort table's review row and nothing else", async () => {
@@ -654,12 +634,8 @@ describe("plan-review: the report", () => {
 	it("completes blocked with a patch that applies to the plan it points into", async () => {
 		const patch = {
 			op: "add",
-			path: "/deliverables/0/tasks/2",
-			value: {
-				id: "rev-replay",
-				title: "Replay review",
-				review: { lens: "replay", tier: "standard" },
-			},
+			path: "/deliverables/0/reviews/1",
+			value: { lens: "replay", tier: "standard" },
 		};
 		const { finished } = await runPlanReview({
 			report: {
@@ -669,8 +645,8 @@ describe("plan-review: the report", () => {
 						id: "unreviewed-replay",
 						severity: "blocking",
 						kind: "gap",
-						where: "/deliverables/0/tasks",
-						what: "The intent names replay correctness, and no task reviews it.",
+						where: "/deliverables/0/reviews",
+						what: "The intent names replay correctness, and no lens reviews it.",
 						patch,
 					},
 				],
@@ -694,13 +670,11 @@ describe("plan-review: the report", () => {
 		// apply against the stored plan, never a re-prompt.
 		if (!reported?.patch) throw new Error("the finding carried no patch");
 		const patched = applyPatch(planFixture(), reported.patch) as {
-			deliverables: { tasks: { id: string }[] }[];
+			deliverables: { reviews: { lens: string }[] }[];
 		};
-		expect(patched.deliverables[0]?.tasks.map((task) => task.id)).toEqual([
-			"impl",
-			"rev-contracts",
-			"rev-replay",
-		]);
+		expect(
+			patched.deliverables[0]?.reviews.map((review) => review.lens),
+		).toEqual(["contracts", "replay"]);
 	});
 
 	it("recomputes the verdict from the findings and never downgrades it", async () => {
@@ -715,7 +689,7 @@ describe("plan-review: the report", () => {
 						id: "budget-over",
 						severity: "blocking",
 						kind: "budget",
-						where: "/policy/effort",
+						where: "/deliverables/0",
 						what: "The projection does not fit the run budget.",
 					},
 					{
@@ -786,7 +760,7 @@ describe("plan-review: the input contract", () => {
 				input({
 					plan: {
 						...plan,
-						schemaVersion: 4,
+						schemaVersion: 5,
 						deliverables: [{ ...first, provenance: "conversation" }],
 					},
 				}),
@@ -840,7 +814,7 @@ describe("plan-review: the input contract", () => {
 						id: "over-budget",
 						severity: "blocking",
 						kind: "budget",
-						where: "/policy/effort",
+						where: "/deliverables/0",
 						what: "The compiled graph reserves more than the run budget admits.",
 					},
 				],
