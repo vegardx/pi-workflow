@@ -12,7 +12,7 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 2.0.0; runtime contract revision 20 with the feature flags
+views. Version 2.0.0; runtime contract revision 21 with the feature flags
 `checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
 and it requires pi-subagent contract revision 7 (`handoffExport: true`,
 `vmMemoryCeiling: true`, `workspaceBudgetRefusal: true`). The
@@ -65,7 +65,7 @@ own publication, push, pull-request, merge, release, or deployment policy.
 (`defineWorkflow`, `defineSupportTask`, `WorkflowContext`, the handle and
 request types), the service API (`createWorkflowService`,
 `WorkflowServiceOptions`, every `WorkflowService` method and the views it
-returns), the contract layer (the revision-20 schemas, constants, and
+returns), the contract layer (the revision-21 schemas, constants, and
 compatibility predicates), and the extension entry (the default export of
 `@vegardx/pi-workflow/extension`, the fourteen `WORKFLOW_TOOL_DECLARATIONS`
 tools, the `/workflow` grammar, the `pi-workflow` widget, and the `alt+w`
@@ -79,7 +79,7 @@ package's own builtin workflow root, and changes nothing frozen. 2.0.0 is a
 major for one reason only: contract revision 19 cannot read revision-18
 persisted runs, and there is no migration. Its one schema change is additive
 (the optional agent-task `memoryBytes`). The unreleased release is a major for
-the same reason: contract revision 20 cannot read revision-19 persisted runs,
+the same reason: contract revision 21 cannot read revision-20 persisted runs,
 and it reads them from a different place (see
 [Where state lives](#where-state-lives)).
 
@@ -298,6 +298,57 @@ names the kind and the rest of that segment names the deliverable, a checkpoint
 is `gate` whatever it is called, and anything else is `other` — which is the
 honest answer for a project definition that names its tasks its own way, not a
 failure.
+
+### Ceilings
+
+The host's mode bounds every delegation this process makes, and it says so in
+**pi-subagent's** vocabulary rather than its own: a `DelegationCeiling` is
+`{workspaceModes?, tools?}`, registered once with
+`registerDelegationCeilingProvider(pi.events, () => ceiling)` from
+`@vegardx/pi-subagent/ceiling-provider`. pi-subagent's preflight refuses a launch
+above it by name — *"workspace mode exceeds host ceiling: worktree (host allows
+read-only)"*, *"tool exceeds host ceiling: write"* — and this package's job is to
+carry the bound from the start of a run to every request the run makes, and to
+refuse a start that could only ever end in that refusal.
+
+**Definitions declare their needs** in the same vocabulary, as definition
+metadata: `meta.needs = { workspace: "read-only" | "worktree" }`. `deep-research`
+and `deep-review` declare `read-only`; `plan-to-ship` declares `worktree`. A
+definition that declares none — every project definition written before this, and
+every dynamic proposal — is **read as needing a `worktree` workspace**, because a
+definition that writes and says nothing must not slip under a read-only ceiling.
+`workflow_list` and `workflow_validate` report the resolved value as
+`workflow.needs = {workspace, declared}`, and `workflow_validate`'s one-line
+result says when the reading was an assumption:
+
+```text
+valid: my-workflow v1; needs a worktree workspace (assumed: the definition declares no needs)
+```
+
+**Starts carry the ceiling, and the caller decides.** `workflow_run` — the
+model's tool — reads the host-registered provider and passes what it answers,
+because the model acts inside whatever mode the host is in; a definition whose
+needs exceed it is refused **before the run exists**, naming both sides:
+
+```text
+plan-to-ship needs a worktree workspace; the host ceiling allows read-only.
+```
+
+`startBuiltin(ref, {input, effort?, ceiling?})` takes an **explicit** ceiling and
+refuses the same way. It does not read the provider, and that is deliberate: the
+host starts the plan's run *while switching modes*, so the provider still answers
+for the mode it is leaving. `hostCeiling()` on the read client is there for a
+host that wants to show the current bound before it asks. `/workflow run` — a
+person typing a command — passes none: they are the one who set the mode.
+
+**The run records it and forwards it.** The ceiling is written onto the run
+record at creation (`WORKFLOW_CONTRACT_REVISION` 21) and `task-launcher.ts`
+lowers it onto every `SubagentRequest` the run makes, including a nested run's,
+which inherits its parent's. A run **keeps the ceiling it started with**: the
+answer a host would give now is a different answer, and a run whose bound moved
+under it would be a run whose evidence no longer explains its own launches. A
+launch above it is refused by pi-subagent's preflight and reported as that task's
+failure on the existing path. Runs with no ceiling behave exactly as before.
 
 `project(ref, input)` is the lease-free half of the seam: it runs the
 definition's `run(ctx)` against a context that declares nothing durable — no
@@ -529,6 +580,12 @@ already asked a person "Start the run?" can start it through the service
 provider's `startBuiltin` instead of sending the model a turn to call
 `workflow_run` ([Service provider](#service-provider)). The run is the same
 run either way; only `run-created`'s `origin` differs.
+
+It declares `meta.needs = { workspace: "worktree" }`, because every
+implementer and fixer it runs writes in one. A host whose delegation ceiling
+allows `read-only` therefore cannot start it at all — the start is refused with
+*"plan-to-ship needs a worktree workspace; the host ceiling allows read-only."*,
+before a run exists ([Ceilings](#ceilings)).
 
 **The stage walk.** A plan schema v5 document **authors no stages**. The
 compiler derives them, the same list for every deliverable: `implement`, the
