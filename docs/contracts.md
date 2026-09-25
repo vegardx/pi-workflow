@@ -273,13 +273,17 @@ have exactly one default export and no named exports"). See
 
 ### Definition roots
 
-Discovery visits `<cwd>/workflows` and `<cwd>/.pi/workflows` (scope
-`project`), `<agentDir>/workflows` (scope `global`), and then every root the
-embedder registered (scope `package` or `builtin`, in that order, each sorted
-by path). A registered root of any other scope is rejected ("registered
+Discovery visits every root the embedder registered first (scope `package` or
+`builtin`, in that order, each sorted by path), then `<agentDir>/workflows`
+(scope `global`), then `<cwd>/workflows` and `<cwd>/.pi/workflows` (scope
+`project`). The order is most trusted first, because a name is claimed by the
+first file that defines it: a root trusted by its installation is visited
+before a project's own, so **a project can never take a name a builtin
+defines**. A registered root of any other scope is rejected ("registered
 workflow roots must use package or builtin scope"); a directory reachable
 through two roots is rejected ("duplicate workflow root …"); names are unique
-across all roots.
+across all roots, and a later claim on a taken name is that later file's
+problem (see [Definition problems](#definition-problems)).
 
 Project roots require Pi project trust and otherwise fail closed with
 `WorkflowDefinitionTrustError` before any module is evaluated. Registered
@@ -318,6 +322,49 @@ output is a receipt naming, per deliverable, the imported handoff descriptor
 and the durable ref `refs/pi-subagent/handoffs/<subagentRunId>/<attemptId>`,
 plus the approved `planDigest`. The workflow never pushes, merges, publishes,
 or applies a handoff: shipping is a cherry-pickable ref and a patch artifact.
+
+### Definition problems
+
+Discovery is per definition file. A file that does not load — it cannot resolve
+a module it imports, it does not parse, evaluating it throws, it defines no
+valid default definition, its resolved path escapes its root, or its name is
+already taken — becomes a **problem entry for that file** and never an
+exception for the whole discovery. The definitions beside it still load, so one
+broken project file cannot take `workflow_list`, `workflow_validate`,
+`workflow_run` or any builtin down with it.
+
+`list()` returns `{ workflows, problems }` (`WorkflowDefinitionListingSchema`).
+A problem is `{ path, problem }`: `path` is the file's path relative to the root
+it was found under, and `problem` is one sentence naming the CLASS of the cause.
+The sentences are fixed:
+
+| Cause | Sentence |
+| --- | --- |
+| `MODULE_NOT_FOUND` / `ERR_MODULE_NOT_FOUND` | `cannot resolve module '<specifier>' from <file>`, and for `@vegardx/pi-workflow` or a subpath of it, ` — the project must be able to resolve pi-workflow, for example through a dependency or link` |
+| syntax or transpile failure | `does not parse: <first line of the parser message>` |
+| any other evaluation failure | `failed to load: <error class name>` |
+| no valid default export | `has no valid default definition` |
+| resolved path outside the root | `escapes its root` |
+| name already claimed | `duplicate workflow name <name>, also defined by <other file>` |
+
+Nothing else of the cause travels: the module specifier and the parser's first
+line pass the same allowlist gates as every other sanitized cause in this
+package (`src/sanitized-cause.ts`), and no host path, URL, or stack text reaches
+a view. The only path a problem carries is the definition file's own, relative
+to its root.
+
+A ref naming a file that did not load is refused with that file's own sentence
+— `Workflow definition <file> is not loadable: <problem>` — rather than with
+"Workflow not found"; the name that file would have defined is simply not
+discovered. Refs that load are unaffected, and the widget and tool-result
+footer count definitions, never problems.
+
+Contract-level refusals are NOT problems and still fail the whole discovery:
+project trust (`WorkflowDefinitionTrustError`), an import the identity gate does
+not admit, a definition that is not a regular file, is over the size limit, or
+is not valid UTF-8, a symlink inside a root, a duplicate root, a registered
+root of the wrong scope, and the discovery budgets. Those say what a definition
+may be at all, not whether one of them loaded.
 
 A root loads `*.workflow.ts|mts|js|mjs` only, so other files may live under
 one. `workflows/agents/*.md` uses that: the agent definitions a builtin names
@@ -1691,7 +1738,7 @@ primary status from a subagent `cleanup-blocked` result.
 ```ts
 interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
-	list(): Promise<readonly WorkflowDefinitionSummary[]>;
+	list(): Promise<WorkflowDefinitionListing>;
 	validate(ref: string, input?: unknown): Promise<WorkflowValidationResult>;
 	run(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;
 	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;

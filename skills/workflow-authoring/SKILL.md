@@ -162,8 +162,12 @@ module. Bounds: at most 256 definitions and 4096 directory entries per
 discovery, 1 MiB per file, regular files only ("workflow definition must be a
 regular file"), valid UTF-8, and no symlinks anywhere under a root ("workflow
 definition roots may not contain symlinks"). The same directory reachable
-through two roots is rejected ("duplicate workflow root …"). Names must be
-unique across all roots ("duplicate workflow name <name>: <path> and <path>").
+through two roots is rejected ("duplicate workflow root …"). Names are unique
+across all roots, and the first file to claim one keeps it: roots are visited
+most trusted first (registered `package` then `builtin` roots, then
+`<agentDir>/workflows`, then the project's), so a project cannot take a name a
+builtin defines, and the later file becomes a problem entry instead
+("duplicate workflow name <name>, also defined by <other file>").
 
 ## Imports
 
@@ -183,9 +187,18 @@ is not part of the authoring API; definitions import from
 The loader resolves imports from the definition file's location, so
 `@vegardx/pi-workflow` and `typebox` must be resolvable there.
 
-The module must default-export the definition; otherwise "workflow module has
-no valid default definition". An exception during module evaluation surfaces
-as "workflow definition module failed to load" with the cause attached.
+The module must default-export the definition. That, a parse failure, an
+exception during module evaluation, and an import that resolves to nothing are
+all **per file**: the file becomes a problem entry in `workflow_list`'s
+`problems` — `{ path, problem }` with one sentence naming the class of the cause
+("has no valid default definition", "does not parse: <first parser line>",
+"failed to load: <error class name>", "cannot resolve module '<specifier>' from
+<file>") — and every other definition, builtins included, still lists,
+validates, and runs. Only the gates above (trust, the import allow-list, the
+file limits, the root rules) fail the whole discovery. Author for a resolvable
+`@vegardx/pi-workflow`: a project whose link is stale gets "cannot resolve
+module '@vegardx/pi-workflow' from <file> — the project must be able to resolve
+pi-workflow, for example through a dependency or link".
 
 A dynamic source passes the same gate with the same messages and two more
 rules: it may not use `import.meta` ("dynamic workflow source may not use import.meta"), and it must have exactly one default export and no named

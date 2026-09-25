@@ -16,10 +16,12 @@ points — a component library and a service-provider seam — two more builtin
 workflows built out of the first, two short reference skills, a model-routing
 port the host installs, a lease-free read of a settled run's output and of a
 checkpoint's decided value, a narration surface a host reads to tell a person
-what a run is doing, and a support-task wiring fix in the extension. No
-frozen export, shape or message was removed or retyped and no returned union
-was widened; the required pi-subagent contract moves to revision 8, pinned to
-`0.14.0` for the delegation ceiling. The builtin
+what a run is doing, and a support-task wiring fix in the extension. One frozen
+shape is retyped — `list()` now returns a listing with the definitions that
+loaded and the files that did not — and otherwise no frozen export, shape or
+message was removed or retyped and no returned union was widened; the required
+pi-subagent contract moves to revision 8, pinned to `0.14.0` for the delegation
+ceiling. The builtin
 `plan-to-ship`'s gate vocabulary does change, its per-deliverable stage list now
 reviews, normalizes and then FIXES, the compiled stage document moves with both,
 and the `plan-review` builtin and `runBuiltin` are removed outright — all over
@@ -29,6 +31,44 @@ run started under.
 
 ### Breaking
 
+- **One broken definition file no longer fails discovery for every ref.**
+  Discovery is per definition file. A file that cannot resolve a module it
+  imports (the field failure: a project's own `@vegardx/pi-workflow` import
+  through a stale link), does not parse, throws while evaluating, defines no
+  valid default definition, whose resolved path escapes its root, or that claims
+  a name already taken becomes a **problem entry for that file** instead of an
+  exception for the whole discovery. Before this, one such file made
+  `workflow_list`, `workflow_validate <any ref>` and `workflow_run <any ref>` —
+  builtins included — all fail with `"workflow definition module failed to
+  load"`, with no way to see which file or why.
+  `WorkflowService.list()` is retyped from `readonly WorkflowDefinitionSummary[]`
+  to `WorkflowDefinitionListing` — `{ workflows, problems }` — and `workflow_list`
+  returns the same shape under the new `WorkflowDefinitionListingSchema`
+  (`WorkflowDefinitionSummaryListSchema` is unchanged and is now the listing's
+  `workflows`). A problem is `{ path, problem }`: the file's path relative to its
+  root, and one sentence naming the class of the cause —
+  `cannot resolve module '<specifier>' from <file>` (plus *"— the project must be
+  able to resolve pi-workflow, for example through a dependency or link"* when the
+  specifier is this package), `does not parse: <first parser line>`,
+  `failed to load: <error class name>`, `has no valid default definition`,
+  `escapes its root`, or
+  `duplicate workflow name <name>, also defined by <other file>`. The sentences
+  pass the same allowlist gates as every other sanitized cause here, so no host
+  path, URL or stack text reaches a view, and the only path a problem carries is
+  the definition file's own. `/workflow list` prints the problems after the
+  table; a ref naming a broken file is refused with
+  `Workflow definition <file> is not loadable: <problem>` instead of
+  `Workflow not found`; refs that load, and the widget and footer counts, are
+  unaffected.
+  Two changes travel with it. Duplicate names no longer fail discovery: the
+  first file to claim a name keeps it and the later one becomes a problem. And
+  roots are now visited **most trusted first** — registered `package` then
+  `builtin` roots, then `<agentDir>/workflows`, then `<cwd>/workflows` and
+  `<cwd>/.pi/workflows` — so a project can never take a name a builtin defines,
+  and `list()` returns builtin and global definitions before a project's. Project
+  trust, the import identity gate, the file limits and the discovery budgets stay
+  contract refusals that fail the whole discovery. No persisted schema changes
+  and `WORKFLOW_CONTRACT_REVISION` is untouched.
 - **A run carries the host's delegation ceiling, and
   `WORKFLOW_CONTRACT_REVISION` becomes 21.** `WorkflowRunRecordSchema` gains the
   optional `ceiling` (pi-subagent's `DelegationCeilingSchema`): the bound the run
