@@ -139,13 +139,12 @@ identity derivation and no `AgentTaskRequestSchema` field changes;
 `WorkflowRunRecordSchema` gains the optional `modelRouting`, which is
 revision-20 additive (every record written before it still validates, a reader
 that does not know the field ignores it, and nothing derives identity from it).
-The package ships three more builtin workflows, `deep-review`, `plan-review`
-and `deep-research`, from the same `workflows/` builtin root; `plan-review` is
-the only name on `BUILTIN_HEADLESS_WORKFLOWS`, and declares no checkpoint,
-worktree or handoff. `deep-research` declares none of the three either, but is
-not on the allowlist: the structural property and a reason to start without a
-model turn are different things. The seam also gains `startBuiltin` and a
-second frozen allowlist, `BUILTIN_STARTABLE_WORKFLOWS`, holding `plan-to-ship`
+The package ships two more builtin workflows, `deep-review` and
+`deep-research`, from the same `workflows/` builtin root; neither declares a
+checkpoint, a worktree or a handoff, which is a property of the graph and not a
+reason to start one without a model turn. There is no headless start: the seam
+carries `startBuiltin` and one frozen allowlist,
+`BUILTIN_STARTABLE_WORKFLOWS`, holding `plan-to-ship`
 alone, for the run a host starts after a person answered its own dialog; the
 runtime contract advertises it as `serviceProviderStart: true` and
 `RunCreatedEventSchema` gains the optional `origin`, revision-20 additive on
@@ -2163,26 +2162,23 @@ through `availableActions` and exposed as `workflow_retry` and
 request shape, `{schema: "pi-workflow-service-request-v1", respond}`, and no
 consumer identity: there is no requesting extension id on it and none on
 `ExtensionContext`, so nothing downstream may claim one. The client is
-`list`, `validate`, `project`, `inspect`, `runs`, `observe`, `runBuiltin`,
-`startBuiltin`, and `awaitRun` - no `decide`, no `stop`, no `invalidate`, no
-general `run`.
+`list`, `validate`, `project`, `inspect`, `runs`, `observe`, `startBuiltin`,
+and `awaitRun` - no `decide`, no `stop`, no `invalidate`, no general `run`, and
+no headless start.
 
-Two frozen allowlists live in the runtime, not in the caller, and they are
-disjoint:
+One frozen allowlist lives in the runtime, not in the caller:
 
 | Method | Allowlist | Holds | Refusal for anything else |
 | --- | --- | --- | --- |
-| `runBuiltin(ref, input)` | `BUILTIN_HEADLESS_WORKFLOWS` | `plan-review` | "Workflow `<ref>` may not be started by a service consumer; use workflow_run." |
 | `startBuiltin(ref, {input, effort?})` | `BUILTIN_STARTABLE_WORKFLOWS` | `plan-to-ship` | "Workflow `<ref>` is not a builtin a service consumer may start; use workflow_run." |
 
-Every name on the headless list must declare no checkpoint, no worktree, and
-no handoff (`headlessBuiltinViolations`). The startable list asserts the
-opposite kind of definition and makes no structural claim at all: what
-qualifies a name is that a person decided, in the host's own dialog, one step
-before the call. Both methods also resolve the ref and refuse it unless the
-definition came from the `builtin` root, so a project definition that took an
-allowlisted name is not it, and a `dynamic:<sha256>` ref is refused by name
-before anything is resolved.
+The startable list makes no structural claim at all - its one name parks,
+writes and hands off, which is exactly what `headlessBuiltinViolations` reports
+against a definition. What qualifies a name is that a person decided, in the
+host's own dialog, one step before the call. The method also resolves the ref
+and refuses it unless the definition came from the `builtin` root, so a project
+definition that took the allowlisted name is not it, and a `dynamic:<sha256>`
+ref is refused by name before anything is resolved.
 
 `startBuiltin` creates the durable run and returns `{runId}`. It never awaits
 and never observes. `input` is validated against the definition's
@@ -2199,8 +2195,10 @@ effort."
 The run it creates is an ordinary run in every respect but one: same journal,
 same checkpoints, same `/workflow` and widget visibility, decided with
 `/workflow decide`, readable through this same client's `runs` and `inspect`.
-`awaitRun` is permitted on it, on the same rule as `runBuiltin` - the client
-started it, so the started-run ledger on the producer side holds its id.
+`awaitRun` is permitted on it, by the one rule that governs `awaitRun` - the
+client started it, so the started-run ledger on the producer side holds its id,
+and every other run is refused with "Workflow run `<runId>` was not started by
+this service consumer; use workflow_wait."
 
 The one difference is provenance. `run-created` carries the optional
 `origin`, whose only value is `"service-provider"`. A run started by the

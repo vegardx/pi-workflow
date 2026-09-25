@@ -20,12 +20,32 @@ frozen export, shape or message was removed or retyped and no returned union
 was widened; the required pi-subagent contract stays revision 7, now pinned to
 `0.12.0` for the request field the agent-template fix needs. The builtin
 `plan-to-ship`'s gate vocabulary does change, its per-deliverable stage list now
-reviews, normalizes and then FIXES, and the compiled stage document moves with
-both — all over unfrozen surfaces, and none of it is persisted state, so none of
-it moves `WORKFLOW_CONTRACT_REVISION` on its own.
+reviews, normalizes and then FIXES, the compiled stage document moves with both,
+and the `plan-review` builtin and `runBuiltin` are removed outright — all over
+unfrozen surfaces, and none of it is persisted state, so none of it moves
+`WORKFLOW_CONTRACT_REVISION` on its own.
 
 ### Breaking
 
+- **`plan-review` and `runBuiltin` are gone.** The blind plan reviewer was a
+  workflow only so a host could reach it without a model turn; the plan check is
+  a one-shot subagent in pi-maestro now, and one read-only opinion needs no
+  durable run, no journal, no lease and no allowlist in this package. Removed:
+  the definition `workflows/plan-review.workflow.ts`, its agent template
+  `workflows/agents/plan-reviewer.md`, `BUILTIN_HEADLESS_WORKFLOWS`,
+  `BuiltinHeadlessWorkflow`, `headlessRefusalMessage`, and
+  `WorkflowReadClient.runBuiltin` with its refusal *"Workflow `<ref>` may not be
+  started by a service consumer; use workflow_run."*. There is no replacement
+  and no copy of the template.
+  What stays: `startBuiltin` and `BUILTIN_STARTABLE_WORKFLOWS` (still
+  `["plan-to-ship"]`, and no longer described as disjoint from a list that does
+  not exist), `awaitRun`, `observe`, and every read. `headlessBuiltinViolations`
+  stays too, as what it always measured — whether a graph would park, take a
+  worktree or hand off — which `deep-review` and `deep-research` assert about
+  themselves and which the startable allowlist's one name violates on purpose.
+  `CompiledStageDocumentSchema` is unchanged: it was never `plan-review`'s, and a
+  host that derives the compiled document to check a plan against still reads
+  exactly that shape.
 - **`plan-to-ship` reviews, normalizes, and then FIXES: the fix loop runs
   inside the deliverable.** The per-deliverable stage list was `implement`,
   `verify-and-fix`, `review-fan-out`, and the review's findings went nowhere but

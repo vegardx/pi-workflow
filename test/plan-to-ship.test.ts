@@ -676,7 +676,7 @@ function examplePlan(): PlanInput {
 
 describe("plan-to-ship: the compiled stage document", () => {
 	// The plan-facing view of the SAME compilation the run walks: what
-	// `plan-review` validates its `compiled` input against and what pi-maestro
+	// a host's plan check reads and what pi-maestro
 	// derives for itself from the stored plan. It must therefore be exactly the
 	// derived stage list of spec 2.1 - no task keys, no policy gates, and
 	// `maxRounds` in the component's VERIFY rounds.

@@ -64,11 +64,10 @@ try {
 		"skills/workflow-authoring/SKILL.md",
 		"skills/workflow-authoring/references/examples.md",
 		"skills/workflows/SKILL.md",
-		// W2-PLANREVIEW: the two short reference skills `plan-review` preloads
-		// by NAME. Pi discovers a skill only from a directory containing
-		// SKILL.md - a loose `.md` under a subdirectory is not discovered - so
-		// each reference is its own directory or the blind reviewer fails
-		// preflight with "preload skill not found".
+		// The two short reference skills a reviewer preloads BY NAME. Pi
+		// discovers a skill only from a directory containing SKILL.md - a loose
+		// `.md` under a subdirectory is not discovered - so each reference is its
+		// own directory or a preload fails with "preload skill not found".
 		"skills/plan-schema/SKILL.md",
 		"skills/workflow-components/SKILL.md",
 		// The package-provided (`builtin` scope) definitions: shipped as
@@ -77,7 +76,6 @@ try {
 		// installed package.
 		"workflows/plan-to-ship.workflow.ts",
 		"workflows/deep-review.workflow.ts",
-		"workflows/plan-review.workflow.ts",
 		"workflows/deep-research.workflow.ts",
 		// W3: the agent definitions the builtin workflows name. They are not
 		// installed anywhere: a run composed from this root carries
@@ -88,7 +86,6 @@ try {
 		"workflows/agents/planner.md",
 		"workflows/agents/reviewer.md",
 		"workflows/agents/lens-reviewer.md",
-		"workflows/agents/plan-reviewer.md",
 		"workflows/agents/researcher.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
@@ -196,7 +193,7 @@ try {
 	// 145 / 2009 KiB freeze measurement); 160 entries left four spare, so the
 	// entry bound was raised deliberately. amaro is a dependency and is not
 	// packed. Unreleased at W2-PLANREVIEW: 186 entries / 2486 KiB, after the
-	// component library, the service-provider entry, deep-review, plan-review,
+	// component library, the service-provider entry, deep-review,
 	// two agent templates and two reference skills - 14 entries and 74 KiB
 	// spare. Unreleased at W2-PTS + W4-INSPECT: 186 entries / 2577 KiB (the
 	// plan-to-ship compiler's README, CHANGELOG and skill prose), 17 KiB over
@@ -298,8 +295,10 @@ if (
 	typeof workflowProvider.isCompatibleWorkflowProvider !== "function" ||
 	typeof workflowProvider.headlessBuiltinViolations !== "function" ||
 	typeof workflowProvider.WorkflowServiceProviderError !== "function" ||
-	!Object.isFrozen(workflowProvider.BUILTIN_HEADLESS_WORKFLOWS) ||
-	workflowProvider.BUILTIN_HEADLESS_WORKFLOWS.join(",") !== "plan-review"
+	typeof workflowProvider.runBuiltin !== "undefined" ||
+	typeof workflowProvider.BUILTIN_HEADLESS_WORKFLOWS !== "undefined" ||
+	!Object.isFrozen(workflowProvider.BUILTIN_STARTABLE_WORKFLOWS) ||
+	workflowProvider.BUILTIN_STARTABLE_WORKFLOWS.join(",") !== "plan-to-ship"
 ) {
 	throw new Error("packed ./service-provider entry does not export the provider seam");
 }
@@ -420,8 +419,8 @@ if (
 	manifest.pi.skills[0] !== "./skills" ||
 	!/^---\\nname: workflow-authoring\\n/.test(skill) ||
 	!/^---\\nname: workflows\\n/.test(operatingSkill) ||
-	// W2-PLANREVIEW: the two preloaded references, whose frontmatter name is
-	// the name plan-review asks for by preloadSkills.
+	// The two preloaded references, whose frontmatter name is the name a
+	// reviewer asks for by `preloadSkills`.
 	!/^---\\nname: plan-schema\\n/.test(planSchemaSkill) ||
 	!/^---\\nname: workflow-components\\n/.test(componentsSkill)
 ) throw new Error("packed authoring and operating skills are not declared in the pi manifest");
@@ -479,7 +478,7 @@ try {
 	if (!builtin || builtin.scope !== "builtin" || builtin.source !== "package" || path.dirname(builtin.path) !== builtinRoot) {
 		throw new Error("packed workflow_list did not discover the builtin root: " + JSON.stringify(listed));
 	}
-	for (const ref of ["plan-to-ship", "deep-review", "plan-review", "deep-research"]) {
+	for (const ref of ["plan-to-ship", "deep-review", "deep-research"]) {
 		const validated = await callTool("workflow_validate", { ref });
 		if (validated.valid !== true || validated.workflow?.scope !== "builtin") {
 			throw new Error("packed workflow_validate refused the builtin definition " + ref + ": " + JSON.stringify(validated));
@@ -496,7 +495,7 @@ try {
 const packedAgents = await subagent.discoverAgents([
 	{ scope: "package", directory: path.resolve("node_modules/@vegardx/pi-workflow/workflows/agents"), trusted: true },
 ]);
-for (const required of ["implementer", "lens-reviewer", "plan-reviewer", "planner", "researcher", "reviewer"]) {
+for (const required of ["implementer", "lens-reviewer", "planner", "researcher", "reviewer"]) {
 	const agent = packedAgents.get(required);
 	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
 	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {

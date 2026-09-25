@@ -20,10 +20,7 @@ import {
 import type { WorkflowDefinition } from "../src/definition.js";
 import { discoverWorkflows } from "../src/registry.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
-import {
-	BUILTIN_HEADLESS_WORKFLOWS,
-	headlessBuiltinViolations,
-} from "../src/service-provider.js";
+import { headlessBuiltinViolations } from "../src/service-provider.js";
 import type {
 	WorkflowServiceRunView,
 	WorkflowServiceTaskView,
@@ -40,8 +37,8 @@ import type {
 // not the definition's implementation:
 //
 //   - structural headlessness: no checkpoint, no worktree, no handoff, over a
-//     dry materialization of the real graph, and NOT a claim of membership on
-//     `BUILTIN_HEADLESS_WORKFLOWS`, which names `plan-review` alone;
+//     dry materialization of the real graph. It is a property of the graph, not
+//     a licence to be started without a model turn;
 //   - the thread count is a pure function of `depth`, or of the sources;
 //   - `forEach`'s key rule: the key is the item's own required id, so
 //     reordering the sources moves the tasks without renaming any of them;
@@ -580,9 +577,8 @@ describe("deep-research: discovery", () => {
 });
 
 describe("deep-research: structural headlessness", () => {
-	// The same structural property that makes `plan-review` legal on the
-	// headless allowlist, asserted here because this definition claims it in its
-	// header: nothing it declares parks, writes, or produces a patch.
+	// Asserted here because this definition claims it in its header: nothing it
+	// declares parks, writes, or produces a patch.
 	it("declares no checkpoint, no worktree and no handoff at any depth", async () => {
 		const definition = await shippedDefinition();
 		for (const depth of DEPTHS) {
@@ -596,14 +592,6 @@ describe("deep-research: structural headlessness", () => {
 				),
 			).resolves.toEqual([]);
 		}
-	});
-
-	it("is not on the headless allowlist, which names plan-review alone", async () => {
-		// Being structurally headless and being startable without a model turn
-		// are different things. Only the blind review has a reason to be the
-		// second, and the allowlist belongs to the runtime rather than to a
-		// definition that would like to join it.
-		expect([...BUILTIN_HEADLESS_WORKFLOWS]).toEqual(["plan-review"]);
 	});
 });
 
@@ -694,7 +682,7 @@ describe("deep-research: the lowered graph", () => {
 		]) {
 			expect(request.tools).toEqual(["read", "grep", "find", "ls"]);
 			// A researcher reads THIS repository, so it gets the project's own
-			// context files — the opposite of `plan-review`, which declares none.
+			// context files — the opposite of a blind reviewer, which declares none.
 			expect(request.contextScopes).toEqual(["project"]);
 		}
 		const synthesis = delegated.synthesisRequest();
