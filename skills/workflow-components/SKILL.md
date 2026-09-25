@@ -39,6 +39,13 @@ A graph that breaks one of these is a replay bug, not a style problem.
 | `synthesizeFindings(ctx, key, {reviews, effort, synthesize})` | `ctx.fanIn` over the lenses that REPORTED (`optional`) | key literal; each input is named by its lens key | a missing `synthesize`; a declaration naming `outputSchema`, `inputs`, `model` or `limits`. Returns `undefined` when no lens reported |
 | `fixFindings(ctx, key, {implementation, findings, synthesis, effort, remainingRounds, agent})` | one `ctx.agent` in a worktree, `handoff: "required"` | key literal | an `implementation` that is not a worktree handle; a negative `remainingRounds`; a fixer that is not a worktree task or declares `outputSchema`/`model`/`limits`/`handoff`; an input name it already wires |
 
+`synthesizeFindings` declares the reducer `optional` by default, because a
+barrier's control edge covers every lens it closed over and a half-dead fan-out
+would otherwise fail the run. A caller whose FIXER depends on the normalized
+list passes `disposition: "required"` and accepts that cost: an optional reducer
+makes a synthesis that failed look like a deliverable nobody had to fix.
+`plan-to-ship` passes `"required"`.
+
 `maxRounds` counts **verify** rounds, so at most `maxRounds - 1` fixers run and
 a fix is never left unchecked. `escalate: "thinking"` moves every fixer one rung
 up the ladder; verifiers never escalate, and escalating past `deep` is refused.

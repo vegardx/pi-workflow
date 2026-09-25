@@ -653,6 +653,14 @@ run started under.
   stays equality, and the refusal names the condition: "Subagent preflight
   response does not match the workflow task: context scopes: plan [] does not
   cover request [project]."
+- **`plan-to-ship`'s review synthesis is required, so a skipped fix is no longer
+  silent.** `synthesis-<d>` inherited `synthesizeFindings`'s `optional` default,
+  so a synthesis that failed let the deliverable reach the ship gate reporting
+  "0 of 1 deliverable(s) ran a fixer" and nothing about why. It is
+  `disposition: "required"` now and its value is read at a `ctx.result` barrier,
+  so a synthesis that cannot run fails the run — including when a dead lens
+  blocks it, which is the cost `synthesizeFindings` documents and a caller with
+  an autonomous fixer accepts; `meta.version` moves to 4.
 - **A handle is recognized across two copies of the package.** The task,
   artifact and handoff handle brands moved from module-local symbols to the
   global registry (`Symbol.for`). A builtin definition imports the component
