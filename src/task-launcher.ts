@@ -132,6 +132,20 @@ const PREFLIGHT_FAILURE_MESSAGE = "Subagent preflight failed before launch.";
 const MAX_RELAYED_REFUSAL_CHARS = 1024;
 
 /**
+ * Fixed prefix of a mismatch the workflow itself found in a preflight
+ * response pi-subagent already accepted. The condition that failed is named
+ * after it: nothing else reaches the journal, and "it did not match" without
+ * saying WHAT did not match is an account nobody can act on.
+ */
+const PREFLIGHT_MISMATCH_MESSAGE =
+	"Subagent preflight response does not match the workflow task";
+
+/** The mismatch sentence for one named condition. */
+function preflightMismatchMessage(reason: string): string {
+	return `${PREFLIGHT_MISMATCH_MESSAGE}: ${reason.slice(0, MAX_RELAYED_REFUSAL_CHARS)}.`;
+}
+
+/**
  * The preflight failure message for a refusal raised by pi-subagent itself.
  * The refusal text is relayed unchanged after the fixed prefix; a refusal with
  * no message degrades to the prefix alone.
@@ -149,57 +163,151 @@ function sameStringSet(
 	return isDeepStrictEqual([...left].sort(), [...right].sort());
 }
 
-function validatePreflight(
+/**
+ * Whether `plan` carries every value `request` selected. The launch plan may
+ * hold MORE than the request asked for, because pi-subagent unions the agent
+ * definition's own requirements into it; it may never hold less.
+ */
+function covers(plan: readonly string[], request: readonly string[]): boolean {
+	return request.every((value) => plan.includes(value));
+}
+
+/** One set, rendered for a mismatch reason: sorted, deduplicated, bracketed. */
+function renderSet(values: readonly string[]): string {
+	return `[${[...new Set(values)].sort().join(" ")}]`;
+}
+
+/**
+ * The ceiling condition, named. The plan states the bound it was compiled
+ * under, and pi-subagent records each of its lists sorted, so the comparison
+ * is over SETS: a host that stated `["write", "read"]` bounds the same run as
+ * one that stated `["read", "write"]`, and an order-sensitive comparison would
+ * refuse every launch of the first host's runs.
+ */
+function ceilingMismatch(
+	plan: DelegationCeiling | undefined,
+	requested: DelegationCeiling | undefined,
+): string | undefined {
+	if (plan === undefined || requested === undefined) {
+		if (plan === requested) return undefined;
+		return `ceiling: plan ${plan === undefined ? "none" : "present"} != request ${requested === undefined ? "none" : "present"}`;
+	}
+	for (const field of ["workspaceModes", "tools"] as const) {
+		const planned = plan[field];
+		const asked = requested[field];
+		if (planned === undefined || asked === undefined) {
+			if (planned === asked) continue;
+			return `ceiling ${field}: plan ${planned === undefined ? "none" : renderSet(planned)} != request ${asked === undefined ? "none" : renderSet(asked)}`;
+		}
+		if (!sameStringSet(planned, asked)) {
+			return `ceiling ${field}: plan ${renderSet(planned)} != request ${renderSet(asked)}`;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The FIRST condition a preflight response fails, named, or `undefined` when
+ * the response is the plan this task asked for.
+ *
+ * Every reason is built from field names and from the tool, skill, scope and
+ * mode names the workflow itself put in the request. None of it carries a
+ * path, a digest, or a word the child wrote, which is what makes the reason
+ * safe to journal and to show a person: the launch never happened, so the
+ * mismatch is the only account of why the task failed.
+ */
+function preflightMismatch(
 	preflight: SubagentPreflight,
 	request: SubagentRequest,
 	ownerId: string,
-): void {
+): string | undefined {
+	if (typeof preflight !== "object" || preflight === null) {
+		return "preflight response shape";
+	}
 	if (
-		typeof preflight !== "object" ||
-		preflight === null ||
 		typeof preflight.preflightId !== "string" ||
 		preflight.preflightId.length < 1 ||
-		preflight.preflightId.length > 128 ||
-		!SHA256_PATTERN.test(preflight.identitySha256) ||
-		!Number.isFinite(Date.parse(preflight.expiresAt)) ||
-		Date.parse(preflight.expiresAt) <= Date.now() ||
-		!Value.Check(AgentLaunchPlanSchema, preflight.launchPlan) ||
-		!verifyLaunchPlanIdentity(preflight.launchPlan) ||
-		preflight.identitySha256 !== preflight.launchPlan.identitySha256 ||
-		preflight.launchPlan.operationId !== request.operationId ||
-		preflight.launchPlan.ownerId !== ownerId ||
-		preflight.launchPlan.agent !== request.agent ||
-		!isDeepStrictEqual(preflight.launchPlan.task, request.task) ||
-		preflight.launchPlan.contextMode !== request.contextMode ||
-		!sameStringSet(preflight.launchPlan.tools, request.tools) ||
-		!sameStringSet(preflight.launchPlan.preloadSkills, request.preloadSkills) ||
-		!sameStringSet(preflight.launchPlan.contextScopes, request.contextScopes) ||
-		preflight.launchPlan.workspace.mode !== request.workspace.mode ||
-		// The baseline digest is persisted as replay identity on the preflight
-		// event; a plan without a well-formed digest cannot be journaled.
-		!SHA256_PATTERN.test(preflight.launchPlan.workspace.baselineSha256) ||
-		!isDeepStrictEqual(
-			preflight.launchPlan.outputSchema,
-			request.outputSchema,
-		) ||
-		!isDeepStrictEqual(preflight.launchPlan.limits, request.limits) ||
-		// The plan always carries a resolved grant. A request that named one
-		// must get exactly it; a request that named none inherits the agent
-		// definition's ceiling, which the workflow cannot predict.
-		(request.memoryBytes !== undefined &&
-			preflight.launchPlan.sandbox.memoryBytes !== request.memoryBytes) ||
-		(request.model !== undefined &&
-			!isDeepStrictEqual(preflight.launchPlan.model, request.model)) ||
-		// The plan states the ceiling it was compiled under. A plan that dropped
-		// or widened the run's ceiling would tell the workflow a bound was applied
-		// that was not.
-		!isDeepStrictEqual(preflight.launchPlan.ceiling, request.ceiling)
+		preflight.preflightId.length > 128
 	) {
-		throw new WorkflowTaskLaunchError(
-			"preflight",
-			"Subagent preflight response does not match the workflow task.",
-		);
+		return "preflight identity";
 	}
+	if (!SHA256_PATTERN.test(preflight.identitySha256)) {
+		return "preflight digest";
+	}
+	if (
+		!Number.isFinite(Date.parse(preflight.expiresAt)) ||
+		Date.parse(preflight.expiresAt) <= Date.now()
+	) {
+		return "expired";
+	}
+	if (!Value.Check(AgentLaunchPlanSchema, preflight.launchPlan)) {
+		// The instance path of the first violation names the field and nothing
+		// else: TypeBox reports where, never the value it found there.
+		const [first] = [
+			...Value.Errors(AgentLaunchPlanSchema, preflight.launchPlan),
+		];
+		return `launch plan schema${first ? `: ${first.instancePath || "/"}` : ""}`;
+	}
+	const plan = preflight.launchPlan;
+	if (
+		!verifyLaunchPlanIdentity(plan) ||
+		preflight.identitySha256 !== plan.identitySha256
+	) {
+		return "launch plan identity";
+	}
+	if (plan.operationId !== request.operationId) return "operation id";
+	if (plan.ownerId !== ownerId) return "owner id";
+	if (plan.agent !== request.agent) return "agent";
+	if (!isDeepStrictEqual(plan.task, request.task)) return "task";
+	if (plan.contextMode !== request.contextMode) return "context mode";
+	// Tools are a sorted copy of the request's own list: pi-subagent bounds them
+	// by the agent definition rather than adding to them, so this is equality.
+	if (!sameStringSet(plan.tools, request.tools)) {
+		return `tools: plan ${renderSet(plan.tools)} != request ${renderSet(request.tools)}`;
+	}
+	// Skills and context scopes are UNIONS of what the agent definition requires
+	// with what the task selected (pi-subagent's `compileLaunchPlan`), so the
+	// plan may add to them - the `reviewer` template requires the `project`
+	// scope, and a task that selected none still gets it. What a plan may never
+	// do is drop something the task asked for.
+	if (!covers(plan.preloadSkills, request.preloadSkills)) {
+		return `preload skills: plan ${renderSet(plan.preloadSkills)} does not cover request ${renderSet(request.preloadSkills)}`;
+	}
+	if (!covers(plan.contextScopes, request.contextScopes)) {
+		return `context scopes: plan ${renderSet(plan.contextScopes)} does not cover request ${renderSet(request.contextScopes)}`;
+	}
+	if (plan.workspace.mode !== request.workspace.mode) {
+		return "workspace mode";
+	}
+	// The baseline digest is persisted as replay identity on the preflight
+	// event; a plan without a well-formed digest cannot be journaled. The launch
+	// plan schema already bounds it, and this states the workflow's own need of
+	// it rather than inheriting one.
+	if (!SHA256_PATTERN.test(plan.workspace.baselineSha256)) {
+		return "workspace baseline digest";
+	}
+	if (!isDeepStrictEqual(plan.outputSchema, request.outputSchema)) {
+		return "output schema";
+	}
+	if (!isDeepStrictEqual(plan.limits, request.limits)) return "limits";
+	// The plan always carries a resolved grant. A request that named one
+	// must get exactly it; a request that named none inherits the agent
+	// definition's ceiling, which the workflow cannot predict.
+	if (
+		request.memoryBytes !== undefined &&
+		plan.sandbox.memoryBytes !== request.memoryBytes
+	) {
+		return "sandbox memory grant";
+	}
+	if (
+		request.model !== undefined &&
+		!isDeepStrictEqual(plan.model, request.model)
+	) {
+		return "model";
+	}
+	// A plan that dropped or widened the run's ceiling would tell the workflow a
+	// bound was applied that was not.
+	return ceilingMismatch(plan.ceiling, request.ceiling);
 }
 
 async function lowerRequest(
@@ -642,19 +750,21 @@ export function createWorkflowTaskLauncher(
 					cause: error,
 				});
 			}
-			try {
-				validatePreflight(resolved, request, binding.ownerId);
-			} catch (error) {
-				const message = PREFLIGHT_FAILURE_MESSAGE;
+			// pi-subagent accepted the request, so a mismatch here is the
+			// workflow's own finding about the plan it was handed back. The failed
+			// condition travels in the message rather than in a `cause` nobody
+			// reads: the journal and the task's failure reason are all a person
+			// gets, and the launch never happened.
+			const mismatch = preflightMismatch(resolved, request, binding.ownerId);
+			if (mismatch !== undefined) {
+				const message = preflightMismatchMessage(mismatch);
 				await terminalizeWorkflowFailure(
 					journal,
 					execution,
 					"preflight",
 					message,
 				);
-				throw new WorkflowTaskLaunchError("preflight", message, {
-					cause: error,
-				});
+				throw new WorkflowTaskLaunchError("preflight", message);
 			}
 			freshPreflight = resolved;
 			await append(journal, {

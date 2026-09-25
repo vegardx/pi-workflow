@@ -133,6 +133,11 @@ function launchPlan(
 			mode: "public-egress" as const,
 			blockInternalRanges: true as const,
 		},
+		// pi-subagent records the bound it compiled under, with each of its
+		// lists sorted, and omits the field when the request carried none.
+		...(request.ceiling === undefined
+			? {}
+			: { ceiling: structuredClone(request.ceiling) }),
 		outputSchema: structuredClone(request.outputSchema),
 		limits: structuredClone(request.limits),
 	} satisfies Omit<AgentLaunchPlan, "identitySha256">;
@@ -267,9 +272,46 @@ function memoryDeclaration(
 	};
 }
 
+/** Re-declares the agent task with a different context-scope selection. */
+function contextScopeDeclaration(
+	event: WorkflowEventInput,
+	contextScopes: AgentTaskSpec["request"]["contextScopes"],
+): WorkflowEventInput {
+	if (event.type !== "task-declared" || !isAgentDeclaration(event.data.task)) {
+		return event;
+	}
+	const task: MaterializedAgentTask = event.data.task;
+	const { identitySha256: _identity, ...spec } = task.spec;
+	const selected: Omit<AgentTaskSpec, "identitySha256"> = {
+		...spec,
+		request: {
+			...structuredClone(spec.request),
+			contextScopes: [...contextScopes],
+		},
+	};
+	return {
+		type: "task-declared",
+		data: {
+			task: {
+				...task,
+				spec: {
+					...selected,
+					identitySha256: deriveAgentTaskIdentity({
+						definitionIdentitySha256,
+						inputSha256,
+						namespace: task.namespace,
+						spec: selected,
+					}),
+				},
+			},
+		},
+	};
+}
+
 async function readyJournal(
 	workspace: "read-only" | "worktree" = "read-only",
 	memoryBytes?: number,
+	contextScopes?: AgentTaskSpec["request"]["contextScopes"],
 ) {
 	const root = path.resolve(".pi", "test-task-launcher", `run-${randomUUID()}`);
 	const lease = await acquireWorkflowRunLease({
@@ -296,10 +338,14 @@ async function readyJournal(
 	for (const event of materializer.closeEpoch("final", [task]).events) {
 		const declared =
 			workspace === "worktree" ? worktreeDeclaration(event) : event;
+		const scoped =
+			contextScopes === undefined
+				? declared
+				: contextScopeDeclaration(declared, contextScopes);
 		await journal.appendEvent(
 			memoryBytes === undefined
-				? declared
-				: memoryDeclaration(declared, memoryBytes),
+				? scoped
+				: memoryDeclaration(scoped, memoryBytes),
 		);
 	}
 	await journal.append("run-status-changed", {
@@ -785,8 +831,9 @@ describe("workflow task launcher", () => {
 
 		await expect(launcher.launch(taskId)).rejects.toMatchObject({
 			stage: "preflight",
-			// A mismatch the launcher detects locally keeps the bare prefix.
-			message: "Subagent preflight failed before launch.",
+			// A mismatch the launcher finds itself NAMES the failed condition.
+			message:
+				"Subagent preflight response does not match the workflow task: sandbox memory grant.",
 		});
 		expect(launch).not.toHaveBeenCalled();
 	});
@@ -844,9 +891,13 @@ describe("workflow task launcher", () => {
 			),
 		});
 
+		// The launch plan schema bounds the digest, so the reason names the field
+		// the plan violated - the path, never the value the plan carried there.
+		const expected =
+			"Subagent preflight response does not match the workflow task: launch plan schema: /workspace/baselineSha256.";
 		await expect(launcher.launch(taskId)).rejects.toMatchObject({
 			stage: "preflight",
-			message: "Subagent preflight failed before launch.",
+			message: expected,
 		});
 		expect(launch).not.toHaveBeenCalled();
 		const state = await projection(journal);
@@ -854,9 +905,168 @@ describe("workflow task launcher", () => {
 		expect(execution?.preflight).toBeUndefined();
 		expect(execution?.terminal).toMatchObject({
 			outcome: "failed",
-			evidence: { kind: "workflow", stage: "preflight" },
+			// The named condition is the durable evidence and the operator-facing
+			// reason: no launch happened, so nothing else can explain the failure.
+			evidence: { kind: "workflow", stage: "preflight", message: expected },
 		});
 		expect(state.tasks[taskId]?.status).toBe("failed");
+		// The same sentence is the task's own failure reason on the journal.
+		const failures = (await journal.readEvents()).flatMap((event) => {
+			if (event.type !== "task-status-changed") return [];
+			const data = event.data as { to: string; reason?: string };
+			return data.to === "failed" ? [data] : [];
+		});
+		expect(failures.at(-1)).toMatchObject({ reason: expected });
+	});
+
+	it("accepts a launch plan that unions the agent's required context scope", async () => {
+		// pi-subagent UNIONS `agent.contextScopes` with the request's, so a task
+		// that selected none still gets what its template requires - the shipped
+		// `reviewer` requires `project`, which is what the synthesis reducer
+		// asking for `contextScopes: []` was refused over.
+		const { journal, taskId } = await readyJournal("read-only", undefined, []);
+		const launch = vi.fn(
+			async (): Promise<RunReceipt> => ({
+				runId: "run_launcher",
+				attemptId: "attempt_launcher",
+				status: "active",
+			}),
+		);
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					preflight: async (input) => {
+						expect(input.contextScopes).toEqual([]);
+						return preflight(
+							{ ...input, contextScopes: ["project"] },
+							"pi-workflow:workflow_launcher",
+						);
+					},
+					launch,
+				}),
+			),
+		});
+
+		const outcome = await launcher.launch(taskId);
+		expect(outcome.state).toBe("launched");
+		expect(launch).toHaveBeenCalledTimes(1);
+		const state = await projection(journal);
+		const execution = Object.values(state.executions)[0];
+		expect(execution).toMatchObject({
+			phase: "launched",
+			preflight: { preflightId: "preflight-launcher" },
+		});
+	});
+
+	it("names the context scopes a plan dropped", async () => {
+		// The union goes one way only: a plan that dropped a scope the task asked
+		// for is not the plan this task asked for.
+		const { journal, taskId } = await readyJournal();
+		const launch = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					preflight: async (input) =>
+						preflight(
+							{ ...input, contextScopes: [] },
+							"pi-workflow:workflow_launcher",
+						),
+					launch,
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "preflight",
+			message:
+				"Subagent preflight response does not match the workflow task: context scopes: plan [] does not cover request [project].",
+		});
+		expect(launch).not.toHaveBeenCalled();
+	});
+
+	it("names the tools a plan changed", async () => {
+		const { journal, taskId } = await readyJournal();
+		const launch = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			binding: binding(
+				client({
+					// Tools are a sorted copy of the request's own list, never a union:
+					// a plan that added one is a widened grant, not a resolved one.
+					preflight: async (input) =>
+						preflight(
+							{ ...input, tools: ["read", "write"] },
+							"pi-workflow:workflow_launcher",
+						),
+					launch,
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "preflight",
+			message:
+				"Subagent preflight response does not match the workflow task: tools: plan [read write] != request [read].",
+		});
+		expect(launch).not.toHaveBeenCalled();
+	});
+
+	it("names the ceiling a plan restated, and reads its lists as sets", async () => {
+		const unsorted = { tools: ["write", "read"] };
+		const narrowed = { tools: ["read"] };
+		const { journal, taskId } = await readyJournal();
+		const launch = vi.fn();
+		const launcher = createWorkflowTaskLauncher({
+			journal,
+			ceiling: unsorted,
+			binding: binding(
+				client({
+					preflight: async (input) =>
+						preflight(
+							{ ...input, ceiling: narrowed },
+							"pi-workflow:workflow_launcher",
+						),
+					launch,
+				}),
+			),
+		});
+
+		await expect(launcher.launch(taskId)).rejects.toMatchObject({
+			stage: "preflight",
+			message:
+				"Subagent preflight response does not match the workflow task: ceiling tools: plan [read] != request [read write].",
+		});
+		expect(launch).not.toHaveBeenCalled();
+
+		// The same bound, sorted as pi-subagent records it, is the same bound: a
+		// host that stated its tools in another order still launches.
+		const second = await readyJournal();
+		const sorted = { tools: ["read", "write"] };
+		const relaunch = vi.fn(
+			async (): Promise<RunReceipt> => ({
+				runId: "run_launcher",
+				attemptId: "attempt_launcher",
+				status: "active",
+			}),
+		);
+		const accepting = createWorkflowTaskLauncher({
+			journal: second.journal,
+			ceiling: unsorted,
+			binding: binding(
+				client({
+					preflight: async (input) =>
+						preflight(
+							{ ...input, ceiling: sorted },
+							"pi-workflow:workflow_launcher",
+						),
+					launch: relaunch,
+				}),
+			),
+		});
+		expect((await accepting.launch(second.taskId)).state).toBe("launched");
+		expect(relaunch).toHaveBeenCalledTimes(1);
 	});
 
 	it("reopens and binds verified artifacts into delegated context", async () => {
