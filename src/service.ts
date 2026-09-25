@@ -3,7 +3,11 @@ import type { Dirent, Stats } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { HANDOFF_EXPORT_MEDIA_TYPE } from "@vegardx/pi-subagent";
+import {
+	type DelegationCeiling,
+	DelegationCeilingSchema,
+	HANDOFF_EXPORT_MEDIA_TYPE,
+} from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
@@ -41,11 +45,13 @@ import {
 	createTaskHandle,
 	type FinalizeRequest,
 	type NestedWorkflowRequest,
+	resolveWorkflowNeeds,
 	type TaskHandle,
 	validateJsonSchemaDocument,
 	type WorkflowBudget,
 	type WorkflowContext,
 	type WorkflowDefinition,
+	type WorkflowNeeds,
 } from "./definition.js";
 import {
 	assertDynamicSourceRunnable,
@@ -249,6 +255,14 @@ export type WorkflowDefinitionSummary = {
 	readonly source: string;
 	readonly path: string;
 	readonly identitySha256: string;
+	/**
+	 * What the definition needs of the host, with `declared: false` when it said
+	 * nothing and the conservative reading (`worktree`) applies.
+	 */
+	readonly needs: {
+		readonly workspace: WorkflowNeeds["workspace"];
+		readonly declared: boolean;
+	};
 };
 
 export type WorkflowValidationResult = {
@@ -325,6 +339,56 @@ const CHECKPOINT_DECISION_UNVERIFIED_MESSAGE =
  */
 export interface WorkflowServiceRunOptions {
 	readonly origin?: WorkflowRunOrigin;
+	/**
+	 * The host's delegation ceiling this run must stay inside, in pi-subagent's
+	 * own vocabulary. It is recorded on the run record at creation, lowered onto
+	 * every `SubagentRequest` the run makes, and never changed afterwards: a run
+	 * keeps the ceiling it started with.
+	 *
+	 * The CALLER decides whether there is one, and that is the whole design.
+	 * `workflow_run` - the model's tool - reads the host-registered provider and
+	 * passes what it answers, because the model acts inside whatever mode the
+	 * host is in. `startBuiltin` passes the ceiling of the mode the host is
+	 * switching INTO, because the host starts the plan's run while changing
+	 * modes. `/workflow run` passes none: a person typing a command is not
+	 * delegating under a mode, they are the one who set it.
+	 *
+	 * Given one, `run` refuses BEFORE creating the run when the definition's
+	 * declared `needs` exceed it ({@link ceilingRefusalMessage}), so a plan that
+	 * cannot execute under this bound costs nothing rather than a journal and a
+	 * failed first task.
+	 */
+	readonly ceiling?: DelegationCeiling;
+}
+
+/**
+ * The refusal a start above the host's ceiling raises, naming BOTH sides: what
+ * the definition needs and what the host allows. A message that named only one
+ * would leave a person guessing which to change.
+ */
+/** The one refusal a ceiling that is not a `DelegationCeiling` raises. */
+export const CEILING_INVALID_MESSAGE =
+	"Host delegation ceiling is not a valid ceiling.";
+
+export function ceilingRefusalMessage(
+	name: string,
+	needs: WorkflowNeeds["workspace"],
+	ceiling: DelegationCeiling,
+): string {
+	const allowed = [...(ceiling.workspaceModes ?? [])].sort().join(", ");
+	return `${name} needs a ${needs} workspace; the host ceiling allows ${allowed}.`;
+}
+
+/**
+ * Whether a definition's declared needs fit inside a ceiling. Only the
+ * workspace axis is compared: `needs` states one, and tools are per-task.
+ */
+export function needsFitCeiling(
+	needs: WorkflowNeeds["workspace"],
+	ceiling: DelegationCeiling | undefined,
+): boolean {
+	const modes = ceiling?.workspaceModes;
+	return modes === undefined || modes.includes(needs);
 }
 
 export interface WorkflowService {
@@ -350,6 +414,17 @@ export interface WorkflowService {
 		input: unknown,
 		options?: WorkflowServiceRunOptions,
 	): Promise<WorkflowServiceRunReceipt>;
+	/**
+	 * The host's delegation ceiling right now, from the provider the embedder
+	 * installed as `WorkflowServiceOptions.delegationCeiling`, or `undefined`
+	 * when none is installed - which is what "no bound" means.
+	 *
+	 * It exists so the model's `workflow_run` can pass the host's answer to
+	 * `run` without the tool layer reaching for Pi's event bus, and so a
+	 * person's `/workflow run` can decline to: the ceiling is a property of the
+	 * CALL SITE, not of the service.
+	 */
+	hostDelegationCeiling(): DelegationCeiling | undefined;
 	status(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 	/**
 	 * Drives the run to a durable terminal state. With `timeoutMs`, returns
@@ -513,6 +588,15 @@ export interface WorkflowServiceOptions {
 	 */
 	readonly modelRouting?: ModelRoutingPort;
 	/**
+	 * The host's delegation ceiling provider, read once per `workflow_run`
+	 * through {@link WorkflowService.hostDelegationCeiling}. The shipped
+	 * extension installs
+	 * `() => resolveDelegationCeiling(pi.events)` from
+	 * `@vegardx/pi-subagent/ceiling-provider`; an embedder with no host mode
+	 * installs nothing and every run is unbounded, exactly as before.
+	 */
+	readonly delegationCeiling?: () => DelegationCeiling | undefined;
+	/**
 	 * Checkpoint policy: with `headless`, `use-explicit-default` checkpoints
 	 * are decided from their default immediately and never park; `block`
 	 * checkpoints park regardless. Default `{ headless: false }`.
@@ -631,6 +715,7 @@ function summary(workflow: DiscoveredWorkflow): WorkflowDefinitionSummary {
 		source: workflow.source,
 		path: workflow.path,
 		identitySha256: workflow.identity.identitySha256,
+		needs: resolveWorkflowNeeds(workflow.definition.meta),
 	});
 }
 
@@ -1007,6 +1092,35 @@ export async function createWorkflowService(
 		}
 	}
 
+	/**
+	 * The ceiling this run is created under, or `undefined` for no bound.
+	 *
+	 * Refuses before anything durable exists when the definition's declared
+	 * `needs` exceed it. A definition that declares no `needs` is read as needing
+	 * a `worktree` workspace, so silence never slips under a read-only ceiling.
+	 */
+	function assertCeiling(
+		workflow: DiscoveredWorkflow,
+		ceiling: DelegationCeiling | undefined,
+	): DelegationCeiling | undefined {
+		if (ceiling === undefined) return undefined;
+		if (!Value.Check(DelegationCeilingSchema, ceiling)) {
+			throw new WorkflowServiceError("validation", CEILING_INVALID_MESSAGE);
+		}
+		const needs = resolveWorkflowNeeds(workflow.definition.meta);
+		if (!needsFitCeiling(needs.workspace, ceiling)) {
+			throw new WorkflowServiceError(
+				"validation",
+				ceilingRefusalMessage(
+					workflow.definition.meta.name,
+					needs.workspace,
+					ceiling,
+				),
+			);
+		}
+		return Object.freeze(structuredClone(ceiling));
+	}
+
 	/** D10: dynamic source is untrusted orchestration input in a trusted process. */
 	function assertDynamicTrusted(): void {
 		if (!options.projectTrusted()) {
@@ -1284,6 +1398,9 @@ export async function createWorkflowService(
 			binding,
 			artifacts,
 			...(agentRoots.length === 0 ? {} : { agentRoots }),
+			// From the RECORD, not from the host: a resume of a run started under a
+			// bound is still bound by it, whatever mode the host is in now.
+			...(record.ceiling === undefined ? {} : { ceiling: record.ceiling }),
 		});
 		const finalizer = createWorkflowTaskFinalizer({
 			journal,
@@ -1977,6 +2094,10 @@ export async function createWorkflowService(
 				);
 			}
 			validateInput(workflow, request.input);
+			// The parent's own record is the only source for the child's bound: the
+			// parent is owned while it launches a child, so this is always present
+			// when the parent has one.
+			const parentCeiling = owned.get(request.parent.runId)?.record.ceiling;
 			const binding = await options.subagents.bind(request.childRunId);
 			let lease: WorkflowRunLease;
 			try {
@@ -2069,6 +2190,11 @@ export async function createWorkflowService(
 					...(options.modelRouting?.id
 						? { modelRouting: { router: options.modelRouting.id } }
 						: {}),
+					// A nested run inherits its parent's ceiling. It is the same
+					// delegation seen one level down, so a child that escaped the bound
+					// would be a hole in it; the parent's record is the source, because
+					// the host's answer now is a different answer.
+					...(parentCeiling === undefined ? {} : { ceiling: parentCeiling }),
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);
 				const run = await compose(record, workflow, lease, binding, discovered);
@@ -2303,6 +2429,10 @@ export async function createWorkflowService(
 					? dynamicWorkflow(dynamic.proposal, createdAt.toISOString())
 					: resolveAmong(discovered, ref);
 				validateInput(workflow, input);
+				// BEFORE the run exists. A plan that cannot execute under the host's
+				// bound costs a refusal here rather than a journal, a lease and a
+				// first task that pi-subagent's preflight refuses minutes later.
+				const ceiling = assertCeiling(workflow, runOptions?.ceiling);
 				const id = runId();
 				const binding = await options.subagents.bind(id);
 				const lease = await acquireWorkflowRunLease({
@@ -2362,6 +2492,9 @@ export async function createWorkflowService(
 						...(options.modelRouting?.id
 							? { modelRouting: { router: options.modelRouting.id } }
 							: {}),
+						// Recorded at creation and never changed: a run keeps the
+						// ceiling it started with.
+						...(ceiling === undefined ? {} : { ceiling }),
 					};
 					await WorkflowRunRecordStore.open(journal).create(record);
 					const run = await compose(
@@ -3295,6 +3428,20 @@ export async function createWorkflowService(
 			return () => {
 				listeners.delete(listener);
 			};
+		},
+		hostDelegationCeiling() {
+			assertOpen();
+			const provider = options.delegationCeiling;
+			if (!provider) return undefined;
+			const answer = provider();
+			if (answer === undefined) return undefined;
+			// A ceiling that does not satisfy pi-subagent's own contract would be
+			// silently ignored by the launch it was meant to bound, so it fails
+			// closed here instead.
+			if (!Value.Check(DelegationCeilingSchema, answer)) {
+				throw new WorkflowServiceError("validation", CEILING_INVALID_MESSAGE);
+			}
+			return Object.freeze(structuredClone(answer));
 		},
 	});
 	return service;

@@ -12,6 +12,7 @@ import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-pr
 import { Value } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowRunId, WorkflowTaskId } from "../src/contracts.js";
+import { resolveWorkflowNeeds } from "../src/definition.js";
 import workflowExtension from "../src/extension.js";
 import { workflowStateRoot } from "../src/persistence/state-root.js";
 import { discoverWorkflows } from "../src/registry.js";
@@ -154,6 +155,7 @@ async function builtinSummaryList(): Promise<unknown> {
 		source: entry.source,
 		path: entry.path,
 		identitySha256: entry.identity.identitySha256,
+		needs: resolveWorkflowNeeds(entry.definition.meta),
 	}));
 }
 

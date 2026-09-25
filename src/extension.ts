@@ -5,6 +5,7 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
+import { resolveDelegationCeiling } from "@vegardx/pi-subagent/ceiling-provider";
 import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
 import { workflowStateRoot } from "./persistence/state-root.js";
@@ -243,6 +244,12 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			// builtin code only (`support-registry.ts`): each registration also
 			// admits its module specifier to the definition import gate.
 			supportTasks: supportTaskRegistrations(),
+			// The host's own bound on every delegation this process makes, read
+			// once per `workflow_run`. pi-subagent owns the vocabulary and the
+			// registration; this package only carries the answer onto the run
+			// record and from there onto every request. A host that registered no
+			// provider means no bound, and every run is unbounded as before.
+			delegationCeiling: () => resolveDelegationCeiling(pi.events),
 		});
 		return service;
 	}

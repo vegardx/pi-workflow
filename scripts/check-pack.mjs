@@ -216,13 +216,22 @@ try {
 	// README prose) the package measures 192 entries and 2675 KiB unpacked -
 	// four entries and 55 KiB over the row above. Both bounds stand as they
 	// are, with 16 entries and 141 KiB spare.
-	if (workflow.entryCount > 208 || workflow.unpackedSize > 2816 * 1024) {
+	// The fix loop, the narration surface and the delegation ceiling record
+	// theirs together: removing plan-review and its template gave back two
+	// entries and added src/narration.* and src/components/review-fix.*, so the
+	// package measures 196 entries and 2822 KiB unpacked - four entries and
+	// 147 KiB over the row above, and 6 KiB over the old 2816 KiB bound. The
+	// ENTRY bound stays at 208 (12 spare). The SIZE bound is raised
+	// deliberately to 2944 KiB, which keeps 122 KiB spare; three slices in a row
+	// have now been mostly prose, so the next thing this package ships records
+	// its own measurement here rather than nudging the bound silently.
+	if (workflow.entryCount > 208 || workflow.unpackedSize > 2944 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
 		);
 	}
 	process.stdout.write(
-		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 2816 KiB)\n`,
+		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 2944 KiB)\n`,
 	);
 	const rootExports = await readExportList(rootExportList);
 	const runtimeExports = await readExportList(runtimeExportList);
@@ -258,6 +267,7 @@ const workflowProvider = await import("@vegardx/pi-workflow/service-provider");
 const extension = await import("@vegardx/pi-workflow/extension");
 const subagent = await import("@vegardx/pi-subagent");
 const provider = await import("@vegardx/pi-subagent/service-provider");
+const ceilingProvider = await import("@vegardx/pi-subagent/ceiling-provider");
 const { readFile } = await import("node:fs/promises");
 // D4: the manifest is an exported entry, read through the exports map.
 const manifest = (await import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })).default;
@@ -342,7 +352,7 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 20 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 21 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows !== true ||
@@ -379,7 +389,16 @@ if (
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.vmMemoryCeiling !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
-	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 7 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 8 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.delegationCeiling !== true ||
+	typeof ceilingProvider.registerDelegationCeilingProvider !== "function" ||
+	typeof ceilingProvider.resolveDelegationCeiling !== "function" ||
+	!subagent.DelegationCeilingSchema ||
+	// The ceiling is lowered onto a request and stated on the launch plan, and a
+	// run records it: three surfaces the packed install must actually have.
+	subagent.SubagentRequestSchema.properties?.ceiling === undefined ||
+	subagent.AgentLaunchPlanSchema.properties?.ceiling === undefined ||
+	runtime.WorkflowRunRecordSchema.properties?.ceiling === undefined ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.vmMemoryCeiling !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.workspaceBudgetRefusal !== true ||
 	workflow.WORKFLOW_HANDOFF_FORMAT_SHA256 !== subagent.canonicalSha256({ format: "git-format-patch", mediaType: subagent.HANDOFF_EXPORT_MEDIA_TYPE, revision: 7 }) ||
@@ -420,7 +439,7 @@ if (
 	!/^---\\nname: workflow-authoring\\n/.test(skill) ||
 	!/^---\\nname: workflows\\n/.test(operatingSkill) ||
 	// The two preloaded references, whose frontmatter name is the name a
-	// reviewer asks for by `preloadSkills`.
+	// reviewer asks for by preloadSkills.
 	!/^---\\nname: plan-schema\\n/.test(planSchemaSkill) ||
 	!/^---\\nname: workflow-components\\n/.test(componentsSkill)
 ) throw new Error("packed authoring and operating skills are not declared in the pi manifest");
@@ -484,7 +503,15 @@ try {
 			throw new Error("packed workflow_validate refused the builtin definition " + ref + ": " + JSON.stringify(validated));
 		}
 	}
-	process.stdout.write("builtin workflow root: " + builtin.name + " (" + builtin.scope + "/" + builtin.source + ") discovered from the packed install without project trust\\n");
+	// Revision 21: every packed builtin declares what it needs of the host, so a
+	// host can refuse a start above its ceiling before a run exists.
+	const needs = Object.fromEntries(listed.filter((entry) => entry.scope === "builtin").map((entry) => [entry.name, entry.needs]));
+	for (const [name, workspace] of Object.entries({ "plan-to-ship": "worktree", "deep-review": "read-only", "deep-research": "read-only" })) {
+		if (needs[name]?.workspace !== workspace || needs[name]?.declared !== true) {
+			throw new Error("packed builtin " + name + " does not declare needs " + workspace + ": " + JSON.stringify(needs[name]));
+		}
+	}
+	process.stdout.write("builtin workflow root: " + builtin.name + " (" + builtin.scope + "/" + builtin.source + ") discovered from the packed install without project trust; declared needs " + Object.entries(needs).map(([name, value]) => name + "=" + value.workspace).sort().join(", ") + "\\n");
 } finally {
 	await hooks.get("session_shutdown")?.({ reason: "quit" }, toolContext);
 }

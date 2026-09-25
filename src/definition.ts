@@ -60,6 +60,65 @@ const handoffHandleBrand: unique symbol = Symbol.for(
 
 export { type WorkflowBudget, WorkflowBudgetSchema };
 
+/**
+ * What a definition NEEDS of the host, stated in pi-subagent's own vocabulary
+ * so a host can compare it to a delegation ceiling without translating.
+ *
+ * It is a declaration, not a grant: a definition that needs a `worktree`
+ * workspace still gets its authority from the agent definition, the request, and
+ * pi-subagent's preflight. What `needs` buys is the ability to refuse a start
+ * BEFORE a run exists, when the host's own mode cannot admit the work the
+ * definition is going to ask for. A launch above the ceiling is refused by
+ * pi-subagent either way; that refusal arrives as a failed task, minutes and a
+ * journal later, which is a worse answer to the same question.
+ *
+ * `workspace` is the most permissive mode any task of the definition may ask
+ * for. It is deliberately ONE axis: tools are per-task and vary across a graph,
+ * so a single tool list at the definition level would either be a union nobody
+ * can act on or a bound that lies.
+ *
+ * **Optional, and the absence is not "needs nothing."** A definition that
+ * declares no `needs` is READ as needing a `worktree` workspace - the
+ * conservative reading, because a definition that writes and says nothing must
+ * not slip under a read-only ceiling. `workflow_list` and `workflow_validate`
+ * report the resolved value with `declared: false` so a reader can tell an
+ * assumption from a statement.
+ */
+export const WorkflowNeedsSchema = Type.Object(
+	{
+		/** The most permissive workspace mode any task may ask for. */
+		workspace: Type.Union([
+			Type.Literal("read-only"),
+			Type.Literal("worktree"),
+		]),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowNeeds = Static<typeof WorkflowNeedsSchema>;
+
+/** The conservative reading of a definition that declares no `needs`. */
+export const DEFAULT_WORKFLOW_NEEDS: WorkflowNeeds = Object.freeze({
+	workspace: "worktree",
+});
+
+/**
+ * What a definition needs, and whether it said so. `declared: false` is the
+ * conservative reading of silence, never a claim the definition made.
+ */
+export function resolveWorkflowNeeds(meta: {
+	readonly needs?: WorkflowNeeds;
+}): {
+	readonly workspace: WorkflowNeeds["workspace"];
+	readonly declared: boolean;
+} {
+	return meta.needs
+		? Object.freeze({ workspace: meta.needs.workspace, declared: true })
+		: Object.freeze({
+				workspace: DEFAULT_WORKFLOW_NEEDS.workspace,
+				declared: false,
+			});
+}
+
 const WorkflowMetaInputSchema = Type.Object(
 	{
 		name: Type.String({
@@ -77,6 +136,7 @@ const WorkflowMetaInputSchema = Type.Object(
 		concurrency: Type.Optional(
 			Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_CONCURRENCY }),
 		),
+		needs: Type.Optional(WorkflowNeedsSchema),
 	},
 	{ additionalProperties: false },
 );

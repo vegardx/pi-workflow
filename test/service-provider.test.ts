@@ -340,6 +340,7 @@ describe("registration and discovery", () => {
 		const { client } = await acquire(serviceDouble());
 		expect(Object.keys(client).sort()).toEqual([
 			"awaitRun",
+			"hostCeiling",
 			"inspect",
 			"list",
 			"observe",
@@ -1102,10 +1103,9 @@ describe("inspect through the read client", () => {
 			stage: "ship",
 			taskKind: "gate",
 		});
-		const work = inspection.tasks?.find((task) => task.kind === "agent");
-		expect(work?.narration?.taskKind).toBe("other");
-		expect(work?.narration?.stage).toBe(work?.key);
-		expect(typeof work?.narration?.summary).toBe("string");
+		// A checkpoint's committed result is its decision, so the narration
+		// summary is a rendering of the answer a person gave.
+		expect(decided?.narration?.summary).toBe("{ship: true}");
 
 		// Asking for neither section leaves both out, so the default read is
 		// unchanged for every consumer that does not want them.
@@ -1126,15 +1126,24 @@ describe("inspect through the read client", () => {
 			observed.push(observation);
 		});
 		const receipt = await service.run("ship-example", {});
+		const parked = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		const gate = parked.tasks?.find((task) => task.kind === "checkpoint");
+		await service.decide(receipt.runId, gate?.id ?? "", {
+			decision: { ship: true },
+			approver: "human:vegard",
+		});
 		await service.wait(receipt.runId, { timeoutMs: 30_000 });
 		stop();
 
 		const settled = observed.flatMap((observation) =>
 			observation.task ? [observation.task] : [],
 		);
-		expect(settled.length).toBeGreaterThan(0);
+		expect(
+			settled.map((task) => [task.narration.stage, task.narration.taskKind]),
+		).toEqual([["ship", "gate"]]);
 		for (const task of settled) {
-			expect(task.narration.stage.length).toBeGreaterThan(0);
+			expect(task.status).toBe("completed");
+			// An observation reads no file, so it carries no summary.
 			expect(task.narration.summary).toBeUndefined();
 		}
 		// Most appends settle no task, so `task` is the filter, not the payload.

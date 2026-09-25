@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
 	AgentLaunchPlanSchema,
 	AttemptIdSchema,
+	type DelegationCeiling,
 	RunIdSchema,
 	type RunReceipt,
 	RunStatusSchema,
@@ -77,6 +78,18 @@ export interface WorkflowTaskLauncherOptions {
 	 * trusted project's `.pi/agents` still win.
 	 */
 	readonly agentRoots?: readonly string[];
+	/**
+	 * The host's delegation ceiling this run started under, from the run record,
+	 * lowered onto every request this launcher makes. It is the RUN's, not the
+	 * task's: a task spec that carried it would put a host mode into task
+	 * identity, and a run keeps the ceiling it started with either way.
+	 *
+	 * Absent means no bound, which is what a host that registered no provider
+	 * means. A request above the ceiling is refused by pi-subagent's preflight
+	 * ("workspace mode exceeds host ceiling: …", "tool exceeds host ceiling: …"),
+	 * which the launcher relays unchanged as the task's failure.
+	 */
+	readonly ceiling?: DelegationCeiling;
 }
 
 function launchReceipt(
@@ -176,7 +189,11 @@ function validatePreflight(
 		(request.memoryBytes !== undefined &&
 			preflight.launchPlan.sandbox.memoryBytes !== request.memoryBytes) ||
 		(request.model !== undefined &&
-			!isDeepStrictEqual(preflight.launchPlan.model, request.model))
+			!isDeepStrictEqual(preflight.launchPlan.model, request.model)) ||
+		// The plan states the ceiling it was compiled under. A plan that dropped
+		// or widened the run's ceiling would tell the workflow a bound was applied
+		// that was not.
+		!isDeepStrictEqual(preflight.launchPlan.ceiling, request.ceiling)
 	) {
 		throw new WorkflowTaskLaunchError(
 			"preflight",
@@ -191,6 +208,7 @@ async function lowerRequest(
 	current: WorkflowStateProjection,
 	artifacts?: WorkflowArtifactStore,
 	agentRoots: readonly string[] = [],
+	ceiling?: DelegationCeiling,
 ): Promise<SubagentRequest> {
 	const hasInputs = Object.keys(task.spec.inputs).length > 0;
 	if (hasInputs && !artifacts) {
@@ -231,6 +249,10 @@ async function lowerRequest(
 			: { memoryBytes: task.spec.request.memoryBytes }),
 		outputSchema: structuredClone(task.spec.request.outputSchema),
 		limits: structuredClone(task.spec.request.limits),
+		// The run's ceiling, not the task's. Not part of the persisted task spec:
+		// which bound the host was under is a property of the run, and putting it
+		// into task identity would make the same graph hash differently per mode.
+		...(ceiling === undefined ? {} : { ceiling: structuredClone(ceiling) }),
 	};
 	if (!Value.Check(SubagentRequestSchema, request)) {
 		throw new WorkflowTaskLaunchError(
@@ -577,6 +599,7 @@ export function createWorkflowTaskLauncher(
 				current,
 				await artifactsFor(agentTask),
 				options.agentRoots ?? [],
+				options.ceiling,
 			);
 		} catch (error) {
 			const message =
