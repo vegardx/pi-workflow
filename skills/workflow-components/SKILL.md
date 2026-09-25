@@ -1,6 +1,6 @@
 ---
 name: workflow-components
-description: Reference tables for @vegardx/pi-workflow/components — what each component lowers to, its key rule, its refusals, the effort envelope, the shared Finding, and the compiled stage document. Use when reading or reviewing a compiled workflow graph; preloaded by the plan-review workflow.
+description: Reference tables for @vegardx/pi-workflow/components — what each component lowers to, its key rule, its refusals, the effort envelope, the shared Finding, and the compiled stage document. Use when reading or reviewing a compiled workflow graph; preloaded by a reviewer that is shown one.
 ---
 
 # The component library
@@ -104,7 +104,7 @@ finding forces `request-changes` even from a lens that approved.
 
 ## The compiled stage document
 
-What `plan-to-ship` compiles a plan into and `plan-review` reads —
+What `plan-to-ship` compiles a plan into, and what a reader checks a plan against —
 `CompiledStageDocumentSchema`, exported from the same entry point. It is the
 **graph, not prose**, and it is closed (`additionalProperties: false`). A plan
 never authors it: the compiler derives each deliverable's stages from the
@@ -136,8 +136,9 @@ is non-empty — `review-fan-out`, `synthesis` and `fix`, and nothing else.
 | Ref | In | Out |
 | --- | --- | --- |
 | `deep-review` | `{subject, lenses?, effort, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` |
-| `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict: ready\|gaps\|blocked, findings (≤32), notes?}` |
 
-`plan-review` is the one definition a service consumer may start headlessly, so
-it declares **no checkpoint, no worktree and no handoff** — the property
-`headlessBuiltinViolations` checks, since `workflow_validate` cannot.
+`deep-review` declares **no checkpoint, no worktree and no handoff** — the
+structural property `headlessBuiltinViolations` reports on, since
+`workflow_validate` cannot. That makes it a graph nobody has to be asked about;
+it does not make it startable without a model turn, which only
+`BUILTIN_STARTABLE_WORKFLOWS` decides.

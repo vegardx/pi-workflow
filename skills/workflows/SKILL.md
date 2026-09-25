@@ -38,19 +38,16 @@ source of truth; a project may ship more.
 | --- | --- | --- |
 | `plan-to-ship` | `{plan, planDigest, effort}` | `{approved, shipped, deliverables[], reviews[], receipt}` — per deliverable it implements, runs the project's check, reviews through every lens, normalizes the findings and FIXES them (`implement-<d>`, `check-<d>`, `review-<d>/<lens>`, `synthesis-<d>`, `fix-<d>`); the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`), and never pushes, merges, or applies anything |
 | `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
-| `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict, findings, notes?}` — the blind plan reviewer, one read-only agent, no gate |
 | `deep-research` | `{question, depth, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |
 
-A host embedding this package may start an allowlisted builtin without a model
-turn, through the service provider, over two separate frozen allowlists.
-`runBuiltin` starts a **headless** run and its allowlist is
-`BUILTIN_HEADLESS_WORKFLOWS`, today `plan-review` alone, because it declares no
-checkpoint, no worktree, and no handoff — a run nobody can be asked to decide.
-`startBuiltin` creates a run a person already asked for in the host's own
-dialog and its allowlist is `BUILTIN_STARTABLE_WORKFLOWS`, today `plan-to-ship`
-alone; that run parks and is decided like any other, and its `run-created`
-event records `origin: "service-provider"`. Both are the host's path, not
-yours: you start a workflow with `workflow_run`.
+A host embedding this package may start ONE allowlisted builtin without a model
+turn, through the service provider. `startBuiltin` creates a run a person
+already asked for in the host's own dialog, and its frozen allowlist is
+`BUILTIN_STARTABLE_WORKFLOWS`, today `plan-to-ship` alone; that run parks and is
+decided like any other, and its `run-created` event records
+`origin: "service-provider"`. There is no headless start: a host that wants one
+read-only opinion runs a one-shot subagent, not a durable workflow. That path is
+the host's, not yours: you start a workflow with `workflow_run`.
 
 **Whether you may start a run inside a host's plan mode is the HOST's rule, not
 this package's.** A workflow never mutates the working tree or the host: writers
@@ -67,8 +64,9 @@ handoff is not, and neither is deciding a checkpoint on the human's behalf.
 
 Whatever the host allows, a run starts because the person asked for one. Do not
 start a workflow to review, verify, or research your own plan: the plan is
-checked after it is stored, by a blind reviewer that has not seen your
-reasoning, and a plan reviewed by its author is not reviewed.
+checked after it is stored, by a reviewer that has not seen your reasoning, and
+a plan reviewed by its author is not reviewed. That check is the host's own
+one-shot subagent; it is not a workflow this package ships.
 
 ## The operating loop
 

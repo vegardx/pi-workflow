@@ -1,6 +1,6 @@
 ---
 name: plan-schema
-description: Reference tables for the pi-maestro plan document — deliverables, work tasks, the reviews list, policy dials, the stage list the compiler derives, and the validation rules a stored plan already passed. Use when reading, reviewing, or patching a plan; preloaded by the plan-review workflow.
+description: Reference tables for the pi-maestro plan document — deliverables, work tasks, the reviews list, policy dials, the stage list the compiler derives, and the validation rules a stored plan already passed. Use when reading, reviewing, or patching a plan; preloaded by a reviewer that is shown one.
 ---
 
 # The pi-maestro plan document
@@ -29,7 +29,7 @@ because a schema error about an unexpected property is not something a person
 can act on.
 
 pi-workflow does not own this schema. It mirrors what it needs
-(`workflows/plan-to-ship.workflow.ts`, `workflows/plan-review.workflow.ts`) and
+(`workflows/plan-to-ship.workflow.ts`) and
 admits the rest, so a plan may carry fields not listed here.
 
 ## Plan

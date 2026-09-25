@@ -33,33 +33,32 @@
  * and moves no contract revision.
  *
  * What crosses the seam is deliberately narrow. The client is **read,
- * validate, project, observe, and start-a-builtin-headless-run**: no
+ * validate, project, observe, and start one allowlisted builtin**: no
  * `decide`, `stop`, `invalidate`, or general `run`. Starting a workflow that
  * writes stays the model's own `workflow_run` call, in the open, in the
- * transcript (`docs/authority.md`). The one exception is `runBuiltin`, gated
- * by this package's own frozen `BUILTIN_HEADLESS_WORKFLOWS` allowlist: a
- * blind reviewer reached through a model turn would have read the planning
- * conversation and would not be blind. The allowlist belongs to the runtime,
- * not to the caller, and every name on it must declare no checkpoint, no
- * worktree and no handoff - a structural property `workflow_validate` cannot
- * check but `headlessBuiltinViolations` can.
+ * transcript (`docs/authority.md`).
  *
- * `startBuiltin` is the second and last exception, and a different one. The
- * decision it carries is a person's, taken in the host's own dialog - "Start
- * the run?" - and a decision a human already made does not become safer by
- * being routed back through the model to make it call `workflow_run`. So the
- * harness executes it: `startBuiltin` creates the durable run and returns,
- * never awaiting and never observing. Its allowlist,
- * `BUILTIN_STARTABLE_WORKFLOWS`, is separate from the headless one and holds
- * the opposite kind of workflow - one that DOES park on a checkpoint, take a
- * worktree and produce a handoff - so nothing on it may be reached by
- * `runBuiltin`, and nothing on the headless list may be reached by
- * `startBuiltin`. The run is an ordinary run in every other respect: the same
- * journal, the same checkpoints, visible in `/workflow` and the widget,
- * decided with `/workflow decide`. What marks it is provenance, not
+ * `startBuiltin` is the one exception, and it is a narrow one. The decision it
+ * carries is a person's, taken in the host's own dialog - "Start the run?" -
+ * and a decision a human already made does not become safer by being routed
+ * back through the model to make it call `workflow_run`. So the harness
+ * executes it: `startBuiltin` creates the durable run and returns, never
+ * awaiting and never observing. Its allowlist,
+ * `BUILTIN_STARTABLE_WORKFLOWS`, belongs to the runtime rather than to the
+ * caller, and it holds a workflow that DOES park on a checkpoint, take a
+ * worktree and produce a handoff - the opposite of what a run nobody can be
+ * asked to decide looks like. The run is an ordinary run in every other
+ * respect: the same journal, the same checkpoints, visible in `/workflow` and
+ * the widget, decided with `/workflow decide`. What marks it is provenance, not
  * behaviour - `run-created` records `origin: "service-provider"`, because no
  * model turn and no `/workflow` command is in the transcript to show where the
  * run came from.
+ *
+ * There is no headless start. `runBuiltin` and `BUILTIN_HEADLESS_WORKFLOWS`
+ * existed for one definition, the blind plan reviewer, and the plan check is a
+ * one-shot subagent in pi-maestro now: a host that wants one read-only opinion
+ * does not need a durable run, a journal, a lease or an allowlist in this
+ * package to get it.
  *
  * This entry point is **unfrozen** until a later minor pins it
  * (`docs/compatibility.md`).
@@ -84,7 +83,6 @@ import {
 	type WorkflowDefinitionSummary,
 	type WorkflowService,
 	WorkflowServiceError,
-	type WorkflowServiceRunReceipt,
 	type WorkflowValidationResult,
 } from "./service.js";
 import type {
@@ -100,7 +98,6 @@ import type {
 
 export type {
 	WorkflowDefinitionSummary,
-	WorkflowServiceRunReceipt,
 	WorkflowValidationResult,
 } from "./service.js";
 export type {
@@ -133,33 +130,14 @@ type ServiceRequest = {
 };
 
 /**
- * The workflows a service consumer may start headlessly, frozen here in the
- * runtime. `plan-review` is the blind plan reviewer of spec 2.2: one
- * read-only agent, `contextMode: "fresh"`, no checkpoint, no worktree, no
- * handoff.
- */
-export const BUILTIN_HEADLESS_WORKFLOWS = Object.freeze([
-	"plan-review",
-] as const);
-export type BuiltinHeadlessWorkflow =
-	(typeof BUILTIN_HEADLESS_WORKFLOWS)[number];
-
-/** The one refusal `runBuiltin` raises for a ref outside the allowlist. */
-export function headlessRefusalMessage(ref: string): string {
-	return `Workflow ${ref} may not be started by a service consumer; use workflow_run.`;
-}
-
-/**
  * The workflows a host may start on a person's behalf, frozen here in the
- * runtime and disjoint from `BUILTIN_HEADLESS_WORKFLOWS`. `plan-to-ship` is
- * the builtin pipeline pi-maestro's plan mode exits into: the person has
- * already answered "Start the run?" in the host's dialog, and the harness,
- * not the model, carries that answer across.
+ * runtime. `plan-to-ship` is the builtin pipeline pi-maestro's plan mode exits
+ * into: the person has already answered "Start the run?" in the host's dialog,
+ * and the harness, not the model, carries that answer across.
  *
- * Nothing about the definition qualifies it - a startable builtin parks,
- * writes and hands off, which is exactly what `headlessBuiltinViolations`
- * refuses. What qualifies it is that a person decided, in the open, one
- * dialog ago.
+ * Nothing about the definition qualifies it - a startable builtin parks, writes
+ * and hands off, which is exactly what `headlessBuiltinViolations` reports on.
+ * What qualifies it is that a person decided, in the open, one dialog ago.
  */
 export const BUILTIN_STARTABLE_WORKFLOWS = Object.freeze([
 	"plan-to-ship",
@@ -240,11 +218,9 @@ export interface WorkflowReadClient {
 	 * filters on that field rather than re-reading the journal per append.
 	 */
 	observe(listener: (observation: WorkflowRunObservation) => void): () => void;
-	/** Starts an allowlisted headless builtin; refuses every other ref. */
-	runBuiltin(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;
 	/**
 	 * Creates a durable run of an allowlisted startable builtin and returns
-	 * its id; refuses every other ref, including the headless list\'s.
+	 * its id; refuses every other ref.
 	 *
 	 * It returns as soon as the run exists: no drive is awaited and no
 	 * observation is opened. The run is an ordinary run - same journal, same
@@ -413,27 +389,6 @@ export function createWorkflowReadClient(
 				throw mapFailure(error);
 			}
 		},
-		runBuiltin: (ref: string, input: unknown) =>
-			delegate(async () => {
-				if (!(BUILTIN_HEADLESS_WORKFLOWS as readonly string[]).includes(ref)) {
-					throw new WorkflowServiceError(
-						"validation",
-						headlessRefusalMessage(ref),
-					);
-				}
-				// The allowlist names a definition this package ships; a project
-				// definition that took the same name is not it.
-				const resolved = await service.validate(ref, input);
-				if (resolved.workflow.scope !== "builtin") {
-					throw new WorkflowServiceError(
-						"validation",
-						headlessRefusalMessage(ref),
-					);
-				}
-				const receipt = await service.run(ref, input);
-				started.add(receipt.runId);
-				return receipt;
-			}),
 		startBuiltin: (ref: string, options: WorkflowStartBuiltinOptions) =>
 			delegate(async () => {
 				if (!(BUILTIN_STARTABLE_WORKFLOWS as readonly string[]).includes(ref)) {
@@ -538,15 +493,19 @@ export async function acquireWorkflowService(
 	return client;
 }
 
-/** What makes a definition illegal on the headless allowlist. */
+/** What stops a definition from being a run nobody has to be asked about. */
 export type HeadlessBuiltinViolation = "checkpoint" | "worktree" | "handoff";
 
 /**
- * The allowlist's safety property, as a check (spec R2). `runBuiltin` starts a
- * run with no human on the other end, so an allowlisted definition may not
- * park on a decision, may not take a worktree, and may not produce a handoff.
- * The dry materialization of `project` is what makes this observable without
- * running anything.
+ * Whether a definition would park on a decision, take a worktree, or produce a
+ * handoff, for one input - the three things that make a run need a person.
+ *
+ * It answers a STRUCTURAL question `workflow_validate` cannot: the dry
+ * materialization of `project` walks the graph without running anything. Two
+ * kinds of caller need it. A definition that claims to be structurally headless
+ * (`deep-review`, `deep-research`) asserts it against the shipped file rather
+ * than in prose; and `BUILTIN_STARTABLE_WORKFLOWS` is the opposite list, whose
+ * one name violates all three on purpose, because a person already decided.
  */
 export async function headlessBuiltinViolations(
 	definition: WorkflowDefinition,

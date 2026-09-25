@@ -79,11 +79,11 @@ import { type Static, Type } from "typebox";
  * structurally headless: nothing here writes, decides or parks, so it is safe
  * to run from plan mode and `headlessBuiltinViolations` reports nothing
  * against it (`test/deep-research.test.ts` asserts that at every depth).
- * `deep-research` is NOT on `BUILTIN_HEADLESS_WORKFLOWS` — that allowlist
- * names `plan-review` and only `plan-review`, because only the blind review
- * has a reason to start without a model turn. The structural property and
- * membership of the allowlist are different things, and this definition has
- * the first without asking for the second.
+ * Being structurally headless is a property of the GRAPH, and it is not a
+ * licence to be started without a model turn: no service consumer may start
+ * this definition, and `BUILTIN_STARTABLE_WORKFLOWS` names `plan-to-ship`
+ * alone, because what qualifies a name there is a person's decision one dialog
+ * ago rather than anything the definition declares.
  *
  * **Why claims are not de-duplicated.** `deep-review` collapses two lenses
  * that say the same thing about the same place, because a finding repeated is
@@ -530,8 +530,9 @@ export default defineWorkflow({
 				// `project`, not `[]`: a researcher reads THIS repository, and the
 				// project's own context files (`AGENTS.md` and the rest) are what
 				// tell it what the repository is for and how to read it. That is
-				// the opposite of `plan-review`, which declares no scopes because
-				// its whole value is not having read them. Nothing here is blind:
+				// the opposite of a blind reviewer, which declares no scopes
+				// because its whole value is not having read them. Nothing here is
+				// blind:
 				// the independence this workflow needs is between the THREADS, and
 				// `contextMode: "fresh"` is what delivers it — each thread is its
 				// own conversation, so no thread can see another's reasoning and

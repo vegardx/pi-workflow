@@ -1124,19 +1124,17 @@ without project trust. They are the worked examples of the patterns above.
 | --- | --- | --- | --- |
 | `plan-to-ship` | `{plan, planDigest, effort}` — a pi-maestro plan by value with its sha256 digest and the effort dial | `{approved, shipped, deliverables[], reviews[], receipt}`; the receipt names each durable handoff ref and the approved plan digest | Yes: the `ship` gate, `headless: "block"` |
 | `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` — one `worktree-handoff`, `tree`, or `document` subject | `{verdict, findings (≤64), coverage[], synthesis?}` | No gate, no worktree, no handoff |
-| `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict: ready \| gaps \| blocked, findings (≤32), notes?}` | No. Exactly one read-only agent, and the one definition a host may start headlessly |
-| `deep-research` | `{question, depth, sources?}` — one question, the depth dial doubling as the thread count, and up to 16 `path`/`url`/`note` sources | `{answer, claims[], crossChecks[], coverage[]}`; a coverage row per thread says which one did not report | No gate, no worktree, no handoff — structurally headless, but **not** on the headless allowlist |
+| `deep-research` | `{question, depth, sources?}` — one question, the depth dial doubling as the thread count, and up to 16 `path`/`url`/`note` sources | `{answer, claims[], crossChecks[], coverage[]}`; a coverage row per thread says which one did not report | No gate, no worktree, no handoff — structurally headless, which is a property of the graph and not a licence to start it without a model turn |
 
 `plan-to-ship` never pushes, merges, or applies anything; it records a
 receipt. Per deliverable it walks `implement-<d>`, `check-<d>`, `review-<d>/…`,
 `synthesis-<d>`, `fix-<d>` — the review's findings are normalized and then
 FIXED inside the deliverable, so what reaches the ship gate is a patch that
-answered them, not a list nobody acted on. `plan-review` is deliberately blind — `contextMode: "fresh"`,
-`contextScopes: []`, and no planning conversation — because a reviewer that
-inherits the conversation only ever agrees with it. `deep-research` is the
-opposite: its threads read the project's own context files, and the
-independence it needs is between the threads, which `contextMode: "fresh"`
-delivers. All four name agents the package ships under
+answered them, not a list nobody acted on. `deep-research`'s threads read the
+project's own context files, and the independence it needs is between the
+THREADS, which `contextMode: "fresh"` delivers: each thread is its own
+conversation, so no thread can agree with another's reasoning by inheritance.
+All three name agents the package ships under
 `workflows/agents/*.md`, which the run carries to pi-subagent as the request's
 `agentRoots`; `<agentDir>/agents` or a trusted project's `.pi/agents` overrides
 a name it defines.

@@ -203,31 +203,27 @@ const workflows = await acquireWorkflowService(pi.events, context);
 ```
 
 and receives a `WorkflowReadClient`, not the `WorkflowService`. What crosses
-the seam is **read, validate, project, observe, and start an allowlisted
+the seam is **read, validate, project, observe, and start the one allowlisted
 builtin**: `list`, `validate`, `project`, `inspect`, `runs`, `observe`,
-`runBuiltin`, `startBuiltin`, and `awaitRun`. There is no `decide`, no `stop`,
+`startBuiltin`, and `awaitRun`. There is no `decide`, no `stop`,
 no `invalidate`, and no general `run` — starting an arbitrary workflow that
 writes stays the model's own `workflow_run` call, in the open, in the
 transcript ([Authority model](docs/authority.md)). A run this client did not
 start cannot be awaited through it either.
 
-`runBuiltin` is gated by `BUILTIN_HEADLESS_WORKFLOWS`, a frozen allowlist that
-belongs to this package rather than to the caller; anything else is refused
-with "Workflow `<ref>` may not be started by a service consumer; use
-`workflow_run`." Every name on it must declare no checkpoint, no worktree, and
-no handoff — a structural property `workflow_validate` cannot check, which is
-why `headlessBuiltinViolations` exists and the package's own tests run it over
-the allowlist. Failures that are not a `WorkflowServiceError` are flattened to
-one fixed message, so a consumer never sees an internal error string or a
-stack.
+Failures that are not a `WorkflowServiceError` are flattened to one fixed
+message, so a consumer never sees an internal error string or a stack.
 
-`startBuiltin(ref, {input, effort?})` is the other, opposite gate, and its own
-frozen allowlist is `BUILTIN_STARTABLE_WORKFLOWS` — today exactly
-`["plan-to-ship"]`. Anything not on it, `plan-review` and every project or
-`dynamic:<sha256>` ref included, is refused with "Workflow `<ref>` is not a
-builtin a service consumer may start; use `workflow_run`.", and the two
-allowlists never overlap: a headless builtin may not be started with
-`startBuiltin` and a startable one may not be started with `runBuiltin`.
+`startBuiltin(ref, {input, effort?})` is the one gate, and its frozen allowlist
+is `BUILTIN_STARTABLE_WORKFLOWS` — today exactly `["plan-to-ship"]`. Anything
+not on it, every project and `dynamic:<sha256>` ref included, is refused with
+"Workflow `<ref>` is not a builtin a service consumer may start; use
+`workflow_run`."
+
+**There is no headless start.** `runBuiltin` and its own allowlist existed for
+one definition, a blind plan reviewer, and a plan check is a one-shot subagent
+in the host now: one read-only opinion needs no durable run, no journal, no
+lease and no allowlist here to be worth having.
 
 ```ts
 const { runId } = await workflows.startBuiltin("plan-to-ship", {
@@ -464,8 +460,10 @@ are tables, not prose: the pi-maestro plan document (deliverables, tasks, stage
 kinds, policy dials, the default stage list, and what a stored plan has already
 been validated for) and the component library (what each component lowers to,
 its key rule and refusals, the effort envelope, the shared `Finding`, and the
-compiled stage document). `plan-review` preloads both by name, and a preloaded
-skill costs a context entry rather than bytes, which is why they stay short.
+compiled stage document). A reviewer that is shown a plan or a compiled graph
+preloads them BY NAME — pi-maestro's plan check is one such reviewer — and a
+preloaded skill costs a context entry rather than bytes, which is why they stay
+short.
 
 The companion `workflows` skill under `skills/workflows/` covers the other
 side: operating existing runs — the fourteen `workflow_*` tools and their
@@ -618,8 +616,8 @@ so they cannot drift. `compileStageDocument(plan, policy)` returns the
 plan-facing `CompiledStageDocument` typed by `CompiledStageDocumentSchema` on
 `@vegardx/pi-workflow/components` — the stages each deliverable got, in the
 plan's own vocabulary — which is what a host shows a person before starting,
-what `plan-review` validates its `compiled` input against, and what pi-maestro
-derives from the stored plan for itself. `compileStages(plan, policy)` returns
+what a host's plan check reads, and what pi-maestro derives from the stored plan
+for itself. `compileStages(plan, policy)` returns
 the lowering: every task key the run will declare, in order, with the gate keys
 it parks on, so a finding can point at `check-d0-fix-1` rather than at a
 paragraph. Both are exported from the
@@ -719,54 +717,6 @@ lenses that reported. It is therefore declared optional and read through
 `ctx.settled`, and a run that loses a lens ends `completed-degraded` with the
 verdict, the findings and the coverage all committed — never failed.
 
-### `plan-review`
-
-`workflows/plan-review.workflow.ts` is the **blind reviewer**: the one
-definition a service consumer may start without a model turn, through
-`runBuiltin` and the runtime's own `BUILTIN_HEADLESS_WORKFLOWS` allowlist.
-
-```text
-provider.runBuiltin("plan-review", { plan, planDigest, intent, compiled, projection, effort })
-```
-
-`plan` is a pi-maestro plan document verbatim, `planDigest` its sha256,
-`intent` the human's one line (≤512), `compiled` the stage document
-`plan-to-ship` compiled it into (`CompiledStageDocumentSchema`), and
-`projection` the lease-free `project()` result — `{cost, totalTokens,
-childRuntimeMs, tasks, budget, fits}`. The output is `{verdict: "ready" |
-"gaps" | "blocked", findings (≤32), notes?}`, in the same shared `Finding`
-shape every reviewer here reports, with `patch` RFC 6902-shaped so accepting a
-finding is a mechanical apply against the stored plan followed by that
-document's own validation — never a re-prompt.
-
-**Blind means declared, not asked for.** The graph is exactly one read-only
-`plan-reviewer` with `contextMode: "fresh"` and **no context scopes**, so
-pi-subagent projects no `AGENTS.md` and no other project context file; the
-planning conversation and the session transcript are not reachable from a
-headless run at all. That is the point: a reviewer reached through the model
-would have read the conversation and would only ever agree with it. It preloads
-five short reference skills — `workflows`, `subagents`, `workflow-authoring`,
-`plan-schema`, and `workflow-components`.
-
-**No checkpoint, no worktree, no handoff.** That is what makes it legal on the
-allowlist, and it is a structural property rather than a promise:
-`headlessBuiltinViolations(definition, input)` dry-materializes the graph and
-names any of the three, and the test suite runs that against the shipped file
-at every effort. Nothing here writes, decides or parks — the findings go back
-to the human who asked, and every accept, dismissal and re-plan happens in
-pi-maestro.
-
-The verdict is **computed, not asserted**: the reviewer reports findings and
-its own verdict, and the definition takes the more severe of that verdict and
-the one the findings' severities imply. A blocking finding under a `ready`
-verdict is recorded as `blocked`, because the human's findings walk asks per
-blocking finding and would otherwise ask about nothing.
-
-One agent template, `plan-reviewer`, and its `contextScopes` is empty for the
-same reason the workflow's is: pi-subagent unions the agent's scopes with the
-request's, so a `project` scope in the template would hand the blind reviewer
-`AGENTS.md`.
-
 ### `deep-research`
 
 `workflows/deep-research.workflow.ts` answers one question from several
@@ -814,9 +764,10 @@ point of view reads as two threads of five rather than as a whole one. A run
 whose reducer never ran still records every claim and a deterministic `answer`
 saying what is missing. **There is no gate, no worktree and no handoff**:
 the graph is structurally headless, which `headlessBuiltinViolations` asserts
-against the shipped file — though `deep-research` is deliberately *not* on
-`BUILTIN_HEADLESS_WORKFLOWS`, since only the blind review has a reason to start
-without a model turn.
+against the shipped file. That is a property of the graph and not a licence to
+start it without a model turn — no service consumer may start `deep-research`,
+because what puts a name on `BUILTIN_STARTABLE_WORKFLOWS` is a person's decision
+one dialog ago rather than anything a definition declares.
 
 Its one agent template is `researcher`, and it covers all three kinds of task.
 It has `read`, `grep`, `find` and `ls` and **no network tool**, so a `url`
@@ -834,7 +785,8 @@ deterministic fan-in), `verifyAndFix`, and the `synthesizeFindings` +
 `fixFindings` pair that turns a fan-out's findings into a fixed patch. It also carries the two shapes the
 builtins share rather than copy: the `Finding` every reviewer reports, and
 `CompiledStageDocumentSchema` — the compiled stage document `plan-to-ship`
-produces and `plan-review` reads, so neither builtin has to import the other.
+produces and every reader of a compiled plan consumes, so no definition has to
+import another.
 
 ### `verifyAndFix`
 

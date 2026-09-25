@@ -2,13 +2,14 @@ import { type Static, Type } from "typebox";
 
 /**
  * The compiled stage document: what `plan-to-ship` compiles a plan into, and
- * what the blind reviewer (`plan-review`) is shown next to the plan itself
- * (plan-loop spec 2.1 and 2.2).
+ * what a person is shown before the run starts (plan-loop spec 2.1 and 2.2).
  *
- * It lives here, in the component library, because two builtins need the same
- * shape and neither may import the other: `plan-to-ship` PRODUCES it and
- * `plan-review` READS it. A shape owned by the producer would make the
- * reviewer's contract a copy, and a copy is what drifts.
+ * It lives here, in the component library, rather than in the definition that
+ * produces it, because it is a SHARED shape: `plan-to-ship` produces it, a host
+ * derives the same document from the stored plan to show it and to check the
+ * run against it, and whatever checks the plan reads it. A shape owned by the
+ * producer would make every reader's contract a copy, and a copy is what
+ * drifts.
  *
  * This is the **graph, not prose**. It says which stages each deliverable
  * compiled into, in order, with the identifiers the workflow namespaces are
@@ -69,7 +70,7 @@ const CompiledStageIdSchema = Type.String({ pattern: COMPILED_ID_PATTERN });
  * a three-literal union to `{anyOf: [{const, type}, …]}`, which costs three
  * levels where `{type: "string", pattern: "^(a|b|c)$"}` costs one. Two levels
  * here are two levels a caller gets to spend embedding this document in its own
- * schema - `plan-review` needs one of them today. `Type.Unsafe` keeps the
+ * schema - a reader that embeds it needs them. `Type.Unsafe` keeps the
  * narrow TypeScript type; the pattern is exactly as strict as the union.
  *
  * Every vocabulary NOT on that path (`use`, `effort`, `gates`) stays a

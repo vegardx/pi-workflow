@@ -65,9 +65,8 @@ import { type Static, Type } from "typebox";
  * - `compileStageDocument(plan, policy)` — the PLAN-FACING
  *   `CompiledStageDocument` (`@vegardx/pi-workflow/components`): the stages
  *   each deliverable got, in the plan's own vocabulary. This is what a host
- *   shows at step 12 of the exit loop and what `plan-review` validates its
- *   `compiled` input against, and pi-maestro derives the same document from the
- *   stored plan for itself.
+ *   shows at step 12 of the exit loop and what its plan check reads, and
+ *   pi-maestro derives the same document from the stored plan for itself.
  * - `compileStages(plan, policy)` — the LOWERING (`StageLowering`, declared in
  *   this module): every task key the run will declare, in order, and the gates
  *   it parks on. Nothing else produces it, so it is not part of the component
@@ -572,9 +571,9 @@ interface ResolvedPolicy {
  *
  * `CompiledStageDocument` (`@vegardx/pi-workflow/components`) is the shape the
  * PLAN compiles to: the stages each deliverable got, in the plan's own
- * vocabulary, which pi-maestro derives for itself and `plan-review` validates
- * its `compiled` input against. It deliberately says nothing about task keys,
- * because the plan does not have any.
+ * vocabulary, which pi-maestro derives for itself and its plan check reads. It
+ * deliberately says nothing about task keys, because the plan does not have
+ * any.
  *
  * The lowering is the same compilation seen from the runtime side: which task
  * keys each stage will declare, in declaration order. It is what a host shows
@@ -927,9 +926,9 @@ export function compileStages(
  * stages each deliverable got, in the plan's own vocabulary, with the two
  * resolved policy dials.
  *
- * ONE derivation, two views. This is the document `plan-review` validates its
- * `compiled` input against and the one pi-maestro derives for itself from the
- * stored plan, so the two must agree: the stage list is the derived one,
+ * ONE derivation, two views. This is the document a host's plan check reads and
+ * the one pi-maestro derives for itself from the stored plan, so the two must
+ * agree: the stage list is the derived one,
  * `derivedStagesFor`'s, field for field, and the gates `policy.gates` adds are
  * NOT stages — `gates` already says where a person is asked, so a compiled
  * deliverable never carries a `gate`. The one translation is `maxRounds`, which

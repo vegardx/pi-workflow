@@ -30,12 +30,10 @@ import {
 } from "../src/service.js";
 import {
 	acquireWorkflowService,
-	BUILTIN_HEADLESS_WORKFLOWS,
 	BUILTIN_STARTABLE_WORKFLOWS,
 	createWorkflowReadClient,
 	foreignRunRefusalMessage,
 	headlessBuiltinViolations,
-	headlessRefusalMessage,
 	isCompatibleWorkflowProvider,
 	registerWorkflowServiceProvider,
 	START_EFFORT_REFUSAL_MESSAGE,
@@ -53,8 +51,9 @@ import type {
 // W1-PROVIDER (spec 2.4, D2, D3): the seam pi-maestro acquires the runtime
 // through. Every expectation below is the spec's, not the implementation's:
 // the channel, the four provider error codes, the narrowed operation list,
-// the error mapping, the runtime-owned headless allowlist and its structural
-// safety property, and the lease-free projection.
+// the error mapping, the runtime-owned startable allowlist and the structural
+// property that makes it the opposite of a run nobody is asked about, and the
+// lease-free projection.
 
 const BUILTIN_ROOT = fileURLToPath(new URL("../workflows", import.meta.url));
 const CONTEXT = {} as ExtensionContext;
@@ -293,45 +292,6 @@ function planInput(deliverables = 1, effort = "standard") {
 	return { plan: plan(deliverables), planDigest: "a".repeat(64), effort };
 }
 
-/**
- * The shipped `plan-review`'s own input (spec 2.2). The allowlist's structural
- * check dry-materializes the real graph, so it needs a real input; `{}` was
- * enough only while the definition did not exist.
- */
-function planReviewInput(deliverables = 1) {
-	return {
-		plan: plan(deliverables),
-		planDigest: "a".repeat(64),
-		intent: "Ship the sample plan.",
-		compiled: {
-			deliverables: Array.from({ length: deliverables }, (_unused, index) => ({
-				id: `d${index}`,
-				stages: [
-					{ use: "implement", id: "implement" },
-					{ use: "verify-and-fix", id: "verify", maxRounds: 2 },
-					{
-						use: "review-fan-out",
-						id: "review",
-						synthesis: "optional",
-						lenses: [{ id: "contracts" }],
-					},
-				],
-			})),
-			effort: "standard",
-			gates: "ship",
-		},
-		projection: {
-			cost: 30,
-			totalTokens: 4_000_000,
-			childRuntimeMs: 5_000_000,
-			tasks: 5,
-			budget: { cost: 900, childRuntimeMs: 172_800_000 },
-			fits: true,
-		},
-		effort: "standard",
-	};
-}
-
 describe("registration and discovery", () => {
 	it("answers the versioned request channel with a frozen provider", async () => {
 		const events = createEventBus();
@@ -384,7 +344,6 @@ describe("registration and discovery", () => {
 			"list",
 			"observe",
 			"project",
-			"runBuiltin",
 			"runs",
 			"startBuiltin",
 			"validate",
@@ -628,96 +587,7 @@ describe("delegation and error mapping", () => {
 	});
 });
 
-describe("runBuiltin and awaitRun", () => {
-	it("freezes the allowlist to plan-review", () => {
-		expect(Object.isFrozen(BUILTIN_HEADLESS_WORKFLOWS)).toBe(true);
-		expect([...BUILTIN_HEADLESS_WORKFLOWS]).toEqual(["plan-review"]);
-	});
-
-	it.each(["plan-to-ship", "deep-review", "", "../plan-review"])(
-		"refuses to start %j",
-		async (ref) => {
-			const { client } = await acquire(serviceDouble());
-			const error = await client
-				.runBuiltin(ref, {})
-				.catch((value: unknown) => value);
-			expect(error).toBeInstanceOf(WorkflowServiceError);
-			expect((error as WorkflowServiceError).code).toBe("validation");
-			expect((error as Error).message).toBe(headlessRefusalMessage(ref));
-		},
-	);
-
-	it("starts an allowlisted builtin and awaits only that run", async () => {
-		const run = vi.fn(async () => ({
-			runId: "workflow_a1" as WorkflowRunId,
-			status: "created" as const,
-		}));
-		const wait = vi.fn(async () => ({ status: "completed" }));
-		const { client } = await acquire(
-			serviceDouble({
-				validate: async () => ({
-					valid: true,
-					workflow: { scope: "builtin" },
-				}),
-				run,
-				wait,
-			} as unknown as Partial<WorkflowService>),
-		);
-		const receipt = await client.runBuiltin("plan-review", { plan: 1 });
-		expect(receipt.runId).toBe("workflow_a1");
-		expect(run).toHaveBeenCalledWith("plan-review", { plan: 1 });
-		await expect(
-			client.awaitRun("workflow_a1" as WorkflowRunId, { timeoutMs: 10 }),
-		).resolves.toEqual({ status: "completed" });
-		expect(wait).toHaveBeenCalledWith("workflow_a1", { timeoutMs: 10 });
-	});
-
-	it("refuses an allowlisted name resolved outside the builtin root", async () => {
-		const { client } = await acquire(
-			serviceDouble({
-				validate: async () => ({
-					valid: true,
-					workflow: { scope: "project" },
-				}),
-			} as unknown as Partial<WorkflowService>),
-		);
-		await expect(client.runBuiltin("plan-review", {})).rejects.toThrow(
-			headlessRefusalMessage("plan-review"),
-		);
-	});
-
-	// The allowlist is not a string check alone: `runBuiltin` also resolves the
-	// ref and refuses it unless it came from the BUILTIN root, and the runtime
-	// then validates the input. This drives all three against the definition
-	// pi-maestro actually reaches, through the real service.
-	it("starts the shipped plan-review through the real runtime", async () => {
-		const service = await realService({
-			// The reviewer itself is `test/plan-review.test.ts`'s subject; here a
-			// binding that refuses every launch is enough to prove the gate opened
-			// and a durable run exists on the other side of it.
-			bind: async (runId) => ({
-				workflowRunId: runId,
-				ownerId: `pi-workflow:${runId}`,
-				client: {
-					preflight: async () => {
-						throw new Error("no subagent in this test");
-					},
-				} as never,
-			}),
-		});
-		const { client } = await acquire(service);
-		const receipt = await client.runBuiltin("plan-review", planReviewInput());
-		expect(receipt.runId).toMatch(/^workflow_[a-z0-9]+$/);
-		// Started by this client, so `awaitRun` is permitted on it.
-		const view = await client.awaitRun(receipt.runId, { timeoutMs: 30_000 });
-		expect(view.status).toBe("failed");
-		// And the input the exit flow sends really does validate against the
-		// shipped schema: a schema refusal never creates a run at all.
-		await expect(
-			client.validate("plan-review", planReviewInput()),
-		).resolves.toMatchObject({ valid: true, workflow: { scope: "builtin" } });
-	});
-
+describe("awaitRun", () => {
 	it("refuses awaitRun on a run this client did not start", async () => {
 		const { client } = await acquire(serviceDouble());
 		const error = await client
@@ -937,18 +807,13 @@ async function journalledOrigin(
 }
 
 describe("startBuiltin", () => {
-	it("freezes a startable allowlist disjoint from the headless one", () => {
+	it("freezes the one startable allowlist", () => {
 		expect(Object.isFrozen(BUILTIN_STARTABLE_WORKFLOWS)).toBe(true);
 		expect([...BUILTIN_STARTABLE_WORKFLOWS]).toEqual(["plan-to-ship"]);
-		expect(
-			[...BUILTIN_STARTABLE_WORKFLOWS].filter((ref) =>
-				(BUILTIN_HEADLESS_WORKFLOWS as readonly string[]).includes(ref),
-			),
-		).toEqual([]);
 	});
 
 	it.each([
-		"plan-review",
+		"deep-review",
 		"deep-research",
 		"fan-out",
 		`dynamic:${"a".repeat(64)}`,
@@ -1076,16 +941,9 @@ describe("startBuiltin", () => {
 			"service-provider",
 		);
 	}, 90_000);
-
-	it("still refuses plan-to-ship through runBuiltin", async () => {
-		const { client } = await acquire(serviceDouble());
-		await expect(client.runBuiltin("plan-to-ship", {})).rejects.toThrow(
-			headlessRefusalMessage("plan-to-ship"),
-		);
-	});
 });
 
-describe("the headless allowlist's structural safety property", () => {
+describe("the structural property of a run nobody is asked about", () => {
 	const headless = defineWorkflow({
 		meta: {
 			name: "headless-example",
@@ -1175,35 +1033,9 @@ describe("the headless allowlist's structural safety property", () => {
 		).resolves.toEqual(["checkpoint", "worktree", "handoff"]);
 	});
 
-	// W2 shipped `plan-review`, so the intersection of the allowlist with the
-	// discovered builtins is no longer empty: this case now checks the real
-	// definition rather than asserting its absence.
-	it("holds for every allowlisted builtin that exists", async () => {
-		const service = await realService();
-		const builtins = (await service.list()).filter(
-			(summary) => summary.scope === "builtin",
-		);
-		const allowlisted = builtins.filter((summary) =>
-			(BUILTIN_HEADLESS_WORKFLOWS as readonly string[]).includes(summary.name),
-		);
-		for (const summary of allowlisted) {
-			const definition = (
-				(await import(summary.path)) as { default: WorkflowDefinition }
-			).default;
-			await expect(
-				headlessBuiltinViolations(definition, planReviewInput()),
-			).resolves.toEqual([]);
-		}
-		expect(builtins.length).toBeGreaterThan(0);
-		// Every allowlisted name ships, and `plan-review` is one of them: an
-		// allowlist entry nobody can resolve is a refusal waiting to happen.
-		expect(allowlisted.map((summary) => summary.name).sort()).toEqual(
-			[...BUILTIN_HEADLESS_WORKFLOWS].sort(),
-		);
-		expect(allowlisted).toHaveLength(1);
-	});
-
-	it("proves plan-to-ship would never pass the allowlist", async () => {
+	// The startable allowlist is the OPPOSITE list: its one name violates all
+	// three on purpose, because a person already decided one dialog ago.
+	it("proves plan-to-ship would never be a run nobody is asked about", async () => {
 		const service = await realService();
 		const projection = await service.project("plan-to-ship", planInput());
 		expect(projection.tasks).toBeGreaterThan(0);
