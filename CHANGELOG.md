@@ -19,12 +19,57 @@ checkpoint's decided value, and a support-task wiring fix in the extension. No
 frozen export, shape or message was removed or retyped and no returned union
 was widened; the required pi-subagent contract stays revision 7, now pinned to
 `0.12.0` for the request field the agent-template fix needs. The builtin
-`plan-to-ship`'s gate vocabulary does change, and the compiled stage document
-narrows with it — both over unfrozen surfaces, and neither is persisted state,
-so neither moves `WORKFLOW_CONTRACT_REVISION` on its own.
+`plan-to-ship`'s gate vocabulary does change, its per-deliverable stage list now
+reviews, normalizes and then FIXES, and the compiled stage document moves with
+both — all over unfrozen surfaces, and none of it is persisted state, so none of
+it moves `WORKFLOW_CONTRACT_REVISION` on its own.
 
 ### Breaking
 
+- **`plan-to-ship` reviews, normalizes, and then FIXES: the fix loop runs
+  inside the deliverable.** The per-deliverable stage list was `implement`,
+  `verify-and-fix`, `review-fan-out`, and the review's findings went nowhere but
+  the ship gate. It is now `implement`, `check`, `review-fan-out`, `synthesis`,
+  `fix` — with stable, documented keys `implement-<d>`, `check-<d>`
+  (`check-<d>-verify-<n>` / `-fix-<n>`), `review-<d>/<lens>`, `synthesis-<d>`,
+  `fix-<d>`. The `verify` stage is renamed `check` and its task keys move with
+  it (`verify-d0-verify-1` is now `check-d0-verify-1`); the fan-out's own prose
+  reducer is gone (`synthesis: "none"`) and `review-<d>-synthesis` no longer
+  exists.
+  - `synthesis-<d>` is a structured-output fan-in over the lenses that
+    reported: `{findings: [{id, severity, lens, where, summary, suggestion?}],
+    verdict}`, one de-duplicated list plus one paragraph. It is compiled
+    whenever the deliverable has lenses, and it is `disposition: "optional"` for
+    the same reason a reviewer is.
+  - `fix-<d>` hands that list and the patch back to the implementer, which
+    addresses every `blocking` and `major` finding (minor at its discretion),
+    re-runs the project's check, and reports
+    `{findings: [{id, outcome: "addressed" | "disputed" | "out-of-scope",
+    note}], checkPassed}`. `disputed` requires a note **in the schema**, as a
+    two-branch union. **There is no re-review.** The patch that ships is the
+    fixer's.
+  - **Fix rounds are one pool per deliverable.** `policy.maxFixRounds` bounds
+    the whole deliverable: the check spends what it needs, the fix stage spends
+    at most what is left, so the total never exceeds it. No fixer is declared —
+    and the reason is logged to the journal and shown at the gate — when nothing
+    is blocking or major, when the pool is spent, or when the synthesis did not
+    run.
+  - A fixer's own `checkPassed` never turns a `checkRan: false` deliverable
+    into a verified one. `checkRan: false` is unverified rather than broken, and
+    a fixer's own word is not the separate verification that answer is missing;
+    the claim is shown at the gate, the verdict is not changed.
+  - The `ship` gate's inputs are now `plan`, `summary-<d>`, `findings-<d>` and
+    `fix-<d>`; `review-<d>` is gone. A per-deliverable gate's inputs are
+    `summary`, `findings` and `fix`. `meta.version` moves to 3.
+- **`CompiledStageDocumentSchema` gains the `synthesis` and `fix` stage
+  kinds,** and a `review-fan-out` stage `plan-to-ship` compiles now carries
+  `synthesis: "none"`. `COMPILED_STAGE_KINDS` is
+  `implement | verify-and-fix | review-fan-out | synthesis | fix | gate`, the
+  `verify-and-fix` stage's `id` is `check`, and a `fix` stage carries
+  `maxRounds` — the deliverable's whole shared FIX-round pool (0-2), which is
+  not the same unit as `verify-and-fix`'s `maxRounds` (verify rounds, 0-3). The
+  compiled stage document is a PLAN-FACING VIEW derived on demand, not persisted
+  run state, so `WORKFLOW_CONTRACT_REVISION` does not move for it.
 - **`plan-to-ship` has no `approve-plan` gate: the start of the run is the
   approval.** `policy.gates` is now `ship` (the default) or
   `every-deliverable`, and both keep their old meaning minus the up-front
@@ -95,6 +140,23 @@ so neither moves `WORKFLOW_CONTRACT_REVISION` on its own.
   proposed and approved afresh.
 
 ### Added
+
+- **`synthesizeFindings` and `fixFindings`** on
+  `@vegardx/pi-workflow/components` (`src/components/review-fix.ts`): the
+  "review, then fix" pair, with the two schemas pinned in the component —
+  `FindingSynthesisSchema` / `NormalizedFindingSchema` and
+  `FindingFixReportSchema` / `FixFindingOutcomeSchema` — plus
+  `FIX_OUTCOMES`, `NORMALIZED_FINDING_SEVERITIES`,
+  `ACTIONABLE_FINDING_SEVERITIES`, `MAX_FIX_NOTE_LENGTH`, the two skip reasons
+  `NO_ACTIONABLE_FINDINGS_REASON` and `NO_FIX_ROUNDS_REASON`, and the default
+  input names `DEFAULT_FINDINGS_INPUT` / `DEFAULT_FIX_PATCH_INPUT`. The pattern
+  is `skills/workflow-authoring/SKILL.md` § "Normalize a fan-out's findings,
+  then fix them".
+- **`ReviewOutcome.handle`** on `reviewFanOut`'s result: the reviewer's own task
+  handle, so a caller can declare a second reducer of its own over the fan-out.
+  Additive, and the same rule applies to it as to every other handle there —
+  only a lens whose `reported` is true may be named in a downstream task's
+  `inputs`.
 
 - **`startBuiltin` on the service-provider client: a host starts
   `plan-to-ship` itself.** `WorkflowReadClient` gains

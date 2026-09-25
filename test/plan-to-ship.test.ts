@@ -184,7 +184,11 @@ function checkReport(script: CheckScript, round: number) {
 }
 
 /** The structured output a scripted child returns, keyed by what it was asked. */
-function outputFor(request: SubagentRequest, script: CheckScript): unknown {
+function outputFor(
+	request: SubagentRequest,
+	script: CheckScript,
+	minorOnly = false,
+): unknown {
 	const goal = request.task.goal;
 	if (goal.startsWith("Refine the authored plan")) {
 		return {
@@ -224,8 +228,47 @@ function outputFor(request: SubagentRequest, script: CheckScript): unknown {
 			],
 		};
 	}
-	if (goal.startsWith("Synthesize the review")) {
-		return { synthesis: "One lens asked for a test." };
+	if (goal.startsWith("Normalize the review findings")) {
+		if (minorOnly) {
+			return {
+				findings: [
+					{
+						id: "naming",
+						severity: "minor",
+						lens: "correctness",
+						where: "/deliverables/0",
+						summary: "The helper could be named better.",
+					},
+				],
+				verdict: "Nothing blocking; one naming nit.",
+			};
+		}
+		return {
+			findings: [
+				{
+					id: "missing-test",
+					severity: "blocking",
+					lens: "correctness",
+					where: "/deliverables/0",
+					summary: "Missing a test.",
+					suggestion: "Add one next to the change.",
+				},
+				{
+					id: "naming",
+					severity: "minor",
+					lens: "correctness",
+					where: "/deliverables/0",
+					summary: "The helper could be named better.",
+				},
+			],
+			verdict: "One lens asked for a test; nothing else is blocking.",
+		};
+	}
+	if (goal.startsWith("Address the review findings")) {
+		return {
+			findings: [{ id: "missing-test", outcome: "addressed" }],
+			checkPassed: true,
+		};
 	}
 	if (goal.startsWith("Record the plan-to-ship receipt")) {
 		return { recorded: true, refs: [] };
@@ -282,6 +325,8 @@ function scripted(
 		/** Fail only the lens whose name the goal names; the rest report. */
 		readonly failLens?: string;
 		readonly check?: CheckScript;
+		/** The synthesis normalizes to minor findings only, so nothing is fixed. */
+		readonly minorOnly?: boolean;
 	} = {},
 ) {
 	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
@@ -391,7 +436,11 @@ function scripted(
 			...(failed
 				? {}
 				: {
-						structuredOutput: outputFor(child.request, options.check ?? "pass"),
+						structuredOutput: outputFor(
+							child.request,
+							options.check ?? "pass",
+							options.minorOnly === true,
+						),
 					}),
 			usage: {
 				input: 1,
@@ -649,13 +698,19 @@ describe("plan-to-ship: the compiled stage document", () => {
 						{ use: "implement", id: "implement" },
 						// The plan counts one FIX round; a compiled document records
 						// the two VERIFY rounds the component was asked for.
-						{ use: "verify-and-fix", id: "verify", maxRounds: 2 },
+						{ use: "verify-and-fix", id: "check", maxRounds: 2 },
 						{
 							use: "review-fan-out",
 							id: "review",
 							lenses: [{ id: "correctness", tier: "standard", diverse: false }],
-							synthesis: "optional",
+							// The fan-out declares no reducer of its own: the
+							// normalization the fixer reads is its own stage.
+							synthesis: "none",
 						},
+						{ use: "synthesis", id: "synthesis" },
+						// The fix stage draws on the deliverable's WHOLE fix-round
+						// pool, the same one the check stage spends from.
+						{ use: "fix", id: "fix", maxRounds: 1 },
 					],
 				},
 			],
@@ -673,16 +728,18 @@ describe("plan-to-ship: the compiled stage document", () => {
 					id: "catalogue",
 					stages: [
 						{ use: "implement", id: "implement" },
-						{ use: "verify-and-fix", id: "verify", maxRounds: 2 },
+						{ use: "verify-and-fix", id: "check", maxRounds: 2 },
 						{
 							use: "review-fan-out",
 							id: "review",
-							synthesis: "optional",
+							synthesis: "none",
 							lenses: [
 								{ id: "contracts", tier: "heavy", diverse: true },
 								{ id: "replay", tier: "standard", diverse: false },
 							],
 						},
+						{ use: "synthesis", id: "synthesis" },
+						{ use: "fix", id: "fix", maxRounds: 1 },
 					],
 				},
 			],
@@ -705,6 +762,8 @@ describe("plan-to-ship: the compiled stage document", () => {
 					"implement",
 					"verify-and-fix",
 					"review-fan-out",
+					"synthesis",
+					"fix",
 				]);
 			}
 			// The lowering, from the same compilation, is where the gates are named.
@@ -714,7 +773,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 		},
 	);
 
-	it("omits the review stage when the deliverable lists no review", () => {
+	it("omits the review, synthesis and fix stages when the deliverable lists no review", () => {
 		const document = compileStageDocument(plan({ lensesPerDeliverable: [] }));
 		check(document);
 		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
@@ -749,16 +808,12 @@ describe("plan-to-ship: the compiler", () => {
 					},
 					{
 						use: "verify-and-fix",
-						id: "verify",
-						key: "verify-d0",
+						id: "check",
+						key: "check-d0",
 						// `standard` pays for one FIX round, which is two VERIFY rounds.
 						fixRounds: 1,
 						verifyRounds: 2,
-						tasks: [
-							"verify-d0-verify-1",
-							"verify-d0-fix-1",
-							"verify-d0-verify-2",
-						],
+						tasks: ["check-d0-verify-1", "check-d0-fix-1", "check-d0-verify-2"],
 					},
 					{
 						use: "review-fan-out",
@@ -766,15 +821,29 @@ describe("plan-to-ship: the compiler", () => {
 						key: "review-d0",
 						// Seeded from `reviews`, with the policy's review defaults.
 						lenses: [{ id: "correctness", tier: "standard", diverse: false }],
-						synthesis: "optional",
-						tasks: ["review-d0/correctness", "review-d0-synthesis"],
+						synthesis: "none",
+						tasks: ["review-d0/correctness"],
+					},
+					{
+						use: "synthesis",
+						id: "synthesis",
+						key: "synthesis-d0",
+						tasks: ["synthesis-d0"],
+					},
+					{
+						use: "fix",
+						id: "fix",
+						key: "fix-d0",
+						// The SHARED pool, the same number the check stage reports.
+						fixRounds: 1,
+						tasks: ["fix-d0"],
 					},
 				],
 			},
 		]);
 	});
 
-	it("omits the review stage when the deliverable lists no review", () => {
+	it("omits the review, synthesis and fix stages when the deliverable lists no review", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: [] }));
 		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
 			"implement",
@@ -782,24 +851,39 @@ describe("plan-to-ship: the compiler", () => {
 		]);
 	});
 
+	it("derives the five stage keys of a reviewed deliverable, in order", () => {
+		// The documented key list; a host names a task by these and a finding
+		// points at one, so they are pinned here rather than implied.
+		const document = compileStages(plan());
+		expect(
+			document.deliverables[0]?.stages.map((stage) => [stage.id, stage.key]),
+		).toEqual([
+			["implement", "implement-d0"],
+			["check", "check-d0"],
+			["review", "review-d0"],
+			["synthesis", "synthesis-d0"],
+			["fix", "fix-d0"],
+		]);
+	});
+
 	it.each([
-		["cheap", 0, 1, ["verify-d0-verify-1"]],
+		["cheap", 0, 1, ["check-d0-verify-1"]],
 		[
 			"standard",
 			1,
 			2,
-			["verify-d0-verify-1", "verify-d0-fix-1", "verify-d0-verify-2"],
+			["check-d0-verify-1", "check-d0-fix-1", "check-d0-verify-2"],
 		],
 		[
 			"deep",
 			2,
 			3,
 			[
-				"verify-d0-verify-1",
-				"verify-d0-fix-1",
-				"verify-d0-verify-2",
-				"verify-d0-fix-2",
-				"verify-d0-verify-3",
+				"check-d0-verify-1",
+				"check-d0-fix-1",
+				"check-d0-verify-2",
+				"check-d0-fix-2",
+				"check-d0-verify-3",
 			],
 		],
 	] as const)(
@@ -819,15 +903,15 @@ describe("plan-to-ship: the compiler", () => {
 			maxFixRounds: 2,
 		});
 		expect(document.deliverables[0]?.stages[1]).toMatchObject({
-			key: "verify-d0",
+			key: "check-d0",
 			fixRounds: 2,
 			verifyRounds: MAX_VERIFY_ROUNDS,
 			tasks: [
-				"verify-d0-verify-1",
-				"verify-d0-fix-1",
-				"verify-d0-verify-2",
-				"verify-d0-fix-2",
-				"verify-d0-verify-3",
+				"check-d0-verify-1",
+				"check-d0-fix-1",
+				"check-d0-verify-2",
+				"check-d0-fix-2",
+				"check-d0-verify-3",
 			],
 		});
 	});
@@ -944,7 +1028,11 @@ describe("plan-to-ship: the compiler", () => {
 			"review-d0/risk",
 			"review-d0/risk-2",
 			"review-d0/risk-3",
-			"review-d0-synthesis",
+		]);
+		// The synthesis is its own stage, so the fan-out's task list is the
+		// lenses and nothing else.
+		expect(document.deliverables[0]?.stages[3]?.tasks).toEqual([
+			"synthesis-d0",
 		]);
 	});
 
@@ -1052,9 +1140,10 @@ describe("plan-to-ship: the stage walk", () => {
 		expect(taskPaths(ship)).toEqual([
 			"refine",
 			"implement-d0",
-			"verify-d0-verify-1",
+			"check-d0-verify-1",
 			"review-d0/correctness",
-			"review-d0-synthesis",
+			"synthesis-d0",
+			"fix-d0",
 			"ship",
 		]);
 	});
@@ -1068,8 +1157,8 @@ describe("plan-to-ship: the stage walk", () => {
 			"refine",
 			"implement-d0",
 			"implement-d1",
-			"verify-d0-verify-1",
-			"verify-d1-verify-1",
+			"check-d0-verify-1",
+			"check-d1-verify-1",
 			"ship",
 		]);
 	});
@@ -1127,14 +1216,17 @@ describe("plan-to-ship: the stage walk", () => {
 		const run = await service.run("plan-to-ship", input());
 		const ship = await park(service, run.runId, "ship");
 
+		// The check spent the ONE fix round `standard` pays for, so the review's
+		// fixer has none left and is not declared: total fix rounds per
+		// deliverable never exceed `policy.maxFixRounds`.
 		expect(taskPaths(ship)).toEqual([
 			"refine",
 			"implement-d0",
-			"verify-d0-verify-1",
-			"verify-d0-fix-1",
-			"verify-d0-verify-2",
+			"check-d0-verify-1",
+			"check-d0-fix-1",
+			"check-d0-verify-2",
 			"review-d0/correctness",
-			"review-d0-synthesis",
+			"synthesis-d0",
 			"ship",
 		]);
 		const [fix] = delegated.requestsGoal("Fix what the check reported");
@@ -1146,7 +1238,7 @@ describe("plan-to-ship: the stage walk", () => {
 			commitFor(fixChild.attemptId),
 		);
 		const status = await service.status(run.runId);
-		expect(taskByKey(status, "verify-d0-fix-1").handoff).toMatchObject({
+		expect(taskByKey(status, "check-d0-fix-1").handoff).toMatchObject({
 			handoffCommit: commitFor(fixChild.attemptId),
 		});
 		await decide(service, ship, "ship", { ship: true });
@@ -1164,12 +1256,131 @@ describe("plan-to-ship: the stage walk", () => {
 		const run = await service.run("plan-to-ship", input());
 		const ship = await park(service, run.runId, "ship");
 		// `checkRan: false` escalates to a human; it never declares a fixer.
-		expect(taskPaths(ship)).not.toContain("verify-d0-fix-1");
+		expect(taskPaths(ship)).not.toContain("check-d0-fix-1");
+		// The review's fixer still runs - the findings are real, and it has the
+		// whole fix-round pool - and it reports the check passing after its edits.
+		// That is the fixer's OWN word, and it is not the separate verification a
+		// check that never ran is missing, so the deliverable stays unverified.
+		expect(taskPaths(ship)).toContain("fix-d0");
+		expect(
+			taskByKey(ship, "ship").checkpoint?.inputs?.["fix-d0"],
+		).toMatchObject({ checkPassed: true });
 		await decide(service, ship, "ship", { ship: false });
 		const finished = await bounded(service.wait(run.runId), "wait");
 		expect(finished.output).toMatchObject({
 			deliverables: [{ id: "d0", checkRan: false, checkPassed: false }],
 		});
+	});
+
+	it("normalizes every lens's findings and fixes the blocking ones", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["a", "b"] }),
+		);
+		const ship = await park(service, run.runId, "ship");
+
+		// The synthesis is a fan-in over the lenses that reported, and both of
+		// them are its inputs by lens key. `inputs` is an inspection-only field.
+		const inspected = await service.inspect(run.runId, {
+			include: ["run", "tasks"],
+		});
+		const synthesis = (inspected.tasks ?? []).find(
+			(task) => task.key === "synthesis-d0",
+		);
+		expect(Object.keys(synthesis?.inputs ?? {}).sort()).toEqual(["a", "b"]);
+		const [normalize] = delegated.requestsGoal("Normalize the review findings");
+		expect(normalize?.agent).toBe("reviewer");
+		expect(normalize?.workspace.mode).toBe("read-only");
+		expect(normalize?.model).toEqual(envelope("standard", "synthesis").model);
+		expect(normalize?.task.instructions.join("\n")).toMatch(
+			/de-duplicated|ONE list/,
+		);
+
+		// The fixer reads the normalized list and the patch, in a worktree, at the
+		// `fix` envelope, and it is told to answer every finding by id.
+		const [fix] = delegated.requestsGoal("Address the review findings");
+		expect(fix?.agent).toBe("implementer");
+		expect(fix?.workspace.mode).toBe("worktree");
+		expect(fix?.model).toEqual(envelope("standard", "fix").model);
+		const instructions = fix?.task.instructions.join("\n") ?? "";
+		expect(instructions).toContain("Address EVERY blocking and major finding");
+		// Only the blocking finding of the scripted synthesis is actionable; the
+		// minor one is the fixer's to judge.
+		expect(instructions).toContain("1 of them");
+		expect(instructions).toMatch(/a note is REQUIRED/);
+		// No re-review: nothing reads the fixer's patch again.
+		expect(
+			taskPaths(ship).filter((path) => path.startsWith("review-d0/")).length,
+		).toBe(2);
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"implement-d0",
+			"check-d0-verify-1",
+			"review-d0/a",
+			"review-d0/b",
+			"synthesis-d0",
+			"fix-d0",
+			"ship",
+		]);
+		// The patch that ships is the FIXER's, not the implementer's.
+		const fixChild = delegated.childFor("Address the review findings");
+		const status = await service.status(run.runId);
+		expect(taskByKey(status, "fix-d0").handoff).toMatchObject({
+			handoffCommit: commitFor(fixChild.attemptId),
+		});
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.output).toMatchObject({
+			shipped: true,
+			receipt: {
+				refs: [
+					`refs/pi-subagent/handoffs/${fixChild.runId}/${fixChild.attemptId}`,
+				],
+			},
+		});
+	});
+
+	it("skips the fixer, and says why, when nothing is blocking or major", async () => {
+		const delegated = scripted({ minorOnly: true });
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const ship = await park(service, run.runId, "ship");
+		expect(taskPaths(ship)).not.toContain("fix-d0");
+		expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
+			"Fixes: 0 of 1 deliverable(s) ran a fixer",
+		);
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		// The reason is recorded in the journal, not only in the prompt.
+		const logs = await service.logs(run.runId, { limit: 500 });
+		expect(
+			logs.entries.some((entry) =>
+				entry.message.includes(
+					'no fixer for deliverable "d0": the synthesis reported no blocking or major finding',
+				),
+			),
+		).toBe(true);
+		expect(finished.status).toBe("completed");
+	});
+
+	it("skips the fixer, and says why, when the check spent the whole fix budget", async () => {
+		const delegated = scripted({ check: "fail-then-pass" });
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const ship = await park(service, run.runId, "ship");
+		expect(taskPaths(ship)).not.toContain("fix-d0");
+		const logs = await service.logs(run.runId, { limit: 500 });
+		expect(
+			logs.entries.some((entry) =>
+				entry.message.includes(
+					'no fixer for deliverable "d0": no fix round remains in the shared budget (1 of 1 fix round(s) spent on the check)',
+				),
+			),
+		).toBe(true);
+		await decide(service, ship, "ship", { ship: true });
+		await bounded(service.wait(run.runId), "wait");
 	});
 
 	it("imports the handoff and hands its descriptor to the reviewer", async () => {
@@ -1196,19 +1407,46 @@ describe("plan-to-ship: the stage walk", () => {
 		expect(projected).not.toContain("From: Agent");
 		expect(review?.workspace.mode).toBe("read-only");
 
-		// The ship gate shows the summaries and the review synthesis, keyed by
-		// deliverable id rather than by an ordinal nobody can look up.
+		// The ship gate shows the summaries, the normalized findings and the fix
+		// report, keyed by deliverable id rather than by an ordinal nobody can
+		// look up.
 		const gate = taskByKey(ship, "ship").checkpoint;
+		expect(Object.keys(gate?.inputs ?? {}).sort()).toEqual([
+			"findings-d0",
+			"fix-d0",
+			"plan",
+			"summary-d0",
+		]);
 		expect(gate?.inputs).toMatchObject({
 			"summary-d0": { checkRan: true, checkPassed: true, files: ["a.txt"] },
-			"review-d0": { synthesis: "One lens asked for a test." },
+			"findings-d0": {
+				findings: [
+					{
+						id: "missing-test",
+						severity: "blocking",
+						lens: "correctness",
+						where: "/deliverables/0",
+						summary: "Missing a test.",
+						suggestion: "Add one next to the change.",
+					},
+					{ id: "naming", severity: "minor" },
+				],
+				verdict: "One lens asked for a test; nothing else is blocking.",
+			},
+			"fix-d0": {
+				findings: [{ id: "missing-test", outcome: "addressed" }],
+				checkPassed: true,
+			},
 		});
 		expect(gate?.prompt).toContain("1 blocking finding(s)");
+		expect(gate?.prompt).toContain("nothing re-reviewed a fixed patch");
 	});
 
 	it("records a receipt naming the handoff ref, its digest, and the plan digest", async () => {
 		const { delegated, service, runId, ship } = await walkToShip();
-		const child = delegated.childFor("Implement deliverable");
+		// The patch that ships is the last worktree task's: the fixer that
+		// answered the review findings.
+		const child = delegated.childFor("Address the review findings");
 		await decide(service, ship, "ship", { ship: true, note: "cherry-picked" });
 		const finished = await bounded(service.wait(runId), "wait");
 
@@ -1297,8 +1535,8 @@ describe("plan-to-ship: the gate policies", () => {
 			"refine",
 			"implement-d0",
 			"implement-d1",
-			"verify-d0-verify-1",
-			"verify-d1-verify-1",
+			"check-d0-verify-1",
+			"check-d1-verify-1",
 			"ship",
 			"receipt",
 		]);
@@ -1333,7 +1571,7 @@ describe("plan-to-ship: the gate policies", () => {
 		expect(taskPaths(first)).toEqual([
 			"refine",
 			"implement-d0",
-			"verify-d0-verify-1",
+			"check-d0-verify-1",
 			"approve-d0",
 		]);
 		await decide(service, first, "approve-d0", { proceed: true });
@@ -1344,10 +1582,10 @@ describe("plan-to-ship: the gate policies", () => {
 		expect(taskPaths(finished)).toEqual([
 			"refine",
 			"implement-d0",
-			"verify-d0-verify-1",
+			"check-d0-verify-1",
 			"approve-d0",
 			"implement-d1",
-			"verify-d1-verify-1",
+			"check-d1-verify-1",
 			"ship",
 			"receipt",
 		]);
@@ -1433,18 +1671,18 @@ describe("plan-to-ship: replay", () => {
 		expect(taskPaths(finished)).toEqual([
 			"refine",
 			"implement-d0",
-			"verify-d0-verify-1",
-			"verify-d0-fix-1",
-			"verify-d0-verify-2",
+			"check-d0-verify-1",
+			"check-d0-fix-1",
+			"check-d0-verify-2",
 			"review-d0/correctness",
-			"review-d0-synthesis",
+			"synthesis-d0",
 			"approve-d0",
 			"implement-d1",
-			"verify-d1-verify-1",
-			"verify-d1-fix-1",
-			"verify-d1-verify-2",
+			"check-d1-verify-1",
+			"check-d1-fix-1",
+			"check-d1-verify-2",
 			"review-d1/correctness",
-			"review-d1-synthesis",
+			"synthesis-d1",
 			"ship",
 			"receipt",
 		]);

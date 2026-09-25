@@ -164,6 +164,14 @@ export interface ReviewOutcome {
 	readonly reported: boolean;
 	readonly review?: Static<typeof ReviewReportSchema>;
 	readonly failure?: SettledTaskFailure;
+	/**
+	 * The reviewer's own handle, for a caller that declares a second reducer of
+	 * its own over the fan-out (`synthesizeFindings`). It is present for every
+	 * DECLARED lens, reporting or not; the same rule applies to it as to every
+	 * other handle here - only a lens whose `reported` is true may be named in
+	 * a downstream task's `inputs`.
+	 */
+	readonly handle?: TaskHandle<Static<typeof ReviewReportSchema>>;
 }
 
 /** What the caller needs to write the synthesis prose; all of it is data. */
@@ -371,16 +379,21 @@ export async function reviewFanOut(
 	const settled = reviewers.length === 0 ? [] : await ctx.settled(reviewers);
 	const outcomes: ReviewOutcome[] = resolved.map((entry, index) => {
 		const outcome = settled[index];
+		const handle = reviewers[index] as
+			| TaskHandle<Static<typeof ReviewReportSchema>>
+			| undefined;
 		if (outcome?.status === "fulfilled") {
 			return Object.freeze({
 				lens: entry,
 				reported: true,
 				review: outcome.value,
+				...(handle === undefined ? {} : { handle }),
 			});
 		}
 		return Object.freeze({
 			lens: entry,
 			reported: false,
+			...(handle === undefined ? {} : { handle }),
 			...(outcome?.status === "rejected" && outcome.failure
 				? { failure: outcome.failure }
 				: {}),

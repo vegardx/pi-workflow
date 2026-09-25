@@ -344,6 +344,7 @@ const PATTERN_MODULES = [
 	"gate.ts",
 	"index.ts",
 	"review-fan-out.ts",
+	"review-fix.ts",
 	"verify-and-fix.ts",
 ] as const;
 

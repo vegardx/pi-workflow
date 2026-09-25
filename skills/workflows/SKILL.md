@@ -36,7 +36,7 @@ source of truth; a project may ship more.
 
 | Ref | In | Out |
 | --- | --- | --- |
-| `plan-to-ship` | `{plan, planDigest, effort}` | `{approved, shipped, deliverables[], reviews[], receipt}` — the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`), and never pushes, merges, or applies anything |
+| `plan-to-ship` | `{plan, planDigest, effort}` | `{approved, shipped, deliverables[], reviews[], receipt}` — per deliverable it implements, runs the project's check, reviews through every lens, normalizes the findings and FIXES them (`implement-<d>`, `check-<d>`, `review-<d>/<lens>`, `synthesis-<d>`, `fix-<d>`); the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`), and never pushes, merges, or applies anything |
 | `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
 | `plan-review` | `{plan, planDigest, intent, compiled, projection, effort}` | `{verdict, findings, notes?}` — the blind plan reviewer, one read-only agent, no gate |
 | `deep-research` | `{question, depth, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |

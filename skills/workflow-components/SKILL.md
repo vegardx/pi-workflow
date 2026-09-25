@@ -36,11 +36,30 @@ A graph that breaks one of these is a replay bug, not a style problem.
 | `forEach(ctx, ns, items, {idOf, task, disposition?})` | `ctx.fanOut` | `key(item) = idOf(item)` | >64 items; a duplicate id; an `idOf` reading an optional field; a budget over-projection |
 | `reviewFanOut(ctx, ns, lenses, {subject, synthesis, diversity})` | `ctx.fanOut` (`optional`) + `ctx.settled` + optional `ctx.fanIn` | `key = lens.id`; duplicates take `-2`, `-3` **by declaration ordinal** | >16 lenses |
 | `verifyAndFix(ctx, ns, {implementation, check, effort, maxRounds, escalate, verify, agent})` | a fixed bounded loop of `ctx.agent` + `ctx.result` | flat keys `<ns>-verify-<n>` / `<ns>-fix-<n>`, `n` from 1 | `maxRounds` outside `0..MAX_VERIFY_ROUNDS`; a worst-case budget the run cannot admit |
+| `synthesizeFindings(ctx, key, {reviews, effort, synthesize})` | `ctx.fanIn` over the lenses that REPORTED (`optional`) | key literal; each input is named by its lens key | a missing `synthesize`; a declaration naming `outputSchema`, `inputs`, `model` or `limits`. Returns `undefined` when no lens reported |
+| `fixFindings(ctx, key, {implementation, findings, synthesis, effort, remainingRounds, agent})` | one `ctx.agent` in a worktree, `handoff: "required"` | key literal | an `implementation` that is not a worktree handle; a negative `remainingRounds`; a fixer that is not a worktree task or declares `outputSchema`/`model`/`limits`/`handoff`; an input name it already wires |
 
 `maxRounds` counts **verify** rounds, so at most `maxRounds - 1` fixers run and
 a fix is never left unchecked. `escalate: "thinking"` moves every fixer one rung
 up the ladder; verifiers never escalate, and escalating past `deep` is refused.
 `checkRan: false` escalates to a human and never counts as green.
+
+`synthesizeFindings` + `fixFindings` are the "review, then fix" pair, and they
+are the reason `reviewFanOut` may be asked for `synthesis: "none"`. The
+synthesis returns STRUCTURE, not prose — one de-duplicated list of
+`{id, severity, lens, where, summary, suggestion?}` plus a one-paragraph
+`verdict` — because an agent, not only a person, reads it next. `fixFindings`
+declares a fixer only when a finding is `blocking` or `major` **and**
+`remainingRounds` is positive; otherwise it returns `skipped` with the reason,
+which is how one shared fix-round pool bounds a deliverable's total fixers.
+Nothing re-reviews a fixed patch: the fix report is the evidence.
+
+| Field | Values |
+| --- | --- |
+| `FindingSynthesisSchema.findings[]` | `{id, severity: blocking\|major\|minor, lens (≤128), where (≤512), summary (≤2048), suggestion? (≤2048)}`, ≤64 |
+| `FindingSynthesisSchema.verdict` | ≤8192, one paragraph for a person |
+| `FindingFixReportSchema.findings[]` | `{id, outcome: addressed\|out-of-scope, note?}` or `{id, outcome: disputed, note}` — a dispute with no note is refused by the schema |
+| `FindingFixReportSchema.checkPassed` | the project's check after the edits |
 
 Deferred, on purpose: `sequence` (`ctx.pipeline` is one line), `branch`,
 `retrying`, `loopUntil`, `mapReduce`, `dynamicStage`, `subWorkflow`.
@@ -102,13 +121,15 @@ deliverable's `reviews` list and the plan's `policy`.
 | `implement` | `id`, `tools?` |
 | `verify-and-fix` | `id`, `maxRounds` (0–3 **verify** rounds = plan fix rounds + 1), `escalate?` |
 | `review-fan-out` | `id`, `lenses` (≤16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` |
+| `synthesis` | `id` — a STRUCTURED normalization of the fan-out's findings, which is not the same thing as `review-fan-out`'s own prose `synthesis` field |
+| `fix` | `id`, `maxRounds` (0–2 **fix** rounds: the deliverable's whole shared pool, which `verify-and-fix` draws from too) |
 | `gate` | `id`, `question`, `show?` |
 
 `dynamic` and `sub-workflow` cannot appear: the plan has no stage vocabulary to
 name them with, and the second does not exist. Nor does a `gate`, in practice:
 `gates` alone says where a person is asked, so `plan-to-ship` derives
 `implement`, `verify-and-fix` and — only when the deliverable's `reviews` list
-is non-empty — `review-fan-out`, and nothing else.
+is non-empty — `review-fan-out`, `synthesis` and `fix`, and nothing else.
 
 ## Builtin workflows assembled from the library
 

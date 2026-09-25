@@ -487,17 +487,20 @@ provider's `startBuiltin` instead of sending the model a turn to call
 run either way; only `run-created`'s `origin` differs.
 
 **The stage walk.** A plan schema v5 document **authors no stages**. The
-compiler derives them, the same list for every deliverable: `implement`,
-`verify-and-fix` with `policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at
-`deep`), and — only when the deliverable's `reviews` list is non-empty —
-`review-fan-out` over those lenses. Each stage lowers through one component, and
+compiler derives them, the same list for every deliverable: `implement`, the
+`check` with `policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at `deep`),
+and — only when the deliverable's `reviews` list is non-empty — a
+`review-fan-out` over those lenses, a `synthesis` that normalizes what they
+found, and a `fix` that acts on it. Each stage lowers through one component, and
 the stage id is the compiled key's prefix:
 
 | stage | component | task keys |
 | --- | --- | --- |
 | `implement` | `ctx.agent` | `implement-<deliverable>` |
-| `verify-and-fix` | `verifyAndFix` | `verify-<deliverable>-verify-<n>`, `-fix-<n>` |
-| `review-fan-out` | `reviewFanOut` | `review-<deliverable>/<lens>`, `review-<deliverable>-synthesis` |
+| `check` | `verifyAndFix` | `check-<deliverable>-verify-<n>`, `-fix-<n>` |
+| `review-fan-out` | `reviewFanOut` | `review-<deliverable>/<lens>` |
+| `synthesis` | `synthesizeFindings` | `synthesis-<deliverable>` |
+| `fix` | `fixFindings` | `fix-<deliverable>` |
 | `gate` | `gate` | `approve-<deliverable>`, `ship` |
 
 The plan counts **fix** rounds and the component counts **verify** rounds, so
@@ -506,6 +509,27 @@ and `maxFixRounds: 2` is three verifiers and two fixers. A verifier applies the
 handoff in its own worktree and runs the repository's check; `checkRan: false`
 is unverified rather than broken, so it stops the loop and goes to a person
 instead of starting a fix round.
+
+**Review findings are fixed inside the deliverable.** The fan-out declares no
+prose reducer of its own (`synthesis: "none"`). Instead `synthesis-<deliverable>`
+is a structured-output task over the lenses that reported: one de-duplicated
+list of `{id, severity, lens, where, summary, suggestion?}` plus a
+one-paragraph `verdict`. `fix-<deliverable>` hands that list and the patch back
+to the implementer, which addresses **every blocking and major finding** (minor
+at its discretion), re-runs the check, and answers each finding
+`addressed | disputed | out-of-scope` — a `disputed` finding without a note is
+refused by the schema. **There is no re-review:** the fix report is the
+evidence, and it is in front of the person at the gate beside the findings it
+answers.
+
+The fix rounds are **one pool per deliverable**. `policy.maxFixRounds` bounds
+the whole deliverable, not one stage: the check spends what it needs and the
+fix stage may spend only what is left, so a deliverable never runs more than
+`maxFixRounds` fixers. When nothing is blocking or major, when the pool is
+spent, or when the synthesis did not run, no fixer is declared and the reason is
+logged to the journal and shown at the gate. A fixer's own word that the check
+passed never turns a `checkRan: false` deliverable into a verified one; the
+claim is shown, the verdict is not changed.
 
 **What v5 deleted is refused by name.** There is no migration from version 3 or
 4, so each deleted key parses — a TypeBox "unexpected property" is not something
@@ -551,7 +575,7 @@ plan's own vocabulary — which is what a host shows a person before starting,
 what `plan-review` validates its `compiled` input against, and what pi-maestro
 derives from the stored plan for itself. `compileStages(plan, policy)` returns
 the lowering: every task key the run will declare, in order, with the gate keys
-it parks on, so a finding can point at `verify-d0-fix-1` rather than at a
+it parks on, so a finding can point at `check-d0-fix-1` rather than at a
 paragraph. Both are exported from the
 definition; only the first is a shared contract.
 
@@ -760,7 +784,8 @@ from, and the one package subpath besides the root that the definition import
 gate accepts. It exports `gate` (a checkpoint plus the branch it decides),
 `envelope` (the `(effort, stage)` table that fixes a task's model, thinking
 level, and limits), `forEach` and `reviewFanOut` (bounded fan-out and its
-deterministic fan-in), and `verifyAndFix`. It also carries the two shapes the
+deterministic fan-in), `verifyAndFix`, and the `synthesizeFindings` +
+`fixFindings` pair that turns a fan-out's findings into a fixed patch. It also carries the two shapes the
 builtins share rather than copy: the `Finding` every reviewer reports, and
 `CompiledStageDocumentSchema` — the compiled stage document `plan-to-ship`
 produces and `plan-review` reads, so neither builtin has to import the other.
@@ -809,6 +834,38 @@ rounds depend on each other. A request that declares one of the component's own
 fields is refused rather than overwritten. Rounds depend on each other through
 **data**, never a bare `after`: `verify-<n>` names the current patch's handoff
 handle, and `fix-<n>` names that handoff plus the failing verifier's report.
+
+### `synthesizeFindings` and `fixFindings`
+
+The other half of a review: normalize what the lenses found, then act on it.
+
+```text
+ctx.fanIn(`synthesis-<d>`, reportingReviewers, …)   structured, "optional"
+await ctx.settled([synthesis])                       barrier
+ctx.agent(`fix-<d>`, …)                              worktree, handoff "required"
+```
+
+`reviewFanOut`'s own synthesis returns prose, because it explains a verdict a
+deterministic rail already computed. That is the wrong shape when an **agent**
+reads it next, so a caller asks the fan-out for `synthesis: "none"` and declares
+`synthesizeFindings` instead. It reports
+`{findings: [{id, severity, lens, where, summary, suggestion?}], verdict}` —
+one de-duplicated list plus one paragraph — and returns `undefined` when no lens
+reported, because a reducer over an empty fan-in is a task nobody can complete.
+It is `disposition: "optional"` for the same reason a reviewer is: a barrier's
+control edge covers every task it closed over, so a half-dead fan-out must
+degrade the run rather than fail it.
+
+`fixFindings` declares **at most one** fixer, in a worktree, with
+`handoff: "required"`, and hands it the patch's descriptor plus the normalized
+list. It reports
+`{findings: [{id, outcome: addressed | disputed | out-of-scope, note}], checkPassed}`,
+and `disputed` requires a note **in the schema** — a two-branch union, so a
+dispute nobody can read is refused by structured output rather than noticed at a
+gate. No fixer is declared, and `skipped` carries the reason, when no finding is
+`blocking` or `major` or when `remainingRounds` is 0: the fix rounds are one
+pool shared with `verifyAndFix`, so that zero is how a subject's total fixers
+stay inside its budget. Nothing re-reviews the fixed patch.
 
 ## Model roles
 
