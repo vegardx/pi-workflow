@@ -399,6 +399,10 @@ function scripted(
 			},
 			outputSchema: structuredClone(request.outputSchema),
 			limits: structuredClone(request.limits),
+			// The real preflight states the ceiling it compiled under.
+			...(request.ceiling === undefined
+				? {}
+				: { ceiling: structuredClone(request.ceiling) }),
 		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
 		const identitySha256 = canonicalSha256(launchPlan);
 		return {
@@ -478,7 +482,7 @@ function scripted(
 			handoff: worktree
 				? {
 						schema: "pi-subagent-worktree",
-						contractRevision: 7,
+						contractRevision: 8,
 						runId,
 						attemptId: child.attemptId,
 						repositoryRoot: "/private/repo",

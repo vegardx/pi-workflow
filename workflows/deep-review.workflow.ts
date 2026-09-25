@@ -319,6 +319,10 @@ export default defineWorkflow({
 		// deep column's cumulative child runtime with room for retries.
 		timeoutMs: 86_400_000,
 		concurrency: 8,
+		// What this definition needs of the host, in pi-subagent's own
+		// vocabulary, so a host can refuse a start above its delegation ceiling
+		// before a run exists.
+		needs: { workspace: "read-only" },
 	},
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,

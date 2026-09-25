@@ -1216,6 +1216,10 @@ export default defineWorkflow({
 		// covers a 48-hour wait at each gate with room for the work.
 		timeoutMs: 604_800_000,
 		concurrency: 4,
+		// What this definition needs of the host, in pi-subagent's own
+		// vocabulary, so a host can refuse a start above its delegation ceiling
+		// before a run exists.
+		needs: { workspace: "worktree" },
 	},
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,

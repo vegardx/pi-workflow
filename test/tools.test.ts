@@ -656,13 +656,18 @@ describe("workflow tool declarations", () => {
 			);
 			for (const tool of WORKFLOW_TOOL_DECLARATIONS) {
 				if (tool.name === "workflow_validate" || tool.name === "workflow_run") {
-					expect(tool.description).toMatch(
-						/ Accepts dynamic:<sha256> for an approved dynamic workflow proposal\.$/,
+					expect(tool.description).toContain(
+						" Accepts dynamic:<sha256> for an approved dynamic workflow proposal.",
 					);
 				} else {
 					expect(tool.description).not.toContain("dynamic:<sha256> for");
 				}
 			}
+			// The ceiling is the model's to know about on `workflow_run` alone:
+			// nothing else it can call creates a run.
+			expect(declaration("workflow_run").description).toContain(
+				"The host's delegation ceiling bounds the run",
+			);
 		});
 
 		it("proposes as the tool and never decides", async () => {
@@ -1093,6 +1098,7 @@ describe("workflow tool declarations", () => {
 				source: "project",
 				path: "/workflows/x.workflow.ts",
 				identitySha256: "a".repeat(64),
+				needs: { workspace: "worktree" as const, declared: true },
 			}));
 			const listText = workflowToolText(declaration("workflow_list"), list);
 			expect(Buffer.byteLength(listText)).toBeLessThanOrEqual(

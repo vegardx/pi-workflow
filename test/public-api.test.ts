@@ -29,6 +29,7 @@ const WORKFLOW_SERVICE_METHODS = [
 	"decide",
 	"decideSource",
 	"exportHandoff",
+	"hostDelegationCeiling",
 	"inspect",
 	"inspectProposal",
 	"invalidate",
@@ -238,7 +239,7 @@ describe("public API export lists", () => {
 		const actual = exportNames(root);
 		expect(diff(actual, pinned)).toEqual({ added: [], removed: [] });
 		expect(actual).toEqual(pinned);
-		expect(pinned).toHaveLength(184);
+		expect(pinned).toHaveLength(197);
 	});
 
 	it("pins the runtime entry to runtime-exports.json", async () => {
@@ -303,7 +304,7 @@ describe("frozen service surface", () => {
 		});
 		try {
 			expect(methodNames(service)).toEqual([...WORKFLOW_SERVICE_METHODS]);
-			expect(WORKFLOW_SERVICE_METHODS).toHaveLength(25);
+			expect(WORKFLOW_SERVICE_METHODS).toHaveLength(26);
 		} finally {
 			await service.shutdown();
 			await rm(base, { recursive: true, force: true });

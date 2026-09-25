@@ -68,6 +68,7 @@ import type {
 	EventBus,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { DelegationCeiling } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import type { Effort } from "./components/envelope.js";
 import {
@@ -182,6 +183,20 @@ export const WORKFLOW_SERVICE_FAILURE_MESSAGE =
 export interface WorkflowStartBuiltinOptions {
 	readonly input: unknown;
 	readonly effort?: Effort;
+	/**
+	 * The delegation ceiling this run must stay inside, in pi-subagent's own
+	 * vocabulary. It is EXPLICIT here and not read from the host's registered
+	 * provider, and that is the point: the host starts the plan's run WHILE
+	 * switching modes, so the provider still answers for the mode it is leaving.
+	 * The caller passes the ceiling of the mode the run belongs to.
+	 *
+	 * Given one, the start is refused before any run exists when the
+	 * definition\'s declared `needs` exceed it, with the same message
+	 * `workflow_run` raises. The ceiling is then recorded on the run record and
+	 * lowered onto every `SubagentRequest` the run makes, and a run keeps it for
+	 * life. Omitted means no bound.
+	 */
+	readonly ceiling?: DelegationCeiling;
 }
 
 /** The narrowed client a consumer receives; see the module comment. */
@@ -233,6 +248,17 @@ export interface WorkflowReadClient {
 		ref: string,
 		options: WorkflowStartBuiltinOptions,
 	): Promise<{ runId: WorkflowRunId }>;
+	/**
+	 * The host's delegation ceiling right now, from the provider the embedder
+	 * installed, or `undefined` when there is none.
+	 *
+	 * It is here so a host can SHOW what a run would be bound by before it asks
+	 * a person to start one, and so `startBuiltin`\'s explicit `ceiling` is a
+	 * deliberate choice rather than the only thing available. `startBuiltin` does
+	 * not read it: the host is switching modes when it starts the plan\'s run,
+	 * and the provider still answers for the mode it is leaving.
+	 */
+	hostCeiling(): DelegationCeiling | undefined;
 	/** Drives a run this client started to a durable terminal state. */
 	awaitRun(
 		runId: WorkflowRunId,
@@ -409,10 +435,20 @@ export function createWorkflowReadClient(
 				}
 				const receipt = await service.run(ref, input, {
 					origin: "service-provider",
+					...(options.ceiling === undefined
+						? {}
+						: { ceiling: options.ceiling }),
 				});
 				started.add(receipt.runId);
 				return { runId: receipt.runId };
 			}),
+		hostCeiling: () => {
+			try {
+				return service.hostDelegationCeiling();
+			} catch (error) {
+				throw mapFailure(error);
+			}
+		},
 		awaitRun: (runId: WorkflowRunId, options?: WorkflowWaitOptions) =>
 			delegate(() => {
 				if (!started.has(runId)) {

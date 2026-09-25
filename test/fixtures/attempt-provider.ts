@@ -194,6 +194,11 @@ export function attemptProvider(script: Script) {
 			},
 			outputSchema: structuredClone(request.outputSchema),
 			limits: structuredClone(request.limits),
+			// The real preflight states the ceiling it compiled under, and the
+			// launcher refuses a plan that dropped or widened it.
+			...(request.ceiling === undefined
+				? {}
+				: { ceiling: structuredClone(request.ceiling) }),
 		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
 		return {
 			preflightId: "preflight-service",

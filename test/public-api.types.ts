@@ -95,6 +95,8 @@ export type ServiceApiPins = [
 			| "supportTasks"
 			// 2.1.0 (additive): the host's model-routing port.
 			| "modelRouting"
+			// Revision 21 (additive): the host's delegation-ceiling provider.
+			| "delegationCeiling"
 			| "checkpoints"
 			| "dynamic"
 		>
@@ -127,6 +129,8 @@ export type ServiceApiPins = [
 			| "decide"
 			| "decideSource"
 			| "exportHandoff"
+			// Revision 21 (additive): the host's ceiling, for `workflow_run`.
+			| "hostDelegationCeiling"
 			| "inspect"
 			| "inspectProposal"
 			| "invalidate"

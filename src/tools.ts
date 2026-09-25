@@ -233,6 +233,22 @@ export const WorkflowDefinitionSummarySchema = Type.Object(
 		source: Type.String({ minLength: 1, maxLength: 1024 }),
 		path: Type.String({ minLength: 1, maxLength: 4096 }),
 		identitySha256: Sha256Schema,
+		/**
+		 * What the definition needs of the host, in pi-subagent's vocabulary, with
+		 * `declared: false` when the definition said nothing and the conservative
+		 * reading (`worktree`) applies. A start above the host's delegation
+		 * ceiling is refused before a run exists.
+		 */
+		needs: Type.Object(
+			{
+				workspace: Type.Union([
+					Type.Literal("read-only"),
+					Type.Literal("worktree"),
+				]),
+				declared: Type.Boolean(),
+			},
+			{ additionalProperties: false },
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -278,6 +294,25 @@ function runStatusSummary(value: {
 
 /** A collapsed-result line fits this many characters. */
 const MAX_TOOL_SUMMARY_LENGTH = 120;
+
+/**
+ * `<name> v<version>; needs a <workspace> workspace`, with `(assumed)` when the
+ * definition declared none — the sentence `workflow_validate` shows so a reader
+ * can tell a conservative reading from a statement.
+ */
+function needsLine(workflow: {
+	readonly name: string;
+	readonly version: number;
+	readonly needs: {
+		readonly workspace: string;
+		readonly declared: boolean;
+	};
+}): string {
+	const assumed = workflow.needs.declared
+		? ""
+		: " (assumed: the definition declares no needs)";
+	return `${workflow.name} v${workflow.version}; needs a ${workflow.needs.workspace} workspace${assumed}`;
+}
 
 /**
  * What a run view carrying a parked checkpoint says, told once and shared by
@@ -367,15 +402,16 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 					: service.validate(params.ref, params.input);
 			},
 			summarizeCall: (params) => params.ref,
-			summarizeResult: (value) =>
-				`valid: ${value.workflow.name} v${value.workflow.version}`,
+			summarizeResult: (value) => `valid: ${needsLine(value.workflow)}`,
 		}),
 		declare({
 			name: "workflow_run",
 			label: "Run Workflow",
 			description:
-				"Start a trusted durable static workflow. Returns a run ID immediately; use workflow_wait or workflow_status to observe it. Accepts dynamic:<sha256> for an approved dynamic workflow proposal.",
-			promptGuidelines: [],
+				"Start a trusted durable static workflow. Returns a run ID immediately; use workflow_wait or workflow_status to observe it. Accepts dynamic:<sha256> for an approved dynamic workflow proposal. The host's delegation ceiling bounds the run: a definition whose needs exceed it is refused before any run exists.",
+			promptGuidelines: [
+				"workflow_validate reports what a definition needs of the host at workflow.needs; a definition that declares none is read as needing a worktree workspace.",
+			],
 			parameters: Type.Object(
 				{
 					ref: WorkflowRefSchema,
@@ -385,7 +421,13 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 			),
 			output: WorkflowServiceRunReceiptSchema,
 			execute(service, params) {
-				return service.run(params.ref, params.input);
+				// The MODEL's start, so it carries the host's bound: the model acts
+				// inside whatever mode the host is in. `/workflow run` is a person
+				// typing a command and passes none.
+				const ceiling = service.hostDelegationCeiling();
+				return ceiling === undefined
+					? service.run(params.ref, params.input)
+					: service.run(params.ref, params.input, { ceiling });
 			},
 			summarizeCall: (params) => params.ref,
 			summarizeResult: runStatusSummary,

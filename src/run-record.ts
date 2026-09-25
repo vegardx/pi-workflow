@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { open, rename } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { DelegationCeilingSchema } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -102,6 +103,27 @@ export const WorkflowRunRecordSchema = Type.Object(
 		input: Type.Unknown(),
 		/** Revision 19, additive: see {@link WorkflowRunModelRoutingSchema}. */
 		modelRouting: Type.Optional(WorkflowRunModelRoutingSchema),
+		/**
+		 * The host's delegation ceiling this run started under, stated in
+		 * pi-subagent's own vocabulary (`DelegationCeilingSchema`).
+		 *
+		 * **Persisted at creation, and never changed.** A run keeps the ceiling it
+		 * started with: the answer a host would give now is a different answer,
+		 * and a run whose bound moved under it would be a run whose evidence no
+		 * longer explains its own launches. The launcher lowers this value onto
+		 * every `SubagentRequest` the run makes, so a launch above it is refused
+		 * by pi-subagent's preflight and the run reports that as the task's
+		 * failure on the existing path.
+		 *
+		 * Absent means no bound at all, which is what a host that registered no
+		 * provider means and what every run created before revision 21 has. A
+		 * record is `additionalProperties: false`, so this is why the revision
+		 * moves from 20 to 21 rather than being additive within it: the
+		 * contract-revision rule counts a new persisted field as a revision when
+		 * the field changes what a reader must understand about the run, and a
+		 * reader that ignored a ceiling would misread every launch the run made.
+		 */
+		ceiling: Type.Optional(DelegationCeilingSchema),
 		createdAt: Type.String({ format: "date-time" }),
 	},
 	{ additionalProperties: false },
