@@ -9,24 +9,39 @@ surfaces described in
 ## Unreleased
 
 The next release is the major 3.0.0: run state moves out of the project and
-`WORKFLOW_CONTRACT_REVISION` becomes 20, which under the persisted-state rule
+`WORKFLOW_CONTRACT_REVISION` becomes 21, which under the persisted-state rule
 in [docs/contracts.md](docs/contracts.md#public-api-and-stability) is what
 makes it a major. Everything else since 2.0.0 is additive: two new entry
-points — a component library and a service-provider seam — three more builtin
+points — a component library and a service-provider seam — two more builtin
 workflows built out of the first, two short reference skills, a model-routing
 port the host installs, a lease-free read of a settled run's output and of a
-checkpoint's decided value, and a support-task wiring fix in the extension. No
+checkpoint's decided value, a narration surface a host reads to tell a person
+what a run is doing, and a support-task wiring fix in the extension. No
 frozen export, shape or message was removed or retyped and no returned union
-was widened; the required pi-subagent contract stays revision 7, now pinned to
-`0.12.0` for the request field the agent-template fix needs. The builtin
+was widened; the required pi-subagent contract moves to revision 8, pinned to
+`0.14.0` for the delegation ceiling. The builtin
 `plan-to-ship`'s gate vocabulary does change, its per-deliverable stage list now
 reviews, normalizes and then FIXES, the compiled stage document moves with both,
 and the `plan-review` builtin and `runBuiltin` are removed outright — all over
-unfrozen surfaces, and none of it is persisted state, so none of it moves
-`WORKFLOW_CONTRACT_REVISION` on its own.
+unfrozen surfaces, and none of that is persisted state. What does move the
+revision, to 21, is the run record's new `ceiling`: the host delegation ceiling a
+run started under.
 
 ### Breaking
 
+- **A run carries the host's delegation ceiling, and
+  `WORKFLOW_CONTRACT_REVISION` becomes 21.** `WorkflowRunRecordSchema` gains the
+  optional `ceiling` (pi-subagent's `DelegationCeilingSchema`): the bound the run
+  started under, written at creation and never changed. A record is
+  `additionalProperties: false`, and a reader that ignored the field would
+  misread every launch the run made, so this moves the revision rather than being
+  additive within it. Revision-21 stores refuse revision-20 leases, journals,
+  snapshots, run records, decision records and dynamic proposals; there is no
+  migration. The revision is an input to `hostApiSha256`, so every existing
+  dynamic source approval is invalidated. `WORKFLOW_HANDOFF_FORMAT.revision`
+  stays 7 — it names the pi-subagent revision that DEFINES the handoff rendering,
+  which 0.14.0 does not change, and moving it would fail every existing handoff
+  artifact's verification for no change in the bytes.
 - **`plan-review` and `runBuiltin` are gone.** The blind plan reviewer was a
   workflow only so a host could reach it without a model turn; the plan check is
   a one-shot subagent in pi-maestro now, and one read-only opinion needs no
@@ -159,8 +174,57 @@ unfrozen surfaces, and none of it is persisted state, so none of it moves
   unchanged, but they now live under the new root, so in practice the source is
   proposed and approved afresh.
 
+### Changed
+
+- **`@vegardx/pi-subagent` is pinned to `0.14.0`** (from `0.13.0`), for the
+  delegation ceiling. `REQUIRED_SUBAGENT_CONTRACT` moves to revision 8 and gains
+  `delegationCeiling: true`; `compatibility.json`, `docs/compatibility.md`,
+  `docs/qualification.md` and both `ref:` lines in `.github/workflows/ci.yml`
+  pin commit `0ae4c106b4235d8576bde75a23896ba413bcf88e`. The packed size bound
+  moves from 2816 to 2944 KiB with its measurement recorded in
+  `scripts/check-pack.mjs`; the entry bound stays at 208.
+
 ### Added
 
+- **Definitions declare what they need of the host.** `meta.needs =
+  { workspace: "read-only" | "worktree" }` is the most permissive workspace mode
+  any task of the graph may ask for, stated in pi-subagent's own vocabulary so a
+  host can compare it to a delegation ceiling without translating. `deep-review`
+  and `deep-research` declare `read-only`; `plan-to-ship` declares `worktree`. It
+  is OPTIONAL, and its absence is read as `worktree` — the conservative reading,
+  because a definition that writes and says nothing must not slip under a
+  read-only ceiling. `WorkflowDefinitionSummary.needs` is `{workspace, declared}`,
+  so `workflow_list` and `workflow_validate` report the resolved value and whether
+  the definition said it; `workflow_validate`'s one-line result spells the
+  assumption out (*"needs a worktree workspace (assumed: the definition declares
+  no needs)"*). New exports: `WorkflowNeedsSchema`, `WorkflowNeeds`,
+  `DEFAULT_WORKFLOW_NEEDS`, `resolveWorkflowNeeds`.
+- **Starts are refused above the host's ceiling, before a run exists.**
+  `WorkflowServiceRunOptions.ceiling` is the bound a start carries, and the CALL
+  SITE decides whether there is one: `workflow_run` (the model) reads the
+  host-registered provider through the new
+  `WorkflowService.hostDelegationCeiling()`; `startBuiltin(ref, {…, ceiling?})`
+  (the host) takes an explicit one, because the host starts the plan's run WHILE
+  switching modes and the provider still answers for the mode it is leaving;
+  `/workflow run` (the person) passes none. A definition whose resolved `needs`
+  exceed the ceiling is refused with *"`<name>` needs a `<workspace>` workspace;
+  the host ceiling allows `<modes>`."* (`ceilingRefusalMessage`), and a ceiling
+  that is not a `DelegationCeiling` with *"Host delegation ceiling is not a valid
+  ceiling."* (`CEILING_INVALID_MESSAGE`). `WorkflowServiceOptions` gains
+  `delegationCeiling`, which the shipped extension installs as
+  `() => resolveDelegationCeiling(pi.events)`; without it every run is unbounded,
+  exactly as before. The read client gains `hostCeiling()` so a host can show the
+  current bound before it asks a person to start anything. New export:
+  `needsFitCeiling`.
+- **The run forwards the ceiling into every launch.** `task-launcher.ts` lowers
+  `record.ceiling` onto every `SubagentRequest`, and the preflight response must
+  state the same ceiling or the launch is refused with the existing "Subagent
+  preflight response does not match the workflow task." A nested run inherits its
+  parent record's ceiling. The ceiling is not part of the task spec and task
+  identity is unchanged: which mode the host was in is a property of the run. A
+  launch above the bound is refused by pi-subagent's own preflight
+  ("workspace mode exceeds host ceiling: …", "tool exceeds host ceiling: …") and
+  reported as that task's failure on the existing path.
 - **`narration`: what a host needs to narrate a run.** Every projected task view
   now carries `narration: {stage, taskKind, deliverable?, summary?, cause?}`,
   and a run observation carries `task: {taskId, status, outcome?, narration}` on

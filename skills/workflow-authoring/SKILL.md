@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 20. Every
+This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 21. Every
 rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
@@ -13,7 +13,7 @@ launch contracts). Quoted strings are the exact messages the runtime throws.
 Worked examples that load through the real definition loader and through the
 dynamic manifest VM are in [references/examples.md](references/examples.md).
 
-Not available in revision 20: `ctx.artifact`, fork context, a Pi tool for
+Not available in revision 21: `ctx.artifact`, fork context, a Pi tool for
 handoff export, a model-callable checkpoint decide tool (there is none by design: a model must
 never decide a checkpoint; only a human decides, through `/workflow decide`),
 and a model-callable dynamic-source approve, reject, or proposals tool (none
@@ -24,7 +24,7 @@ them fails when its source runs. `ctx.finalize` is available since revision
 are available since revision 17 (see
 [Worktree tasks and handoffs](#worktree-tasks-and-handoffs)); human
 checkpoints with `ctx.checkpoint` and dynamic workflows are available since
-revision 20 (see [Checkpoints](#checkpoints) and
+revision 21 (see [Checkpoints](#checkpoints) and
 [Dynamic workflows](#dynamic-workflows)).
 
 The same source is a static definition when it is saved as a `*.workflow.ts`
@@ -170,16 +170,16 @@ unique across all roots ("duplicate workflow name <name>: <path> and <path>").
 Static imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
 module specifiers of support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 20". Relative imports of helper files are therefore
+contract revision 21". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 20",
+"dynamic workflow imports are not supported by contract revision 21",
 "dynamic imports and CommonJS require are not supported by contract revision
 18", and "TypeScript import assignment is not supported by contract revision
 18". Import-like text inside strings and comments is fine. The
 `@vegardx/pi-workflow/runtime` subpath is not importable from a definition and
 is not part of the authoring API; definitions import from
 `@vegardx/pi-workflow` only, and the gate refuses the subpath with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 20".
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 21".
 The loader resolves imports from the definition file's location, so
 `@vegardx/pi-workflow` and `typebox` must be resolvable there.
 
@@ -224,6 +224,7 @@ export default defineWorkflow({
 		},
 		timeoutMs: 3_600_000, // wall-clock deadline, 1_000 .. 365 days
 		concurrency: 4, // optional integer 1..16, default 4
+		needs: { workspace: "read-only" }, // optional; "read-only" | "worktree"
 	},
 	inputSchema: Type.Object({ question: Type.String() }, { additionalProperties: false }),
 	outputSchema: Type.Object({ answer: Type.String() }, { additionalProperties: false }),
@@ -234,6 +235,24 @@ export default defineWorkflow({
 ```
 
 - `meta` outside these bounds fails with "invalid workflow metadata".
+- **`meta.needs` is what the definition needs of the HOST**, in pi-subagent's own
+  vocabulary, so a host can compare it to its delegation ceiling without
+  translating. `workspace` is the most permissive mode any task of the graph may
+  ask for: declare `"worktree"` if any task takes one, `"read-only"` otherwise.
+  **Declare it.** A definition that omits it is read as needing a `"worktree"`
+  workspace — the conservative reading — and `workflow_validate` reports
+  `needs: {workspace: "worktree", declared: false}` so a reader can see the
+  reading was an assumption. Getting it wrong in the permissive direction costs
+  a start under a read-only host that nothing could have run; getting it wrong in
+  the strict direction costs nothing, because it is a declaration and not a
+  grant: authority still comes from the agent definition, the request, and
+  pi-subagent's preflight. A start whose `needs` exceed the host's ceiling is
+  refused before a run exists ("`<name>` needs a `<workspace>` workspace; the
+  host ceiling allows `<modes>`."), and the ceiling the run starts under is
+  carried onto every request it makes.
+  There is no `tools` axis here on purpose: tools are per-task and vary across a
+  graph, so one list at the definition level would either be a union nobody can
+  act on or a bound that lies.
 - `inputSchema` and `outputSchema` must be JSON-serializable JSON Schema
   documents (nesting depth at most 16) that compile under Ajv strict mode:
   "workflow input schema must be a bounded JSON-serializable schema",

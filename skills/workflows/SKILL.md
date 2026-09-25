@@ -5,7 +5,7 @@ description: Use when running, waiting on, inspecting, recovering, or stopping a
 
 # Operating pi-workflow runs
 
-This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 20. It is
+This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 21. It is
 about running workflows, not writing them. Every tool name, parameter, bound,
 status, subcommand, legality rule, and quoted message below is taken from the
 runtime source (`src/tools.ts`, `src/service-views.ts`, `src/run-actions.ts`,
@@ -118,6 +118,10 @@ Every parameter object is closed: an unknown key is an error.
   `/workflow` command convenience, not a tool input.
 - `Section` is one of `run`, `budget`, `tasks`, `executions`, `effects`,
   `barriers`, `artifacts`. The `run` section is always present.
+- `workflow_list` and `workflow_validate` report what a definition needs of the
+  host at `workflow.needs = { workspace: "read-only" | "worktree", declared }`.
+  `declared: false` means the definition said nothing and the conservative
+  reading applies: it is treated as needing a **worktree** workspace.
 - `source` for `workflow_propose` is 1..262144 characters (256 KiB).
 - Tool output is bounded at 48 KiB of pretty-printed JSON. A run view over
   that bound drops its `output` and tells you to read the durable output
@@ -130,6 +134,28 @@ Every parameter object is closed: an unknown key is an error.
 There is no tool for approving a dynamic source and no tool for deciding a
 checkpoint. Those are human acts (see below). There is no `action` parameter,
 no `awaitTerminal`, no `detach`, and no execution profile.
+
+## The host's ceiling bounds what you can start
+
+The host may bound every delegation this process makes — which workspace modes
+and which tools a subagent may have — and `workflow_run` passes that bound to the
+run it starts. A definition whose `needs` exceed it is **refused before a run
+exists**, in one sentence naming both sides:
+
+```text
+plan-to-ship needs a worktree workspace; the host ceiling allows read-only.
+```
+
+That is not a failure to retry, work around, or re-run with a different input.
+It means the work needs a mode the person has not put the host in. Say which
+definition and which mode, and stop; the person changes the mode or picks
+different work. `workflow_validate` tells you a definition's `needs` before you
+start it, which is the cheap way to find out.
+
+A run keeps the ceiling it started with, and every task it launches carries it,
+so a task that asks for more fails with pi-subagent's own refusal ("workspace
+mode exceeds host ceiling: …", "tool exceeds host ceiling: …"). Report that as
+the task's cause; it is a bound, not a bug.
 
 ## Run statuses
 
