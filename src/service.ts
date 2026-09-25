@@ -148,7 +148,12 @@ import {
 	WorkflowEventReductionError,
 	type WorkflowInvalidationClosure,
 } from "./reducer.js";
-import type { DiscoveredWorkflow, WorkflowRoot } from "./registry.js";
+import type {
+	DiscoveredWorkflow,
+	DiscoveredWorkflowProblem,
+	WorkflowDiscovery,
+	WorkflowRoot,
+} from "./registry.js";
 import { discoverWorkflows } from "./registry.js";
 import {
 	admitsInvalidation,
@@ -263,6 +268,26 @@ export type WorkflowDefinitionSummary = {
 		readonly workspace: WorkflowNeeds["workspace"];
 		readonly declared: boolean;
 	};
+};
+
+/**
+ * One definition file discovery could not load, as a view shows it: the file's
+ * path relative to its root, and one sentence naming the class of the cause.
+ * Nothing else of the cause survives the seam (see `sanitized-cause.ts`).
+ */
+export type WorkflowDefinitionProblem = {
+	readonly path: string;
+	readonly problem: string;
+};
+
+/**
+ * What `list()` returns: every definition that loaded, and every file that did
+ * not. One unloadable file is that file's problem, so the definitions beside it
+ * — a project's other files, and every builtin — still list, validate, and run.
+ */
+export type WorkflowDefinitionListing = {
+	readonly workflows: readonly WorkflowDefinitionSummary[];
+	readonly problems: readonly WorkflowDefinitionProblem[];
 };
 
 export type WorkflowValidationResult = {
@@ -393,7 +418,7 @@ export function needsFitCeiling(
 
 export interface WorkflowService {
 	registerRoot(root: WorkflowRoot): Promise<void>;
-	list(): Promise<readonly WorkflowDefinitionSummary[]>;
+	list(): Promise<WorkflowDefinitionListing>;
 	validate(ref: string, input?: unknown): Promise<WorkflowValidationResult>;
 	/**
 	 * Lease-free budget projection of `ref` against `input` (spec 2.4): the
@@ -717,6 +742,12 @@ function summary(workflow: DiscoveredWorkflow): WorkflowDefinitionSummary {
 		identitySha256: workflow.identity.identitySha256,
 		needs: resolveWorkflowNeeds(workflow.definition.meta),
 	});
+}
+
+function problemView(
+	problem: DiscoveredWorkflowProblem,
+): WorkflowDefinitionProblem {
+	return Object.freeze({ path: problem.path, problem: problem.problem });
 }
 
 function validateInput(workflow: DiscoveredWorkflow, input: unknown): void {
@@ -1252,7 +1283,7 @@ export async function createWorkflowService(
 		});
 	}
 
-	async function discover(): Promise<readonly DiscoveredWorkflow[]> {
+	async function discover(): Promise<WorkflowDiscovery> {
 		assertOpen();
 		return discoverWorkflows({
 			cwd,
@@ -1273,9 +1304,16 @@ export async function createWorkflowService(
 		return resolveAmong(await discover(), ref);
 	}
 
-	/** `ref` (a workflow name or definition path) among one discovery's result. */
+	/**
+	 * `ref` (a workflow name or definition path) among one discovery's result.
+	 *
+	 * A ref naming a file that did not load gets that file's own problem rather
+	 * than "not found": the file is there, and the sentence says what is wrong
+	 * with it. A ref naming a definition that loaded is unaffected by any
+	 * problem beside it.
+	 */
 	function resolveAmong(
-		workflows: readonly DiscoveredWorkflow[],
+		discovery: WorkflowDiscovery,
 		ref: string,
 	): DiscoveredWorkflow {
 		if (!ref || ref.length > 4096) {
@@ -1284,11 +1322,24 @@ export async function createWorkflowService(
 				"Invalid workflow reference.",
 			);
 		}
-		const matches = workflows.filter(
+		const matches = discovery.workflows.filter(
 			(workflow) =>
 				workflow.definition.meta.name === ref || workflow.path === ref,
 		);
 		if (matches.length !== 1) {
+			const problem =
+				matches.length === 0
+					? discovery.problems.find(
+							(candidate) =>
+								candidate.path === ref || candidate.definitionPath === ref,
+						)
+					: undefined;
+			if (problem) {
+				throw new WorkflowServiceError(
+					"validation",
+					`Workflow definition ${problem.path} is not loadable: ${problem.problem}`,
+				);
+			}
 			throw new WorkflowServiceError(
 				matches.length === 0 ? "not-found" : "conflict",
 				matches.length === 0
@@ -1614,7 +1665,7 @@ export async function createWorkflowService(
 	async function workflowForRecord(
 		record: WorkflowRunRecord,
 		journal: WorkflowRunJournal,
-		discovered: readonly DiscoveredWorkflow[],
+		discovery: WorkflowDiscovery,
 	): Promise<DiscoveredWorkflow> {
 		if (record.definitionKind === "dynamic") {
 			// The run directory copy is the only evidence consulted; the proposal
@@ -1651,7 +1702,7 @@ export async function createWorkflowService(
 				throw dynamicFailure(error);
 			}
 		}
-		const workflow = resolveAmong(discovered, record.definitionPath);
+		const workflow = resolveAmong(discovery, record.definitionPath);
 		if (
 			workflow.definition.meta.name !== record.definitionName ||
 			workflow.identity.identitySha256 !== record.definitionIdentitySha256 ||
@@ -2078,7 +2129,7 @@ export async function createWorkflowService(
 					return;
 				}
 			}
-			const discovered = await discover();
+			const { workflows: discovered } = await discover();
 			const workflow = discovered.find(
 				(candidate) =>
 					candidate.definition.meta.name === request.definitionName,
@@ -2322,11 +2373,11 @@ export async function createWorkflowService(
 		if (existing && !existing.settled) return existing;
 		const opened = await openInactive(runIdValue);
 		try {
-			const discovered = await discover();
+			const discovery = await discover();
 			const workflow = await workflowForRecord(
 				opened.record,
 				opened.journal,
-				discovered,
+				discovery,
 			);
 			const binding = await options.subagents.bind(runIdValue);
 			const run = await compose(
@@ -2334,7 +2385,7 @@ export async function createWorkflowService(
 				workflow,
 				opened.lease,
 				binding,
-				discovered,
+				discovery.workflows,
 			);
 			owned.set(runIdValue, run);
 			return run;
@@ -2367,7 +2418,11 @@ export async function createWorkflowService(
 			});
 		},
 		async list() {
-			return Object.freeze((await discover()).map(summary));
+			const discovery = await discover();
+			return Object.freeze({
+				workflows: Object.freeze(discovery.workflows.map(summary)),
+				problems: Object.freeze(discovery.problems.map(problemView)),
+			});
 		},
 		async validate(ref: string, input?: unknown) {
 			assertOpen();
@@ -2391,11 +2446,11 @@ export async function createWorkflowService(
 					WORKFLOW_PROJECTION_DYNAMIC_MESSAGE,
 				);
 			}
-			const discovered = await discover();
-			const workflow = resolveAmong(discovered, ref);
+			const discovery = await discover();
+			const workflow = resolveAmong(discovery, ref);
 			validateInput(workflow, input);
 			const byName = new Map(
-				discovered.map((candidate) => [
+				discovery.workflows.map((candidate) => [
 					candidate.definition.meta.name,
 					candidate.definition.meta.budget,
 				]),
@@ -2424,10 +2479,10 @@ export async function createWorkflowService(
 				const dynamic = isDynamicRef(ref)
 					? await dynamicRunnable(ref)
 					: undefined;
-				const discovered = await discover();
+				const discovery = await discover();
 				const workflow = dynamic
 					? dynamicWorkflow(dynamic.proposal, createdAt.toISOString())
-					: resolveAmong(discovered, ref);
+					: resolveAmong(discovery, ref);
 				validateInput(workflow, input);
 				// BEFORE the run exists. A plan that cannot execute under the host's
 				// bound costs a refusal here rather than a journal, a lease and a
@@ -2502,7 +2557,7 @@ export async function createWorkflowService(
 						workflow,
 						lease,
 						binding,
-						discovered,
+						discovery.workflows,
 						runOptions?.origin,
 					);
 					owned.set(id, run);

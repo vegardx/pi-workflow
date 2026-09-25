@@ -147,3 +147,114 @@ export function sanitizedTaskFailureCause(
 	}
 	return `The task ended ${outcome}.`;
 }
+
+/**
+ * Module specifiers are bare names by the import gate, so a specifier that
+ * looks like a path or a URL is not one this package would admit and is
+ * dropped rather than shown.
+ */
+const BARE_SPECIFIER =
+	/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/i;
+
+/** Node's two codes for "that specifier resolves to nothing". */
+const MODULE_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
+	"MODULE_NOT_FOUND",
+	"ERR_MODULE_NOT_FOUND",
+]);
+
+/** The package every definition imports; its absence has its own advice. */
+const PI_WORKFLOW_SPECIFIER = "@vegardx/pi-workflow";
+
+/** The advice that turns an unresolvable pi-workflow into something to do. */
+const PI_WORKFLOW_ADVICE =
+	"the project must be able to resolve pi-workflow, for example through a dependency or link";
+
+/** An error class name is one identifier; anything else is not a name. */
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/** A parser message is one line; a report is not a reason. */
+const MAX_PARSE_DETAIL = 200;
+
+function codeOf(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const code = (error as { code?: unknown }).code;
+	return typeof code === "string" ? code : undefined;
+}
+
+/** `error` and its causes, outermost first, bounded by {@link MAX_DEPTH}. */
+function causeChain(error: unknown): readonly unknown[] {
+	const chain: unknown[] = [];
+	let current: unknown = error;
+	for (let depth = 0; depth < MAX_DEPTH && current !== undefined; depth += 1) {
+		chain.push(current);
+		current = (current as { cause?: unknown } | null)?.cause;
+	}
+	return chain;
+}
+
+function moduleNotFoundSpecifier(
+	chain: readonly unknown[],
+): string | undefined {
+	for (const link of chain) {
+		const message = messageOf(link) ?? "";
+		if (
+			!MODULE_NOT_FOUND_CODES.has(codeOf(link) ?? "") &&
+			!/Cannot find (?:module|package) /.test(message)
+		) {
+			continue;
+		}
+		const specifier = /Cannot find (?:module|package) ['"]([^'"\n]+)['"]/.exec(
+			message,
+		)?.[1];
+		if (
+			specifier !== undefined &&
+			specifier.length <= 128 &&
+			BARE_SPECIFIER.test(specifier)
+		) {
+			return specifier;
+		}
+	}
+	return undefined;
+}
+
+function parseDetail(chain: readonly unknown[]): string | undefined {
+	for (const link of chain) {
+		if (nameOf(link) !== "SyntaxError") continue;
+		const first = (messageOf(link) ?? "")
+			.split("\n", 1)[0]
+			?.slice(0, MAX_PARSE_DETAIL)
+			.trim();
+		if (first !== undefined && looksSanitized(first)) return first;
+	}
+	return undefined;
+}
+
+/**
+ * Why one definition file did not load, as one sentence a person can act on.
+ *
+ * The same two gates the rest of this module applies: the only cause text that
+ * travels is a module specifier that looks like one and a parser's first line
+ * that looks like a fixed message, and the only path that travels is
+ * `definitionPath` — the file's own path relative to its root, which the caller
+ * supplies. Everything else collapses to the class of the failure, so no stack,
+ * no host path, and no dependency's prose reaches a view.
+ */
+export function sanitizedDefinitionProblem(
+	error: unknown,
+	definitionPath: string,
+): string {
+	const chain = causeChain(error);
+	const specifier = moduleNotFoundSpecifier(chain);
+	if (specifier !== undefined) {
+		const sentence = `cannot resolve module '${specifier}' from ${definitionPath}`;
+		// The root and its subpaths are the same missing package and the same fix.
+		return specifier === PI_WORKFLOW_SPECIFIER ||
+			specifier.startsWith(`${PI_WORKFLOW_SPECIFIER}/`)
+			? `${sentence} — ${PI_WORKFLOW_ADVICE}`
+			: sentence;
+	}
+	const parse = parseDetail(chain);
+	if (parse !== undefined) return `does not parse: ${parse}`;
+	const name = nameOf(error);
+	return `failed to load: ${name !== undefined && ERROR_NAME.test(name) ? name : "Error"}`;
+}

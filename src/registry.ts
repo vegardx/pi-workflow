@@ -10,6 +10,7 @@ import {
 	isWorkflowDefinition,
 	type WorkflowDefinition,
 } from "./definition.js";
+import { sanitizedDefinitionProblem } from "./sanitized-cause.js";
 
 const MAX_DEFINITION_BYTES = 1024 * 1024;
 const MAX_DEFINITIONS = 256;
@@ -59,6 +60,32 @@ export interface DiscoveredWorkflow {
 	readonly root: string;
 	readonly scope: WorkflowRootScope;
 	readonly source: string;
+}
+
+/**
+ * One definition file that discovery could not turn into a definition.
+ *
+ * Discovery is per file: a file that does not load, does not parse, defines no
+ * definition, escapes its root, or repeats a name already taken becomes one of
+ * these instead of an exception for every other file. `problem` is one
+ * sanitized sentence (see {@link sanitizedDefinitionProblem}) and `path` is the
+ * file's path relative to its root — the only path a view of a problem shows.
+ * `definitionPath` is the resolved absolute path, which the service uses to
+ * answer a ref naming the broken file and never puts in a view.
+ */
+export interface DiscoveredWorkflowProblem {
+	readonly path: string;
+	readonly definitionPath: string;
+	readonly root: string;
+	readonly scope: WorkflowRootScope;
+	readonly source: string;
+	readonly problem: string;
+}
+
+/** What one discovery found: the definitions that loaded, and the files that did not. */
+export interface WorkflowDiscovery {
+	readonly workflows: readonly DiscoveredWorkflow[];
+	readonly problems: readonly DiscoveredWorkflowProblem[];
 }
 
 export class WorkflowDefinitionLoadError extends Error {
@@ -175,6 +202,9 @@ async function readDefinitionSource(filePath: string): Promise<string> {
 	}
 }
 
+/** The one `assertSupportedImports` refusal that is a parse failure, not a policy one. */
+const DEFINITION_SYNTAX_INVALID = "workflow definition syntax is invalid";
+
 export function assertSupportedImports(
 	source: string,
 	filePath: string,
@@ -187,11 +217,9 @@ export function assertSupportedImports(
 			plugins: ["typescript", "importAttributes", "topLevelAwait"],
 		});
 	} catch (error) {
-		throw new WorkflowDefinitionLoadError(
-			"workflow definition syntax is invalid",
-			filePath,
-			{ cause: error },
-		);
+		throw new WorkflowDefinitionLoadError(DEFINITION_SYNTAX_INVALID, filePath, {
+			cause: error,
+		});
 	}
 	const visit = (value: unknown): void => {
 		if (Array.isArray(value)) {
@@ -276,7 +304,7 @@ export async function discoverWorkflows(options: {
 	projectTrusted: boolean;
 	registeredRoots?: readonly WorkflowRoot[];
 	allowedSupportImports?: readonly string[];
-}): Promise<readonly DiscoveredWorkflow[]> {
+}): Promise<WorkflowDiscovery> {
 	const cwd = await realpath(options.cwd);
 	const allowedSupportImports = new Set(options.allowedSupportImports ?? []);
 	if (allowedSupportImports.size > 64) {
@@ -304,19 +332,24 @@ export async function discoverWorkflows(options: {
 		if (leftRank !== rightRank) return leftRank - rightRank;
 		return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
 	});
+	// Most trusted first, because the first file to claim a name keeps it and
+	// every later claim is that file's problem: a root trusted by its install
+	// (a registered `package` or `builtin` root, then the agent directory) is
+	// visited before a project's own, so a project can never take a name a
+	// builtin defines.
 	const roots: WorkflowRoot[] = [
+		...registeredRoots,
+		{
+			path: path.join(options.agentDir ?? getAgentDir(), "workflows"),
+			scope: "global",
+			source: "agent-directory",
+		},
 		{ path: path.join(cwd, "workflows"), scope: "project", source: "project" },
 		{
 			path: path.join(cwd, ".pi", "workflows"),
 			scope: "project",
 			source: "project-config",
 		},
-		{
-			path: path.join(options.agentDir ?? getAgentDir(), "workflows"),
-			scope: "global",
-			source: "agent-directory",
-		},
-		...registeredRoots,
 	];
 	const discoveredRoots: Array<{
 		root: WorkflowRoot;
@@ -349,18 +382,51 @@ export async function discoverWorkflows(options: {
 		interopDefault: true,
 	});
 	const workflows: DiscoveredWorkflow[] = [];
+	const problems: DiscoveredWorkflowProblem[] = [];
 	const names = new Map<string, string>();
 	for (const { root, canonical, files } of discoveredRoots) {
 		for (const filePath of files) {
+			// The file's own path relative to the root it was found under: the only
+			// path a problem carries, and stable across hosts. `filePath` comes from
+			// walking `canonical`, so this never climbs out of the root even when
+			// the resolved target does.
+			const relative = path
+				.relative(canonical, filePath)
+				.split(path.sep)
+				.join("/");
 			const resolved = await realpath(filePath);
-			if (!resolved.startsWith(`${canonical}${path.sep}`)) {
-				throw new WorkflowDefinitionLoadError(
-					"workflow definition escapes its root",
-					filePath,
+			const record = (problem: string): void => {
+				problems.push(
+					Object.freeze({
+						path: relative,
+						definitionPath: resolved,
+						root: canonical,
+						scope: root.scope,
+						source: root.source,
+						problem,
+					}),
 				);
+			};
+			if (!resolved.startsWith(`${canonical}${path.sep}`)) {
+				record("escapes its root");
+				continue;
 			}
 			const source = await readDefinitionSource(resolved);
-			assertSupportedImports(source, resolved, allowedSupportImports);
+			try {
+				assertSupportedImports(source, resolved, allowedSupportImports);
+			} catch (error) {
+				// A file that does not parse is this file's problem. An import the
+				// contract does not admit is still the contract's refusal: the gate
+				// decides what a definition may be, not whether this one loaded.
+				if (
+					error instanceof WorkflowDefinitionLoadError &&
+					error.message === DEFINITION_SYNTAX_INVALID
+				) {
+					record(sanitizedDefinitionProblem(error, relative));
+					continue;
+				}
+				throw error;
+			}
 			let loaded: unknown;
 			try {
 				const module = await jiti.evalModule(source, {
@@ -370,17 +436,12 @@ export async function discoverWorkflows(options: {
 				});
 				loaded = (module as { default?: unknown }).default ?? module;
 			} catch (error) {
-				throw new WorkflowDefinitionLoadError(
-					"workflow definition module failed to load",
-					resolved,
-					{ cause: error },
-				);
+				record(sanitizedDefinitionProblem(error, relative));
+				continue;
 			}
 			if (!isWorkflowDefinition(loaded)) {
-				throw new WorkflowDefinitionLoadError(
-					"workflow module has no valid default definition",
-					resolved,
-				);
+				record("has no valid default definition");
+				continue;
 			}
 			const definition = defineWorkflow({
 				meta: loaded.meta,
@@ -390,12 +451,15 @@ export async function discoverWorkflows(options: {
 			});
 			const existing = names.get(definition.meta.name);
 			if (existing) {
-				throw new WorkflowDefinitionLoadError(
-					`duplicate workflow name ${definition.meta.name}: ${existing} and ${resolved}`,
-					resolved,
+				// The first file to claim a name keeps it, and roots are visited
+				// most-trusted first, so this is always the less trusted or later
+				// file — never the builtin.
+				record(
+					`duplicate workflow name ${definition.meta.name}, also defined by ${existing}`,
 				);
+				continue;
 			}
-			names.set(definition.meta.name, resolved);
+			names.set(definition.meta.name, relative);
 			const identity = Object.freeze(
 				definitionIdentity(definition, resolved, source),
 			);
@@ -411,5 +475,8 @@ export async function discoverWorkflows(options: {
 			);
 		}
 	}
-	return Object.freeze(workflows);
+	return Object.freeze({
+		workflows: Object.freeze(workflows),
+		problems: Object.freeze(problems),
+	});
 }

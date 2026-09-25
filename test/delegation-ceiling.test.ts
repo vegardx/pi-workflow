@@ -136,7 +136,10 @@ describe("what a definition needs", () => {
 	it("reports the builtins' own declarations through list and validate", async () => {
 		const { service } = await fixture();
 		const byName = new Map(
-			(await service.list()).map((summary) => [summary.name, summary.needs]),
+			(await service.list()).workflows.map((summary) => [
+				summary.name,
+				summary.needs,
+			]),
 		);
 		// The three the package ships: the pipeline that writes needs a worktree;
 		// the two reviewers do not.

@@ -512,7 +512,7 @@ async function shippedDefinition(): Promise<WorkflowDefinition> {
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
 	});
-	const found = workflows.find(
+	const found = workflows.workflows.find(
 		(entry) => entry.definition.meta.name === "deep-research",
 	);
 	if (!found) throw new Error("deep-research was not discovered");
@@ -549,7 +549,7 @@ describe("deep-research: discovery", () => {
 				{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 			],
 		});
-		const found = workflows.find(
+		const found = workflows.workflows.find(
 			(entry) => entry.definition.meta.name === "deep-research",
 		);
 		if (!found) throw new Error("deep-research was not discovered");

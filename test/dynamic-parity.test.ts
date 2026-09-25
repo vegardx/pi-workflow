@@ -619,7 +619,7 @@ async function openProject(name: string, source: string): Promise<Project> {
 		projectTrusted: true,
 		allowedSupportImports: [TOOLS_MODULE],
 	});
-	const registry = discovered.find(
+	const registry = discovered.workflows.find(
 		(workflow) => workflow.definition.meta.name === name,
 	);
 	if (!registry) throw new Error(`registry did not load ${name}`);

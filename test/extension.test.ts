@@ -144,7 +144,7 @@ async function builtinSummaryList(): Promise<unknown> {
 			{ path: builtinRoot, scope: "builtin", source: "package" },
 		],
 	});
-	return workflows.map((entry) => ({
+	return workflows.workflows.map((entry) => ({
 		name: entry.definition.meta.name,
 		description: entry.definition.meta.description,
 		version: entry.definition.meta.version,
@@ -355,7 +355,10 @@ describe("workflow Pi extension", () => {
 		expect(
 			rendered(
 				tool("workflow_list").renderResult?.(
-					{ content: [{ type: "text", text: "[]" }], details: [] },
+					{
+						content: [{ type: "text", text: '{"workflows":[],"problems":[]}' }],
+						details: { workflows: [], problems: [] },
+					},
 					{ expanded: false, isPartial: false },
 					theme,
 					{} as never,
@@ -418,11 +421,14 @@ describe("workflow Pi extension", () => {
 		);
 		// The empty project contributes nothing; the package's own builtin
 		// root is what is listed.
+		const listing = JSON.parse(toolText(listed)) as {
+			workflows: Array<{ scope: string }>;
+			problems: unknown[];
+		};
 		expect(
-			(JSON.parse(toolText(listed)) as Array<{ scope: string }>).filter(
-				(entry) => entry.scope === "builtin",
-			),
+			listing.workflows.filter((entry) => entry.scope === "builtin"),
 		).toEqual(await builtinSummaryList());
+		expect(listing.problems).toEqual([]);
 		await handlers.get("session_shutdown")?.({}, context);
 	});
 
@@ -449,13 +455,17 @@ describe("workflow Pi extension", () => {
 			return JSON.parse(toolText(result));
 		};
 		try {
-			const listed = (await call("workflow_list", {})) as Array<
-				Record<string, unknown>
-			>;
-			expect(listed.filter((entry) => entry.scope === "builtin")).toEqual(
-				await builtinSummaryList(),
+			const listed = (await call("workflow_list", {})) as {
+				workflows: Array<Record<string, unknown>>;
+				problems: unknown[];
+			};
+			expect(
+				listed.workflows.filter((entry) => entry.scope === "builtin"),
+			).toEqual(await builtinSummaryList());
+			expect(listed.problems).toEqual([]);
+			const planToShip = listed.workflows.find(
+				(entry) => entry.name === "plan-to-ship",
 			);
-			const planToShip = listed.find((entry) => entry.name === "plan-to-ship");
 			expect(planToShip).toMatchObject({
 				name: "plan-to-ship",
 				scope: "builtin",
@@ -510,6 +520,42 @@ describe("workflow Pi extension", () => {
 		// The controller hides on stop, then the hook clears the key itself.
 		expect(setWidget.mock.calls.at(-1)).toEqual(["pi-workflow", undefined]);
 		expect(setWidget.mock.calls.length).toBeGreaterThanOrEqual(2);
+	});
+
+	// A project file that does not load is reported after the table, never
+	// instead of it: the builtins and the project's other definitions still
+	// list, and the person is told which file and why.
+	it("prints definition problems after the /workflow list table", async () => {
+		const { commands } = capture();
+		const command = commands.get("workflow");
+		if (!command) throw new Error("/workflow missing");
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const notify = vi.fn();
+		const cwd = await emptyProject();
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "broken.workflow.ts"),
+			"export default {\n",
+		);
+		await command.handler("list", {
+			cwd,
+			mode: "print",
+			hasUI: false,
+			isProjectTrusted: () => true,
+			ui: { notify },
+		});
+		const printed = log.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(printed).toContain("plan-to-ship");
+		expect(printed).toContain("1 definition file(s) could not be loaded:");
+		const problem = printed
+			.split("\n")
+			.find((line) => line.startsWith("  broken.workflow.ts: "));
+		expect(problem).toMatch(/^ {2}broken\.workflow\.ts: does not parse: \S/);
+		expect(problem).not.toMatch(/[\s(<"'][/~]/);
+		expect(problem).not.toMatch(/\bat\s+\S*\s*\(/);
+		expect(problem).not.toContain(cwd);
+		expect(notify).not.toHaveBeenCalled();
+		log.mockRestore();
 	});
 
 	it("routes /workflow output through operatorOutput and never rethrows", async () => {

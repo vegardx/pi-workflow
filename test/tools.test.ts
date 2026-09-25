@@ -10,6 +10,7 @@ import { deriveDynamicSourceSha256 } from "../src/dynamic/source.js";
 import { encodeWorkflowRunCursor } from "../src/run-projection.js";
 import {
 	createWorkflowService,
+	type WorkflowDefinitionListing,
 	type WorkflowService,
 	WorkflowServiceError,
 } from "../src/service.js";
@@ -551,12 +552,15 @@ describe("workflow tool declarations", () => {
 					limit: 100,
 				}),
 			) as WorkflowLogPage;
-			expect(listed).toMatchObject([
-				{ name: "delegating", scope: "project" },
-				{ name: "example", scope: "project" },
-				{ name: "gated", scope: "project" },
-				{ name: "stoppable", scope: "project" },
-			]);
+			expect(listed).toMatchObject({
+				workflows: [
+					{ name: "delegating", scope: "project" },
+					{ name: "example", scope: "project" },
+					{ name: "gated", scope: "project" },
+					{ name: "stoppable", scope: "project" },
+				],
+				problems: [],
+			});
 			expect(validated).toMatchObject({
 				valid: true,
 				workflow: { name: "example" },
@@ -606,10 +610,11 @@ describe("workflow tool declarations", () => {
 			const listed = checked(
 				"workflow_list",
 				await declaration("workflow_list").execute(live, {}),
-			);
-			expect(listed).not.toContainEqual(
+			) as WorkflowDefinitionListing;
+			expect(listed.workflows).not.toContainEqual(
 				expect.objectContaining({ scope: "dynamic" }),
 			);
+			expect(listed.problems).toEqual([]);
 			// Across the three sweeps, every declared tool had a real result checked.
 			expect([...checkedResults.keys()].sort()).toEqual([...TOOL_NAMES].sort());
 		});
@@ -1100,13 +1105,29 @@ describe("workflow tool declarations", () => {
 				identitySha256: "a".repeat(64),
 				needs: { workspace: "worktree" as const, declared: true },
 			}));
-			const listText = workflowToolText(declaration("workflow_list"), list);
+			// Problems are why a person reads a listing that does not fit: the
+			// definitions shrink and every problem survives the bound.
+			const problems = Array.from({ length: 8 }, (_, index) => ({
+				path: `broken-${index}.workflow.ts`,
+				problem: `does not parse: Unexpected token (${index}:0)`,
+			}));
+			const listText = workflowToolText(declaration("workflow_list"), {
+				workflows: list,
+				problems,
+			});
 			expect(Buffer.byteLength(listText)).toBeLessThanOrEqual(
 				MAX_TOOL_OUTPUT_BYTES,
 			);
-			const bounded = JSON.parse(listText) as unknown[];
-			expect(bounded.at(-1)).toEqual({ truncated: true, totalItems: 256 });
-			expect(bounded.length).toBeLessThan(257);
+			const bounded = JSON.parse(listText) as {
+				workflows: unknown[];
+				problems: unknown[];
+			};
+			expect(bounded.workflows.at(-1)).toEqual({
+				truncated: true,
+				totalItems: 256,
+			});
+			expect(bounded.workflows.length).toBeLessThan(257);
+			expect(bounded.problems).toEqual(problems);
 		});
 	});
 });

@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	realpath,
+	rm,
+	writeFile,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { SubagentClient } from "@vegardx/pi-subagent";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -143,9 +151,10 @@ describe("service registered roots", () => {
 		services.push(service);
 		// The constructor registers; it does not discover.
 		expect(discoveries).toHaveBeenCalledTimes(0);
-		expect(await service.list()).toMatchObject([
-			{ name: "shipped", scope: "builtin", source: "package" },
-		]);
+		expect(await service.list()).toMatchObject({
+			workflows: [{ name: "shipped", scope: "builtin", source: "package" }],
+			problems: [],
+		});
 		const run = await service.run("shipped", { value: "z" });
 		expect(await service.wait(run.runId)).toMatchObject({
 			status: "completed",
@@ -167,5 +176,112 @@ describe("service registered roots", () => {
 				registeredRoots: [{ path: cwd, scope: "project", source: "test" }],
 			}),
 		).rejects.toThrow("Registered roots must be package or builtin scope.");
+	});
+});
+
+/**
+ * The failure observed in the field: a project's own definition imports
+ * `@vegardx/pi-workflow` through a stale link, so the module resolves to
+ * nothing. Discovery is one pass over every root, and that one file used to
+ * fail it - and with it `workflow_list`, every `workflow_validate`, and every
+ * `workflow_run`, builtins included - behind one generic sentence.
+ *
+ * The project lives OUTSIDE this checkout on purpose: inside it the package
+ * self-references through its own `exports` and resolves.
+ */
+describe("service definition problems", () => {
+	const roots: string[] = [];
+
+	afterEach(async () => {
+		await Promise.all(
+			roots.map((root) => rm(root, { recursive: true, force: true })),
+		);
+		roots.length = 0;
+	});
+
+	it("reports one unloadable file per file and leaves every other ref alone", async () => {
+		const base = await realpath(
+			await mkdtemp(path.join(os.tmpdir(), "pi-workflow-problems-")),
+		);
+		roots.push(base);
+		const cwd = path.join(base, "project");
+		const packageRoot = path.join(base, "package", "workflows");
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await mkdir(packageRoot, { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "gated-answer.workflow.ts"),
+			`import { defineWorkflow } from "@vegardx/pi-workflow";\nvoid defineWorkflow;\n${definition("gated-answer", "gated ")}`,
+		);
+		await writeFile(
+			path.join(cwd, "workflows", "good.workflow.ts"),
+			definition("good", "good "),
+		);
+		await writeFile(
+			path.join(packageRoot, "shipped.workflow.ts"),
+			definition("shipped", "shipped "),
+		);
+		const service = await createWorkflowService({
+			cwd,
+			agentDir: path.join(base, "agent"),
+			storeRoot: path.join(base, "state"),
+			projectTrusted: () => true,
+			subagents: provider(),
+			registeredRoots: [
+				{ path: packageRoot, scope: "builtin", source: "package" },
+			],
+		});
+		services.push(service);
+
+		const listing = await service.list();
+		expect(listing.workflows.map((entry) => entry.name)).toEqual([
+			"shipped",
+			"good",
+		]);
+		expect(listing.problems).toEqual([
+			{
+				path: "gated-answer.workflow.ts",
+				problem:
+					"cannot resolve module '@vegardx/pi-workflow' from gated-answer.workflow.ts — the project must be able to resolve pi-workflow, for example through a dependency or link",
+			},
+		]);
+		// The view carries the class of the cause and the file's own root-relative
+		// path: no host path, no URL, no stack text.
+		for (const problem of listing.problems) {
+			expect(problem.problem).not.toMatch(/[\r\n\t]/);
+			expect(problem.problem).not.toMatch(/(^|[\s(<"'])[/~]/);
+			expect(problem.problem).not.toMatch(/[a-z][a-z0-9+.-]*:\/\//i);
+			expect(problem.problem).not.toMatch(/\bat\s+\S*\s*\(/);
+			expect(problem.problem).not.toContain(base);
+			expect(problem.problem).not.toContain(os.tmpdir());
+		}
+
+		// Refs that load are unaffected, project and builtin alike.
+		await expect(
+			service.validate("good", { value: "x" }),
+		).resolves.toMatchObject({ valid: true, workflow: { name: "good" } });
+		await expect(service.validate("shipped")).resolves.toMatchObject({
+			valid: true,
+			workflow: { scope: "builtin" },
+		});
+		const run = await service.run("shipped", { value: "z" });
+		expect(await service.wait(run.runId)).toMatchObject({
+			status: "completed",
+			output: { answer: "shipped z" },
+		});
+
+		// The broken ref gets its own sentence, not "not found" and not the
+		// generic load failure.
+		await expect(
+			service.validate("gated-answer.workflow.ts"),
+		).rejects.toMatchObject({
+			code: "validation",
+			message:
+				"Workflow definition gated-answer.workflow.ts is not loadable: cannot resolve module '@vegardx/pi-workflow' from gated-answer.workflow.ts — the project must be able to resolve pi-workflow, for example through a dependency or link",
+		});
+		// The name it would have defined is not discovered at all.
+		await expect(service.validate("gated-answer")).rejects.toMatchObject({
+			code: "not-found",
+			message: "Workflow not found: gated-answer",
+		});
 	});
 });

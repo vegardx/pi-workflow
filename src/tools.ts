@@ -120,21 +120,27 @@ function boundedText(value: unknown): string {
 }
 
 /** Legacy bounding for `workflow_list`, the only tool that returns a bare array. */
-function legacyListText(value: readonly unknown[]): string {
+function listingText(value: {
+	readonly workflows: readonly unknown[];
+	readonly problems: readonly unknown[];
+}): string {
 	const serialized = serialize(value);
 	if (fits(serialized)) return serialized;
+	// Problems are why a person is reading this result at all, so the listing
+	// shrinks on the definition side and keeps every problem.
+	const page = (workflows: readonly unknown[]): unknown => ({
+		...value,
+		workflows: [
+			...workflows,
+			{ truncated: true, totalItems: value.workflows.length },
+		],
+	});
 	const bounded: unknown[] = [];
-	for (const entry of value) {
-		const candidate = [
-			...bounded,
-			entry,
-			{ truncated: true, totalItems: value.length },
-		];
-		if (!fits(serialize(candidate))) break;
+	for (const entry of value.workflows) {
+		if (!fits(serialize(page([...bounded, entry])))) break;
 		bounded.push(entry);
 	}
-	bounded.push({ truncated: true, totalItems: value.length });
-	return serialize(bounded);
+	return serialize(page(bounded));
 }
 
 /**
@@ -259,6 +265,31 @@ export const WorkflowDefinitionSummaryListSchema = Type.Array(
 	{ maxItems: 256 },
 );
 
+/**
+ * One definition file that did not load. `path` is the file's path relative to
+ * the root it was found under - the only path a problem carries - and `problem`
+ * is one sentence naming the class of the cause.
+ */
+export const WorkflowDefinitionProblemSchema = Type.Object(
+	{
+		path: Type.String({ minLength: 1, maxLength: 1024 }),
+		problem: Type.String({ minLength: 1, maxLength: 1024 }),
+	},
+	{ additionalProperties: false },
+);
+
+/**
+ * `workflow_list`: the definitions that loaded, and the files that did not. One
+ * unloadable file never hides the definitions beside it.
+ */
+export const WorkflowDefinitionListingSchema = Type.Object(
+	{
+		workflows: WorkflowDefinitionSummaryListSchema,
+		problems: Type.Array(WorkflowDefinitionProblemSchema, { maxItems: 256 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const WorkflowValidationResultSchema = Type.Object(
 	{
 		valid: Type.Literal(true),
@@ -374,13 +405,15 @@ export const WORKFLOW_TOOL_DECLARATIONS: readonly WorkflowToolDeclaration[] =
 				"Use workflow_list before workflow_run when the available workflow name is unknown.",
 			],
 			parameters: Type.Object({}, { additionalProperties: false }),
-			output: WorkflowDefinitionSummaryListSchema,
+			output: WorkflowDefinitionListingSchema,
 			execute(service) {
 				return service.list();
 			},
-			text: legacyListText,
+			text: listingText,
 			summarizeCall: () => "",
-			summarizeResult: (value) => `${value.length} workflow(s)`,
+			// The count is the definitions a caller can run; a problem is reported
+			// in the result, not counted as a workflow.
+			summarizeResult: (value) => `${value.workflows.length} workflow(s)`,
 		}),
 		declare({
 			name: "workflow_validate",

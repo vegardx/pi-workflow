@@ -501,7 +501,7 @@ describe("deep-review: discovery", () => {
 				{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 			],
 		});
-		const found = workflows.find(
+		const found = workflows.workflows.find(
 			(entry) => entry.definition.meta.name === "deep-review",
 		);
 		if (!found) throw new Error("deep-review was not discovered");

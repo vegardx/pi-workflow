@@ -81,7 +81,7 @@ import type { WorkflowDefinition } from "./definition.js";
 import { withSanitizedCause } from "./sanitized-cause.js";
 import {
 	projectWorkflowGraph,
-	type WorkflowDefinitionSummary,
+	type WorkflowDefinitionListing,
 	type WorkflowService,
 	WorkflowServiceError,
 	type WorkflowValidationResult,
@@ -98,6 +98,8 @@ import type {
 } from "./service-views.js";
 
 export type {
+	WorkflowDefinitionListing,
+	WorkflowDefinitionProblem,
 	WorkflowDefinitionSummary,
 	WorkflowValidationResult,
 } from "./service.js";
@@ -201,8 +203,8 @@ export interface WorkflowStartBuiltinOptions {
 
 /** The narrowed client a consumer receives; see the module comment. */
 export interface WorkflowReadClient {
-	/** Every discovered static definition. */
-	list(): Promise<readonly WorkflowDefinitionSummary[]>;
+	/** Every static definition that loaded, and every file that did not. */
+	list(): Promise<WorkflowDefinitionListing>;
 	/** Resolves `ref` and, with an input, validates it against `inputSchema`. */
 	validate(ref: string, input?: unknown): Promise<WorkflowValidationResult>;
 	/** Lease-free budget projection (spec 2.4); static refs only. */
