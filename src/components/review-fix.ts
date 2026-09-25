@@ -236,7 +236,11 @@ export interface SynthesizeFindingsOptions {
 	readonly synthesize: (
 		brief: FindingSynthesisBrief,
 	) => FindingSynthesisTaskRequest;
-	/** Default `"optional"`, and for the reason `reviewFanOut` documents. */
+	/**
+	 * Default `"optional"`, and for the reason `reviewFanOut` documents. A
+	 * caller whose fix loop runs on its own passes `"required"`: see
+	 * {@link synthesizeFindings}.
+	 */
 	readonly disposition?: TaskDisposition;
 	readonly budget?: WorkflowBudget;
 }
@@ -292,6 +296,13 @@ function assertOwned(
  * task it closed over, so a half-dead fan-out blocks the reducer declared
  * after it, and a required reducer would turn a degraded review into a failed
  * run.
+ *
+ * A caller that FIXES what the review found should pass `"required"` instead,
+ * and pay that cost knowingly. The normalized list is the only thing a fixer
+ * can answer, so where review, synthesis and fix run without a person between
+ * them, an optional reducer means a synthesis that failed is indistinguishable
+ * from a deliverable nobody had to fix: the run reaches its gate reporting that
+ * no fixer ran, and says nothing about why. `plan-to-ship` passes `"required"`.
  */
 export function synthesizeFindings(
 	ctx: WorkflowContext<unknown>,

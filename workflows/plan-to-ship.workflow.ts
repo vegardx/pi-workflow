@@ -93,15 +93,21 @@ import { type Static, Type } from "typebox";
  *                     structured reducer over the lenses that reported. It
  *                     normalizes every lens's findings into ONE de-duplicated
  *                     list plus a one-paragraph verdict. Compiled whenever
- *                     the deliverable has lenses.
+ *                     the deliverable has lenses, and `disposition: "required"`
+ *                     there: a synthesis that cannot run is a failed
+ *                     deliverable, not a skipped fix, so the run ends at its
+ *                     barrier instead of reaching the ship gate with nothing
+ *                     normalized. A dead lens blocks it, and that fails the
+ *                     run too.
  *     fix             `fixFindings`: `fix-<deliverable>`, one worktree agent
  *                     handed the normalized findings and the patch. It
  *                     addresses every blocking and major finding, re-runs the
  *                     check, and answers each finding
  *                     `addressed | disputed | out-of-scope`. NOT declared
- *                     when nothing is blocking or major, when the review
- *                     synthesis did not run, or when the deliverable's shared
- *                     fix-round pool is spent; the reason is logged.
+ *                     when nothing is blocking or major, when no lens reported
+ *                     at all (so no synthesis exists), or when the
+ *                     deliverable's shared fix-round pool is spent; the reason
+ *                     is logged.
  *                     THERE IS NO RE-REVIEW after it.
  *     gate            `gate`: a human decides; nothing runs after one. Only
  *                     `policy.gates: every-deliverable` buys one here.
@@ -1210,7 +1216,7 @@ export default defineWorkflow({
 		name: "plan-to-ship",
 		description:
 			"Compile a plan's stages into one graph: refine it, implement each deliverable in a worktree, run the project's check, review it through every lens, normalize the findings, fix them, and ask a human before recording a receipt.",
-		version: 3,
+		version: 4,
 		budget: RUN_BUDGET,
 		// The run parks on human gates, so it outlives any session. Seven days
 		// covers a 48-hour wait at each gate with room for the work.
@@ -1540,6 +1546,16 @@ export default defineWorkflow({
 						reviews: reviewed.reviews,
 						effort,
 						budget: RUN_BUDGET,
+						// REQUIRED, unlike the lenses it reduces. A deliverable with
+						// reviews runs review, synthesis and fix on its own; the
+						// synthesis is the only thing that turns lens prose into a list
+						// a fixer can answer, so a synthesis that cannot run is a
+						// FAILED deliverable, not a deliverable whose fix was quietly
+						// skipped on the way to the ship gate. The cost is the one
+						// `reviewFanOut` names: a barrier's control edge covers every
+						// lens it closed over, so a dead lens blocks this reducer and
+						// now fails the run instead of subtracting its findings.
+						disposition: "required",
 						synthesize: (brief) => ({
 							agent: REVIEWER_AGENT,
 							task: {
@@ -1574,19 +1590,13 @@ export default defineWorkflow({
 						);
 						continue;
 					}
-					// `ctx.settled`, not `ctx.result`: the reducer is optional, and a
-					// gate or a fixer that named a reducer which never ran would park
-					// on a task nobody can complete. Only a synthesis that REPORTED may
-					// be an input - the same rule `reviewFanOut` states for a dead lens.
-					const [reduced] = await ctx.settled([reducer]);
-					if (reduced?.status === "fulfilled") {
-						normalized = reduced.value;
-						findingsInput = reducer.output;
-					} else {
-						ctx.log(
-							`plan-to-ship: the synthesis "${lowered.key}" did not run (${reduced?.outcome ?? "absent"}); the verdict, the findings and the coverage stand without it, and no fixer is declared.`,
-						);
-					}
+					// `ctx.result`, not `ctx.settled`: the reducer is required, so its
+					// value is read rather than inspected for absence. A synthesis that
+					// did not complete ends the run HERE, before the fixer and the ship
+					// gate are declared, rather than parking a person at a gate whose
+					// findings nobody normalized and whose fix nobody ran.
+					normalized = await ctx.result(reducer);
+					findingsInput = reducer.output;
 					continue;
 				}
 

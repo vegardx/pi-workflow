@@ -325,6 +325,8 @@ function scripted(
 		readonly failReview?: boolean;
 		/** Fail only the lens whose name the goal names; the rest report. */
 		readonly failLens?: string;
+		/** Every lens reports; the reducer over them fails. */
+		readonly failSynthesis?: boolean;
 		readonly check?: CheckScript;
 		/** The synthesis normalizes to minor findings only, so nothing is fixed. */
 		readonly minorOnly?: boolean;
@@ -431,10 +433,12 @@ function scripted(
 		const worktree = child.request.workspace.mode === "worktree";
 		const goal = child.request.task.goal;
 		const failed =
-			goal.startsWith("Review deliverable") &&
-			(options.failReview === true ||
-				(options.failLens !== undefined &&
-					goal.includes(`"${options.failLens}" lens`)));
+			(goal.startsWith("Review deliverable") &&
+				(options.failReview === true ||
+					(options.failLens !== undefined &&
+						goal.includes(`"${options.failLens}" lens`)))) ||
+			(options.failSynthesis === true &&
+				goal.startsWith("Normalize the review findings"));
 		const result = {
 			runId,
 			status: failed ? ("failed" as const) : ("completed" as const),
@@ -1872,27 +1876,53 @@ describe("plan-to-ship: a reviewer that dies", () => {
 	});
 
 	it("records what a half-dead fan-out costs the synthesis declared after it", async () => {
-		// The honest half: a barrier's control edge covers every task it closed
-		// over, so the reducer declared after `ctx.settled` is blocked when one
-		// lens failed - even though its `inputs` name only the lens that reported.
-		// `deep-review` records the same cost. The verdict and the findings are
-		// computed on the deterministic rail either way.
+		// The honest half, and what it costs now that the reducer is REQUIRED: a
+		// barrier's control edge covers every task it closed over, so the reducer
+		// declared after `ctx.settled` is blocked when one lens failed - even
+		// though its `inputs` name only the lens that reported. A blocked required
+		// task ends the run. This is the price of running review, synthesis and
+		// fix without a person between them: the alternative is the ship gate the
+		// owner saw, reporting "0 of 1 deliverable(s) ran a fixer" and saying
+		// nothing about why.
 		const delegated = scripted({ failLens: "b" });
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
 			input({ lensesPerDeliverable: ["a", "b"] }),
 		);
-		const ship = await park(service, run.runId, "ship");
-		expect(taskByKey(ship, "review-d0/a").status).toBe("completed");
-		expect(taskByKey(ship, "review-d0/b").status).toBe("failed");
-		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
-		expect(finished.status).toBe("completed-degraded");
-		expect(finished.output).toMatchObject({
-			shipped: true,
-			reviews: [{ deliverable: "d0", lens: "a", blocking: true }],
+		expect(finished.status).toBe("failed");
+		expect(taskByKey(finished, "review-d0/a").status).toBe("completed");
+		expect(taskByKey(finished, "review-d0/b").status).toBe("failed");
+		expect(taskByKey(finished, "synthesis-d0").status).toBe("blocked");
+		// Nobody was asked to ship what nobody reviewed to the end.
+		expect(finished.parked ?? false).toBe(false);
+		expect(taskPaths(finished)).not.toContain("fix-d0");
+	});
+
+	it("fails the run when the synthesis cannot run, rather than parking at ship", async () => {
+		// The defect this replaced: every lens reported, the reducer over them
+		// failed, and the deliverable walked on to the ship gate with no
+		// normalized findings and no fixer - "0 of 1 deliverable(s) ran a fixer"
+		// as the only trace. A deliverable with reviews runs review, synthesis and
+		// fix; a synthesis that cannot run is a failed deliverable.
+		const delegated = scripted({ failSynthesis: true });
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const finished = await bounded(service.wait(run.runId), "wait");
+
+		expect(finished.status).toBe("failed");
+		expect(taskByKey(finished, "review-d0/correctness").status).toBe(
+			"completed",
+		);
+		expect(taskByKey(finished, "synthesis-d0")).toMatchObject({
+			status: "failed",
+			disposition: "required",
 		});
+		// The run ends at the synthesis barrier: no fixer, no gate, no output.
+		expect(taskPaths(finished)).not.toContain("fix-d0");
+		expect(finished.parked ?? false).toBe(false);
+		expect(finished.output).toBeUndefined();
 	});
 });
 
