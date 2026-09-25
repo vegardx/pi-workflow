@@ -2,7 +2,8 @@
 
 | Class | Examples | Default effect |
 | --- | --- | --- |
-| Definition | Invalid module, duplicate workflow name, invalid schemas | Fail before run |
+| Definition | Untrusted project root, an import the identity gate refuses, a file over the limits, a root rule | Fail the whole discovery before any run |
+| Definition file | Unresolvable import, parse failure, evaluation throw, no default definition, duplicate name | One problem entry for that file; every other ref is unaffected |
 | Trust | Untrusted project workflow or helper | Block for trust decision |
 | Materialization | Duplicate task key, foreign handle, invalid dependency, incompatible declaration | Fail run closed |
 | Validation | Invalid input, output, task request, or artifact | Fail task or run by policy |

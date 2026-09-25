@@ -55,8 +55,14 @@ An in-memory-only successful drive does not satisfy the first slice.
 - the package's own shipped `workflows/` root is discovered, listed, and
   validated from a packed install with the project untrusted, and its
   definitions resolve their imports from inside the installed package;
-- precedence and name collisions are deterministic;
+- precedence and name collisions are deterministic: roots are visited most
+  trusted first, the first file to claim a name keeps it, and a project cannot
+  take a name a builtin defines;
 - malformed or changed definitions fail with stable diagnostics;
+- one unloadable definition file is reported as a problem for that file - with
+  one sentence naming the class of the cause, no host path and no stack text -
+  and never fails discovery for the definitions beside it;
+- a ref naming an unloadable file is refused with that file's own sentence;
 - static module, helper, input schema, and output schema identities are recorded;
 - workflow source change refuses version-1 resume.
 

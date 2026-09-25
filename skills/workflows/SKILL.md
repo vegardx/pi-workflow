@@ -31,8 +31,9 @@ state a concrete task, ask one question instead of guessing.
 ## The builtin workflows
 
 The package ships these under its own `builtin` root, so they are listed and
-runnable in any project without project trust. `workflow_list` is still the
-source of truth; a project may ship more.
+runnable in any project without project trust, and a project cannot take one of
+their names. `workflow_list` is still the source of truth; a project may ship
+more.
 
 | Ref | In | Out |
 | --- | --- | --- |
@@ -77,7 +78,10 @@ workflow_list  →  workflow_validate  →  workflow_run  →  workflow_wait
 ```
 
 1. `workflow_list` when you do not already know the definition name. Never
-   invent one; the list is the only source of truth.
+   invent one; `workflows` is the only source of truth. The same result carries
+   `problems`: definition files that did not load. Quote a problem to the user
+   when it is the definition they asked for; never work around it by inventing
+   a name.
 2. `workflow_validate` with the ref and the input you intend to send. This
    catches a bad ref or a schema-invalid input without creating durable state.
 3. `workflow_run` returns `{ runId, status }` immediately. It never blocks.
@@ -118,6 +122,16 @@ Every parameter object is closed: an unknown key is an error.
   `/workflow` command convenience, not a tool input.
 - `Section` is one of `run`, `budget`, `tasks`, `executions`, `effects`,
   `barriers`, `artifacts`. The `run` section is always present.
+- `workflow_list` returns `{ workflows, problems }`. `problems` is one entry per
+  definition file that did not load, as `{ path, problem }` — the file's path
+  relative to its root, and one sentence naming the cause, for example
+  `cannot resolve module '@vegardx/pi-workflow' from gated-answer.workflow.ts — the project must be able to resolve pi-workflow, for example through a dependency or link`,
+  `does not parse: Unexpected token (2:0)`, or
+  `duplicate workflow name deep-review, also defined by deep-review.workflow.ts`.
+  A broken file never hides the definitions beside it, builtins included, and a
+  ref naming one is refused with that file's own sentence rather than
+  "Workflow not found". The count in the result footer is the definitions, not
+  the problems.
 - `workflow_list` and `workflow_validate` report what a definition needs of the
   host at `workflow.needs = { workspace: "read-only" | "worktree", declared }`.
   `declared: false` means the definition said nothing and the conservative
@@ -286,7 +300,7 @@ You cannot invoke these. Quote them to the user when they are the next step.
 
 ```text
 /workflow                                                      — opens the inspector
-/workflow list
+/workflow list                                                 problems after the table
 /workflow runs [--all]
 /workflow prune [--apply] [--older-than 24h|7d]                store-level
 /workflow validate <ref> [json-input]

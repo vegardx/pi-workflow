@@ -367,7 +367,7 @@ schema, output schema, and service binding:
 
 | Tool | Parameters | Output schema |
 | --- | --- | --- |
-| `workflow_list` | none | `WorkflowDefinitionSummaryListSchema` |
+| `workflow_list` | none | `WorkflowDefinitionListingSchema` |
 | `workflow_validate` | `ref`, optional `input` | `WorkflowValidationResultSchema` |
 | `workflow_run` | `ref`, `input` | `WorkflowServiceRunReceiptSchema` |
 | `workflow_status` | `runId` | `WorkflowServiceRunViewSchema` |
@@ -387,8 +387,8 @@ value, checked against its output schema, as JSON text bounded to 48 KiB
 (`workflowToolText`): run and log pages shrink to the bound and re-cursor so
 later pages stay complete, an oversized inspection is refused with guidance to
 narrow `include` or pass `taskId`, an oversized run `output` is omitted in
-favor of the durable output artifact, and the `workflow_list` array is
-truncated with a marker. `workflow_run` returns a durable run ID immediately.
+favor of the durable output artifact, and an oversized `workflow_list` shrinks
+its `workflows` array with a marker while keeping every `problems` entry. `workflow_run` returns a durable run ID immediately.
 Use `workflow_wait` for the bounded result (with `timeoutMs`, the current view
 marked `timedOut` while the run keeps driving) or `workflow_stop` to persist
 stop intent, abort in-process support work, and drain active child work.
@@ -548,11 +548,29 @@ They are loaded from source by the same loader as any other definition, so
 their imports resolve from their own location inside the installed package
 (`@vegardx/pi-workflow` resolves to the package itself, `typebox` to the peer
 the consumer installed). The pack check installs the tarball and asserts that
-`workflow_list` finds them there. An embedder ships its own definitions the
-same way: `registeredRoots` at construction, or `service.registerRoot` later,
-with `scope: "package"` or `"builtin"`. Discovery loads only `*.workflow.*`
-files, so `workflows/agents/*.md` travels in the same directory without being
-mistaken for a definition.
+`workflow_list` finds them there, with no problems. An embedder ships its own
+definitions the same way: `registeredRoots` at construction, or
+`service.registerRoot` later, with `scope: "package"` or `"builtin"`. Discovery
+loads only `*.workflow.*` files, so `workflows/agents/*.md` travels in the same
+directory without being mistaken for a definition.
+
+**One broken file is that file's problem.** Discovery is per definition file:
+a file that cannot resolve a module it imports, does not parse, throws while
+evaluating, defines no valid default definition, or claims a name already taken
+becomes a problem entry instead of an exception for the whole discovery.
+`list()` returns `{ workflows, problems }`, where a problem is `{ path, problem }`
+— the file's path relative to its root, and one sentence naming the class of
+the cause, such as `cannot resolve module '@vegardx/pi-workflow' from
+gated-answer.workflow.ts — the project must be able to resolve pi-workflow, for
+example through a dependency or link` or `does not parse: Unexpected token
+(2:0)`. No host path, URL, or stack text reaches the sentence. `/workflow list`
+prints the problems after the table; a ref naming a broken file is refused with
+that file's own sentence; every other ref, builtins included, is unaffected.
+Roots are visited most trusted first — registered `package` and `builtin` roots,
+then `<agentDir>/workflows`, then the project's — and the first file to claim a
+name keeps it, so a project cannot shadow a builtin name. Project trust, the
+import identity gate, and the discovery budgets are contract refusals and still
+fail the whole discovery.
 
 **Agent templates travel with the root.** When a root has an `agents/`
 directory, every task a definition from that root launches carries its absolute
