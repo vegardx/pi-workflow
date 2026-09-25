@@ -1061,6 +1061,60 @@ descriptor — baseline, commit, digest, size, and the durable ref — and the
 caller's prose is what tells the fixer to apply it
 ([Worktree tasks and handoffs](#worktree-tasks-and-handoffs)).
 
+### Normalize a fan-out's findings, then fix them
+
+| | |
+| --- | --- |
+| Intent | Turn a review fan-out's findings into ONE de-duplicated, machine-readable list, hand it to the implementer that wrote the code, and let a person read both the list and the answer to it — without re-running the reviewers. |
+| Lowers to | `ctx.fanIn(<key>, reportingReviewers, …)` for the synthesis (`optional`), one `await ctx.settled`, then at most one `ctx.agent` fixer in a worktree with `handoff: "required"`. |
+| Keying | both keys are the caller's literal, one per subject: `synthesis-<subject>` and `fix-<subject>`. The synthesis's inputs are named by lens key. |
+| Replay laws | law 2: the findings the fixer is declared on come from a value a barrier already returned, which is what makes "declare a fixer only when something is worth fixing" legal. Law 3: `envelope(effort, "synthesis" \| "fix")`. |
+| Refuses | a `synthesize` or `agent` that is missing or returns a non-declaration; a declaration naming `outputSchema`, `model`, `limits`, the fixer's `handoff`, or an input the component wires; a fixer that is not a worktree task; a negative `remainingRounds`; a budget the run cannot admit. |
+| Budget | one `envelope(effort, "synthesis")` share plus, at most, one `envelope(effort, "fix")` share — and the fix share comes out of the SAME pool `verifyAndFix` spends from, so a subject that bounds its fix rounds declares no extra budget for it. |
+| Hand-write when | the findings go to a person and nobody fixes them: then `reviewFanOut`'s own prose synthesis is the right shape and this pair is two tasks you do not need. |
+
+`reviewFanOut`'s own synthesis returns PROSE, because it explains a verdict a
+deterministic rail already computed. That is the wrong shape when an **agent**
+reads it next: prose cannot be addressed one finding at a time and cannot be
+reported back against. So ask the fan-out for `synthesis: "none"` and declare
+the normalization as its own stage with its own pinned schema —
+`{findings: [{id, severity, lens, where, summary, suggestion?}], verdict}` —
+and let the fixer answer it field for field:
+`{findings: [{id, outcome: addressed | disputed | out-of-scope, note}], checkPassed}`,
+where `disputed` requires a note **in the schema**, not in the prose.
+
+**One pool, two spenders.** A subject's fix rounds are one budget.
+`verifyAndFix` spends what it needs making the check pass; `fixFindings` may
+spend only what is left, and spends one when it runs. At zero it declares
+nothing and returns the reason, so a gate can show why nothing was fixed
+instead of implying nothing was wrong.
+
+**No re-review.** Nothing re-runs the lenses over a fixed patch. The fix report
+is the evidence, beside the findings it answers, in front of the person at the
+gate. A second fan-out would double the most expensive stage to re-confirm what
+the check already re-ran.
+
+```ts
+const fanOut = await reviewFanOut(ctx, "review-d0" as TaskKey, lenses, {
+	subject, review, synthesis: "none",            // no prose reducer
+});
+const reducer = synthesizeFindings(ctx, "synthesis-d0" as TaskKey, {
+	reviews: fanOut.reviews, effort, budget: BUDGET,
+	synthesize: (brief) => normalizeRequest(brief),
+});
+if (reducer) {
+	const [settled] = await ctx.settled([reducer]);   // the barrier
+	if (settled?.status === "fulfilled") {
+		const attempt = fixFindings(ctx, "fix-d0" as TaskKey, {
+			implementation: loop.handoff, findings: settled.value.findings,
+			synthesis: reducer.output, effort, remainingRounds, budget: BUDGET,
+			agent: (actionable) => fixRequest(actionable),
+		});
+		if (!attempt.fix) ctx.log(`no fixer: ${attempt.skipped}`);
+	}
+}
+```
+
 ## Builtin workflows
 
 The package ships these under its own `builtin` root, runnable in any project
@@ -1074,7 +1128,10 @@ without project trust. They are the worked examples of the patterns above.
 | `deep-research` | `{question, depth, sources?}` — one question, the depth dial doubling as the thread count, and up to 16 `path`/`url`/`note` sources | `{answer, claims[], crossChecks[], coverage[]}`; a coverage row per thread says which one did not report | No gate, no worktree, no handoff — structurally headless, but **not** on the headless allowlist |
 
 `plan-to-ship` never pushes, merges, or applies anything; it records a
-receipt. `plan-review` is deliberately blind — `contextMode: "fresh"`,
+receipt. Per deliverable it walks `implement-<d>`, `check-<d>`, `review-<d>/…`,
+`synthesis-<d>`, `fix-<d>` — the review's findings are normalized and then
+FIXED inside the deliverable, so what reaches the ship gate is a patch that
+answered them, not a list nobody acted on. `plan-review` is deliberately blind — `contextMode: "fresh"`,
 `contextScopes: []`, and no planning conversation — because a reviewer that
 inherits the conversation only ever agrees with it. `deep-research` is the
 opposite: its threads read the project's own context files, and the

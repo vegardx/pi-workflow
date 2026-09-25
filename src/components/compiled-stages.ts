@@ -42,13 +42,15 @@ export const COMPILED_STAGE_KINDS = Object.freeze([
 	"implement",
 	"verify-and-fix",
 	"review-fan-out",
+	"synthesis",
+	"fix",
 	"gate",
 ] as const);
 export type CompiledStageKind = (typeof COMPILED_STAGE_KINDS)[number];
 
 /** `plan-to-ship`'s own deliverable bound, repeated as the document's. */
 export const MAX_COMPILED_DELIVERABLES = 16;
-/** A deliverable's stage list: one implement, one verify, one review, a gate. */
+/** implement, check, review, synthesis, fix, a gate - and room to spare. */
 export const MAX_COMPILED_STAGES = 8;
 /** `reviewFanOut`'s bound, so a compiled fan-out cannot describe an illegal one. */
 export const MAX_COMPILED_LENSES = 16;
@@ -163,10 +165,50 @@ export const CompiledGateStageSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * The normalization of a review fan-out's findings into ONE de-duplicated
+ * list, as its own stage.
+ *
+ * It is separate from `review-fan-out`'s own `synthesis` field on purpose.
+ * That field says whether the fan-out declares a PROSE reducer of its own; a
+ * `synthesis` stage says the deliverable declares a STRUCTURED one, whose
+ * output a `fix` stage is handed. A deliverable that compiles a `fix` stage
+ * therefore always compiles a `synthesis` stage before it, and its
+ * `review-fan-out` stage carries `synthesis: "none"`.
+ */
+export const CompiledSynthesisStageSchema = Type.Object(
+	{
+		use: Type.Literal("synthesis"),
+		id: CompiledStageIdSchema,
+	},
+	{ additionalProperties: false },
+);
+
+/**
+ * The fixer that reads the normalized findings, addresses the blocking and
+ * major ones, and re-runs the check. There is no re-review after it.
+ *
+ * `maxRounds` counts FIX rounds, and it is the deliverable's WHOLE pool - the
+ * same pool the `verify-and-fix` stage draws from, so a compiled document
+ * shows the bound rather than implying a second budget. How much of it is left
+ * when this stage is reached is a run-time fact and is not part of a compiled
+ * document.
+ */
+export const CompiledFixStageSchema = Type.Object(
+	{
+		use: Type.Literal("fix"),
+		id: CompiledStageIdSchema,
+		maxRounds: Type.Integer({ minimum: 0, maximum: 2 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const CompiledStageSchema = Type.Union([
 	CompiledImplementStageSchema,
 	CompiledVerifyAndFixStageSchema,
 	CompiledReviewFanOutStageSchema,
+	CompiledSynthesisStageSchema,
+	CompiledFixStageSchema,
 	CompiledGateStageSchema,
 ]);
 export type CompiledStage = Static<typeof CompiledStageSchema>;
