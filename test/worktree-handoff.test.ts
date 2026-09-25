@@ -178,7 +178,7 @@ function childIds(nonce: string, launch: number): FakeChild {
 function worktreeRecord(child: FakeChild, captured: boolean): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 7,
+		contractRevision: 8,
 		runId: child.runId,
 		attemptId: child.attemptId,
 		repositoryRoot: PRIVATE_REPO,

@@ -145,9 +145,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 20 and rejects revision 19", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(20);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(20);
+	it("publishes revision 21 and rejects revision 20", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(21);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(21);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -163,7 +163,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 20,
+			contractRevision: 21,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -183,7 +183,7 @@ describe("workflow contracts", () => {
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 20,
+			contractRevision: 21,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -798,8 +798,8 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 	});
 
-	it("requires pi-subagent revision 7 with handoff export, the memory ceiling, and budget refusal", () => {
-		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(7);
+	it("requires pi-subagent revision 8 with the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(8);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.handoffExport,
 		).toBe(true);

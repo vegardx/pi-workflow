@@ -581,7 +581,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 20,
+			contractRevision: 21,
 			runId,
 			depth: 0,
 			definitionName: "pending",
@@ -1618,7 +1618,7 @@ function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
 function worktreeRecord(handoffCommit?: string): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 7,
+		contractRevision: 8,
 		runId: "run_servicechild",
 		attemptId: "attempt_servicechild",
 		repositoryRoot: "/private/repo",

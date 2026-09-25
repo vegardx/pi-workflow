@@ -3,7 +3,7 @@
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
 		"version": "2.0.0",
-		"contractRevision": 20,
+		"contractRevision": 21,
 		"features": {
 			"checkpoints": true,
 			"dynamicWorkflows": true,
@@ -24,8 +24,8 @@
 	},
 	"piSubagent": {
 		"package": "@vegardx/pi-subagent",
-		"peerRange": "0.13.0",
-		"contractRevision": 7,
+		"peerRange": "0.14.0",
+		"contractRevision": 8,
 		"requiredFeatures": {
 			"nativeSessionBackend": true,
 			"gondolinSandbox": true,
@@ -50,9 +50,10 @@
 			"explicitResources": true,
 			"ambientExtensionsControl": true,
 			"hostBrokeredTools": true,
-			"agentRootsFirst": true
+			"agentRootsFirst": true,
+			"delegationCeiling": true
 		},
-		"ciCommit": "bc2d816f78be8aa67100acf4ead25d0d99d6f35f"
+		"ciCommit": "0ae4c106b4235d8576bde75a23896ba413bcf88e"
 	},
 	"pi": {
 		"packages": [
@@ -79,7 +80,7 @@
 			"status": "qualified",
 			"pi": "0.85.0",
 			"node": "24.16.0",
-			"piSubagentCommit": "55e84bd731e2017510ee85b2df898e7f2d3679f2",
+			"piSubagentCommit": "0ae4c106b4235d8576bde75a23896ba413bcf88e",
 			"evidence": [
 				"docs/qualification.md",
 				"docs/qualification/macos-arm64-phase1.md",
@@ -95,7 +96,7 @@
 			"platform": "linux-x64",
 			"status": "build-only",
 			"node": "24.16.0",
-			"piSubagentCommit": "bc2d816f78be8aa67100acf4ead25d0d99d6f35f",
+			"piSubagentCommit": "0ae4c106b4235d8576bde75a23896ba413bcf88e",
 			"evidence": [".github/workflows/ci.yml"]
 		}
 	]
