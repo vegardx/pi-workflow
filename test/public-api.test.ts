@@ -239,7 +239,7 @@ describe("public API export lists", () => {
 		const actual = exportNames(root);
 		expect(diff(actual, pinned)).toEqual({ added: [], removed: [] });
 		expect(actual).toEqual(pinned);
-		expect(pinned).toHaveLength(197);
+		expect(pinned).toHaveLength(199);
 	});
 
 	it("pins the runtime entry to runtime-exports.json", async () => {

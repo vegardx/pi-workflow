@@ -1616,7 +1616,7 @@ describe("dynamic shim parity with the static loader", () => {
 			agentDir: path.join(parityRoot, "agent"),
 			projectTrusted: true,
 		});
-		const loaded = discovered.find(
+		const loaded = discovered.workflows.find(
 			(workflow) => workflow.definition.meta.name === "parity",
 		);
 		if (!loaded) throw new Error("registry did not load the parity fixture");

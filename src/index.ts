@@ -286,6 +286,8 @@ export {
 	type DynamicWorkflowProposalView,
 	type DynamicWorkflowProposeOptions,
 	needsFitCeiling,
+	type WorkflowDefinitionListing,
+	type WorkflowDefinitionProblem,
 	type WorkflowDefinitionSummary,
 	type WorkflowRunListener,
 	type WorkflowService,
@@ -399,6 +401,8 @@ export {
 export {
 	MAX_TOOL_OUTPUT_BYTES,
 	WORKFLOW_TOOL_DECLARATIONS,
+	WorkflowDefinitionListingSchema,
+	WorkflowDefinitionProblemSchema,
 	WorkflowDefinitionSummaryListSchema,
 	WorkflowDefinitionSummarySchema,
 	WorkflowRootScopeSchema,

@@ -644,9 +644,9 @@ describe("dynamic workflow proposals", () => {
 			const view = await propose(service, UPPER_SOURCE);
 			expect(await service.proposals()).toEqual([view]);
 			// D11: `list()` stays static-only.
-			expect((await service.list()).map((entry) => entry.name)).toEqual([
-				STATIC_NAME,
-			]);
+			expect(
+				(await service.list()).workflows.map((entry) => entry.name),
+			).toEqual([STATIC_NAME]);
 		} finally {
 			await bounded(service.shutdown(), "shutdown");
 		}
@@ -1468,10 +1468,9 @@ describe("running dynamic workflows", () => {
 				reason:
 					"Dynamic workflow source execution failed: StaticWorkflowRuntimeError: Nested workflow definition is not discovered.",
 			});
-			expect((await service.list()).map((entry) => entry.name).sort()).toEqual([
-				"parent",
-				STATIC_NAME,
-			]);
+			expect(
+				(await service.list()).workflows.map((entry) => entry.name).sort(),
+			).toEqual(["parent", STATIC_NAME]);
 		} finally {
 			await bounded(service.shutdown(), "shutdown");
 		}

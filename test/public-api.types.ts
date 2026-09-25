@@ -14,8 +14,8 @@ import type {
 	WorkflowContext,
 	WorkflowDecideOptions,
 	WorkflowDefinition,
+	WorkflowDefinitionListing,
 	WorkflowDefinitionOptions,
-	WorkflowDefinitionSummary,
 	WorkflowHandoffDescriptor,
 	WorkflowInspectOptions,
 	WorkflowInvalidationPreview,
@@ -158,12 +158,7 @@ export type ServiceApiPins = [
 	Assert<Equal<Parameters<Method<"registerRoot">>, [WorkflowRoot]>>,
 	Assert<Equal<ReturnType<Method<"registerRoot">>, Promise<void>>>,
 	Assert<Equal<Parameters<Method<"list">>, []>>,
-	Assert<
-		Equal<
-			ReturnType<Method<"list">>,
-			Promise<readonly WorkflowDefinitionSummary[]>
-		>
-	>,
+	Assert<Equal<ReturnType<Method<"list">>, Promise<WorkflowDefinitionListing>>>,
 	Assert<Equal<Parameters<Method<"validate">>, [string, unknown?]>>,
 	Assert<
 		Equal<ReturnType<Method<"validate">>, Promise<WorkflowValidationResult>>

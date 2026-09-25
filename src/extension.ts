@@ -674,18 +674,26 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 		const runtime = await getService(ctx);
 		switch (parsed.kind) {
 			case "list": {
-				const workflows = await runtime.list();
-				operatorOutput(
-					ctx,
+				const { workflows, problems } = await runtime.list();
+				const lines =
 					workflows.length === 0
-						? "No workflows found"
-						: workflows
-								.map(
-									(workflow) =>
-										`${workflow.name.padEnd(24)} v${workflow.version} ${workflow.scope.padEnd(8)} ${workflow.description}`,
-								)
-								.join("\n"),
-				);
+						? ["No workflows found"]
+						: workflows.map(
+								(workflow) =>
+									`${workflow.name.padEnd(24)} v${workflow.version} ${workflow.scope.padEnd(8)} ${workflow.description}`,
+							);
+				// After the table, never instead of it: the definitions that loaded
+				// are listed even when a file beside them did not.
+				if (problems.length > 0) {
+					lines.push(
+						"",
+						`${problems.length} definition file(s) could not be loaded:`,
+						...problems.map(
+							(problem) => `  ${problem.path}: ${problem.problem}`,
+						),
+					);
+				}
+				operatorOutput(ctx, lines.join("\n"));
 				return;
 			}
 			case "validate": {

@@ -270,7 +270,10 @@ describe("dynamic workflow service path", () => {
 			hostApiSha256: approved.hostApiSha256,
 		});
 		// Static run views carry no dynamic block; the summary list stays static.
-		await expect(service.list()).resolves.toEqual([]);
+		await expect(service.list()).resolves.toEqual({
+			workflows: [],
+			problems: [],
+		});
 		await expect(
 			service.decideSource(REF, {
 				decision: "approved",

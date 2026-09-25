@@ -257,16 +257,17 @@ describe("workflow authoring skill", () => {
 			...project,
 			projectTrusted: true,
 		});
-		expect(workflows.map((workflow) => workflow.definition.meta.name)).toEqual(
-			EXPECTED_EXAMPLE_NAMES,
-		);
-		for (const workflow of workflows) {
+		expect(workflows.problems).toEqual([]);
+		expect(
+			workflows.workflows.map((workflow) => workflow.definition.meta.name),
+		).toEqual(EXPECTED_EXAMPLE_NAMES);
+		for (const workflow of workflows.workflows) {
 			expect(workflow.scope).toBe("project");
 			expect(workflow.definition.schema).toBe("pi-workflow-definition");
 			expect(workflow.definition.meta.concurrency).toBeGreaterThanOrEqual(1);
 			expect(workflow.identity.identitySha256).toMatch(/^[a-f0-9]{64}$/);
 		}
-		const child = workflows.find(
+		const child = workflows.workflows.find(
 			(workflow) => workflow.definition.meta.name === "nested-child",
 		);
 		expect(child?.definition.inputSchema).toMatchObject({
@@ -282,7 +283,7 @@ describe("workflow authoring skill", () => {
 			...project,
 			projectTrusted: true,
 		});
-		expect(workflows).toHaveLength(examples.length);
+		expect(workflows.workflows).toHaveLength(examples.length);
 		// Each extraction boots one worker under its own watchdog. The boots
 		// share nothing, so a few run at a time: enough to overlap the
 		// per-worker module load, few enough that a loaded 4 vCPU CI runner
@@ -296,7 +297,7 @@ describe("workflow authoring skill", () => {
 			}),
 		);
 		for (const [index, manifest] of manifests.entries()) {
-			const loaded = workflows[index];
+			const loaded = workflows.workflows[index];
 			if (!loaded) throw new Error(`no loaded example ${index}`);
 			expect(manifest).toEqual({
 				meta: loaded.definition.meta,

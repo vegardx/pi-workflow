@@ -430,7 +430,9 @@ if (
 	typeof workflow.WorkflowInvalidationPreviewSchema !== "object" ||
 	typeof runtime.invalidationPreview !== "function" ||
 	typeof workflow.workflowToolText !== "function" ||
-	!workflow.WorkflowDefinitionSummarySchema
+	!workflow.WorkflowDefinitionSummarySchema ||
+	!workflow.WorkflowDefinitionListingSchema ||
+	!workflow.WorkflowDefinitionProblemSchema
 ) throw new Error("packed tool declaration table is unavailable or incomplete");
 if (
 	!Array.isArray(manifest.pi?.skills) ||
@@ -492,7 +494,11 @@ const callTool = async (name, params) => {
 	return JSON.parse(result.content[0].text);
 };
 try {
-	const listed = await callTool("workflow_list", {});
+	const listing = await callTool("workflow_list", {});
+	if (!Array.isArray(listing.workflows) || !Array.isArray(listing.problems) || listing.problems.length !== 0) {
+		throw new Error("packed workflow_list did not return a problem-free listing: " + JSON.stringify(listing));
+	}
+	const listed = listing.workflows;
 	const builtin = listed.find((entry) => entry.name === "plan-to-ship");
 	if (!builtin || builtin.scope !== "builtin" || builtin.source !== "package" || path.dirname(builtin.path) !== builtinRoot) {
 		throw new Error("packed workflow_list did not discover the builtin root: " + JSON.stringify(listed));

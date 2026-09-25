@@ -289,7 +289,10 @@ describe("typed support tasks", () => {
 	it("accepts a valid registration in the service constructor", async () => {
 		const registration = helper.registration(execute);
 		const service = await serviceWith([registration]);
-		await expect(service.list()).resolves.toEqual([]);
+		await expect(service.list()).resolves.toEqual({
+			workflows: [],
+			problems: [],
+		});
 		await service.shutdown();
 	});
 

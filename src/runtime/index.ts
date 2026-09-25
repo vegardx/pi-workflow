@@ -176,8 +176,10 @@ export {
 } from "../reducer.js";
 export {
 	type DiscoveredWorkflow,
+	type DiscoveredWorkflowProblem,
 	discoverWorkflows,
 	type WorkflowDefinitionIdentity,
+	type WorkflowDiscovery,
 } from "../registry.js";
 export {
 	admitsInvalidation,

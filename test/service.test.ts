@@ -265,9 +265,10 @@ describe("workflow service", () => {
 			maxWorkflowChildRuntimeMs: 1_800_000,
 			maxWorkflowTimeoutMs: 900_000,
 		});
-		expect(await service.list()).toMatchObject([
-			{ name: "example", concurrency: 4, scope: "project" },
-		]);
+		expect(await service.list()).toMatchObject({
+			workflows: [{ name: "example", concurrency: 4, scope: "project" }],
+			problems: [],
+		});
 		await expect(
 			service.validate("example", { value: "yes" }),
 		).resolves.toMatchObject({
@@ -561,11 +562,13 @@ describe("workflow service", () => {
 
 	it("resumes a nonterminal durable run when wait is called after restart", async () => {
 		const fixture = await workflowFixture("pending");
-		const [workflow] = await discoverWorkflows({
-			cwd: fixture.cwd,
-			agentDir: fixture.agentDir,
-			projectTrusted: true,
-		});
+		const [workflow] = (
+			await discoverWorkflows({
+				cwd: fixture.cwd,
+				agentDir: fixture.agentDir,
+				projectTrusted: true,
+			})
+		).workflows;
 		if (!workflow) throw new Error("missing workflow");
 		const runId = "workflow_pendingresume";
 		const lease = await acquireWorkflowRunLease({

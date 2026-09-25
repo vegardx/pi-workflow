@@ -89,11 +89,13 @@ function discoveredWorkflows(): Promise<readonly DiscoveredWorkflow[]> {
 			path.join(cwd, "workflows", "child.workflow.ts"),
 			childDefinitionSource("child"),
 		);
-		return discoverWorkflows({
-			cwd,
-			agentDir: path.join(nestedRoot, "agent"),
-			projectTrusted: true,
-		});
+		return (
+			await discoverWorkflows({
+				cwd,
+				agentDir: path.join(nestedRoot, "agent"),
+				projectTrusted: true,
+			})
+		).workflows;
 	})();
 	return discovery;
 }
