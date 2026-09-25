@@ -913,6 +913,7 @@ describe("invalidation and re-execution", () => {
 						usageComplete: true,
 					},
 					outcome: "completed",
+					narration: { stage: "answer", taskKind: "other" },
 				},
 			]);
 			expect(view.tasks?.some((entry) => entry.abandoned)).toBe(false);
@@ -1679,6 +1680,13 @@ describe("invalidation and re-execution", () => {
 						usageComplete: true,
 					},
 					outcome: "failed",
+					narration: {
+						stage: "answer",
+						taskKind: "other",
+						// Composed from the journalled codes; no child prose.
+						cause:
+							"The delegated run failed: provider-transient (origin provider, retry manual).",
+					},
 				},
 			]);
 			expect(Object.isFrozen(failedView)).toBe(true);
@@ -1694,6 +1702,7 @@ describe("invalidation and re-execution", () => {
 				"key",
 				"kind",
 				"namespace",
+				"narration",
 				"outcome",
 				"role",
 				"settlement",
@@ -1727,6 +1736,7 @@ describe("invalidation and re-execution", () => {
 						usageComplete: true,
 					},
 					outcome: "completed",
+					narration: { stage: "answer", taskKind: "other" },
 				},
 			]);
 			expect(Object.keys(finished.tasks?.[0] ?? {})).not.toContain("abandoned");

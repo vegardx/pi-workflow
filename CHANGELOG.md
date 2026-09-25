@@ -141,6 +141,31 @@ it moves `WORKFLOW_CONTRACT_REVISION` on its own.
 
 ### Added
 
+- **`narration`: what a host needs to narrate a run.** Every projected task view
+  now carries `narration: {stage, taskKind, deliverable?, summary?, cause?}`,
+  and a run observation carries `task: {taskId, status, outcome?, narration}` on
+  the append that moved a task to a terminal status. `stage` is
+  `${namespace}/${key}` as one string; `taskKind` is
+  `implement | check | review | synthesis | fix | gate | refine | other`;
+  `deliverable` is the deliverable the stage key names; `cause` is a sanitized
+  sentence COMPOSED from the journalled closed vocabularies (the delegated run's
+  status, the failure code, its origin, its retry class, or the workflow stage)
+  and never quotes the evidence's own message or guidance, because an inspection
+  carries no child prose. `narration.summary` needs an artifact, so it appears on
+  `inspect(runId, {include: [..., "tasks", "output"]})` and never on an
+  observation, which is a synchronous notice in sequence order that reads no
+  file. It is the agent's own `summary`/`verdict`/`answer`/`synthesis` when its
+  result has one, else a bounded rendering of the structured result, cut to
+  `MAX_NARRATION_SUMMARY_LENGTH` (1024).
+  Everything here is DERIVED from durable state — `src/narration.ts` is a pure
+  function of `(namespace, key, kind)` — so no definition authors it, nothing is
+  persisted, and `WORKFLOW_CONTRACT_REVISION` does not move. New root exports:
+  `taskNarration`, `narrationSummary`, `NARRATED_TASK_KINDS`,
+  `MAX_NARRATION_SUMMARY_LENGTH`, `WorkflowTaskNarrationSchema`,
+  `WorkflowObservedTaskSchema`, `WorkflowNarratedTaskKindSchema` and their types.
+  `WorkflowJournalAppendNotice` on `@vegardx/pi-workflow/runtime` gains an
+  optional `task`, because the journal is the only place that holds a
+  post-append projection synchronously.
 - **`synthesizeFindings` and `fixFindings`** on
   `@vegardx/pi-workflow/components` (`src/components/review-fix.ts`): the
   "review, then fix" pair, with the two schemas pinned in the component —

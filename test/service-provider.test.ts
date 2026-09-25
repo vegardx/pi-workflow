@@ -42,6 +42,7 @@ import {
 	startableRefusalMessage,
 	WORKFLOW_SERVICE_FAILURE_MESSAGE,
 	type WorkflowReadClient,
+	type WorkflowRunObservation,
 	WorkflowServiceProviderError,
 } from "../src/service-provider.js";
 import type {
@@ -1261,11 +1262,51 @@ describe("inspect through the read client", () => {
 			value: { ship: true },
 		});
 
+		// Every projected task carries what a host needs to narrate it, and with
+		// `output` asked for it carries the task's own summary too. This fixture
+		// names its tasks its own way, so the kind is the honest `other` and the
+		// checkpoint is a `gate` whatever it is called.
+		expect(decided?.narration).toMatchObject({
+			stage: "ship",
+			taskKind: "gate",
+		});
+		const work = inspection.tasks?.find((task) => task.kind === "agent");
+		expect(work?.narration?.taskKind).toBe("other");
+		expect(work?.narration?.stage).toBe(work?.key);
+		expect(typeof work?.narration?.summary).toBe("string");
+
 		// Asking for neither section leaves both out, so the default read is
 		// unchanged for every consumer that does not want them.
 		const lean = await client.inspect(receipt.runId, { include: ["run"] });
 		expect(lean.run).not.toHaveProperty("output");
 		expect(lean).not.toHaveProperty("tasks");
+	});
+
+	it("tells an observer which task settled, and how", async () => {
+		// The other half of the narration surface: a host posts one message per
+		// task completion, so the observation says which task and what happened
+		// without a second call. The summary is not here — an observation reads no
+		// file — and `inspect` above is where a host gets it.
+		const service = await shipService();
+		const { client } = await acquire(service);
+		const observed: WorkflowRunObservation[] = [];
+		const stop = client.observe((observation) => {
+			observed.push(observation);
+		});
+		const receipt = await service.run("ship-example", {});
+		await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		stop();
+
+		const settled = observed.flatMap((observation) =>
+			observation.task ? [observation.task] : [],
+		);
+		expect(settled.length).toBeGreaterThan(0);
+		for (const task of settled) {
+			expect(task.narration.stage.length).toBeGreaterThan(0);
+			expect(task.narration.summary).toBeUndefined();
+		}
+		// Most appends settle no task, so `task` is the filter, not the payload.
+		expect(observed.length).toBeGreaterThan(settled.length);
 	});
 });
 

@@ -22,6 +22,7 @@ import {
 } from "../src/components/index.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
 import type {
+	WorkflowRunObservation,
 	WorkflowServiceRunView,
 	WorkflowServiceTaskView,
 } from "../src/service-views.js";
@@ -1505,6 +1506,144 @@ describe("plan-to-ship: the stage walk", () => {
 		expect(
 			(finished.output as { deliverables: unknown[] }).deliverables,
 		).toHaveLength(1);
+	});
+});
+
+describe("plan-to-ship: what a host needs to narrate", () => {
+	// pi-maestro observes a run it started and posts each task completion into
+	// the person's conversation, then gives the model a turn on the interesting
+	// ones. These are the fields it builds against.
+	it("names every settled task's stage, kind and deliverable on the observation", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const observed: WorkflowRunObservation[] = [];
+		const unsubscribe = service.subscribe((observation) => {
+			observed.push(observation);
+		});
+		const run = await service.run("plan-to-ship", input());
+		const ship = await park(service, run.runId, "ship");
+		await decide(service, ship, "ship", { ship: true });
+		await bounded(service.wait(run.runId), "wait");
+		unsubscribe();
+
+		const settled = observed.flatMap((observation) =>
+			observation.task ? [observation.task] : [],
+		);
+		// One per task that reached a terminal status, in sequence order, and
+		// nothing else: an append that moved no task carries no `task`.
+		expect(
+			settled.map((task) => [
+				task.narration.stage,
+				task.narration.taskKind,
+				task.narration.deliverable,
+				task.status,
+			]),
+		).toEqual([
+			["refine", "refine", undefined, "completed"],
+			["implement-d0", "implement", "d0", "completed"],
+			["check-d0-verify-1", "check", "d0-verify-1", "completed"],
+			["review-d0/correctness", "review", "d0", "completed"],
+			["synthesis-d0", "synthesis", "d0", "completed"],
+			["fix-d0", "fix", "d0", "completed"],
+			["ship", "gate", undefined, "completed"],
+			["receipt", "other", undefined, "completed"],
+		]);
+		for (const task of settled) {
+			expect(task.taskId).toMatch(/^task_[a-z0-9]+$/);
+			expect(task.outcome).toBe("completed");
+			// An observation reads no file, so it never carries a summary.
+			expect(task.narration.summary).toBeUndefined();
+			expect(task.narration.cause).toBeUndefined();
+		}
+		// Most appends settle no task, so the field is the filter a host uses.
+		expect(observed.length).toBeGreaterThan(settled.length);
+	});
+
+	it("carries each task's own summary on the inspection that reads output", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const ship = await park(service, run.runId, "ship");
+		await decide(service, ship, "ship", { ship: true });
+		await bounded(service.wait(run.runId), "wait");
+
+		const inspected = await service.inspect(run.runId, {
+			include: ["run", "tasks", "output"],
+		});
+		const narrated = new Map(
+			(inspected.tasks ?? []).map((task) => [
+				task.narration?.stage,
+				task.narration,
+			]),
+		);
+		// The agent's own words where it reported them, and a bounded rendering
+		// of the structured result where it did not.
+		expect(narrated.get("implement-d0")).toMatchObject({
+			taskKind: "implement",
+			deliverable: "d0",
+			summary: "Edited a.txt",
+		});
+		expect(narrated.get("review-d0/correctness")?.summary).toContain(
+			"request-changes",
+		);
+		expect(narrated.get("synthesis-d0")?.summary).toBe(
+			"One lens asked for a test; nothing else is blocking.",
+		);
+		// The fix report has no summary field of its own, so the rendering says
+		// its structure and its scale — the artifact is canonical JSON, so the
+		// field order is the sorted one.
+		expect(narrated.get("fix-d0")?.summary).toBe(
+			"{checkPassed: true, findings: [1 item(s)]}",
+		);
+		// Without `output` the narration is still there; the summary is not.
+		const lean = await service.inspect(run.runId, {
+			include: ["run", "tasks"],
+		});
+		const implement = (lean.tasks ?? []).find(
+			(task) => task.narration?.stage === "implement-d0",
+		);
+		expect(implement?.narration).toMatchObject({ taskKind: "implement" });
+		expect(implement?.narration?.summary).toBeUndefined();
+	});
+
+	it("says why a task failed, in a sanitized sentence, on both surfaces", async () => {
+		const delegated = scripted({ failReview: true });
+		const service = await serviceFor(delegated);
+		const observed: WorkflowRunObservation[] = [];
+		const unsubscribe = service.subscribe((observation) => {
+			observed.push(observation);
+		});
+		const run = await service.run("plan-to-ship", input());
+		const ship = await park(service, run.runId, "ship");
+		await decide(service, ship, "ship", { ship: true });
+		await bounded(service.wait(run.runId), "wait");
+		unsubscribe();
+
+		const failed = observed
+			.flatMap((observation) => (observation.task ? [observation.task] : []))
+			.filter((task) => task.status === "failed");
+		expect(failed.map((task) => task.narration.stage)).toEqual([
+			"review-d0/correctness",
+		]);
+		// Composed from the journalled codes; the reviewer's own words ("reviewer
+		// produced nothing") never travel, because a view carries no child prose.
+		const cause =
+			"The delegated run failed: model-output (origin model, retry never).";
+		expect(failed[0]).toMatchObject({
+			outcome: "failed",
+			narration: { taskKind: "review", deliverable: "d0", cause },
+		});
+		// The inspection says the same thing, with no artifact read needed.
+		const inspected = await service.inspect(run.runId, {
+			include: ["run", "tasks"],
+		});
+		const review = (inspected.tasks ?? []).find(
+			(task) => task.narration?.stage === "review-d0/correctness",
+		);
+		expect(review?.narration?.cause).toBe(cause);
+		expect(JSON.stringify(inspected)).not.toContain(
+			"reviewer produced nothing",
+		);
 	});
 });
 

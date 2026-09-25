@@ -111,6 +111,7 @@ import {
 	verifyWorkflowHandoffEvidence,
 	WORKFLOW_HANDOFF_UNVERIFIED_MESSAGE,
 } from "./handoff.js";
+import { narrationSummary, taskNarration } from "./narration.js";
 import {
 	WorkflowNestedRunError,
 	type WorkflowNestedRunLaunch,
@@ -956,12 +957,36 @@ export async function createWorkflowService(
 		runIdValue: WorkflowRunId,
 	): WorkflowRunJournalOpenOptions {
 		return {
-			onAppended: ({ event, status }) =>
+			onAppended: ({ event, status, task }) =>
 				emit(
 					Object.freeze({
 						runId: runIdValue,
 						status,
 						sequence: event.sequence,
+						// Present only on the append that settled a task. The narration
+						// is derived from the key, so it reads no file and the
+						// observation stays a synchronous notice in sequence order; the
+						// summary of the task's result is artifact-backed and belongs to
+						// `inspect(runId, {include: [..., "output"]})`.
+						...(task
+							? {
+									task: Object.freeze({
+										taskId: task.taskId as WorkflowTaskId,
+										status: task.status,
+										...(task.outcome === undefined
+											? {}
+											: { outcome: task.outcome }),
+										narration: taskNarration({
+											namespace: task.namespace,
+											key: task.key,
+											kind: task.kind,
+											...(task.cause === undefined
+												? {}
+												: { cause: task.cause }),
+										}),
+									}),
+								}
+							: {}),
 					}),
 				),
 		};
@@ -3342,12 +3367,13 @@ export async function createWorkflowService(
 	}
 
 	/**
-	 * The two durable values the lease-free inspection cannot project from the
-	 * journal alone: a terminal run's committed output (only when `include`
-	 * asks for it) and the decided value of every on-path checkpoint (whenever
-	 * `tasks` are projected). Both are read through the read-only stores and
+	 * The three durable values the lease-free inspection cannot project from the
+	 * journal alone: a terminal run's committed output and a bounded summary of
+	 * every settled task's own result (both only when `include` asks for
+	 * `"output"`), and the decided value of every on-path checkpoint (whenever
+	 * `tasks` are projected). All are read through the read-only stores and
 	 * verified against the journal before they are shown; nothing is read when
-	 * the run has neither.
+	 * the run has none of them.
 	 */
 	async function inspectionEvidence(
 		runIdValue: WorkflowRunId,
@@ -3356,14 +3382,17 @@ export async function createWorkflowService(
 	): Promise<{
 		output?: unknown;
 		decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
+		taskSummaries?: ReadonlyMap<WorkflowTaskId, string>;
 	}> {
 		if (!state) return {};
 		const wantsOutput =
 			include.includes("output") &&
 			state.outputArtifactId !== undefined &&
 			isTerminalWorkflowRunStatus(state.status);
+		const wantsSummaries =
+			include.includes("output") && include.includes("tasks");
 		const decided = include.includes("tasks") ? decidedCheckpoints(state) : [];
-		if (!wantsOutput && decided.length === 0) return {};
+		if (!wantsOutput && !wantsSummaries && decided.length === 0) return {};
 		const stores = await readOnlyStores(runIdValue);
 		return {
 			...(wantsOutput
@@ -3374,7 +3403,43 @@ export async function createWorkflowService(
 						decisionValues: await decidedValues(decided, stores.decisions),
 					}
 				: {}),
+			...(wantsSummaries
+				? { taskSummaries: await taskResultSummaries(state, stores.artifacts) }
+				: {}),
 		};
+	}
+
+	/**
+	 * A bounded human summary of every task's committed `result` artifact, so a
+	 * host can post "what this task said" without reading an artifact itself and
+	 * without a second call per task.
+	 *
+	 * Only `output: "result"` artifacts are read - a handoff artifact is a patch,
+	 * and the descriptor of it is already on the task view - and only for on-path
+	 * tasks. A read or digest check that fails leaves that one task without a
+	 * summary rather than failing the whole inspection: the summary is narration,
+	 * and the journal already carries the facts a decision rests on.
+	 */
+	async function taskResultSummaries(
+		state: WorkflowStateProjection,
+		artifacts: WorkflowArtifactStore,
+	): Promise<ReadonlyMap<WorkflowTaskId, string>> {
+		const summaries = new Map<WorkflowTaskId, string>();
+		for (const artifact of Object.values(state.artifacts)) {
+			if (artifact.output !== "result" || !artifact.producerTaskId) continue;
+			const task = state.tasks[artifact.producerTaskId];
+			if (!task || task.abandoned === true) continue;
+			try {
+				const summary = narrationSummary(await artifacts.readJson(artifact));
+				if (summary !== undefined) {
+					summaries.set(artifact.producerTaskId, summary);
+				}
+			} catch {
+				// A narration nobody can read is one task without a summary, never a
+				// failed inspection.
+			}
+		}
+		return summaries;
 	}
 
 	/** The run's committed output value, digest-verified by the store. */
