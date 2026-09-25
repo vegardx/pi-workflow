@@ -1042,9 +1042,19 @@ launch it:
    `@vegardx/pi-subagent/service-provider`;
 2. checks the exact runtime contract revision and required feature values;
 3. binds an owner client to the workflow run;
-4. calls preflight, validates tools, skills, and context scopes as canonical
-   unique grants rather than order-sensitive arrays, and persists the resolved
-   launch-plan identity plus planned subagent run and initial-attempt identities;
+4. calls preflight, validates tools as the canonical unique grant the request
+   named rather than an order-sensitive array, validates skills and context
+   scopes as grants the plan must COVER rather than equal - pi-subagent unions
+   the agent definition's required skills and scopes into the plan, so a task
+   that selected no scope still gets what its template requires, and only a
+   plan that DROPPED a requested one is refused - and persists the resolved
+   launch-plan identity plus planned subagent run and initial-attempt
+   identities. A response that does not match is refused before launch, and the
+   refusal NAMES the condition that failed: "Subagent preflight response does
+   not match the workflow task: context scopes: plan [] does not cover request
+   [project]." Every such reason is built from field names and from the tool,
+   skill, scope and mode names the workflow itself requested, so it is safe in
+   the journal and in the task's failure reason;
 5. persists launch intent;
 6. launches with the exact preflight identity;
 7. persists the launch receipt.
@@ -2123,7 +2133,9 @@ bound moved under it would be a run whose evidence no longer explains its own
 launches. `task-launcher.ts` lowers `record.ceiling` onto every
 `SubagentRequest`; the preflight response must state the same ceiling, or the
 launch is refused with "Subagent preflight response does not match the workflow
-task." A nested run inherits its parent record's ceiling, because a child that
+task: ceiling tools: plan [read] != request [read write]." pi-subagent records
+each of the ceiling's lists sorted, so the two are compared as SETS: the order a
+host stated its bound in is not part of the bound. A nested run inherits its parent record's ceiling, because a child that
 escaped the bound would be a hole in it. The ceiling is NOT part of the persisted
 task spec and nothing about task identity changes: which mode the host was in is
 a property of the run.

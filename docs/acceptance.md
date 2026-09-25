@@ -459,7 +459,13 @@ Revision 19 must prove:
 - a preflight refusal raised by pi-subagent is relayed unchanged: the terminal
   evidence and the task failure reason carry "memory request exceeds agent
   ceiling" after the fixed prefix "Subagent preflight failed before launch.",
-  while a locally detected plan mismatch still records that prefix alone;
+  while a mismatch the launcher finds itself names the failed condition -
+  "Subagent preflight response does not match the workflow task: sandbox memory
+  grant.";
+- the launcher accepts a launch plan whose `contextScopes` or `preloadSkills`
+  are the union pi-subagent compiles (the agent definition's required scopes and
+  skills plus the request's), and refuses one that dropped a requested scope,
+  skill or tool, naming the sets on both sides;
 - a `workspace-budget` failure classified `retry: "never"` is not retried, with
   or without a declared retry policy, and no retry intent is journaled for it.
 

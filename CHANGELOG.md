@@ -641,6 +641,18 @@ run started under.
 
 ### Fixed
 
+- **The launcher accepts the context-scope union pi-subagent documents, and a
+  mismatch says which condition failed.** `validatePreflight` required the launch
+  plan's `contextScopes` to equal the request's, while `compileLaunchPlan` unions
+  them with the agent definition's, so every task that selected no scope under a
+  template that requires one — the `synthesis-<d>` reducer of every reviewed
+  `plan-to-ship` deliverable, whose `reviewer` requires `project` — failed with a
+  bare "Subagent preflight failed before launch." and its real reason only in an
+  unjournaled `cause`. Scopes and `preloadSkills` are now read as grants the plan
+  must COVER, the ceiling's sorted lists are compared as sets, everything else
+  stays equality, and the refusal names the condition: "Subagent preflight
+  response does not match the workflow task: context scopes: plan [] does not
+  cover request [project]."
 - **A handle is recognized across two copies of the package.** The task,
   artifact and handoff handle brands moved from module-local symbols to the
   global registry (`Symbol.for`). A builtin definition imports the component
