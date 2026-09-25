@@ -2012,12 +2012,62 @@ refuses an unknown option or an out-of-range bound (`validation`, "Invalid
 workflow prune options.").
 
 `subscribe(listener)` observes every append this service makes to an owned
-run's journal as `{ runId, status, sequence }`, delivered from the journal's
-post-append microtask in sequence order per run without coalescing; a
+run's journal as `{ runId, status, sequence, task? }`, delivered from the
+journal's post-append microtask in sequence order per run without coalescing; a
 listener that throws affects nothing. It refuses after shutdown (`conflict`,
 "Workflow service is closed."), returns an idempotent unsubscribe, and never
 notifies for runs leased elsewhere, which the widget must poll through
 `listRuns`.
+
+`task` is present only on the append that moved a task to a terminal status
+(`completed`, `failed`, `cancelled`, `interrupted`, `invalidated`, `blocked`,
+`cleanup-blocked`), and it carries
+`{ taskId, status, outcome?, narration }` — the durable facts plus the narration
+below. It is derived from the same pre-append reduction `status` comes from, in
+the journal, because that is the only place holding a post-append projection
+synchronously; `WorkflowJournalAppendNotice` on `@vegardx/pi-workflow/runtime`
+carries it across.
+
+### Narration
+
+Every projected task view carries
+`narration: { stage, taskKind, deliverable?, summary?, cause? }`. It is a VIEW:
+derived from durable state, authored by no definition, persisted nowhere, and
+therefore additive without a contract revision.
+
+| Field | Source | Where |
+| --- | --- | --- |
+| `stage` | `${namespace.join("/")}/${key}` | every projected task |
+| `taskKind` | the stage key, by the convention below; a checkpoint is always `gate` | every projected task |
+| `deliverable` | the rest of the leading segment, when the key names one | every projected task whose key names one |
+| `cause` | the journalled terminal evidence, sanitized | every task whose execution outcome is not `completed` |
+| `summary` | the task's committed `result` artifact | `inspect` with `include` carrying both `"tasks"` and `"output"` |
+
+`taskKind` is
+`implement | check | review | synthesis | fix | gate | refine | other`. The
+convention is the stage-key convention `workflows/plan-to-ship.workflow.ts`
+documents: a stage key is `<stage id>-<deliverable id>`, and a fan-out member is
+`<stage id>-<deliverable id>/<member>` whose kind is its namespace's. A leading
+segment that is one of the six known stage ids names the kind and the rest of
+that segment names the deliverable; anything else is `other`, with its own key —
+the honest answer for a project definition that names its tasks its own way.
+
+`cause` is COMPOSED from the closed vocabularies the journal already carries —
+the delegated run's status, the failure `code`, its `origin`, its `retry` class,
+or the workflow failure `stage` — and never quotes the evidence's own message or
+guidance (`src/sanitized-cause.ts`). A classified failure carries up to 4096
+characters of whatever the child or the provider said, and an inspection carries
+**no child prose**; the sentence is therefore strictly more than a bare code and
+strictly less than prose.
+
+`summary` is the agent's own `summary`, `verdict`, `answer` or `synthesis` when
+its result has one, else a bounded structural rendering of the value
+(`{checkPassed: true, findings: [3 item(s)]}`), one line, cut to
+`MAX_NARRATION_SUMMARY_LENGTH` (1024). It needs an artifact read, so it never
+appears on an observation and never on a view that opens no store. A result
+artifact that cannot be read or verified leaves that one task without a summary
+rather than failing the inspection: the summary is narration, and the journal
+already carries the facts a decision rests on.
 
 ### Operator surface
 

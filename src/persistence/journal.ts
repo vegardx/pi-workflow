@@ -6,10 +6,12 @@ import { isDeepStrictEqual } from "node:util";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
+	type TaskExecutionOutcome,
 	WORKFLOW_CONTRACT_REVISION,
 	type WorkflowRunId,
 	WorkflowRunIdSchema,
 	type WorkflowRunStatus,
+	type WorkflowTaskStatus,
 } from "../contracts.js";
 import {
 	MAX_WORKFLOW_EVENT_INPUT_BYTES,
@@ -19,7 +21,9 @@ import {
 	type WorkflowStateProjection,
 	WorkflowStateProjectionSchema,
 } from "../events.js";
+import { isNarratedTerminalStatus } from "../narration.js";
 import type { WorkflowReduction } from "../reducer.js";
+import { sanitizedTaskFailureCause } from "../sanitized-cause.js";
 import {
 	WorkflowPersistenceCorruptionError,
 	type WorkflowRunLease,
@@ -71,10 +75,81 @@ export const WorkflowRunSnapshotSchema = Type.Object(
 );
 export type WorkflowRunSnapshot = Static<typeof WorkflowRunSnapshotSchema>;
 
+/**
+ * The task an append settled, from the pre-append validation reduction.
+ *
+ * It is here and not in the caller because this is the only place that holds a
+ * post-append projection SYNCHRONOUSLY: an observation is one notice per durable
+ * append, in sequence order, and a listener that had to read the journal again
+ * to learn which task settled would neither be in order nor be free. Only the
+ * durable facts travel; every derived and artifact-backed field is the view
+ * layer's (`src/narration.ts`).
+ */
+export interface WorkflowJournalSettledTask {
+	readonly taskId: string;
+	readonly namespace: readonly string[];
+	readonly key: string;
+	readonly kind: "agent" | "support" | "workflow" | "checkpoint";
+	readonly status: WorkflowTaskStatus;
+	/** The current execution's terminal outcome, when it has one. */
+	readonly outcome?: TaskExecutionOutcome;
+	/** The sanitized reason the task did not complete; absent on a completion. */
+	readonly cause?: string;
+}
+
 export interface WorkflowJournalAppendNotice {
 	readonly event: WorkflowJournalEvent;
 	/** Run status after the appended event, from the pre-append validation reduction. */
 	readonly status: WorkflowRunStatus;
+	/**
+	 * Present only on an append that moved a task to a terminal status, so a
+	 * listener narrating completions filters on this rather than on the event
+	 * type. Derived from the same reduction `status` comes from.
+	 */
+	readonly task?: WorkflowJournalSettledTask;
+}
+
+/**
+ * The settled task of one append, or `undefined` when the append settled none.
+ *
+ * `task-status-changed` is the one event that moves a task, so it is the one
+ * event this reads; a task that was already terminal and is re-stated is not a
+ * settlement, because `from` and `to` would be equal and the reducer refuses
+ * that anyway.
+ */
+function settledTaskOf(
+	input: { readonly type: WorkflowEventType; readonly data: unknown },
+	projected: WorkflowStateProjection,
+): WorkflowJournalSettledTask | undefined {
+	if (input.type !== "task-status-changed") return undefined;
+	const data = input.data as { taskId?: unknown; to?: unknown };
+	const taskId = typeof data.taskId === "string" ? data.taskId : undefined;
+	if (!taskId || !isNarratedTerminalStatus(data.to as WorkflowTaskStatus)) {
+		return undefined;
+	}
+	const task = projected.tasks[taskId as keyof typeof projected.tasks];
+	if (!task) return undefined;
+	const execution = task.currentExecutionId
+		? projected.executions[task.currentExecutionId]
+		: undefined;
+	const terminal = execution?.terminal;
+	const outcome = terminal?.outcome;
+	return Object.freeze({
+		taskId,
+		namespace: Object.freeze([...task.task.namespace]),
+		key: task.task.spec.key,
+		kind: task.task.spec.kind,
+		status: task.status,
+		...(outcome === undefined ? {} : { outcome }),
+		...(outcome !== undefined && outcome !== "completed"
+			? {
+					cause: sanitizedTaskFailureCause(
+						terminal?.evidence as never,
+						outcome,
+					),
+				}
+			: {}),
+	});
 }
 
 export interface WorkflowRunJournalOpenOptions {
@@ -733,9 +808,11 @@ export class WorkflowRunJournal {
 					: undefined;
 				const onAppended = this.onAppended;
 				if (onAppended) {
+					const settled = settledTaskOf(input, projected);
 					const notice: WorkflowJournalAppendNotice = Object.freeze({
 						event: roundTrip.value,
 						status: projected.status,
+						...(settled === undefined ? {} : { task: settled }),
 					});
 					queueMicrotask(() => {
 						try {

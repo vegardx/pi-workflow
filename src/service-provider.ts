@@ -7,6 +7,31 @@
  * versioned channel, discovered twice so a provider swapped during
  * acquisition is refused rather than used.
  *
+ * ## Narration
+ *
+ * A host that shows a run to a person needs more than a status: it posts each
+ * task completion into the conversation and gives the model a turn on the
+ * interesting ones. Two of the client's methods carry that, and between them
+ * they are the whole narration surface:
+ *
+ * - `observe` fires once per durable append. The append that moved a task to a
+ *   terminal status carries `task: {taskId, status, outcome?, narration}`, and
+ *   `narration` is `{stage, taskKind, deliverable?, cause?}` — the stage key as
+ *   one string, the kind a narrator branches on
+ *   (`implement | check | review | synthesis | fix | gate | refine | other`),
+ *   the deliverable the key names, and for a task that did not complete a
+ *   sanitized cause composed from the journalled failure codes, never from the
+ *   child's own prose. It carries no `summary`: an observation is a synchronous
+ *   notice in sequence order and reads no file, and a summary is an artifact.
+ * - `inspect(runId, {include: ["run", "tasks", "output"]})` carries the same
+ *   `narration` on every projected task, with `narration.summary` filled in —
+ *   the agent's own `summary`/`verdict`/`answer`/`synthesis` when its result has
+ *   one, else a bounded rendering of the structured result. That is what a host
+ *   hands the model when it wants a turn on a synthesis result or a fix report.
+ *
+ * Everything in `narration` is DERIVED from durable state, so it is additive
+ * and moves no contract revision.
+ *
  * What crosses the seam is deliberately narrow. The client is **read,
  * validate, project, observe, and start-a-builtin-headless-run**: no
  * `decide`, `stop`, `invalidate`, or general `run`. Starting a workflow that
@@ -84,6 +109,8 @@ export type {
 	WorkflowCheckpointTaskView,
 	WorkflowInspectOptions,
 	WorkflowInspectSection,
+	WorkflowNarratedTaskKind,
+	WorkflowObservedTask,
 	WorkflowRunInspection,
 	WorkflowRunObservation,
 	WorkflowRunPage,
@@ -91,6 +118,7 @@ export type {
 	WorkflowRunSummary,
 	WorkflowServiceTaskView,
 	WorkflowServiceWaitView,
+	WorkflowTaskNarration,
 	WorkflowWaitOptions,
 } from "./service-views.js";
 
@@ -193,6 +221,10 @@ export interface WorkflowReadClient {
 	 * `tasks[].checkpoint.decision.value` once the decision is durable - so a
 	 * consumer can read a run's result and prove a decision without a lease
 	 * and without `decide`.
+	 *
+	 * Every projected task also carries `tasks[].narration`, and with `"output"`
+	 * and `"tasks"` both included it carries `narration.summary` too: the one
+	 * call a host makes when it wants to narrate what a task said.
 	 */
 	inspect(
 		runId: WorkflowRunId,
@@ -200,7 +232,13 @@ export interface WorkflowReadClient {
 	): Promise<WorkflowRunInspection>;
 	/** Lease-free scan of the durable run store, newest first. */
 	runs(query?: WorkflowRunQuery): Promise<WorkflowRunPage>;
-	/** Every append this service makes to an owned run; idempotent unsubscribe. */
+	/**
+	 * Every append this service makes to an owned run; idempotent unsubscribe.
+	 *
+	 * The append that settled a task carries `observation.task` — see
+	 * **Narration** in this module's header — so a host narrating completions
+	 * filters on that field rather than re-reading the journal per append.
+	 */
 	observe(listener: (observation: WorkflowRunObservation) => void): () => void;
 	/** Starts an allowlisted headless builtin; refuses every other ref. */
 	runBuiltin(ref: string, input: unknown): Promise<WorkflowServiceRunReceipt>;

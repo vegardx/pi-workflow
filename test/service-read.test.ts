@@ -1246,6 +1246,10 @@ describe("inspect and logs", () => {
 					outcome: "completed",
 					dependsOn: [],
 					inputs: {},
+					// Derived from the key; this definition names its task its own
+					// way, so the kind a host narrates it as is the honest `other`.
+					// No `summary`, because `include` does not ask for `output`.
+					narration: { stage: "answer", taskKind: "other" },
 				},
 			]);
 

@@ -35,6 +35,7 @@ import {
 	DynamicWorkflowProposerSchema,
 } from "./dynamic/contracts.js";
 import { TaskExecutionProjectionSchema } from "./events.js";
+import { MAX_NARRATION_SUMMARY_LENGTH } from "./narration.js";
 
 /**
  * Every view that crosses the tool boundary is defined once, as a TypeBox
@@ -316,6 +317,55 @@ export type WorkflowCheckpointTaskView = View<
 	typeof WorkflowCheckpointTaskViewSchema
 >;
 
+/**
+ * The task kinds a HOST narrates in, derived from the stage key (`narration.ts`)
+ * and never authored or persisted. It is not the runtime's execution kind: that
+ * says `agent` where a reader needs `implement` or `review`.
+ */
+export const WorkflowNarratedTaskKindSchema = Type.Union([
+	Type.Literal("implement"),
+	Type.Literal("check"),
+	Type.Literal("review"),
+	Type.Literal("synthesis"),
+	Type.Literal("fix"),
+	Type.Literal("gate"),
+	Type.Literal("refine"),
+	/** The honest answer for a key this convention does not name. */
+	Type.Literal("other"),
+]);
+export type WorkflowNarratedTaskKind = Static<
+	typeof WorkflowNarratedTaskKindSchema
+>;
+
+/**
+ * What a host needs to narrate ONE task: the stage key as one string, the kind
+ * it narrates as, the deliverable the key names, a bounded human summary, and
+ * for a task that did not complete a sanitized cause.
+ *
+ * Everything here is DERIVED, so it is additive and costs a run nothing.
+ * `summary` is artifact-backed and therefore present only on a view that reads
+ * artifacts: the inspection with `include` carrying `"output"`, and the
+ * artifact-backed status, wait and decide views. `cause` is journal-derived and
+ * present on every view whenever the task did not complete.
+ */
+export const WorkflowTaskNarrationSchema = Type.Object(
+	{
+		/** `${namespace.join("/")}/${key}`. */
+		stage: Type.String({
+			minLength: 1,
+			maxLength: MAX_WORKFLOW_TASK_KEY_LENGTH,
+		}),
+		taskKind: WorkflowNarratedTaskKindSchema,
+		deliverable: Type.Optional(TaskKeySchema),
+		summary: Type.Optional(
+			Type.String({ minLength: 1, maxLength: MAX_NARRATION_SUMMARY_LENGTH }),
+		),
+		cause: Type.Optional(FixedStringSchema),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowTaskNarration = View<typeof WorkflowTaskNarrationSchema>;
+
 export const WorkflowServiceTaskViewSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
@@ -356,6 +406,13 @@ export const WorkflowServiceTaskViewSchema = Type.Object(
 				maxProperties: 64,
 			}),
 		),
+		/**
+		 * What a host needs to narrate this task; present on every projected
+		 * task. `narration.summary` needs an artifact read, so it appears on the
+		 * artifact-backed views and on an inspection whose `include` carries
+		 * `"output"`.
+		 */
+		narration: Type.Optional(WorkflowTaskNarrationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -867,11 +924,47 @@ export const WorkflowLogPageSchema = Type.Object(
 );
 export type WorkflowLogPage = View<typeof WorkflowLogPageSchema>;
 
+/**
+ * The task a single append settled, on the observation that carries it.
+ *
+ * A host narrating a run posts one message per task completion, so it needs to
+ * know WHICH task settled and how — without a second call, and without
+ * re-reading the journal on every append. `status` is the task status the append
+ * produced and `outcome` its execution's, so a completion and a failure are
+ * distinguishable; `narration` is the derived stage key, kind, deliverable and,
+ * for a failure, the sanitized cause.
+ *
+ * `narration.summary` is NOT here, and cannot be: a summary is the task's
+ * committed result, which lives in an artifact, and an observation is a
+ * synchronous notice on a durable append that reads no file and must stay in
+ * sequence order. A host that wants the summary reads
+ * `inspect(runId, {include: ["run", "tasks", "output"]})` once it has been told
+ * which task to look at.
+ */
+export const WorkflowObservedTaskSchema = Type.Object(
+	{
+		taskId: WorkflowTaskIdSchema,
+		status: WorkflowTaskStatusSchema,
+		/** The current execution's outcome, when it had one. */
+		outcome: Type.Optional(TaskExecutionOutcomeSchema),
+		narration: WorkflowTaskNarrationSchema,
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowObservedTask = View<typeof WorkflowObservedTaskSchema>;
+
 export const WorkflowRunObservationSchema = Type.Object(
 	{
 		runId: WorkflowRunIdSchema,
 		status: WorkflowRunStatusSchema,
 		sequence: SequenceSchema,
+		/**
+		 * Present on the append that moved a task to a terminal status, and only
+		 * then: an observation is one notice per append, so a host narrating
+		 * completions filters on this field rather than on the event type it
+		 * cannot see.
+		 */
+		task: Type.Optional(WorkflowObservedTaskSchema),
 	},
 	{ additionalProperties: false },
 );

@@ -257,6 +257,52 @@ turn and no `/workflow` command is in the transcript to show where it came
 from. A run started by the tool or by the UI command records no origin — the
 runtime cannot tell those two apart.
 
+### Narrating a run
+
+A host that shows a run to a person needs more than a status: pi-maestro posts
+each task completion into the conversation and then gives the model a turn on
+the interesting ones — a synthesis result, a fix report, a failure, the ship
+gate. Two methods carry that, and between them they are the whole surface.
+
+`observe` fires once per durable append. The append that moved a task to a
+terminal status — and only that one — carries `task`:
+
+```ts
+workflows.observe(({ runId, status, sequence, task }) => {
+	if (!task) return;                       // most appends settle no task
+	const { stage, taskKind, deliverable, cause } = task.narration;
+	// stage      "check-d0-verify-1" — `${namespace}/${key}`, as one string
+	// taskKind   implement | check | review | synthesis | fix | gate | refine | other
+	// deliverable "d0" — when the stage key names one
+	// cause      a sanitized sentence, for a task that did not complete —
+	//            composed from the journalled codes, never the child's prose
+	post(`${stage} ${task.status}${cause ? `: ${cause}` : ""}`);
+});
+```
+
+`task` also carries `taskId` and the execution's `outcome`, so a completion and
+a failure are told apart without a second call. It carries **no** `summary`: an
+observation is a synchronous notice in sequence order that reads no file, and a
+summary is an artifact.
+
+`inspect(runId, {include: ["run", "tasks", "output"]})` is where the summary
+comes from. Every projected task carries the same `narration`, and with both
+`"tasks"` and `"output"` asked for it carries `narration.summary` as well — the
+agent's own `summary`, `verdict`, `answer` or `synthesis` when its result has
+one, else a bounded rendering of the structured result
+(`{checkPassed: true, findings: [3 item(s)]}`), cut to 1024 characters. That one
+call is what a host hands the model when it wants a turn on what a task said.
+
+Everything in `narration` is **derived** — from the task key, the journalled
+outcome, and (for the summary) the committed result artifact. No definition
+authors it, nothing about it is persisted, and it moves no contract revision.
+The kind vocabulary is the stage-key convention `plan-to-ship` documents: a
+leading `implement`, `check`, `review`, `synthesis`, `fix` or `refine` segment
+names the kind and the rest of that segment names the deliverable, a checkpoint
+is `gate` whatever it is called, and anything else is `other` — which is the
+honest answer for a project definition that names its tasks its own way, not a
+failure.
+
 `project(ref, input)` is the lease-free half of the seam: it runs the
 definition's `run(ctx)` against a context that declares nothing durable — no
 journal, no lease, no task identity, no subagent, no filesystem — and returns

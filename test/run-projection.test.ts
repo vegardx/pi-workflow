@@ -862,6 +862,9 @@ describe("taskViews", () => {
 				usageComplete: true,
 			},
 			outcome: "completed",
+			// Derived from the key: this fixture names its tasks its own way, so
+			// the kind is the honest `other` and there is no deliverable.
+			narration: { stage: "answer", taskKind: "other" },
 		});
 	});
 
@@ -877,6 +880,7 @@ describe("taskViews", () => {
 			generation: 1,
 			executionId: summaryExecutionId,
 			outcome: "completed",
+			narration: { stage: "summary", taskKind: "other" },
 		});
 	});
 
@@ -897,6 +901,7 @@ describe("taskViews", () => {
 				usageComplete: false,
 			},
 			outcome: "completed",
+			narration: { stage: "child", taskKind: "other" },
 		});
 	});
 
@@ -911,6 +916,7 @@ describe("taskViews", () => {
 			status: "invalidated",
 			generation: 0,
 			abandoned: true,
+			narration: { stage: "stale", taskKind: "other" },
 		});
 		expect(views[6]).toEqual({
 			id: item.id,
@@ -921,6 +927,8 @@ describe("taskViews", () => {
 			disposition: "required",
 			status: "pending",
 			generation: 0,
+			// A fan-out member's stage key is the whole path.
+			narration: { stage: "batch/item", taskKind: "other" },
 		});
 	});
 
@@ -937,6 +945,12 @@ describe("taskViews", () => {
 			executionId: blockedExecutionId,
 			attempts: 0,
 			outcome: "failed",
+			narration: {
+				stage: "blocked",
+				taskKind: "other",
+				// Composed from the journalled stage, never from a message.
+				cause: "The run failed at preflight.",
+			},
 		});
 	});
 
@@ -960,6 +974,12 @@ describe("taskViews", () => {
 				usageComplete: true,
 			},
 			outcome: "failed",
+			narration: {
+				stage: "declined",
+				taskKind: "other",
+				cause:
+					"The delegated run failed: provider-transient (origin provider, retry backoff).",
+			},
 		});
 	});
 
@@ -2319,6 +2339,8 @@ describe("checkpoint task views", () => {
 				requestedAt: REQUESTED_AT,
 				expiresAt: EXPIRES_AT,
 			},
+			// A checkpoint is a `gate` whatever it is called.
+			narration: { stage: "approve", taskKind: "gate" },
 		});
 		expect(byId.get(approve.id)).not.toHaveProperty("attempts");
 		expect(byId.get(approve.id)).not.toHaveProperty("settlement");
@@ -2351,6 +2373,7 @@ describe("checkpoint task views", () => {
 					sha256: DECISION_SHA,
 				},
 			},
+			narration: { stage: "release/review", taskKind: "gate" },
 		});
 		expect(byId.get(review.id)?.checkpoint?.decision).not.toHaveProperty(
 			"value",
@@ -2406,6 +2429,7 @@ describe("checkpoint task views", () => {
 				schema: fresh.spec.request.schema,
 				headless: "block",
 			},
+			narration: { stage: "fresh", taskKind: "gate" },
 		});
 	});
 

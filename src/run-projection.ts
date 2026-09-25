@@ -25,6 +25,7 @@ import type {
 	WorkflowTaskProjection,
 } from "./events.js";
 import { deriveWorkflowHandoffDescriptor } from "./execution.js";
+import { taskNarration } from "./narration.js";
 import type { WorkflowJournalEvent } from "./persistence/journal.js";
 import { WorkflowPersistenceCorruptionError } from "./persistence/run-lease.js";
 import { invalidationClosure } from "./reducer.js";
@@ -36,6 +37,7 @@ import {
 	type WorkflowRunOwnership,
 } from "./run-actions.js";
 import type { WorkflowRunRecord } from "./run-record.js";
+import { sanitizedTaskFailureCause } from "./sanitized-cause.js";
 import {
 	MAX_WORKFLOW_INSPECTION_ITEMS,
 	MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
@@ -132,6 +134,12 @@ export interface TaskViewOptions {
 	 * file, so a caller that passes none leaves `decision.value` absent.
 	 */
 	readonly decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
+	/**
+	 * A bounded human summary per task, already rendered from that task's
+	 * committed result by the caller. A projection opens no store, so a caller
+	 * that passes none leaves `narration.summary` absent.
+	 */
+	readonly taskSummaries?: ReadonlyMap<WorkflowTaskId, string>;
 }
 
 /** A frozen deep copy of a persisted JSON value for a view. */
@@ -353,6 +361,25 @@ export function taskViews(
 				options.promptLimit,
 				options.decisionValues,
 			);
+			// Derived from the key alone, so it is free and cannot drift: a host
+			// narrating a run reads the stage, the kind and the deliverable here
+			// rather than parsing a task path of its own. The cause is journalled;
+			// the summary needs an artifact and is whatever the caller already read.
+			const summary = options.taskSummaries?.get(task.task.id);
+			const cause =
+				outcome !== undefined && outcome !== "completed"
+					? sanitizedTaskFailureCause(
+							execution?.terminal?.evidence as never,
+							outcome,
+						)
+					: undefined;
+			const narration = taskNarration({
+				namespace: task.task.namespace,
+				key: task.task.spec.key,
+				kind: task.task.spec.kind,
+				...(summary === undefined ? {} : { summary }),
+				...(cause === undefined ? {} : { cause }),
+			});
 			return Object.freeze({
 				id: task.task.id,
 				namespace: Object.freeze([...task.task.namespace]),
@@ -371,6 +398,7 @@ export function taskViews(
 				...(task.abandoned === true ? { abandoned: true as const } : {}),
 				...(handoff === undefined ? {} : { handoff: Object.freeze(handoff) }),
 				...(checkpoint === undefined ? {} : { checkpoint }),
+				narration,
 				...(options.graph
 					? {
 							dependsOn: Object.freeze(
@@ -705,6 +733,8 @@ export interface RunInspectionOptions {
 	readonly output?: unknown;
 	/** Decided checkpoint values by task id; see {@link TaskViewOptions}. */
 	readonly decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
+	/** Bounded per-task result summaries; see {@link TaskViewOptions}. */
+	readonly taskSummaries?: ReadonlyMap<WorkflowTaskId, string>;
 }
 
 export function runInspection(
@@ -751,6 +781,9 @@ export function runInspection(
 					promptLimit: MAX_WORKFLOW_INSPECTION_PROMPT_LENGTH,
 					...(options.decisionValues
 						? { decisionValues: options.decisionValues }
+						: {}),
+					...(options.taskSummaries
+						? { taskSummaries: options.taskSummaries }
 						: {}),
 				})
 			: [];

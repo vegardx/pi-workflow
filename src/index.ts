@@ -240,6 +240,15 @@ export {
 } from "./events.js";
 export { deriveJsonValueSha256 } from "./execution.js";
 export {
+	MAX_NARRATION_SUMMARY_LENGTH,
+	NARRATED_TASK_KINDS,
+	type NarratedTaskKind,
+	narrationSummary,
+	type TaskNarration,
+	type TaskNarrationInput,
+	taskNarration,
+} from "./narration.js";
+export {
 	WorkflowDefinitionLoadError,
 	WorkflowDefinitionTrustError,
 	type WorkflowRoot,
@@ -320,6 +329,10 @@ export {
 	WorkflowLogOptionsSchema,
 	type WorkflowLogPage,
 	WorkflowLogPageSchema,
+	type WorkflowNarratedTaskKind,
+	WorkflowNarratedTaskKindSchema,
+	type WorkflowObservedTask,
+	WorkflowObservedTaskSchema,
 	type WorkflowPendingCheckpointView,
 	WorkflowPendingCheckpointViewSchema,
 	type WorkflowReconciledExecution,
@@ -355,6 +368,8 @@ export {
 	WorkflowSettlementViewSchema,
 	type WorkflowTaskCounts,
 	WorkflowTaskCountsSchema,
+	type WorkflowTaskNarration,
+	WorkflowTaskNarrationSchema,
 	type WorkflowWaitOptions,
 	WorkflowWaitOptionsSchema,
 } from "./service-views.js";
