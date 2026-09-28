@@ -6,7 +6,7 @@ nested run executor, artifact store, and static source runtime (exported from
 `@vegardx/pi-workflow/runtime`) implement the current subset; later
 interfaces remain design contracts. Version 1.0.0 freezes the public surfaces
 listed under [Public API and stability](#public-api-and-stability). The
-runtime contract is revision 21 and declares the feature flags `supportTaskExecution: true`,
+runtime contract is revision 22 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
@@ -94,8 +94,9 @@ rule covers where state is kept as well as what is in it: revision 20 both
 refuses revision-19 records and reads a different root, so the release that
 carries it is 3.0.0 and not 2.1.0. Revision 21 refuses revision-20 records in
 turn, for the run record's new `ceiling`, and travels in the same unreleased
-3.0.0. Runs journaled by revision 21 are readable by every 3.x release under
-the same rule.
+3.0.0. Revision 22 refuses revision-21 records in turn, for the run record's new
+`sessionModel`, and travels in the same unreleased 3.0.0. Runs journaled by
+revision 22 are readable by every 3.x release under the same rule.
 
 **1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
 `registeredRoots`, and the package ships its own `workflows/` directory, which
@@ -261,7 +262,7 @@ source identity. The `@vegardx/pi-workflow/components` subpath is an allowed
 import (trusted package code, the same trade the root import makes); the
 `@vegardx/pi-workflow/runtime` subpath is not: the gate matches specifiers
 exactly, so a definition that imports it fails with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 21". A support implementation is identified by its registered
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 22". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,
 with the same messages, applies to dynamic workflow source proposed through
@@ -311,13 +312,14 @@ agent) -> per deliverable, in plan order, `implement` (one worktree agent
 `implement-<deliverable>` with `handoff: "required"`), `verify-and-fix` (the
 bounded `-verify-<n>`/`-fix-<n>` loop), `review-fan-out` (optional read-only
 reviewers keyed by lens id, each fed a handoff descriptor) and the gate
-`policy.gates` bought -> `ship` (checkpoint, `headless: "block"`, always
-declared) -> `receipt` (required finalizer). There is no gate before the work:
-the start of the run is the approval, so the first task is ready the moment the
-run is created. A
-plan schema v5 document authors no stages: the compiler derives that list from
+`policy.gates` bought -> `ship` (checkpoint, `headless: "block"`, declared
+unless `policy.gates` is `none`) -> `receipt` (required finalizer). There is no
+gate before the work: the start of the run is the approval, so the first task is
+ready the moment the run is created. A
+plan schema v8 document authors no stages: the compiler derives that list from
 the deliverable's `reviews` and the plan's `policy`. Its input is a
-pi-maestro plan by value, that plan's sha256 digest, and an effort dial; its
+pi-maestro plan by value and that plan's sha256 digest, and nothing else - there
+is no effort dial, and `policy.effort` is refused by name; its
 output is a receipt naming, per deliverable, the imported handoff descriptor
 and the durable ref `refs/pi-subagent/handoffs/<subagentRunId>/<attemptId>`,
 plus the approved `planDigest`. The workflow never pushes, merges, publishes,
@@ -735,7 +737,7 @@ the same validation messages (`DYNAMIC_CONTEXT_PROPERTIES` = `cwd`, `input`,
 `runId`, `signal`; `DYNAMIC_CONTEXT_METHODS` = `agent`, `checkpoint`,
 `fanIn`, `fanOut`, `finalize`, `handoff`, `log`, `phase`, `pipeline`,
 `result`, `results`, `settled`, `support`, `workflow`, and nothing more).
-`ctx.artifact` is not available in revision 21 on either frontend. In the VM
+`ctx.artifact` is not available in revision 22 on either frontend. In the VM
 declarations are synchronous RPC calls answered by the static-runtime context
 and barriers are asynchronous replies; see [Dynamic workflows](#dynamic-workflows).
 
@@ -834,7 +836,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 21;
+`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 22;
 a checkpoint task (`ctx.checkpoint`) lowers to `CheckpointTaskSpec`, whose
 `request` is the `CheckpointTaskRequest` described in
 [Checkpoints](#checkpoints). `role` is `"task"` for every ordinary
@@ -2126,6 +2128,40 @@ partially. `WorkflowServiceOptions.delegationCeiling` is the provider the
 embedder installs; without it `hostDelegationCeiling()` answers `undefined` and
 every run is unbounded, exactly as before revision 21.
 
+### The session model a run inherits
+
+`WorkflowRunRecord.sessionModel` (optional, revision 22) is the host session's
+model and thinking level the run INHERITED, resolved once when the record was
+created and never changed.
+
+A definition sets a model per role: an exact `ExactModelRequest`, or the literal
+`model: "inherit"`. There is no effort dial behind either - `cheap | standard |
+deep` is gone, `envelope` is one fixed row per stage, and `light | standard |
+heavy` is the one dial a review still has. A definition that inherits declares
+`meta.needs.sessionModel: true`, and `WorkflowService.run` then reads
+`WorkflowServiceOptions.sessionModel` (the shipped extension installs
+`() => resolveSessionModel(pi.events)`) BEFORE the run exists. A host with no
+session model is refused with `<name> inherits the session model, and this host
+has none.` [validation].
+
+The materializer substitutes the record's value for every `model: "inherit"`
+BEFORE the request is assembled, validated or hashed, exactly as it resolves a
+`modelRole`, so `AgentTaskRequestSchema`, task identity and pi-subagent's
+contract are unchanged and the launcher forwards the EXACT model - never the
+literal. Resolution reads a frozen record field rather than the host, so a replay
+re-declares the identical identity, a run never mixes models, and a nested run
+inherits its parent's resolved value verbatim. A declaration that inherits when
+the run resolved none fails materialization with `agent task declares model:
+"inherit", but the run resolved no session model; declare needs.sessionModel so
+the start is refused instead`.
+
+Because the runtime sends the resolved exact model, pi-subagent's preflight
+checks it against the agent definition's `allowedModels` as an ordinary request
+(`modelSource: "request"`). An `inherit` entry in a template admits a DIRECT
+delegation that asks to inherit, not a workflow task that already resolved one,
+so a template an inheriting role uses must also admit the exact
+`provider/id:thinking`.
+
 **The run records it and forwards it.** `WorkflowRunRecordSchema.ceiling` is
 written at creation and never changed - a run keeps the ceiling it started with,
 because the answer a host would give now is a different answer and a run whose
@@ -2283,7 +2319,7 @@ One frozen allowlist lives in the runtime, not in the caller:
 
 | Method | Allowlist | Holds | Refusal for anything else |
 | --- | --- | --- | --- |
-| `startBuiltin(ref, {input, effort?})` | `BUILTIN_STARTABLE_WORKFLOWS` | `plan-to-ship` | "Workflow `<ref>` is not a builtin a service consumer may start; use workflow_run." |
+| `startBuiltin(ref, {input, ceiling?})` | `BUILTIN_STARTABLE_WORKFLOWS` | `plan-to-ship` | "Workflow `<ref>` is not a builtin a service consumer may start; use workflow_run." |
 
 The startable list makes no structural claim at all - its one name parks,
 writes and hands off, which is exactly what `headlessBuiltinViolations` reports
@@ -2297,13 +2333,9 @@ ref is refused by name before anything is resolved.
 and never observes. `input` is validated against the definition's
 `inputSchema` exactly as `workflow_run` validates its own - same refusals,
 same messages ("Workflow input does not match its schema.", "Workflow input is
-not bounded JSON.") - and a refused input creates no run. `effort` (`"cheap" |
-"standard" | "deep"`) is the dial the builtin pipelines read from their input:
-it is written onto the input object, replacing any `effort` already there,
-before that one validation, so an unknown value is refused by the definition's
-schema rather than by a second list. An `effort` given with a non-object
-input is `validation` "Workflow input must be a JSON object to carry an
-effort."
+not bounded JSON.") - and a refused input creates no run. THERE IS NO `effort`
+OPTION: the dial is gone, a builtin sets a model per role, and a consumer that
+wants a different model changes the session it starts the run from.
 
 The run it creates is an ordinary run in every respect but one: same journal,
 same checkpoints, same `/workflow` and widget visibility, decided with
@@ -2362,10 +2394,10 @@ this order, each a `WorkflowServiceError` (code in brackets):
    UTF-8." (a lone surrogate or a NUL byte) [validation];
 3. the import gate of static definitions with its messages verbatim
    ("workflow import <specifier> is not identity-bound by contract revision
-   21", "dynamic workflow imports are not supported by contract revision 21",
+   22", "dynamic workflow imports are not supported by contract revision 22",
    "dynamic imports and CommonJS require are not supported by contract
-   revision 21", "TypeScript import assignment is not supported by contract
-   revision 21", "workflow definition syntax is invalid"); the allow-list is
+   revision 22", "TypeScript import assignment is not supported by contract
+   revision 22", "workflow definition syntax is invalid"); the allow-list is
    `@vegardx/pi-workflow`, `typebox`, and the module specifiers of the
    registered support tasks [validation];
 4. the dynamic-only rules: "dynamic workflow source may not use import.meta"

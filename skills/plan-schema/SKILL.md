@@ -8,20 +8,25 @@ description: Reference tables for the pi-maestro plan document — deliverables,
 A **reference**, not a tutorial: tables only. A plan is *what was authored* —
 never run state, and never a graph. The document is written by pi-maestro's
 plan-mode exit and handed to `plan-to-ship` by value. It is stored at
-`schemaVersion: 5`; `reviews` and `policy` are optional, and a document with
+`schemaVersion: 8`; `reviews` and `policy` are optional, and a document with
 neither is valid and gets the defaults below.
 
-**Version 5** says a task is **work only** and moves review routing to
-`deliverables[].reviews`; it also deletes authored stages — the compiler derives
-the stage list from `reviews` and `policy`, and a plan never writes one. There
-is **no migration** from v3 or v4. Each deleted key parses and is then refused
-**by name** at compile, one sentence each:
+**Version 8** removes `policy.effort`: models are set **per role** on the
+definition — the implementation roles inherit the host session's model, a review
+runs at its tier — and budgets are one fixed row per stage. It also adds
+`policy.gates: "none"`, the `auto` end of a run. **Version 5** said a task is
+**work only** and moved review routing to `deliverables[].reviews`; it also
+deleted authored stages — the compiler derives the stage list from `reviews` and
+`policy`, and a plan never writes one. There is **no migration** from any earlier
+version. Each deleted key parses and is then refused **by name** at compile, one
+sentence each:
 
 | key | refused because |
 | --- | --- |
-| `tasks[].review` | v4's review block: *plan schema v5 moved review routing to `deliverables[].reviews`; a task is work only* |
+| `policy.effort` | *plan schema v8 removed `policy.effort`; models are set per role and budgets are fixed* |
+| `tasks[].review` | v4's review block: *plan schema v8 moved review routing to `deliverables[].reviews`; a task is work only* |
 | `tasks[].by` | v3's name for the same block, same destination |
-| `deliverables[].stages` | *plan schema v5 does not author stages; the compiler derives them from `reviews` and `policy`* |
+| `deliverables[].stages` | *plan schema v8 does not author stages; the compiler derives them from `reviews` and `policy`* |
 
 `plan-to-ship` refuses such a plan before its first task is declared, so the
 refusal costs nothing — and `workflow_validate` still answers `valid: true`,
@@ -80,20 +85,34 @@ ordinal, which is what the fan-out keys become.
 | `tier` | optional | `light` \| `standard` \| `heavy` — **the one to reach for**; the host resolves the reviewer |
 | `diverse` | optional | boolean: a reviewer from another model family |
 | `skill` | optional | an ambient skill name, id pattern |
-| `model` | optional | **only ever** a concrete `provider/model` — never a bare model name, a tier word, or a role. **Prefer `tier` and omit `model`:** a plan that pins one runs only where that model exists |
+| `model` | optional | **only ever** a concrete `provider/model` — never a bare model name, a tier word, or a role. It is pinned at the lens's `tier`'s thinking level. **Prefer `tier` and omit `model`:** a plan that pins one runs only where that model exists |
 
 The lens id pattern is **not** the id pattern above: a lens id may not start
 with a digit, because it reaches pi-workflow as a fan-out namespace.
 
 ## Policy
 
+There is **no `effort`**. Models are per role on the definition and budgets are
+fixed, so the only dials a plan still sets are these:
+
 | Field | Values | Default |
 | --- | --- | --- |
-| `effort` | `cheap` \| `standard` \| `deep` | `standard` |
-| `gates` | `ship` \| `every-deliverable` | `ship` |
+| `gates` | `ship` \| `every-deliverable` \| `none` | `ship` |
 | `reviewDefault` | `{tier?, diverse?}` | `{tier: "standard", diverse: false}` |
-| `maxFixRounds` | 0 \| 1 \| 2 | 0 cheap / 1 standard / 2 deep |
+| `maxFixRounds` | 0 \| 1 \| 2 | `1` |
 | `publish` | `{mode: none\|branch\|pr, base?}` | `{mode: "none"}` |
+
+`gates` decides what happens at the **end** of the run, and it is what the mode a
+person left plan mode in chooses:
+
+| `gates` | end of the run | mode |
+| --- | --- | --- |
+| `ship` | one human decision over every handoff, before publication | `ask` |
+| `every-deliverable` | a gate after each deliverable but the last, then `ship` | `ask` |
+| `none` | **no gate at all**: the run completes and the HOST publishes on completion, on the authority of the yes that started it. The output carries the same `receipt`, plus `shipSummary` — what the ship gate would have shown | `auto` |
+
+`maxFixRounds` bounds the FIX rounds of a whole deliverable, not of one stage:
+the `check` spends what it needs and the `fix` stage may spend only what is left.
 
 `publish.base` must be a valid Git ref name. `mode: "pr"` needs `gh` at
 **readiness** time, not at validation time. The host attaches `policy` from
@@ -114,10 +133,11 @@ deliverable, in order, and what the compiled stage document shows:
 
 Gates are *not* stages: a per-deliverable gate and `ship` come from
 `policy.gates`, applied by the compiler, and a compiled deliverable never
-carries a `gate`. There is no gate before the work and no "no gates" value: the
-START of the run is the approval, and the `ship` decision is what a receipt is
-checked against. `approve-plan` and `approve-plan+ship` were removed and are
-refused by name at compile.
+carries a `gate`. There is no gate before the work: the START of the run is the
+approval, and under `ship`/`every-deliverable` the `ship` decision is what a
+receipt is checked against, while under `none` the start is. `approve-plan` and
+`approve-plan+ship` were removed and are refused by name at compile. The compiled
+stage document carries `gates` and **no `effort`**.
 
 ## What a stored plan has already passed
 

@@ -140,10 +140,11 @@ lowers onto the component library — `implement` to one worktree agent
 (`implement-<deliverable>`, `handoff: "required"`), `verify-and-fix` to
 `verifyAndFix`'s bounded `-verify-<n>`/`-fix-<n>` rounds, `review-fan-out` to
 `reviewFanOut` (omitted when `reviews` is empty), and every gate to `gate`.
-`policy.gates` decides which gates exist and nothing else does. It takes a pi-maestro plan by value with its
-sha256 digest and an effort dial, and returns a receipt naming each durable
-handoff ref plus the approved digest; it never pushes, merges, or applies
-anything. Read it as the worked example of compiling a document into a graph:
+`policy.gates` decides which gates exist and nothing else does — including
+`"none"`, which declares no gate at all and leaves the host to publish on
+completion. It takes a pi-maestro plan by value with its sha256 digest and
+nothing else, and returns a receipt naming each durable handoff ref plus the
+approved digest; it never pushes, merges, or applies anything. Read it as the worked example of compiling a document into a graph:
 checkpoints, worktree handoffs, a bounded loop, fan-out and finalizers in one
 definition, with `compileStageDocument` and `compileStages` showing the whole
 graph as data — the plan's view and the runtime's — before a task is declared.
@@ -409,7 +410,7 @@ request fails with "invalid agent task request".
 | `task.context` | 0..64 strings, each at most 16 KiB. |
 | `task.instructions` | 1..64 strings, each at most 16 KiB. |
 | `contextMode` | `"fresh"` only. |
-| `model` | Optional `{ provider, id, thinking }`; `thinking` is `off | minimal | low | medium | high | xhigh`. |
+| `model` | Optional `{ provider, id, thinking }` (`thinking` is `off | minimal | low | medium | high | xhigh`), or the literal `"inherit"` — the host session's own model and thinking level. `"inherit"` may be written wherever a model may, and `workflow_validate` accepts it. The runtime resolves it ONCE at run start from the host's session-model provider, records the exact answer on the run as `WorkflowRunRecord.sessionModel`, and the materializer substitutes that value BEFORE hashing, so the persisted request, task identity and pi-subagent all see an exact model and never the literal. A definition that writes it declares `meta.needs.sessionModel: true`, so a host with no session model is refused at start (`"<name> inherits the session model, and this host has none."`) rather than on the first task; without that declaration the declaration fails materialization by name. A run never mixes models, a replay re-declares the identical identity, and a nested run inherits its parent's resolved value. |
 | `modelRole` | Optional `{ persona, tier?, effort?, family? }` — ask the host's router instead of naming a model. Mutually exclusive with `model` ("agent task declares both model and modelRole; they are mutually exclusive"). `tier` is `light \| standard \| heavy`, `effort` the thinking ladder plus `max` (mapped to `xhigh`), `family` is `same \| other`. Resolved to an exact `{ provider, id, thinking }` BEFORE hashing, so a role that resolves to the model a hand-written task named has the identical task identity; the resolution is persisted with the task and re-used on every replay. With no router installed: "No model routing is installed; declare an exact model." |
 | `tools` | 0..64 unique resource names, brokered by pi-subagent. |
 | `preloadSkills` | 0..64 unique skill names. |
@@ -798,7 +799,7 @@ such a follow-on task optional and a lost lens degrades the run
 
 ## Patterns
 
-Five shapes — a gate, an effort envelope, a fan-out, a review fan-out, a
+Five shapes — a gate, a stage envelope, a fan-out, a review fan-out, a
 bounded loop — cover nearly every definition in this package, and a sixth
 entry below is the vocabulary a review reports in. Each is first a rule about
 keys, barriers, and budgets, and only then a function.
@@ -812,8 +813,8 @@ component that cannot express your graph is never a reason to bend the graph
 
 ```ts
 import {
-	DIVERSE_MODEL_ID, envelope, forEach, gate, gateTimeoutMs,
-	mergeReviewReports, MODEL_PROVIDER, reviewFanOut, verifyAndFix,
+	DIVERSE_MODEL_ID, envelope, forEach, gate, GATE_TIMEOUT_MS,
+	mergeReviewReports, MODEL_PROVIDER, reviewFanOut, tierModel, verifyAndFix,
 	workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 ```
@@ -831,7 +832,7 @@ point on every drive ([Barriers and replay](#barriers-and-replay)).
 | --- | --- | --- | --- |
 | 1 | A key is a pure function of (namespace, declaration ordinal, a caller-supplied stable id). Never a clock, a random value, a counter over runtime data, a hash of prose, or an index into data that post-dates a barrier. | Task identity is derived from run id, namespace, and key. A key that moves re-declares a task the journal already holds: "task declaration does not match the persisted ordered prefix". | Half. `forEach` calls `idOf` twice per item and refuses a second, different answer; that the id reads a **required** input field is stated law, not a check. |
 | 2 | Data a pattern fans out over originates in `ctx.input` or in a value a barrier has already returned. | An array built from anything else is a different array next drive, and the fan-out declares different keys. | No. A component receives an array, not its provenance. Exact-prefix replay is what catches it, loudly, at resume. |
-| 3 | Effort, model, limits, and budget shares are table lookups keyed by `ctx.input` and, inside a bounded loop, the round ordinal. | Everything declared before a barrier must be deterministic, and a model or limit chosen from a measurement changes the request on replay. | By construction. `envelope(effort, stage)` takes no `ctx` and can read nothing else. |
+| 3 | Limits and budget shares are table lookups keyed by the stage; a model is an exact one the definition pinned, or `"inherit"`, which resolves from a frozen run-record field. | Everything declared before a barrier must be deterministic, and a model or limit chosen from a measurement changes the request on replay. | By construction. `envelope(stage)` takes no `ctx` and can read nothing else, and `"inherit"` reads the record rather than the host. |
 
 A component refuses at **declaration** time, throwing `WorkflowComponentError`
 while the source builds its requests — before the materializer sees anything,
@@ -850,7 +851,7 @@ work mid-run ([Budgets and admission](#budgets-and-admission)).
 | Intent | Park the run for exactly one human decision, and carry the answer forward. |
 | Lowers to | one `ctx.checkpoint(key, …)`, then `await ctx.result(handle)`. |
 | Keying | the caller's literal `key`; nothing is derived. A gate inside a `fanOut` or `pipeline` namespace is namespaced by the materializer exactly as a hand-written checkpoint is. |
-| Replay laws | Law 3: pick `timeoutMs` from a table (`gateTimeoutMs(effort)`), never from a clock. The prompt and schema are declared before the barrier, so build them from `ctx.input` or an earlier barrier's value. |
+| Replay laws | Law 3: pick `timeoutMs` from a constant (`GATE_TIMEOUT_MS`), never from a clock. The prompt and schema are declared before the barrier, so build them from `ctx.input` or an earlier barrier's value. |
 | Refuses | a `key` that is not `^[a-z][a-z0-9-]*$`, 1..128; a `prompt` that is not a question ending in `?`; a `schema` that is not an object, or is not flat enough for the session to ask field by field (nested, empty, or over `MAX_CHECKPOINT_FLAT_PROPERTIES` = 8 leaves), so no gate silently degrades to a raw JSON editor; an input that is a task handle rather than `handle.output` or `handle.handoff`; `headless: "use-explicit-default"` with no `default`. |
 | Budget | none. A checkpoint reserves nothing against `meta.budget`; it spends the run's `timeoutMs` instead. |
 | Hand-write when | the answer shape is genuinely deep and the JSON editor is the intended surface, or the prompt is not a question. |
@@ -871,53 +872,61 @@ const approve = gate(ctx, "approve-draft", {
 	prompt: "Approve this draft before the writer runs?",
 	schema: DecisionSchema,
 	inputs: { plan: refine.output },
-	timeoutMs: gateTimeoutMs(ctx.input.effort),
+	timeoutMs: GATE_TIMEOUT_MS,
 });
 const decision = await ctx.result(approve);
 ```
 
-### An envelope: effort as one table
+### An envelope: one row per stage, and a model per role
 
 | | |
 | --- | --- |
-| Intent | One dial on the workflow input decides every model, thinking level, limit, and reservation in the graph. |
-| Lowers to | nothing on its own. `envelope(effort, stage).model` and `.limits` go on an agent request verbatim; `.budgetShare` is that task's reservation, and `workflowBudgetFor(shares)` is the `meta.budget` the graph needs. |
-| Keying | not a keyed declaration. The table is keyed by `(effort, stage)` — `cheap \| standard \| deep` against `refine`, `implement`, `verify`, `fix`, `review`, `synthesis`, `record`. |
+| Intent | Every limit and reservation in the graph comes from one constant table, and each ROLE says what model it runs at. |
+| Lowers to | nothing on its own. `envelope(stage).limits` goes on an agent request verbatim; `.budgetShare` is that task's reservation, and `workflowBudgetFor(shares)` is the `meta.budget` the graph needs. |
+| Keying | not a keyed declaration. The table is keyed by `stage` alone — `refine`, `implement`, `verify`, `fix`, `review`, `synthesis`, `record`. **There is no effort dial:** `cheap \| standard \| deep` is gone, and these rows are what its `standard` column measured. |
 | Replay laws | Law 3, in pure form: `envelope` takes no `ctx` and cannot read one, so a re-execution declares identical requests. |
-| Refuses | an unknown effort or stage. |
-| Budget | `meta.budget` is static, so declare it at module scope as the worst case the input schema admits — the `deep` column over the largest fan-out — and let each task reserve its own row. |
-| Hand-write when | one stage genuinely needs a model the table does not have. Pin `model` on that request; keep every other stage on the table. |
+| Refuses | an unknown stage. |
+| Budget | `meta.budget` is static, so declare it at module scope as the worst case the input schema admits — the table over the largest fan-out — and let each task reserve its own row. |
+| Hand-write when | never for limits. For a MODEL, say so per role: pin an exact one, write `"inherit"`, or take a review's tier through `tierModel(tier, diverse?)`. |
 
 ```ts
-// Hand-written: a literal per task, repeated per effort branch
+// Hand-written: a literal per task
 const reviewer = ctx.agent("review", {
 	agent: "reviewer", contextMode: "fresh",
 	model: { provider: "github-copilot", id: "gpt-5.6-sol", thinking: "high" },
 	limits: {
-		cumulativeRuntimeMs: 1_200_000, attemptTimeoutMs: 1_200_000,
-		totalTokens: 2_000_000, cost: 5, outputBytes: 65_536,
+		cumulativeRuntimeMs: 900_000, attemptTimeoutMs: 900_000,
+		totalTokens: 1_000_000, cost: 3, outputBytes: 65_536,
 		workspaceWriteBytes: 0, retries: 1, resumes: 1,
 	},
 	/* task, tools, preloadSkills, contextScopes, workspace, outputSchema */
 });
 
-// With the component
-const shape = envelope(ctx.input.effort, "review");
+// With the component: limits from the table, the model from the role
+const shape = envelope("review");
 const reviewer = ctx.agent("review", {
 	agent: "reviewer", contextMode: "fresh",
-	model: shape.model,
+	model: tierModel("heavy"),      // a review runs at its TIER
 	limits: shape.limits,
 	/* task, tools, preloadSkills, contextScopes, workspace, outputSchema */
 });
+const implementer = ctx.agent("implement", {
+	agent: "implementer", contextMode: "fresh",
+	model: "inherit",               // the work runs at the SESSION's model
+	limits: envelope("implement").limits,
+	/* … */
+});
 // at module scope, where meta.budget is declared:
-const BUDGET = workflowBudgetFor([envelope("deep", "review").budgetShare]);
+const BUDGET = workflowBudgetFor([envelope("review").budgetShare]);
 ```
 
-`MODEL_PROVIDER`, `MODEL_ID`, and `DIVERSE_MODEL_ID` are a stand-in for host
-routing and carry a `DELETE WHEN ROUTING LANDS` marker. When `modelRole` is
-installed ([Agent requests](#agent-requests)), the table emits a role and the
-thinking column becomes a tier; its shape — one row per `(effort, stage)` —
-does not change.
+A definition that writes `"inherit"` anywhere declares
+`meta.needs.sessionModel: true` — see `model` under
+[Agent requests](#agent-requests) for what the run then records and what it
+refuses. `MODEL_PROVIDER`, `MODEL_ID`, `DIVERSE_MODEL_ID` and `tierModel` are a
+stand-in for host routing and carry a `DELETE WHEN ROUTING LANDS` marker. When
+`modelRole` is installed, `tierModel` becomes a role; the table's shape — one row
+per stage — does not change.
 
 ### Fan-out over a stable id
 
@@ -953,9 +962,9 @@ const work = forEach(ctx, "implement", ctx.input.plan.deliverables, {
 | Intent | Several read-only reviewers over one subject at once, merged on a deterministic rail, with an honest coverage row per lens. |
 | Lowers to | `ctx.fanOut(ns, lenses, …)` with `disposition: "optional"`, one `await ctx.settled(reviewers)`, and one `ctx.fanIn` into `<ns>-synthesis`, declared only when a synthesis is asked for **and** at least one lens reported. |
 | Keying | `key = lens.id`. A repeated id takes `-2`, `-3`, … **by declaration ordinal**, never by a counter over runtime data, so reordering distinct lenses moves tasks without renaming any. A suffix that collides with an id the caller also declared is refused, not resolved. |
-| Replay laws | Law 1 by ordinal; law 2 — the lens list comes from `ctx.input`; law 3 — the reviewer's tier is carried to the caller's `envelope` lookup, and the component never picks a model from a tier itself. |
+| Replay laws | Law 1 by ordinal; law 2 — the lens list comes from `ctx.input`; law 3 — the reviewer's tier is carried to the caller's `tierModel` lookup, and the component never picks a model from a tier itself. |
 | Refuses | more than 16 lenses; an invalid or colliding lens id; a lens that is not `workspace: { mode: "read-only", cwd }`; a lens input the subject already provides; a `diverse` lens with neither a pinned `model` nor a configured `diversity` seam (it never reviews with the same model twice and calls that diverse); `synthesis: "required"` with no reporting lens; a synthesis that declares its own `inputs`. |
-| Budget | the caller's, through `envelope(effort, "review")` per lens plus `envelope(effort, "synthesis")`. Size `meta.budget` for the largest lens list the input schema admits. |
+| Budget | the caller's, through `envelope("review")` per lens plus `envelope("synthesis")`. Size `meta.budget` for the largest lens list the input schema admits. |
 | Hand-write when | the lenses are not peers — a two-stage review where the second reads the first — or a lens must be `required`. |
 
 The optional-reviewer rule this pattern exists to encode: reviewers are
@@ -983,8 +992,8 @@ const merged = mergeReviewReports(/* … */);
 // With the component
 const review = await reviewFanOut(ctx, "review", ctx.input.lenses, {
 	subject: { title, inputs: { patch: implement.handoff } },
-	review: (lens) => reviewRequest(lens, envelope(effort, "review")),
-	diversity: { model: { provider: MODEL_PROVIDER, id: DIVERSE_MODEL_ID, thinking: "high" } },
+	review: (lens) => reviewRequest(lens, envelope("review")),
+	diversity: { model: { provider: MODEL_PROVIDER, id: DIVERSE_MODEL_ID, thinking: "medium" } },
 	synthesis: "optional",
 	synthesize: (brief) => synthesisRequest(brief),
 });
@@ -1018,9 +1027,9 @@ writes an essay into `what`.
 | Intent | Run the repository's own check against a worktree patch, hand a failing check back to a fixer, and stop at a cap — with the last word always a check nobody skipped. |
 | Lowers to | per round: one `ctx.agent` verifier, one `await ctx.result` barrier, then one `ctx.agent` fixer in a worktree with `handoff: "required"`. No generic `loopUntil` — that component stays deferred. |
 | Keying | `<key>-verify-<n>` and `<key>-fix-<n>`, `n` from 1: a pure function of the caller's key and the round ordinal, and of nothing else. The keys are flat because no `ctx` member opens a namespace that admits a barrier between its members. |
-| Replay laws | Law 3 with the round ordinal: every model and limit comes from `envelope(effort, "verify" \| "fix")` and from the escalation rung, never from the barrier value the loop just read. |
-| Refuses | `maxRounds` outside 0..3; a missing or blank `check.command`; an `implementation` that is not a worktree handle (a read-only task produces no handoff); `escalate: "thinking"` at `deep`, where the ladder ends; a fixer that is not a worktree task; a request that declares `model`, `limits`, `outputSchema`, or the fixer's `handoff` — all component-owned; an input name the loop already wires; a worst case that does not fit `budget`. |
-| Budget | `projectVerifyAndFixBudget(effort, escalate, maxRounds)` — every verifier plus every fixer the cap allows, at the escalated rung. |
+| Replay laws | Law 3 with the round ordinal: every limit comes from `envelope("verify" \| "fix")` and the model is the caller's one `model` option, never the barrier value the loop just read. |
+| Refuses | `maxRounds` outside 0..3; a missing or blank `check.command`; an `implementation` that is not a worktree handle (a read-only task produces no handoff); a `model` that is neither an exact `{provider, id, thinking}` nor `"inherit"`; a fixer that is not a worktree task; a request that declares `model`, `limits`, `outputSchema`, or the fixer's `handoff` — all component-owned; an input name the loop already wires; a worst case that does not fit `budget`. |
+| Budget | `projectVerifyAndFixBudget(maxRounds)` — every verifier plus every fixer the cap allows. |
 | Hand-write when | the loop is not verify-then-fix: a research loop, a negotiation, anything whose next round is a different kind of task. Keep the cap and the per-round keys. |
 
 `maxRounds` bounds the **verify** rounds, so at most `maxRounds - 1` fixers
@@ -1057,16 +1066,16 @@ let patch = implement;
 for (let round = 1; round <= maxRounds; round += 1) {
 	const verifier = ctx.agent(`check-verify-${round}` as TaskKey, {
 		...verifyRequest(round), outputSchema: CheckReportSchema,
-		model: envelope(effort, "verify").model,
-		limits: envelope(effort, "verify").limits,
+		model: "inherit",
+		limits: envelope("verify").limits,
 		inputs: { patch: patch.handoff },
 	});
 	const report = await ctx.result(verifier); // the barrier
 	if (!report.checkRan || report.checkPassed || round === maxRounds) break;
 	patch = ctx.agent(`check-fix-${round}` as TaskKey, {
 		...fixRequest(round), handoff: "required",
-		model: envelope(effort, "fix").model,
-		limits: envelope(effort, "fix").limits,
+		model: "inherit",
+		limits: envelope("fix").limits,
 		inputs: { patch: patch.handoff, check: verifier.output },
 	}) as WorktreeTaskHandle<unknown>;
 }
@@ -1075,9 +1084,8 @@ for (let round = 1; round <= maxRounds; round += 1) {
 const loop = await verifyAndFix(ctx, "check", {
 	implementation: implement,
 	check: { command: "npm run check", install: "npm ci" },
-	effort: ctx.input.effort,
+	model: "inherit",        // one model for every verifier and every fixer
 	maxRounds: 2,            // verify rounds, 0..3; one fix round follows
-	escalate: "thinking",    // a fixer runs one rung up the ladder
 	verify: (round, previous) => verifyRequest(round, previous),
 	agent: (round, previous) => fixRequest(round, previous),
 	budget: BUDGET,
@@ -1100,9 +1108,9 @@ caller's prose is what tells the fixer to apply it
 | Intent | Turn a review fan-out's findings into ONE de-duplicated, machine-readable list, hand it to the implementer that wrote the code, and let a person read both the list and the answer to it — without re-running the reviewers. |
 | Lowers to | `ctx.fanIn(<key>, reportingReviewers, …)` for the synthesis (`optional`), one `await ctx.settled`, then at most one `ctx.agent` fixer in a worktree with `handoff: "required"`. |
 | Keying | both keys are the caller's literal, one per subject: `synthesis-<subject>` and `fix-<subject>`. The synthesis's inputs are named by lens key. |
-| Replay laws | law 2: the findings the fixer is declared on come from a value a barrier already returned, which is what makes "declare a fixer only when something is worth fixing" legal. Law 3: `envelope(effort, "synthesis" \| "fix")`. |
+| Replay laws | law 2: the findings the fixer is declared on come from a value a barrier already returned, which is what makes "declare a fixer only when something is worth fixing" legal. Law 3: `envelope("synthesis" \| "fix")` for the limits, and a model the caller names. |
 | Refuses | a `synthesize` or `agent` that is missing or returns a non-declaration; a declaration naming `outputSchema`, `model`, `limits`, the fixer's `handoff`, or an input the component wires; a fixer that is not a worktree task; a negative `remainingRounds`; a budget the run cannot admit. |
-| Budget | one `envelope(effort, "synthesis")` share plus, at most, one `envelope(effort, "fix")` share — and the fix share comes out of the SAME pool `verifyAndFix` spends from, so a subject that bounds its fix rounds declares no extra budget for it. |
+| Budget | one `envelope("synthesis")` share plus, at most, one `envelope("fix")` share — and the fix share comes out of the SAME pool `verifyAndFix` spends from, so a subject that bounds its fix rounds declares no extra budget for it. |
 | Hand-write when | the findings go to a person and nobody fixes them: then `reviewFanOut`'s own prose synthesis is the right shape and this pair is two tasks you do not need. |
 
 `reviewFanOut`'s own synthesis returns PROSE, because it explains a verdict a
@@ -1131,7 +1139,7 @@ const fanOut = await reviewFanOut(ctx, "review-d0" as TaskKey, lenses, {
 	subject, review, synthesis: "none",            // no prose reducer
 });
 const reducer = synthesizeFindings(ctx, "synthesis-d0" as TaskKey, {
-	reviews: fanOut.reviews, effort, budget: BUDGET,
+	reviews: fanOut.reviews, model: tierModel("standard"), budget: BUDGET,
 	synthesize: (brief) => normalizeRequest(brief),
 });
 if (reducer) {
@@ -1139,7 +1147,7 @@ if (reducer) {
 	if (settled?.status === "fulfilled") {
 		const attempt = fixFindings(ctx, "fix-d0" as TaskKey, {
 			implementation: loop.handoff, findings: settled.value.findings,
-			synthesis: reducer.output, effort, remainingRounds, budget: BUDGET,
+			synthesis: reducer.output, model: "inherit", remainingRounds, budget: BUDGET,
 			agent: (actionable) => fixRequest(actionable),
 		});
 		if (!attempt.fix) ctx.log(`no fixer: ${attempt.skipped}`);
@@ -1154,8 +1162,8 @@ without project trust. They are the worked examples of the patterns above.
 
 | Ref | In | Out | Parks for a human? |
 | --- | --- | --- | --- |
-| `plan-to-ship` | `{plan, planDigest, effort}` — a pi-maestro plan by value with its sha256 digest and the effort dial | `{approved, shipped, deliverables[], reviews[], receipt}`; the receipt names each durable handoff ref and the approved plan digest | Yes: the `ship` gate, `headless: "block"` |
-| `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` — one `worktree-handoff`, `tree`, or `document` subject | `{verdict, findings (≤64), coverage[], synthesis?}` | No gate, no worktree, no handoff |
+| `plan-to-ship` | `{plan, planDigest}` — a pi-maestro plan by value with its sha256 digest, and nothing else | `{approved, shipped, deliverables[], reviews[], findings[], shipSummary?, receipt}`; the receipt names each durable handoff ref and the approved plan digest | Yes: the `ship` gate, `headless: "block"` — unless `policy.gates` is `none`, which declares no gate and leaves `shipSummary` for the host to render before it publishes |
+| `deep-review` | `{subject, lenses?, synthesis?, maxFindings?}` — one `worktree-handoff`, `tree`, or `document` subject | `{verdict, findings (≤64), coverage[], synthesis?}` | No gate, no worktree, no handoff |
 | `deep-research` | `{question, depth, sources?}` — one question, the depth dial doubling as the thread count, and up to 16 `path`/`url`/`note` sources | `{answer, claims[], crossChecks[], coverage[]}`; a coverage row per thread says which one did not report | No gate, no worktree, no handoff — structurally headless, which is a property of the graph and not a licence to start it without a model turn |
 
 `plan-to-ship` never pushes, merges, or applies anything; it records a
