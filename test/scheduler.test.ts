@@ -142,8 +142,12 @@ function launchPlan(
 		task: structuredClone(requestValue.task),
 		contextMode: requestValue.contextMode,
 		model:
-			requestValue.model ??
-			({ provider: "test", id: "model", thinking: "low" } as const),
+			requestValue.model === "inherit"
+				? ({ provider: "test", id: "inherited", thinking: "low" } as const)
+				: (requestValue.model ??
+					({ provider: "test", id: "model", thinking: "low" } as const)),
+		// Revision 9: where the launch's model came from.
+		modelSource: requestValue.model === undefined ? "template" : "request",
 		cwd: "/workspace" as const,
 		tools: [...requestValue.tools],
 		preloadSkills: [...requestValue.preloadSkills],
@@ -3620,7 +3624,7 @@ describe("worktree handoff settlement", () => {
 	): WorktreeRecord {
 		return {
 			schema: "pi-subagent-worktree",
-			contractRevision: 8,
+			contractRevision: 9,
 			runId: "run_scheduler",
 			attemptId,
 			repositoryRoot: "/private/repo",

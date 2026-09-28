@@ -69,6 +69,12 @@ import {
 	type ModelRoleRequest,
 	type ModelRoutingPort,
 } from "./runtime/model-routing.js";
+import {
+	isInheritModel,
+	MODEL_INHERIT_UNAVAILABLE_MESSAGE,
+	type ModelAuthoringRequest,
+	type SessionModel,
+} from "./session-model.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -197,6 +203,15 @@ export interface WorkflowTaskMaterializerOptions {
 	 * {@link MODEL_ROUTING_MISSING_MESSAGE} — the runtime never guesses a model.
 	 */
 	readonly modelRouting?: ModelRoutingPort;
+	/**
+	 * The session model this run resolved at start, from
+	 * `WorkflowRunRecord.sessionModel`. It is what `model: "inherit"` becomes,
+	 * and it is read from the RECORD rather than from the host, so every replay
+	 * of the run substitutes the identical exact model. Absent means the run
+	 * resolved none, and an `inherit` declaration then fails with
+	 * {@link MODEL_INHERIT_UNAVAILABLE_MESSAGE}.
+	 */
+	readonly sessionModel?: SessionModel;
 }
 
 export interface NestedWorkflowDeclaration {
@@ -250,6 +265,7 @@ export class WorkflowTaskMaterializer {
 	private readonly namespace: readonly TaskKey[];
 	private readonly runId: WorkflowRunId;
 	private readonly modelRouting?: ModelRoutingPort;
+	private readonly sessionModel?: SessionModel;
 	/**
 	 * Every persisted agent task's resolved model, by namespaced key: the
 	 * routing evidence a replay re-uses instead of re-resolving. Covers
@@ -282,6 +298,9 @@ export class WorkflowTaskMaterializer {
 		this.namespace = Object.freeze([...(options.namespace ?? [])]);
 		if (options.modelRouting !== undefined) {
 			this.modelRouting = options.modelRouting;
+		}
+		if (options.sessionModel !== undefined) {
+			this.sessionModel = options.sessionModel;
 		}
 		if (
 			!this.definitionIdentitySha256.match(/^[a-f0-9]{64}$/) ||
@@ -547,26 +566,42 @@ export class WorkflowTaskMaterializer {
 	/**
 	 * The exact model an agent declaration carries into its identity hash.
 	 *
-	 * `model` and `modelRole` are mutually exclusive, and a `modelRole` is
-	 * resolved HERE — before the request is assembled, validated or hashed — so
-	 * the materialized `AgentTaskRequestSchema` never learns that routing exists
-	 * and a role that resolves to the model a hand-written task named produces
-	 * the identical task identity.
+	 * Two ways of asking for a model without naming one meet here, and BOTH are
+	 * resolved before the request is assembled, validated or hashed — so the
+	 * materialized `AgentTaskRequestSchema` never learns either exists, and a
+	 * declaration that resolves to the model a hand-written task named produces
+	 * the identical task identity:
 	 *
-	 * Resolution is host-dependent, so replay does not re-resolve: the model the
-	 * first materialization persisted is re-used verbatim and only
-	 * re-authorized. A model that has become unauthorized fails by name here,
-	 * rather than rerouting into an identity the persisted path cannot match.
+	 * - `model: "inherit"` becomes the run's own `sessionModel`, resolved once at
+	 *   run start and frozen on the run record. Nothing host-dependent is read
+	 *   here, so a replay substitutes the identical value and a run never mixes
+	 *   models. A run that resolved none fails by name.
+	 * - `modelRole` resolves through the host's router. That IS host-dependent,
+	 *   so replay does not re-resolve: the model the first materialization
+	 *   persisted is re-used verbatim and only re-authorized. A model that has
+	 *   become unauthorized fails by name here, rather than rerouting into an
+	 *   identity the persisted path cannot match.
+	 *
+	 * `model` and `modelRole` are mutually exclusive, whichever form the `model`
+	 * took.
 	 */
 	private resolveAgentModel(
 		namespace: readonly TaskKey[],
 		key: TaskKey,
 		request: {
-			readonly model?: AgentTaskRequest["model"];
+			readonly model?: ModelAuthoringRequest;
 			readonly modelRole?: ModelRoleRequest;
 		},
 	): AgentTaskRequest["model"] {
-		if (request.modelRole === undefined) return request.model;
+		if (request.modelRole === undefined) {
+			if (!isInheritModel(request.model)) return request.model;
+			if (this.sessionModel === undefined) {
+				throw new WorkflowMaterializationError(
+					MODEL_INHERIT_UNAVAILABLE_MESSAGE,
+				);
+			}
+			return Object.freeze({ ...this.sessionModel });
+		}
 		if (request.model !== undefined) {
 			throw new WorkflowMaterializationError(MODEL_ROLE_EXCLUSIVE_MESSAGE);
 		}

@@ -226,6 +226,11 @@ import {
 	WorkflowWaitOptionsSchema,
 } from "./service-views.js";
 import {
+	type SessionModel,
+	type SessionModelProvider,
+	sessionModelRefusalMessage,
+} from "./session-model.js";
+import {
 	createStaticWorkflowRuntime,
 	isStaticWorkflowParked,
 	type StaticWorkflowParkedResult,
@@ -266,6 +271,8 @@ export type WorkflowDefinitionSummary = {
 	 */
 	readonly needs: {
 		readonly workspace: WorkflowNeeds["workspace"];
+		/** True when some role inherits the host's session model. */
+		readonly sessionModel: boolean;
 		readonly declared: boolean;
 	};
 };
@@ -621,6 +628,16 @@ export interface WorkflowServiceOptions {
 	 * installs nothing and every run is unbounded, exactly as before.
 	 */
 	readonly delegationCeiling?: () => DelegationCeiling | undefined;
+	/**
+	 * The host's session-model provider, read once per run start for a definition
+	 * whose `needs.sessionModel` is true. The shipped extension installs
+	 * `() => resolveSessionModel(pi.events)` from
+	 * `@vegardx/pi-subagent/session-model-provider`; an embedder with no session
+	 * of its own installs nothing, and a definition that inherits is then refused
+	 * at start ({@link sessionModelRefusalMessage}) rather than run against a
+	 * model nobody chose.
+	 */
+	readonly sessionModel?: SessionModelProvider;
 	/**
 	 * Checkpoint policy: with `headless`, `use-explicit-default` checkpoints
 	 * are decided from their default immediately and never park; `block`
@@ -1152,6 +1169,35 @@ export async function createWorkflowService(
 		return Object.freeze(structuredClone(ceiling));
 	}
 
+	/**
+	 * The session model this run inherits, or `undefined` when it inherits none.
+	 *
+	 * Read ONCE, here, at the start: the answer a host would give later is a
+	 * different answer, and a run whose model moved under it would be a run whose
+	 * journal cannot say which model made its work. A definition that declares
+	 * `needs.sessionModel` on a host that has none is refused BEFORE anything
+	 * durable exists, by name.
+	 */
+	function assertSessionModel(
+		workflow: DiscoveredWorkflow,
+	): SessionModel | undefined {
+		if (!resolveWorkflowNeeds(workflow.definition.meta).sessionModel) {
+			return undefined;
+		}
+		const resolved = options.sessionModel?.();
+		if (resolved === undefined) {
+			throw new WorkflowServiceError(
+				"validation",
+				sessionModelRefusalMessage(workflow.definition.meta.name),
+			);
+		}
+		return Object.freeze({
+			provider: resolved.provider,
+			id: resolved.id,
+			thinking: resolved.thinking,
+		});
+	}
+
 	/** D10: dynamic source is untrusted orchestration input in a trusted process. */
 	function assertDynamicTrusted(): void {
 		if (!options.projectTrusted()) {
@@ -1527,6 +1573,12 @@ export async function createWorkflowService(
 				...(options.modelRouting === undefined
 					? {}
 					: { modelRouting: options.modelRouting }),
+				// From the RECORD, not from the host: a resume of a run that
+				// inherited a model still declares that model, whatever the host's
+				// session is using now.
+				...(record.sessionModel === undefined
+					? {}
+					: { sessionModel: record.sessionModel }),
 				nesting: {
 					depth: nesting.depth,
 					ancestorDefinitionIdentities: nesting.ancestorDefinitionIdentities,
@@ -2148,7 +2200,9 @@ export async function createWorkflowService(
 			// The parent's own record is the only source for the child's bound: the
 			// parent is owned while it launches a child, so this is always present
 			// when the parent has one.
-			const parentCeiling = owned.get(request.parent.runId)?.record.ceiling;
+			const parent = owned.get(request.parent.runId)?.record;
+			const parentCeiling = parent?.ceiling;
+			const parentSessionModel = parent?.sessionModel;
 			const binding = await options.subagents.bind(request.childRunId);
 			let lease: WorkflowRunLease;
 			try {
@@ -2246,6 +2300,11 @@ export async function createWorkflowService(
 					// would be a hole in it; the parent's record is the source, because
 					// the host's answer now is a different answer.
 					...(parentCeiling === undefined ? {} : { ceiling: parentCeiling }),
+					// A nested run inherits its parent's RESOLVED model, never the
+					// host's answer of the moment: one run, one model, however deep.
+					...(parentSessionModel === undefined
+						? {}
+						: { sessionModel: parentSessionModel }),
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);
 				const run = await compose(record, workflow, lease, binding, discovered);
@@ -2488,6 +2547,9 @@ export async function createWorkflowService(
 				// bound costs a refusal here rather than a journal, a lease and a
 				// first task that pi-subagent's preflight refuses minutes later.
 				const ceiling = assertCeiling(workflow, runOptions?.ceiling);
+				// Also before the run exists, and for the same reason: a definition
+				// that inherits the session model cannot run on a host that has none.
+				const sessionModel = assertSessionModel(workflow);
 				const id = runId();
 				const binding = await options.subagents.bind(id);
 				const lease = await acquireWorkflowRunLease({
@@ -2550,6 +2612,9 @@ export async function createWorkflowService(
 						// Recorded at creation and never changed: a run keeps the
 						// ceiling it started with.
 						...(ceiling === undefined ? {} : { ceiling }),
+						// The same: resolved once, so every task that inherits carries
+						// this exact model and the journal says which one built the work.
+						...(sessionModel === undefined ? {} : { sessionModel }),
 					};
 					await WorkflowRunRecordStore.open(journal).create(record);
 					const run = await compose(

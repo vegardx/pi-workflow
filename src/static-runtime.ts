@@ -77,6 +77,7 @@ import {
 	type WorkflowSchedulerOutcome,
 	type WorkflowSequentialScheduler,
 } from "./scheduler.js";
+import type { SessionModel } from "./session-model.js";
 
 const addFormats = (addFormatsModule.default ??
 	addFormatsModule) as unknown as FormatsPlugin;
@@ -280,6 +281,13 @@ export interface StaticWorkflowRuntimeOptions<TInput, TOutput> {
 	 * resolving to a guess.
 	 */
 	readonly modelRouting?: ModelRoutingPort;
+	/**
+	 * The session model this run resolved at start, from the run record. It is
+	 * what every `model: "inherit"` declaration becomes. Absent means the run
+	 * resolved none, and such a declaration fails materialization rather than
+	 * falling back to a model nobody chose.
+	 */
+	readonly sessionModel?: SessionModel;
 	readonly nesting?: {
 		readonly depth: number;
 		readonly ancestorDefinitionIdentities: readonly string[];
@@ -1107,6 +1115,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 			...(options.modelRouting === undefined
 				? {}
 				: { modelRouting: options.modelRouting }),
+			...(options.sessionModel === undefined
+				? {}
+				: { sessionModel: options.sessionModel }),
 		});
 		const handles = new Map<WorkflowTaskId, TaskHandle<unknown>>();
 		// Only on-path effects replay; abandoned effects remain history but

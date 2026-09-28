@@ -383,6 +383,16 @@ export {
 	WorkflowWaitOptionsSchema,
 } from "./service-views.js";
 export {
+	INHERIT_MODEL,
+	type InheritModel,
+	isInheritModel,
+	MODEL_INHERIT_UNAVAILABLE_MESSAGE,
+	type ModelAuthoringRequest,
+	type SessionModel,
+	type SessionModelProvider,
+	sessionModelRefusalMessage,
+} from "./session-model.js";
+export {
 	createWorkflowSubagentProvider,
 	type WorkflowSubagentBinding,
 	type WorkflowSubagentProvider,

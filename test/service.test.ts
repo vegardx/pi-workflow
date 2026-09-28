@@ -156,6 +156,8 @@ function taskProvider() {
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
 			model: { provider: "test", id: "model", thinking: "low" as const },
+			// Revision 9: where the launch's model came from.
+			modelSource: "request" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -584,7 +586,7 @@ describe("workflow service", () => {
 		const input = { value: "resumed" };
 		await WorkflowRunRecordStore.open(journal).create({
 			schema: "pi-workflow-run",
-			contractRevision: 21,
+			contractRevision: 22,
 			runId,
 			depth: 0,
 			definitionName: "pending",
@@ -1621,7 +1623,7 @@ function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
 function worktreeRecord(handoffCommit?: string): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 8,
+		contractRevision: 9,
 		runId: "run_servicechild",
 		attemptId: "attempt_servicechild",
 		repositoryRoot: "/private/repo",

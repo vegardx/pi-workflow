@@ -178,7 +178,7 @@ function childIds(nonce: string, launch: number): FakeChild {
 function worktreeRecord(child: FakeChild, captured: boolean): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 8,
+		contractRevision: 9,
 		runId: child.runId,
 		attemptId: child.attemptId,
 		repositoryRoot: PRIVATE_REPO,
@@ -294,6 +294,8 @@ function worktreeProvider(options: WorktreeProviderOptions) {
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
 			model: { provider: "test", id: "model", thinking: "low" as const },
+			// Revision 9: where the launch's model came from.
+			modelSource: "request" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],

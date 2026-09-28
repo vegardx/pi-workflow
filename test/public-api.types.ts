@@ -97,6 +97,8 @@ export type ServiceApiPins = [
 			| "modelRouting"
 			// Revision 21 (additive): the host's delegation-ceiling provider.
 			| "delegationCeiling"
+			// Revision 22 (additive): the host's session-model provider.
+			| "sessionModel"
 			| "checkpoints"
 			| "dynamic"
 		>
