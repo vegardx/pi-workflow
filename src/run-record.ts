@@ -2,7 +2,10 @@ import { constants } from "node:fs";
 import { open, rename } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { DelegationCeilingSchema } from "@vegardx/pi-subagent";
+import {
+	DelegationCeilingSchema,
+	ExactModelRequestSchema,
+} from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -124,6 +127,31 @@ export const WorkflowRunRecordSchema = Type.Object(
 		 * reader that ignored a ceiling would misread every launch the run made.
 		 */
 		ceiling: Type.Optional(DelegationCeilingSchema),
+		/**
+		 * The host session's model and thinking level this run inherited, resolved
+		 * ONCE when the record was created and never changed.
+		 *
+		 * A definition sets a model per role: an exact `{provider, id, thinking}`,
+		 * or the literal `"inherit"`. `inherit` means THIS value, and the
+		 * materializer substitutes it before hashing, so every task that inherited
+		 * carries the same exact model in its persisted request and the journal
+		 * says which model built the work. Resolving once is what makes that true:
+		 * a person who switches model mid-run does not split the run's
+		 * implementers across two of them, and a resume re-declares the identical
+		 * task identity instead of rerouting into a new one.
+		 *
+		 * Absent means the run inherited nothing — either no role asked to, or the
+		 * host has no session model and the definition did not declare
+		 * `needs.sessionModel` (a definition that declares it is refused at start
+		 * instead: "<name> inherits the session model, and this host has none.").
+		 * A nested run inherits its parent's resolved value verbatim.
+		 *
+		 * A record is `additionalProperties: false`, so this is why the revision
+		 * moves from 21 to 22 rather than being additive within it: a reader that
+		 * ignored this field would not be able to say which model made the run's
+		 * work, which is exactly what the field exists to record.
+		 */
+		sessionModel: Type.Optional(ExactModelRequestSchema),
 		createdAt: Type.String({ format: "date-time" }),
 	},
 	{ additionalProperties: false },

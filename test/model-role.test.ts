@@ -31,6 +31,7 @@ import {
 	type StaticModelRoutingTable,
 	staticModelRouting,
 } from "../src/runtime/model-routing.js";
+import { MODEL_INHERIT_UNAVAILABLE_MESSAGE } from "../src/session-model.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
 const inputSha256 = "b".repeat(64);
@@ -84,12 +85,26 @@ function materializer(
 	options: {
 		readonly modelRouting?: ModelRoutingPort;
 		readonly previousState?: ReturnType<typeof reduceWorkflowEvents>;
+		readonly sessionModel?: {
+			readonly provider: string;
+			readonly id: string;
+			readonly thinking:
+				| "off"
+				| "minimal"
+				| "low"
+				| "medium"
+				| "high"
+				| "xhigh";
+		};
 	} = {},
 ): WorkflowTaskMaterializer {
 	return new WorkflowTaskMaterializer({
 		runId,
 		definitionIdentitySha256,
 		inputSha256,
+		...(options.sessionModel === undefined
+			? {}
+			: { sessionModel: options.sessionModel }),
 		...(options.modelRouting === undefined
 			? {}
 			: { modelRouting: options.modelRouting }),
@@ -131,7 +146,7 @@ function project(
 	];
 	const records: WorkflowJournalEvent[] = all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 21,
+		contractRevision: 22,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-16T00:00:00.000Z",
@@ -151,6 +166,52 @@ function routedRun(): ReturnType<typeof reduceWorkflowEvents> {
 		commitOne(staticModelRouting(TABLE), request({ modelRole: HEAVY_ROLE })),
 	);
 }
+
+describe('model: "inherit"', () => {
+	const SESSION = {
+		provider: "anthropic",
+		id: "claude-session",
+		thinking: "high" as const,
+	};
+
+	it("becomes the run's session model before the request is hashed", () => {
+		// The literal never reaches a persisted request, so a task that inherited
+		// and a task that named the same model by hand have the ONE identity.
+		const inherited = agentSpec(commitInherited());
+		const handWritten = agentSpec(
+			commitOne(undefined, request({ model: SESSION })),
+		);
+		expect(inherited.request.model).toEqual(SESSION);
+		expect(inherited.identitySha256).toBe(handWritten.identitySha256);
+		// Resolution reads the RECORD's frozen value, so two materializations of
+		// the same run declare the identical identity however the host moved.
+		expect(agentSpec(commitInherited()).identitySha256).toBe(
+			inherited.identitySha256,
+		);
+	});
+
+	it("refuses a declaration that inherits when the run resolved none", () => {
+		expect(() =>
+			materializer().agent("work", request({ model: "inherit" })),
+		).toThrow(MODEL_INHERIT_UNAVAILABLE_MESSAGE);
+	});
+
+	it("is still mutually exclusive with modelRole", () => {
+		expect(() =>
+			materializer({
+				sessionModel: SESSION,
+				modelRouting: staticModelRouting(TABLE),
+			}).agent("both", request({ model: "inherit", modelRole: HEAVY_ROLE })),
+		).toThrow(MODEL_ROLE_EXCLUSIVE_MESSAGE);
+	});
+
+	/** One `inherit` declaration committed by a materializer that has a session. */
+	function commitInherited(): readonly WorkflowEventInput[] {
+		const runtime = materializer({ sessionModel: SESSION });
+		const handle = runtime.agent("work", request({ model: "inherit" }));
+		return runtime.closeEpoch("final", [handle]).events;
+	}
+});
 
 describe("mutual exclusion", () => {
 	it("refuses a declaration carrying both model and modelRole", () => {

@@ -1103,7 +1103,11 @@ describe("workflow tool declarations", () => {
 				source: "project",
 				path: "/workflows/x.workflow.ts",
 				identitySha256: "a".repeat(64),
-				needs: { workspace: "worktree" as const, declared: true },
+				needs: {
+					workspace: "worktree" as const,
+					sessionModel: false,
+					declared: true,
+				},
 			}));
 			// Problems are why a person reads a listing that does not fit: the
 			// definitions shrink and every problem survives the bound.

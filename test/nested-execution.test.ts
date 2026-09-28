@@ -202,6 +202,8 @@ function agentProvider() {
 				task: structuredClone(request.task),
 				contextMode: request.contextMode,
 				model: { provider: "test", id: "model", thinking: "low" as const },
+				// Revision 9: where the launch's model came from.
+				modelSource: "request" as const,
 				cwd: "/workspace" as const,
 				tools: [...request.tools],
 				preloadSkills: [...request.preloadSkills],
@@ -318,6 +320,8 @@ interface DefinitionOptions {
 	readonly concurrency?: number;
 	readonly imports?: string;
 	readonly description?: string;
+	/** `needs`, verbatim, for a definition that declares one. */
+	readonly needs?: string;
 }
 
 function definition(
@@ -327,7 +331,7 @@ function definition(
 ): string {
 	return `${options.imports ?? ""}export default {
   schema: "pi-workflow-definition",
-  meta: { name: ${JSON.stringify(name)}, description: ${JSON.stringify(options.description ?? "Nested")}, version: 1, budget: ${options.budget ?? DEFAULT_BUDGET}, timeoutMs: ${options.timeoutMs ?? 600000}, concurrency: ${options.concurrency ?? 2} },
+  meta: { name: ${JSON.stringify(name)}, description: ${JSON.stringify(options.description ?? "Nested")}, version: 1, budget: ${options.budget ?? DEFAULT_BUDGET}, timeoutMs: ${options.timeoutMs ?? 600000}, concurrency: ${options.concurrency ?? 2}${options.needs ? `, needs: ${options.needs}` : ""} },
   inputSchema: ${VALUE_SCHEMA},
   outputSchema: ${ANSWER_SCHEMA},
   run(ctx) {
@@ -435,6 +439,14 @@ const FOREIGN_HANDLE = `{ ref: { runId: "workflow_other", producerTaskId: first.
 
 const DEFINITIONS = {
 	"echo-child": definition("echo-child", ECHO_BODY),
+	// A parent that declares it inherits the host session's model, and a child
+	// it nests. The child declares nothing: a nested run takes its parent's
+	// RESOLVED model whatever it says of its own.
+	"inherit-parent": definition(
+		"inherit-parent",
+		`return ctx.workflow("child", { workflow: "echo-child", input: { value: ctx.input.value } });`,
+		{ needs: '{ workspace: "read-only", sessionModel: true }' },
+	),
 	"consumer-child": CONSUMER_CHILD,
 	"input-parent": definition("input-parent", INPUT_PARENT_BODY),
 	// The scheduler reserves the consumer child's full declared budget (cost
@@ -803,6 +815,49 @@ afterEach(() => {
 });
 
 describe("nested workflow execution", () => {
+	it("gives a nested run its parent's resolved session model", async () => {
+		// One run, one model, however deep: the child takes the value the PARENT
+		// resolved at its own start, never the host's answer of the moment, so a
+		// host that switched model mid-run cannot split a run across two.
+		const sessionModel = {
+			provider: "github-copilot",
+			id: "gpt-5.6-sol",
+			thinking: "high" as const,
+		};
+		let answers = 0;
+		const fx = await fixture("session-model", ["echo-child", "inherit-parent"]);
+		const service = await createWorkflowService({
+			...fx,
+			projectTrusted: () => true,
+			subagents: provider([], []),
+			sessionModel: () => {
+				answers += 1;
+				return sessionModel;
+			},
+		});
+		const receipt = await service.run("inherit-parent", { value: "yes" });
+		await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+			status: "completed",
+		});
+		// Read ONCE, at the parent's start: the nested launch does not ask again.
+		expect(answers).toBe(1);
+		const parent = await recordOf(fx.storeRoot, receipt.runId);
+		expect(parent.sessionModel).toEqual(sessionModel);
+		const childRunId = Object.values(await stateOf(fx.storeRoot, receipt.runId))
+			.length
+			? deriveNestedWorkflowRunId(
+					receipt.runId,
+					taskByKey(await stateOf(fx.storeRoot, receipt.runId), "child").task
+						.id,
+					1,
+				)
+			: "";
+		const child = await recordOf(fx.storeRoot, childRunId);
+		expect(child.depth).toBe(1);
+		expect(child.sessionModel).toEqual(sessionModel);
+		await service.shutdown();
+	});
+
 	it("injects a sibling child's verified output as an artifact input", async () => {
 		const calls: string[] = [];
 		const bound: string[] = [];

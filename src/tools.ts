@@ -251,6 +251,12 @@ export const WorkflowDefinitionSummarySchema = Type.Object(
 					Type.Literal("read-only"),
 					Type.Literal("worktree"),
 				]),
+				/**
+				 * True when some role of the definition declares
+				 * `model: "inherit"`, so the run needs the host's session model and a
+				 * host with none is refused at start.
+				 */
+				sessionModel: Type.Boolean(),
 				declared: Type.Boolean(),
 			},
 			{ additionalProperties: false },
@@ -336,13 +342,17 @@ function needsLine(workflow: {
 	readonly version: number;
 	readonly needs: {
 		readonly workspace: string;
+		readonly sessionModel: boolean;
 		readonly declared: boolean;
 	};
 }): string {
 	const assumed = workflow.needs.declared
 		? ""
 		: " (assumed: the definition declares no needs)";
-	return `${workflow.name} v${workflow.version}; needs a ${workflow.needs.workspace} workspace${assumed}`;
+	const inherits = workflow.needs.sessionModel
+		? " and the host's session model"
+		: "";
+	return `${workflow.name} v${workflow.version}; needs a ${workflow.needs.workspace} workspace${inherits}${assumed}`;
 }
 
 /**

@@ -983,7 +983,11 @@ describe("decideSource", () => {
 					identitySha256: view.definitionIdentitySha256,
 					// A dynamic proposal declares no `needs`, so the conservative
 					// reading applies and `declared` says it was not the source's.
-					needs: { workspace: "worktree", declared: false },
+					needs: {
+						workspace: "worktree",
+						sessionModel: false,
+						declared: false,
+					},
 				},
 			});
 		} finally {

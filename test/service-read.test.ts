@@ -311,6 +311,8 @@ function attemptProvider(outcomes: readonly ChildOutcome[]) {
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
 			model: { provider: "test", id: "model", thinking: "low" as const },
+			// Revision 9: where the launch's model came from.
+			modelSource: "request" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],

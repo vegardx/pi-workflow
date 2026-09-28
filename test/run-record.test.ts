@@ -38,7 +38,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 21 as const,
+			contractRevision: 22 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -61,11 +61,57 @@ describe("workflow run record", () => {
 		await expect(store.create(record)).rejects.toThrow("already exists");
 	});
 
+	it("records the session model a run inherited, and refuses a malformed one", async () => {
+		// Revision 22: the one place that says which model made a run's work.
+		// Optional, because a run whose roles all pin a model inherits nothing.
+		const { store } = await fixture();
+		const record = {
+			schema: "pi-workflow-run" as const,
+			contractRevision: 22 as const,
+			runId: "workflow_record" as const,
+			depth: 0,
+			definitionName: "example",
+			definitionPath: "/repo/workflows/example.workflow.ts",
+			definitionIdentitySha256: hash,
+			definitionSourceSha256: hash,
+			definitionKind: "static" as const,
+			concurrency: 4,
+			declaredBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			effectiveBudget: { cost: 1000, childRuntimeMs: 3600000 },
+			declaredTimeoutMs: 3600000,
+			effectiveTimeoutMs: 3600000,
+			deadlineAt: "2026-09-01T01:00:00.000Z",
+			cwd: "/repo",
+			input: {},
+			sessionModel: {
+				provider: "github-copilot",
+				id: "gpt-5.6-sol",
+				thinking: "high" as const,
+			},
+			createdAt: "2026-09-01T00:00:00.000Z",
+		};
+		await store.create(record);
+		const read = await store.read();
+		expect(read.sessionModel).toEqual(record.sessionModel);
+		// It is frozen with the rest of the record: a run keeps the model it
+		// started with, and nothing rewrites the file.
+		expect(Object.isFrozen(read)).toBe(true);
+		// The field is pi-subagent's own `ExactModelRequest`, so a thinking level
+		// outside its ladder is not a record at all.
+		const { store: second } = await fixture();
+		await expect(
+			second.create({
+				...record,
+				sessionModel: { ...record.sessionModel, thinking: "vast" },
+			} as unknown as typeof record),
+		).rejects.toThrow("invalid workflow run record");
+	});
+
 	it("requires lineage exactly when the run is nested", async () => {
 		const { store } = await fixture();
 		const root = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 21 as const,
+			contractRevision: 22 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -122,7 +168,7 @@ describe("workflow run record", () => {
 			}),
 		).rejects.toThrow("invalid workflow run record");
 		await expect(
-			store.create({ ...root, contractRevision: 20 as unknown as 21 }),
+			store.create({ ...root, contractRevision: 21 as unknown as 22 }),
 		).rejects.toThrow("invalid workflow run record");
 		const nested = { ...root, depth: 1, parent };
 		await store.create(nested);
@@ -140,7 +186,7 @@ describe("workflow run record", () => {
 		};
 		const nested = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 21 as const,
+			contractRevision: 22 as const,
 			runId: "workflow_record" as const,
 			depth: 1,
 			parent,
@@ -217,7 +263,7 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 21,
+				contractRevision: 22,
 				runId: "workflow_record",
 				depth: 0,
 				definitionName: "example",
@@ -242,7 +288,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const base = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 21 as const,
+			contractRevision: 22 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -335,7 +381,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const persisted = {
 			schema: "pi-workflow-run",
-			contractRevision: 21,
+			contractRevision: 22,
 			runId: "workflow_record",
 			depth: 0,
 			definitionName: "example",

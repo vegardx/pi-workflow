@@ -1,7 +1,6 @@
 import type {
 	ContextScope,
 	DelegatedTask,
-	ExactModelRequest,
 	RunLimits,
 } from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
@@ -31,6 +30,7 @@ import {
 	type WorkflowTaskStatus,
 } from "./contracts-core.js";
 import type { ModelRoleRequest } from "./runtime/model-routing.js";
+import type { ModelAuthoringRequest } from "./session-model.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -91,6 +91,24 @@ export const WorkflowNeedsSchema = Type.Object(
 			Type.Literal("read-only"),
 			Type.Literal("worktree"),
 		]),
+		/**
+		 * True when some role of this definition declares `model: "inherit"` and
+		 * the run therefore needs the host's session model.
+		 *
+		 * It is the second axis `needs` has, and it is here for the same reason as
+		 * the first: so a start can be refused BEFORE a run exists. pi-workflow
+		 * resolves `inherit` once at run start from the host's session-model
+		 * provider; a host that has none cannot run this definition at all, and
+		 * that refusal belongs at the start
+		 * ({@link sessionModelRefusalMessage}) rather than on the first task,
+		 * minutes and a journal later.
+		 *
+		 * Absent or false means no role inherits, so the host's session model is
+		 * never read. A definition that inherits without declaring it is not
+		 * silently served: the materializer refuses the declaration by name
+		 * ({@link MODEL_INHERIT_UNAVAILABLE_MESSAGE}).
+		 */
+		sessionModel: Type.Optional(Type.Boolean()),
 	},
 	{ additionalProperties: false },
 );
@@ -109,12 +127,18 @@ export function resolveWorkflowNeeds(meta: {
 	readonly needs?: WorkflowNeeds;
 }): {
 	readonly workspace: WorkflowNeeds["workspace"];
+	readonly sessionModel: boolean;
 	readonly declared: boolean;
 } {
 	return meta.needs
-		? Object.freeze({ workspace: meta.needs.workspace, declared: true })
+		? Object.freeze({
+				workspace: meta.needs.workspace,
+				sessionModel: meta.needs.sessionModel === true,
+				declared: true,
+			})
 		: Object.freeze({
 				workspace: DEFAULT_WORKFLOW_NEEDS.workspace,
+				sessionModel: false,
 				declared: false,
 			});
 }
@@ -290,7 +314,19 @@ export interface AgentTaskAuthoringRequest<
 	readonly agent: string;
 	readonly task: DelegatedTask;
 	readonly contextMode: "fresh";
-	readonly model?: ExactModelRequest;
+	/**
+	 * The model this role runs at: an exact `{provider, id, thinking}`, or the
+	 * literal `"inherit"` for the host session's own model and thinking level.
+	 *
+	 * `"inherit"` is resolved ONCE, at run start, from the run record's
+	 * `sessionModel` — not here and not per task — so a run never mixes models
+	 * and a replay re-declares the identical identity. The materializer
+	 * substitutes the exact value BEFORE hashing, so `AgentTaskRequestSchema`,
+	 * task identity and pi-subagent's contract never learn the literal exists.
+	 * A definition that writes it declares `meta.needs.sessionModel: true`; see
+	 * `src/session-model.ts`.
+	 */
+	readonly model?: ModelAuthoringRequest;
 	/**
 	 * Ask the host's router for a model instead of naming one. Mutually
 	 * exclusive with `model`: declaring both fails materialization with

@@ -91,7 +91,12 @@ function roleProvider() {
 	const models: ExactModelRequest[] = [];
 	let ownerId = "";
 	const preflight = vi.fn(async (request: SubagentRequest) => {
-		if (request.model !== undefined) models.push(request.model);
+		// pi-workflow resolves `inherit` before hashing, so a request carries an
+		// exact model; the literal never reaches a client.
+		expect(request.model).not.toBe("inherit");
+		if (request.model !== undefined && request.model !== "inherit") {
+			models.push(request.model);
+		}
 		const draft = {
 			schema: "pi-subagent-launch" as const,
 			contractRevision: SUBAGENT_RUNTIME_CONTRACT.contractRevision,
@@ -107,11 +112,16 @@ function roleProvider() {
 			agentScope: "global" as const,
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
-			model: request.model ?? {
-				provider: "test",
-				id: "model",
-				thinking: "low" as const,
-			},
+			model:
+				request.model === "inherit"
+					? { provider: "test", id: "inherited", thinking: "low" as const }
+					: (request.model ?? {
+							provider: "test",
+							id: "model",
+							thinking: "low" as const,
+						}),
+			// Revision 9: where the launch's model came from.
+			modelSource: request.model === undefined ? "template" : "request",
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],

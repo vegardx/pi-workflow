@@ -99,8 +99,12 @@ function launchPlan(
 		task: structuredClone(request.task),
 		contextMode: request.contextMode,
 		model:
-			request.model ??
-			({ provider: "test", id: "model", thinking: "low" } as const),
+			request.model === "inherit"
+				? ({ provider: "test", id: "inherited", thinking: "low" } as const)
+				: (request.model ??
+					({ provider: "test", id: "model", thinking: "low" } as const)),
+		// Revision 9: where the launch's model came from.
+		modelSource: request.model === undefined ? "template" : "request",
 		cwd: "/workspace" as const,
 		tools: [...request.tools].sort(),
 		preloadSkills: [...request.preloadSkills].sort(),
