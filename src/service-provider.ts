@@ -32,11 +32,27 @@
  * Everything in `narration` is DERIVED from durable state, so it is additive
  * and moves no contract revision.
  *
- * What crosses the seam is deliberately narrow. The client is **read,
- * validate, project, observe, and start one allowlisted builtin**: no
- * `decide`, `stop`, `invalidate`, or general `run`. Starting a workflow that
- * writes stays the model's own `workflow_run` call, in the open, in the
- * transcript (`docs/authority.md`).
+ * ## The host's decision surface
+ *
+ * A host that starts a run and narrates it also has to let a person ANSWER it:
+ * the ship decision at the end, and Retry / Stop / Re-plan when a task fails
+ * mid-run. So the client carries `decide`, `resume` and `stop` too, and
+ * `inspect`'s `"checkpoints"` section carries the gate's own input values so the
+ * host can render the summary a person decides on.
+ *
+ * The authority is unchanged and the reason is the same one that admits
+ * `startBuiltin`: **a person answers in the host's own dialog, and the model
+ * never reaches these methods.** They are the host's harness, not a tool; there
+ * is no model-callable decide, and there never will be. What the runtime records
+ * is the provenance — a decision taken here is filed with
+ * `source: "service-provider"` next to the `decidedBy` it always had, so run
+ * evidence distinguishes the host's dialog from `/workflow decide` without
+ * pretending they are different kinds of authority.
+ *
+ * What still does NOT cross the seam: `invalidate`, `retry`, `reconcile`,
+ * `propose`/`decideSource`, and a general `run`. Starting a workflow that writes
+ * stays the model's own `workflow_run` call, in the open, in the transcript
+ * (`docs/authority.md`).
  *
  * `startBuiltin` is the one exception, and it is a narrow one. The decision it
  * carries is a person's, taken in the host's own dialog - "Start the run?" -
@@ -87,11 +103,13 @@ import {
 } from "./service.js";
 import type {
 	WorkflowBudgetProjection,
+	WorkflowDecideOptions,
 	WorkflowInspectOptions,
 	WorkflowRunInspection,
 	WorkflowRunObservation,
 	WorkflowRunPage,
 	WorkflowRunQuery,
+	WorkflowServiceRunView,
 	WorkflowServiceWaitView,
 	WorkflowWaitOptions,
 } from "./service-views.js";
@@ -150,6 +168,69 @@ export type BuiltinStartableWorkflow =
 /** The one refusal `startBuiltin` raises for a ref outside its allowlist. */
 export function startableRefusalMessage(ref: string): string {
 	return `Workflow ${ref} is not a builtin a service consumer may start; use workflow_run.`;
+}
+
+/**
+ * The refusal `decide` raises when `taskKey` names no checkpoint awaiting a
+ * decision on this run. It names the token the caller passed, because that is
+ * the thing to fix.
+ */
+export function unknownCheckpointRefusalMessage(taskKey: string): string {
+	return `Workflow checkpoint ${taskKey} is not awaiting a decision on this run.`;
+}
+
+/** Raised when one key names more than one awaiting checkpoint. */
+export function ambiguousCheckpointRefusalMessage(taskKey: string): string {
+	return `Workflow checkpoint ${taskKey} names more than one awaiting checkpoint; use its task id.`;
+}
+
+/** The refusal `resume` raises for a task the run cannot re-attempt. */
+export const NOT_RESUMABLE_MESSAGE =
+	"Workflow task is not resumable on this run.";
+
+/** The reason a stop taken in the host's own dialog records. */
+export const SERVICE_PROVIDER_STOP_REASON =
+	"Stopped from the host's own dialog.";
+
+/** The reason a resume taken in the host's own dialog records. */
+export const SERVICE_PROVIDER_RESUME_REASON =
+	"Re-attempted from the host's own dialog.";
+
+/**
+ * The task id a `taskKey` names, for a checkpoint AWAITING a decision.
+ *
+ * A host narrates a gate by its key (`ship`, `approve-<d>`, or
+ * `<namespace>/<key>` inside a fan-out), which is what a person then answers; a
+ * host that already read a task id from `inspect` passes that instead. Both are
+ * accepted, and anything that names no awaiting checkpoint - or more than one -
+ * is refused by name before the service is asked to decide anything.
+ */
+async function resolveCheckpoint(
+	service: WorkflowService,
+	runId: WorkflowRunId,
+	taskKey: string,
+): Promise<string> {
+	const view = await service.status(runId);
+	const pending = view.pendingCheckpoints ?? [];
+	const matched = pending.filter(
+		(checkpoint) =>
+			checkpoint.taskId === taskKey ||
+			checkpoint.taskKey === taskKey ||
+			checkpoint.key === taskKey,
+	);
+	if (matched.length === 0) {
+		throw new WorkflowServiceError(
+			"validation",
+			unknownCheckpointRefusalMessage(taskKey),
+		);
+	}
+	if (matched.length > 1) {
+		throw new WorkflowServiceError(
+			"validation",
+			ambiguousCheckpointRefusalMessage(taskKey),
+		);
+	}
+	return (matched[0] as { readonly taskId: string }).taskId;
 }
 
 /** The refusal `awaitRun` raises for a run this client did not start. */
@@ -257,6 +338,38 @@ export interface WorkflowReadClient {
 		runId: WorkflowRunId,
 		options?: WorkflowWaitOptions,
 	): Promise<WorkflowServiceWaitView>;
+	/**
+	 * Records a person's answer to one checkpoint and restarts the parked drive:
+	 * the same semantics, the same validation and the same refusals as
+	 * `/workflow decide` and {@link WorkflowService.decide}, with one difference
+	 * that is evidence rather than authority — the decision record carries
+	 * `source: "service-provider"` beside its `decidedBy`.
+	 *
+	 * `taskKey` is what narration shows: a checkpoint's key (`ship`,
+	 * `approve-<d>`), or `<namespace>/<key>` for one inside a fan-out. A task id
+	 * is accepted too, so a host that already read one from `inspect` need not
+	 * translate it. A key that names no awaiting checkpoint, or more than one, is
+	 * refused by name and decides nothing.
+	 */
+	decide(
+		runId: WorkflowRunId,
+		taskKey: string,
+		options: WorkflowDecideOptions,
+	): Promise<WorkflowServiceRunView>;
+	/**
+	 * Re-attempts ONE failed or interrupted task on its existing subagent run,
+	 * without invalidating its dependents: `/workflow resume` for that task.
+	 * Refused by name when the run has no such task ({@link NOT_RESUMABLE_MESSAGE}).
+	 */
+	resume(
+		runId: WorkflowRunId,
+		options: { readonly taskId: string },
+	): Promise<WorkflowServiceRunView>;
+	/**
+	 * Cancels the run. Every handoff already captured survives — the runtime
+	 * never applies one — and nothing new is launched.
+	 */
+	stop(runId: WorkflowRunId): Promise<WorkflowServiceRunView>;
 }
 
 export type WorkflowServiceProvider = {
@@ -439,6 +552,33 @@ export function createWorkflowReadClient(
 				}
 				return service.wait(runId, options);
 			}),
+		decide: (
+			runId: WorkflowRunId,
+			taskKey: string,
+			options: WorkflowDecideOptions,
+		) =>
+			delegate(async () => {
+				const taskId = await resolveCheckpoint(service, runId, taskKey);
+				// The source is the CLIENT's, not the caller's: a decision that
+				// reached this method reached it from the host's own dialog, and a
+				// consumer cannot claim it was anything else.
+				return service.decide(runId, taskId, {
+					...options,
+					source: "service-provider",
+				});
+			}),
+		resume: (runId: WorkflowRunId, options: { readonly taskId: string }) =>
+			delegate(() => {
+				const taskId = options?.taskId;
+				if (typeof taskId !== "string" || taskId.length === 0) {
+					throw new WorkflowServiceError("validation", NOT_RESUMABLE_MESSAGE);
+				}
+				return service.resume(runId, SERVICE_PROVIDER_RESUME_REASON, {
+					taskId: taskId as never,
+				});
+			}),
+		stop: (runId: WorkflowRunId) =>
+			delegate(() => service.stop(runId, SERVICE_PROVIDER_STOP_REASON)),
 	});
 }
 

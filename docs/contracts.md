@@ -2312,14 +2312,35 @@ request shape, `{schema: "pi-workflow-service-request-v1", respond}`, and no
 consumer identity: there is no requesting extension id on it and none on
 `ExtensionContext`, so nothing downstream may claim one. The client is
 `list`, `validate`, `project`, `inspect`, `runs`, `observe`, `startBuiltin`,
-and `awaitRun` - no `decide`, no `stop`, no `invalidate`, no general `run`, and
-no headless start.
+`awaitRun`, `decide`, `resume`, and `stop` - no `invalidate`, no `retry`, no
+`reconcile`, no general `run`, and no headless start.
 
 One frozen allowlist lives in the runtime, not in the caller:
 
 | Method | Allowlist | Holds | Refusal for anything else |
 | --- | --- | --- | --- |
 | `startBuiltin(ref, {input, ceiling?})` | `BUILTIN_STARTABLE_WORKFLOWS` | `plan-to-ship` | "Workflow `<ref>` is not a builtin a service consumer may start; use workflow_run." |
+
+The client also carries the host's DECISION SURFACE, feature
+`serviceProviderDecide: true`. The authority is the one that admits
+`startBuiltin`: a person answers in the host's own dialog, and the model never
+reaches these methods - there is no model-callable decide, and `workflow_resume`
+and `workflow_stop` are unchanged operator tools.
+
+| Method | What it is | Refusals |
+| --- | --- | --- |
+| `decide(runId, taskKey, options)` | `WorkflowService.decide` for the checkpoint `taskKey` names - a key as narration shows it (`ship`, `approve-<d>`, or `<namespace>/<key>`), or a task id. Same validation and same refusals, and the decision record carries `source: "service-provider"` beside its `decidedBy` | "Workflow checkpoint `<taskKey>` is not awaiting a decision on this run.", "Workflow checkpoint `<taskKey>` names more than one awaiting checkpoint; use its task id.", then every refusal `decide` already raises |
+| `resume(runId, {taskId})` | `WorkflowService.resume` for that one task: re-attempt a failed or interrupted task without invalidating its dependents | "Workflow task is not resumable on this run." for an empty `taskId`, then the runtime's own |
+| `stop(runId)` | `WorkflowService.stop` with the fixed reason "Stopped from the host's own dialog." Every handoff already captured survives | the runtime's own |
+| `inspect(runId, {include: [..., "checkpoints"]})` | adds every checkpoint task's verified input values at `tasks[].checkpoint.inputs` - the artifact-backed shape, read lease-free - so a host renders the ship gate's `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>` before it answers. Implies `"tasks"`; a checkpoint whose inputs cannot be verified is left without them rather than failing the inspection | - |
+
+`CheckpointDecisionSourceSchema` gains `"service-provider"` for it. That is a
+persisted field VALUE in `WorkflowDecisionRecord` and in
+`CheckpointTerminalEvidence`, and the schema is closed, so it travels in the
+revision-22 bump rather than being additive within 21: a revision-21 reader
+handed such a record would reject it, which is what the revision rule counts.
+`source: "default"` still never names an approver and every other source always
+does - `operator` and `service-provider` are both a person.
 
 The startable list makes no structural claim at all - its one name parks,
 writes and hands off, which is exactly what `headlessBuiltinViolations` reports

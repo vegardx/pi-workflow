@@ -202,14 +202,41 @@ import { acquireWorkflowService } from "@vegardx/pi-workflow/service-provider";
 const workflows = await acquireWorkflowService(pi.events, context);
 ```
 
-and receives a `WorkflowReadClient`, not the `WorkflowService`. What crosses
-the seam is **read, validate, project, observe, and start the one allowlisted
-builtin**: `list`, `validate`, `project`, `inspect`, `runs`, `observe`,
-`startBuiltin`, and `awaitRun`. There is no `decide`, no `stop`,
-no `invalidate`, and no general `run` — starting an arbitrary workflow that
-writes stays the model's own `workflow_run` call, in the open, in the
-transcript ([Authority model](docs/authority.md)). A run this client did not
-start cannot be awaited through it either.
+and receives a `WorkflowReadClient`, not the `WorkflowService`. What crosses the
+seam is **read, validate, project, observe, start the one allowlisted builtin,
+and let a person answer the run**: `list`, `validate`, `project`, `inspect`,
+`runs`, `observe`, `startBuiltin`, `awaitRun`, `decide`, `resume`, and `stop`.
+There is no `invalidate`, no `retry`, no `reconcile`, and no general `run` —
+starting an arbitrary workflow that writes stays the model's own `workflow_run`
+call, in the open, in the transcript
+([Authority model](docs/authority.md)). A run this client did not start cannot be
+awaited through it either.
+
+**The decision surface is the host's, not the model's.** `decide`, `resume` and
+`stop` exist for the same reason `startBuiltin` does: a person answers in the
+host's own dialog — the ship decision at the end, Retry / Stop / Re-plan when a
+task fails — and routing that answer back through the model adds a turn and no
+authority. The model never reaches these methods; there is no model-callable
+decide and there never will be. What the runtime records is the provenance: a
+decision taken here is filed with `source: "service-provider"` next to the
+`decidedBy` it always had, so run evidence tells the host's dialog apart from
+`/workflow decide` without pretending they are different kinds of authority.
+
+```ts
+await workflows.decide(runId, "ship", {
+	decision: { ship: true },
+	approver: "human:vegard",
+});
+await workflows.resume(runId, { taskId });   // re-attempt one failed task
+await workflows.stop(runId);                  // cancel; handoffs survive
+```
+
+`decide` takes the checkpoint key narration shows (`ship`, `approve-<d>`, or
+`<namespace>/<key>` inside a fan-out) or a task id, and refuses by name a token
+that names no awaiting checkpoint — or more than one. To render what a person is
+deciding on, ask `inspect` for the new `"checkpoints"` section: it carries every
+checkpoint task's verified input values at `tasks[].checkpoint.inputs`, lease-free
+— the ship gate's own `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>`.
 
 Failures that are not a `WorkflowServiceError` are flattened to one fixed
 message, so a consumer never sees an internal error string or a stack.

@@ -104,6 +104,22 @@ session's model a run inherited.
   `fix-<d>` inputs. `output.approved` is documented as ALWAYS TRUE under every
   gate policy: the start of the run is the approval, and nothing in a run can
   answer that question a second time.
+- **The service-provider client gains the host's decision surface**
+  (`serviceProviderDecide: true`). `WorkflowReadClient` adds `decide`, `resume`
+  and `stop`, and `inspect` admits a `"checkpoints"` section that carries every
+  checkpoint task's verified input values at `tasks[].checkpoint.inputs` -
+  lease-free, the artifact-backed shape, implying `"tasks"` - so a host can render
+  the ship gate's `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>` before it
+  answers. The authority is the one that admits `startBuiltin`: a person answers
+  in the host's own dialog, and the MODEL never reaches these methods. There is no
+  model-callable decide, and `workflow_resume`/`workflow_stop` are unchanged
+  operator tools. `decide` takes the checkpoint key narration shows (`ship`,
+  `approve-<d>`, `<namespace>/<key>`) or a task id, and refuses by name a token
+  that names no awaiting checkpoint or more than one.
+  `CheckpointDecisionSourceSchema` gains `"service-provider"`, which is a
+  persisted field value in `WorkflowDecisionRecord` and
+  `CheckpointTerminalEvidence`; the schema is closed, so it travels in the
+  revision-22 bump rather than being additive within 21.
 - **One broken definition file no longer fails discovery for every ref.**
   Discovery is per definition file. A file that cannot resolve a module it
   imports (the field failure: a project's own `@vegardx/pi-workflow` import
@@ -528,9 +544,11 @@ session's model a run inherited.
   channel, discovered twice so a provider swapped during acquisition is refused
   rather than used. What crosses it is narrowed to a `WorkflowReadClient`:
   `list`, `validate`, `project`, `inspect`, `runs`, `observe`, `runBuiltin`,
-  and `awaitRun`. There is no `decide`, `stop`, `invalidate`, or general `run`
-  — starting a workflow that writes stays the model's own `workflow_run` call,
-  in the open, in the transcript. `runBuiltin` is gated by the frozen
+  and `awaitRun`. There is no `invalidate`, `retry`, `reconcile`, or general
+  `run` — starting a workflow that writes stays the model's own `workflow_run`
+  call, in the open, in the transcript. (`runBuiltin` is removed later in this
+  same unreleased section, and `decide`/`resume`/`stop` are added there as the
+  host's own decision surface.) `runBuiltin` is gated by the frozen
   `BUILTIN_HEADLESS_WORKFLOWS` allowlist, which belongs to the runtime rather
   than the caller and whose members must declare no checkpoint, no worktree and
   no handoff — the property `headlessBuiltinViolations` checks, since

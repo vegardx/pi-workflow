@@ -23,6 +23,7 @@ import {
 } from "../src/contracts.js";
 import { defineWorkflow, type WorkflowDefinition } from "../src/definition.js";
 import { readWorkflowJournalUnleased } from "../src/persistence/journal.js";
+import { isTerminalWorkflowRunStatus } from "../src/run-actions.js";
 import {
 	createWorkflowService,
 	type WorkflowService,
@@ -35,8 +36,10 @@ import {
 	foreignRunRefusalMessage,
 	headlessBuiltinViolations,
 	isCompatibleWorkflowProvider,
+	NOT_RESUMABLE_MESSAGE,
 	registerWorkflowServiceProvider,
 	startableRefusalMessage,
+	unknownCheckpointRefusalMessage,
 	WORKFLOW_SERVICE_FAILURE_MESSAGE,
 	type WorkflowReadClient,
 	type WorkflowRunObservation,
@@ -47,6 +50,7 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
+import { WORKFLOW_TOOL_DECLARATIONS } from "../src/tools.js";
 
 // W1-PROVIDER (spec 2.4, D2, D3): the seam pi-maestro acquires the runtime
 // through. Every expectation below is the spec's, not the implementation's:
@@ -246,6 +250,39 @@ const SHIP_DEFINITION = `export default {
 };
 `;
 
+/**
+ * Two gates, the second of which reads the first's answer as an input named
+ * `summary-d0` - the shape `plan-to-ship`'s ship gate has (`plan`,
+ * `summary-<d>`, `findings-<d>`, `fix-<d>`), with no agent in the way. A decided
+ * checkpoint commits its answer as a `result` artifact, so the second gate's
+ * input is artifact-backed and digest-verified exactly as a summary would be.
+ */
+const GATE_INPUTS_DEFINITION = `export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "gate-inputs", description: "A gate that reads an earlier gate's answer.", version: 1, budget: { cost: 10, childRuntimeMs: 600000 }, timeoutMs: 600000, concurrency: 1 },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { shipped: { type: "boolean" } }, required: ["shipped"], additionalProperties: false },
+  async run(ctx) {
+    const first = ctx.checkpoint("approve-d0", {
+      schema: { type: "object", properties: { proceed: { type: "boolean" } }, required: ["proceed"], additionalProperties: false },
+      prompt: "Continue past deliverable d0?",
+      headless: "block",
+      timeoutMs: 600000,
+    });
+    await ctx.result(first);
+    const gate = ctx.checkpoint("ship", {
+      schema: { type: "object", properties: { ship: { type: "boolean" } }, required: ["ship"], additionalProperties: false },
+      prompt: "Ship the approved plan?",
+      headless: "block",
+      timeoutMs: 600000,
+      inputs: { "summary-d0": first.output },
+    });
+    const decision = await ctx.result(gate);
+    return { shipped: decision.ship === true };
+  },
+};
+`;
+
 /** A service over a project root carrying `SHIP_DEFINITION`. */
 async function shipService(): Promise<WorkflowService> {
 	const base = await mkdtemp(path.join(os.tmpdir(), "pi-workflow-ship-"));
@@ -264,6 +301,40 @@ async function shipService(): Promise<WorkflowService> {
 		subagents: {
 			// A checkpoint workflow launches nothing, so a binding whose every
 			// call throws proves no agent task was ever reached.
+			bind: async (runId) => ({
+				workflowRunId: runId,
+				ownerId: `pi-workflow:${runId}`,
+				client: new Proxy(
+					{},
+					{
+						get: () => () => {
+							throw new Error("unexpected subagent call");
+						},
+					},
+				) as never,
+			}),
+		},
+	});
+	services.push(service);
+	return service;
+}
+
+/** A service over a project root carrying `GATE_INPUTS_DEFINITION`. */
+async function gateInputsService(): Promise<WorkflowService> {
+	const base = await mkdtemp(path.join(os.tmpdir(), "pi-workflow-gates-"));
+	bases.push(base);
+	const cwd = path.join(base, "project");
+	await mkdir(path.join(cwd, "workflows"), { recursive: true });
+	await writeFile(
+		path.join(cwd, "workflows", "gate-inputs.workflow.ts"),
+		GATE_INPUTS_DEFINITION,
+	);
+	const service = await createWorkflowService({
+		cwd,
+		agentDir: path.join(base, "agent"),
+		storeRoot: path.join(cwd, "state"),
+		projectTrusted: () => true,
+		subagents: {
 			bind: async (runId) => ({
 				workflowRunId: runId,
 				ownerId: `pi-workflow:${runId}`,
@@ -350,13 +421,18 @@ describe("registration and discovery", () => {
 		const { client } = await acquire(serviceDouble());
 		expect(Object.keys(client).sort()).toEqual([
 			"awaitRun",
+			// The host's decision surface: a person answers in the host's own
+			// dialog, and the model never reaches these three.
+			"decide",
 			"hostCeiling",
 			"inspect",
 			"list",
 			"observe",
 			"project",
+			"resume",
 			"runs",
 			"startBuiltin",
+			"stop",
 			"validate",
 		]);
 		expect(Object.isFrozen(client)).toBe(true);
@@ -1060,6 +1136,136 @@ describe("the structural property of a run nobody is asked about", () => {
 	});
 });
 
+describe("the host's decision surface", () => {
+	// A host that starts a run and narrates it also has to let a person answer
+	// it. The authority is the same one that admits `startBuiltin`: a person
+	// decides in the host's own dialog, and the model never reaches these
+	// methods. What the runtime records is the provenance.
+	it("decides the ship gate by its narrated key and records the service-provider source", async () => {
+		const service = await shipService();
+		const { client } = await acquire(service);
+		const receipt = await service.run("ship-example", {});
+		const parked = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		expect(parked).toMatchObject({ status: "waiting", parked: true });
+		// The token a host has: the key narration showed, not a task id.
+		expect((parked.pendingCheckpoints ?? [])[0]?.key).toBe("ship");
+
+		const after = await client.decide(receipt.runId, "ship", {
+			decision: { ship: true },
+			approver: "human:vegard",
+			reason: "Checks passed.",
+		});
+		expect(after.runId).toBe(receipt.runId);
+		await expect(
+			service.wait(receipt.runId, { timeoutMs: 30_000 }),
+		).resolves.toMatchObject({
+			status: "completed",
+			output: { receipt: { planDigest: PLAN_DIGEST } },
+		});
+
+		// The decision record says the answer came from the host's dialog, and
+		// still names the person who gave it.
+		const inspection = await client.inspect(receipt.runId, {
+			include: ["run", "tasks"],
+		});
+		expect(
+			inspection.tasks?.find((task) => task.kind === "checkpoint")?.checkpoint
+				?.decision,
+		).toMatchObject({
+			source: "service-provider",
+			decidedBy: "human:vegard",
+			reason: "Checks passed.",
+			value: { ship: true },
+		});
+	});
+
+	it("takes a task id as well as a key, and refuses anything else by name", async () => {
+		const service = await shipService();
+		const { client } = await acquire(service);
+		const receipt = await service.run("ship-example", {});
+		const parked = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		const pending = (parked.pendingCheckpoints ?? [])[0];
+		if (!pending) throw new Error("no pending checkpoint");
+
+		await expect(
+			client.decide(receipt.runId, "approve-d0", {
+				decision: { ship: true },
+				approver: "human:vegard",
+			}),
+		).rejects.toThrow(unknownCheckpointRefusalMessage("approve-d0"));
+		// Nothing was decided by the refused call: the gate is still awaiting one.
+		const still = await service.status(receipt.runId);
+		expect((still.pendingCheckpoints ?? []).map((entry) => entry.key)).toEqual([
+			"ship",
+		]);
+		await client.decide(receipt.runId, pending.taskId, {
+			decision: { ship: true },
+			approver: "human:vegard",
+		});
+		await expect(
+			service.wait(receipt.runId, { timeoutMs: 30_000 }),
+		).resolves.toMatchObject({ status: "completed" });
+		// A gate already decided is no longer awaiting one.
+		await expect(
+			client.decide(receipt.runId, "ship", {
+				decision: { ship: true },
+				approver: "human:vegard",
+			}),
+		).rejects.toThrow(unknownCheckpointRefusalMessage("ship"));
+	});
+
+	it("stops a run it observes, and leaves what already settled", async () => {
+		const service = await shipService();
+		const { client } = await acquire(service);
+		const receipt = await service.run("ship-example", {});
+		await service.wait(receipt.runId, { timeoutMs: 30_000 });
+
+		const stopped = await client.stop(receipt.runId);
+		expect(isTerminalWorkflowRunStatus(stopped.status)).toBe(true);
+		expect(stopped.status).toBe("cancelled");
+		// The gate it was parked on is settled, not still waiting for anyone.
+		expect(stopped.pendingCheckpoints ?? []).toEqual([]);
+		// And the durable store agrees: a stop is not a view.
+		await expect(service.status(receipt.runId)).resolves.toMatchObject({
+			status: "cancelled",
+		});
+	});
+
+	it("refuses a resume with no task, and relays the runtime's own refusal", async () => {
+		const service = await shipService();
+		const { client } = await acquire(service);
+		const receipt = await service.run("ship-example", {});
+		const parked = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		const gate = (parked.pendingCheckpoints ?? [])[0];
+		if (!gate) throw new Error("no pending checkpoint");
+
+		await expect(client.resume(receipt.runId, { taskId: "" })).rejects.toThrow(
+			NOT_RESUMABLE_MESSAGE,
+		);
+		// A parked checkpoint is not an interrupted agent task, so the runtime
+		// refuses it - through the same sanitized seam as every other failure.
+		const error = await client
+			.resume(receipt.runId, { taskId: gate.taskId })
+			.catch((value: unknown) => value);
+		expect(error).toBeInstanceOf(WorkflowServiceError);
+		expect((error as WorkflowServiceError).code).toBe("validation");
+	});
+
+	it("leaves the model-facing tools exactly as they were", () => {
+		// The seam gains a decision surface; the MODEL does not. There is no
+		// decide, resume or stop tool, and there never will be.
+		// `workflow_resume` and `workflow_stop` were always the operator's own
+		// tools and are unchanged; what does not exist, and never will, is a
+		// model-callable DECIDE.
+		const names = WORKFLOW_TOOL_DECLARATIONS.map((tool) => tool.name);
+		expect(names).not.toContain("workflow_decide");
+		expect(names).toContain("workflow_resume");
+		expect(names).toContain("workflow_stop");
+		expect(names).toHaveLength(14);
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderDecide).toBe(true);
+	});
+});
+
 describe("inspect through the read client", () => {
 	// What pi-maestro's publication reader needs from a settled run, end to
 	// end through the real service: the receipt at `run.output`, and the
@@ -1079,8 +1285,6 @@ describe("inspect through the read client", () => {
 		const gate = pending.tasks?.find((task) => task.kind === "checkpoint");
 		expect(gate?.checkpoint).not.toHaveProperty("decision");
 
-		// Deciding stays the operator's own call; the client never gets one.
-		expect(client).not.toHaveProperty("decide");
 		await service.decide(receipt.runId, gate?.id ?? "", {
 			decision: { ship: true },
 			approver: "human:vegard",
@@ -1122,6 +1326,53 @@ describe("inspect through the read client", () => {
 		const lean = await client.inspect(receipt.runId, { include: ["run"] });
 		expect(lean.run).not.toHaveProperty("output");
 		expect(lean).not.toHaveProperty("tasks");
+	});
+
+	it("carries every gate's verified inputs under `checkpoints`, lease-free", async () => {
+		// What a host renders before it answers a gate: the values the approver
+		// reads, by input name, without holding the run. `plan-to-ship`'s ship
+		// gate names `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>`; this
+		// fixture names one of them and proves the section carries it verbatim.
+		const service = await gateInputsService();
+		const { client } = await acquire(service);
+		const receipt = await service.run("gate-inputs", {});
+		const first = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		const approve = (first.pendingCheckpoints ?? [])[0];
+		expect(approve?.key).toBe("approve-d0");
+
+		// The first gate has no inputs, and asking for the section says so
+		// rather than inventing an empty record.
+		const early = await client.inspect(receipt.runId, {
+			include: ["run", "checkpoints"],
+		});
+		expect(
+			early.tasks?.find((task) => task.key === "approve-d0")?.checkpoint
+				?.inputs,
+		).toEqual({});
+
+		await client.decide(receipt.runId, "approve-d0", {
+			decision: { proceed: true },
+			approver: "human:vegard",
+		});
+		const parked = await service.wait(receipt.runId, { timeoutMs: 30_000 });
+		expect(parked).toMatchObject({ status: "waiting", parked: true });
+
+		const inspection = await client.inspect(receipt.runId, {
+			include: ["run", "checkpoints"],
+		});
+		const ship = inspection.tasks?.find((task) => task.key === "ship");
+		expect(ship?.checkpoint?.inputs).toEqual({
+			"summary-d0": { proceed: true },
+		});
+		// `checkpoints` implies `tasks`, because the values hang off a task view.
+		expect(inspection.tasks?.length).toBeGreaterThan(0);
+		// And it is opt-in: the default read carries no input values at all.
+		const lean = await client.inspect(receipt.runId, {
+			include: ["run", "tasks"],
+		});
+		expect(
+			lean.tasks?.find((task) => task.key === "ship")?.checkpoint,
+		).not.toHaveProperty("inputs");
 	});
 
 	it("tells an observer which task settled, and how", async () => {

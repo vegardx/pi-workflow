@@ -49,6 +49,15 @@ once at run start. A definition that inherits declares
 before a run exists: *"plan-to-ship inherits the session model, and this host has
 none."*
 
+The service-provider client is **read, validate, project, observe,
+`startBuiltin`, `awaitRun`, `decide`, `resume`, `stop`** — and nothing else. The
+last three are the HOST's decision surface, for the same reason `startBuiltin`
+exists: a person answers in the host's own dialog, and the model never reaches
+them. There is no model-callable decide. A decision taken there is filed with
+`source: "service-provider"` beside its `decidedBy`, and
+`inspect(runId, {include: [..., "checkpoints"]})` carries each gate's verified
+input values so the host can render what is being decided.
+
 A host embedding this package may start ONE allowlisted builtin without a model
 turn, through the service provider. `startBuiltin` creates a run a person
 already asked for in the host's own dialog, and its frozen allowlist is

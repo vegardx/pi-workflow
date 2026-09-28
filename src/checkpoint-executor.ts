@@ -80,6 +80,13 @@ export interface WorkflowCheckpointDecisionInput {
 	readonly value: unknown;
 	readonly decidedBy: string;
 	readonly reason?: string;
+	/**
+	 * Who asked. `"operator"` (the default) is a person through `/workflow
+	 * decide`; `"service-provider"` is a person through the HOST's own dialog.
+	 * `"default"` is the executor's own and is never passed in: a caller cannot
+	 * claim a decision nobody took.
+	 */
+	readonly source?: "operator" | "service-provider";
 }
 
 export interface WorkflowCheckpointTaskExecutor {
@@ -791,7 +798,9 @@ export function createWorkflowCheckpointTaskExecutor(
 			);
 		}
 		const spec = selection.task.task.spec;
-		const stage = source === "operator" ? "decision" : "persistence";
+		// A decision a person took is reported against the decision stage; the
+		// headless default is the runtime's own and fails as persistence.
+		const stage = source === "default" ? "persistence" : "decision";
 		if (!losslessJson(value)) {
 			throw new WorkflowCheckpointExecutionError(stage, MESSAGES.nonJson);
 		}
@@ -1144,7 +1153,7 @@ export function createWorkflowCheckpointTaskExecutor(
 		await recordDecision(
 			selection,
 			decision.value,
-			"operator",
+			decision.source ?? "operator",
 			decidedAt,
 			decision.decidedBy,
 			decision.reason,

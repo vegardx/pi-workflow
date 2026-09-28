@@ -2828,6 +2828,12 @@ export async function createWorkflowService(
 						value: decideOptions.decision,
 						decidedBy: approver,
 						...(reason === undefined ? {} : { reason }),
+						// Recorded verbatim: a host that decided in its own dialog says
+						// so, and a `/workflow decide` that names nothing is an
+						// `operator` decision as it always was.
+						...(decideOptions.source === undefined
+							? {}
+							: { source: decideOptions.source }),
 					});
 				} catch (error) {
 					throw decisionRejection(error);
@@ -3650,6 +3656,10 @@ export async function createWorkflowService(
 		output?: unknown;
 		decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
 		taskSummaries?: ReadonlyMap<WorkflowTaskId, string>;
+		checkpointInputs?: ReadonlyMap<
+			WorkflowTaskId,
+			Readonly<Record<string, unknown>>
+		>;
 	}> {
 		if (!state) return {};
 		const wantsOutput =
@@ -3658,8 +3668,19 @@ export async function createWorkflowService(
 			isTerminalWorkflowRunStatus(state.status);
 		const wantsSummaries =
 			include.includes("output") && include.includes("tasks");
-		const decided = include.includes("tasks") ? decidedCheckpoints(state) : [];
-		if (!wantsOutput && !wantsSummaries && decided.length === 0) return {};
+		const wantsCheckpointInputs = include.includes("checkpoints");
+		const decided =
+			include.includes("tasks") || wantsCheckpointInputs
+				? decidedCheckpoints(state)
+				: [];
+		if (
+			!wantsOutput &&
+			!wantsSummaries &&
+			!wantsCheckpointInputs &&
+			decided.length === 0
+		) {
+			return {};
+		}
 		const stores = await readOnlyStores(runIdValue);
 		return {
 			...(wantsOutput
@@ -3673,7 +3694,54 @@ export async function createWorkflowService(
 			...(wantsSummaries
 				? { taskSummaries: await taskResultSummaries(state, stores.artifacts) }
 				: {}),
+			...(wantsCheckpointInputs
+				? {
+						checkpointInputs: await checkpointInputValues(
+							state,
+							stores.artifacts,
+						),
+					}
+				: {}),
 		};
+	}
+
+	/**
+	 * Every checkpoint task's verified input values, read lease-free for
+	 * `include: ["checkpoints"]` - the same values and the same bounds the
+	 * artifact-backed task views carry, so a host renders the gate's own `plan`,
+	 * `summary-<d>`, `findings-<d>` and `fix-<d>` without holding the run.
+	 *
+	 * A checkpoint whose inputs cannot be read and verified is left WITHOUT them
+	 * rather than failing the inspection: the values are what a host shows, and a
+	 * host that cannot show them must still be able to see that the gate is there.
+	 */
+	async function checkpointInputValues(
+		state: WorkflowStateProjection,
+		artifacts: WorkflowArtifactStore,
+	): Promise<ReadonlyMap<WorkflowTaskId, Readonly<Record<string, unknown>>>> {
+		const values = new Map<WorkflowTaskId, Readonly<Record<string, unknown>>>();
+		for (const task of Object.values(state.tasks)) {
+			if (task.task.spec.kind !== "checkpoint" || task.abandoned === true) {
+				continue;
+			}
+			const execution = task.currentExecutionId
+				? state.executions[task.currentExecutionId]
+				: undefined;
+			if (execution?.checkpointRequest === undefined) continue;
+			try {
+				values.set(
+					task.task.id,
+					await readWorkflowArtifactInputs({
+						task: task.task,
+						state,
+						artifacts,
+					}),
+				);
+			} catch (error) {
+				if (!(error instanceof WorkflowArtifactInputError)) throw error;
+			}
+		}
+		return values;
 	}
 
 	/**

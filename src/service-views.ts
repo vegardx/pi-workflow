@@ -543,6 +543,16 @@ export const WorkflowDecideOptionsSchema = Type.Object(
 		decision: Type.Unknown(),
 		approver: ApproverSchema,
 		reason: Type.Optional(FixedStringSchema),
+		/**
+		 * Who asked, for the decision record. Absent means `"operator"`: a person
+		 * through `/workflow decide`. `"service-provider"` is what
+		 * `WorkflowReadClient.decide` sets - a person through the HOST's own
+		 * dialog - and it is the only other value a caller may name, because
+		 * `"default"` is a decision nobody took and belongs to the runtime.
+		 */
+		source: Type.Optional(
+			Type.Union([Type.Literal("operator"), Type.Literal("service-provider")]),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -623,6 +633,15 @@ export const WorkflowInspectSectionSchema = Type.Union([
 	Type.Literal("artifacts"),
 	/** The completed run's output value, on `run.output`. */
 	Type.Literal("output"),
+	/**
+	 * Every checkpoint task's verified INPUT VALUES, on
+	 * `tasks[].checkpoint.inputs` - the same shape and the same bounds the
+	 * artifact-backed views carry. It is what a host renders before it answers a
+	 * gate: `plan`, `summary-<d>`, `findings-<d>`, `fix-<d>`. Implies `"tasks"`,
+	 * because the values hang off a task view; reads the artifact store, and
+	 * still takes no lease. Revision 22.
+	 */
+	Type.Literal("checkpoints"),
 ]);
 export type WorkflowInspectSection = Static<
 	typeof WorkflowInspectSectionSchema
@@ -633,7 +652,7 @@ export const WorkflowInspectOptionsSchema = Type.Object(
 		include: Type.Optional(
 			Type.Array(WorkflowInspectSectionSchema, {
 				minItems: 1,
-				maxItems: 8,
+				maxItems: 9,
 				uniqueItems: true,
 			}),
 		),
