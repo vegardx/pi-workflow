@@ -6,7 +6,6 @@ import {
 	type CheckReport,
 	CheckReportSchema,
 	MAX_VERIFY_ROUNDS,
-	nextRung,
 	projectVerifyAndFixBudget,
 	type VerifyAndFixContext,
 	type VerifyAndFixOptions,
@@ -38,6 +37,15 @@ const FixSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** The one model the loop runs at in most of these tests; see `options`. */
+const LOOP_MODEL = envelope("implement").model;
+/** What a run that inherited resolved at start, for the `inherit` tests. */
+const SESSION_MODEL = {
+	provider: "anthropic",
+	id: "claude-session",
+	thinking: "high",
+} as const;
+
 /** The implementer whose handoff the loop verifies. */
 function implementRequest(): AgentTaskAuthoringRequest<
 	typeof FixSchema,
@@ -57,8 +65,8 @@ function implementRequest(): AgentTaskAuthoringRequest<
 		workspace: { mode: "worktree", cwd: "/repo" },
 		handoff: "required",
 		outputSchema: FixSchema,
-		limits: envelope("standard", "implement").limits,
-		model: envelope("standard", "implement").model,
+		limits: envelope("implement").limits,
+		model: envelope("implement").model,
 		retry: { attempts: 1, on: ["backoff"] },
 	};
 }
@@ -108,7 +116,7 @@ function fixRequest(round: number) {
 /** The `verify` row is read-only; a worktree verifier takes the write grant. */
 function verifyWorktreeLimits() {
 	return {
-		...envelope("standard", "verify").limits,
+		...envelope("verify").limits,
 		workspaceWriteBytes: WORKSPACE_WRITE_BYTES,
 	};
 }
@@ -153,11 +161,15 @@ interface Harness {
  * outcomes. Same run id and same digests in every harness, so two runs that
  * declare the same graph produce byte-identical events and identities.
  */
-function harness(reports: readonly CheckReport[] = []): Harness {
+function harness(
+	reports: readonly CheckReport[] = [],
+	sessionModel?: typeof SESSION_MODEL,
+): Harness {
 	const materializer = new WorkflowTaskMaterializer({
 		runId: RUN_ID,
 		definitionIdentitySha256: DEFINITION_IDENTITY,
 		inputSha256: INPUT_DIGEST,
+		...(sessionModel === undefined ? {} : { sessionModel }),
 	});
 	const events: WorkflowEventInput[] = [];
 	const logs: string[] = [];
@@ -205,7 +217,7 @@ function options(
 	return {
 		implementation: impl,
 		check: { command: "npm run check", install: "npm ci" },
-		effort: "standard",
+		model: LOOP_MODEL,
 		maxRounds: 2,
 		verify: (round) => verifyRequest(round),
 		agent: (round) => fixRequest(round),
@@ -232,7 +244,7 @@ describe("verifyAndFix lowering", () => {
 			...verifyRequest(1),
 			handoff: "optional",
 			outputSchema: CheckReportSchema,
-			model: envelope("standard", "verify").model,
+			model: LOOP_MODEL,
 			limits: verifyWorktreeLimits(),
 			inputs: { patch: handImpl.handoff },
 		});
@@ -259,15 +271,15 @@ describe("verifyAndFix lowering", () => {
 			...verifyRequest(1),
 			handoff: "optional",
 			outputSchema: CheckReportSchema,
-			model: envelope("standard", "verify").model,
+			model: LOOP_MODEL,
 			limits: verifyWorktreeLimits(),
 			inputs: { patch: handImpl.handoff },
 		});
 		hand.barrier([verifyOne]);
 		const fixOne = hand.materializer.agent("green-fix-1", {
 			...fixRequest(1),
-			model: envelope("standard", "fix").model,
-			limits: envelope("standard", "fix").limits,
+			model: LOOP_MODEL,
+			limits: envelope("fix").limits,
 			handoff: "required",
 			inputs: { patch: handImpl.handoff, check: verifyOne.output },
 		}) as WorktreeTaskHandle<unknown>;
@@ -275,7 +287,7 @@ describe("verifyAndFix lowering", () => {
 			...verifyRequest(2),
 			handoff: "optional",
 			outputSchema: CheckReportSchema,
-			model: envelope("standard", "verify").model,
+			model: LOOP_MODEL,
 			limits: verifyWorktreeLimits(),
 			inputs: { patch: fixOne.handoff },
 		});
@@ -484,39 +496,54 @@ describe("verifyAndFix keys", () => {
 	});
 });
 
-describe("verifyAndFix effort", () => {
-	it("runs a verifier at the effort's verify row and a fixer at its fix row", async () => {
-		const component = harness([FAILED, PASSED]);
-		const impl = implementation(component);
-		const result = await verifyAndFix(component.ctx, "green", options(impl));
-		const byKey = new Map(
-			component
-				.finish([result.handoff])
-				.flatMap((event) =>
-					event.type === "task-declared" &&
-					event.data.task.spec.kind === "agent"
-						? [[event.data.task.spec.key, event.data.task.spec.request]]
-						: [],
-				),
-		);
-		expect(byKey.get("green-verify-1")?.model).toEqual(
-			envelope("standard", "verify").model,
-		);
-		expect(byKey.get("green-fix-1")?.model).toEqual(
-			envelope("standard", "fix").model,
-		);
-		expect(byKey.get("green-fix-1")?.limits).toEqual(
-			envelope("standard", "fix").limits,
-		);
-	});
-
-	it("escalates a fixer exactly one rung when asked, and never the verifier", async () => {
+describe("verifyAndFix models", () => {
+	async function requestsOf(
+		overrides: Partial<VerifyAndFixOptions<typeof FixSchema>> = {},
+	) {
 		const component = harness([FAILED, PASSED]);
 		const impl = implementation(component);
 		const result = await verifyAndFix(
 			component.ctx,
 			"green",
-			options(impl, { escalate: "thinking" }),
+			options(impl, overrides),
+		);
+		return new Map(
+			component
+				.finish([result.handoff])
+				.flatMap((event) =>
+					event.type === "task-declared" &&
+					event.data.task.spec.kind === "agent"
+						? [[event.data.task.spec.key, event.data.task.spec.request]]
+						: [],
+				),
+		);
+	}
+
+	it("runs every verifier and every fixer at the one model it was given", async () => {
+		// There is no effort ladder and no escalation: the caller declares ONE
+		// model for the loop, and both roles run at it. `limits` still come from
+		// the stage table, which is what still differs per round.
+		const pinned = { provider: "p", id: "m", thinking: "high" } as const;
+		const byKey = await requestsOf({ model: pinned });
+		expect(byKey.get("green-verify-1")?.model).toEqual(pinned);
+		expect(byKey.get("green-fix-1")?.model).toEqual(pinned);
+		expect(byKey.get("green-fix-1")?.limits).toEqual(envelope("fix").limits);
+		expect(byKey.get("green-verify-1")?.limits).toEqual({
+			...envelope("verify").limits,
+			workspaceWriteBytes: WORKSPACE_WRITE_BYTES,
+		});
+	});
+
+	it("lowers `inherit` to the run's own session model on both roles", async () => {
+		// The literal never reaches a persisted request: the materializer
+		// substitutes the run's resolved session model before hashing, so a
+		// verifier and the fixer that follows it name the same exact model.
+		const component = harness([FAILED, PASSED], SESSION_MODEL);
+		const impl = implementation(component);
+		const result = await verifyAndFix(
+			component.ctx,
+			"green",
+			options(impl, { model: "inherit" }),
 		);
 		const byKey = new Map(
 			component
@@ -528,43 +555,40 @@ describe("verifyAndFix effort", () => {
 						: [],
 				),
 		);
-		expect(byKey.get("green-fix-1")?.model).toEqual(
-			envelope("deep", "fix").model,
-		);
-		expect(byKey.get("green-fix-1")?.limits).toEqual(
-			envelope("deep", "fix").limits,
-		);
-		expect(byKey.get("green-verify-1")?.model).toEqual(
-			envelope("standard", "verify").model,
-		);
-		expect(result.history[0]?.fixEffort).toBe("deep");
+		expect(byKey.get("green-verify-1")?.model).toEqual(SESSION_MODEL);
+		expect(byKey.get("green-fix-1")?.model).toEqual(SESSION_MODEL);
 	});
 
-	it("is a pure ladder lookup", () => {
-		expect(nextRung("cheap")).toBe("standard");
-		expect(nextRung("standard")).toBe("deep");
-		expect(nextRung("deep")).toBeUndefined();
-		expect(projectVerifyAndFixBudget("standard", "none", 2)).toEqual(
-			projectVerifyAndFixBudget("standard", "none", 2),
+	it("refuses `inherit` when the run resolved no session model", async () => {
+		const component = harness([FAILED, PASSED]);
+		const impl = implementation(component);
+		await expect(
+			verifyAndFix(component.ctx, "green", options(impl, { model: "inherit" })),
+		).rejects.toThrow(
+			/declares model: "inherit", but the run resolved no session model/,
 		);
+	});
+
+	it("projects a budget from the round count alone", () => {
+		expect(projectVerifyAndFixBudget(2)).toEqual(projectVerifyAndFixBudget(2));
 	});
 });
 
 describe("verifyAndFix budget", () => {
 	it("projects the worst case as every verifier plus every fixer", () => {
-		expect(projectVerifyAndFixBudget("standard", "none", 0)).toEqual([]);
-		expect(projectVerifyAndFixBudget("standard", "none", 1)).toEqual([
-			envelope("standard", "verify").budgetShare,
+		expect(projectVerifyAndFixBudget(0)).toEqual([]);
+		expect(projectVerifyAndFixBudget(1)).toEqual([
+			envelope("verify").budgetShare,
 		]);
-		expect(projectVerifyAndFixBudget("standard", "thinking", 2)).toEqual([
-			envelope("standard", "verify").budgetShare,
-			envelope("deep", "fix").budgetShare,
-			envelope("standard", "verify").budgetShare,
+		expect(projectVerifyAndFixBudget(2)).toEqual([
+			envelope("verify").budgetShare,
+			envelope("fix").budgetShare,
+			envelope("verify").budgetShare,
 		]);
 	});
 
 	it("admits a worst case that fits", async () => {
-		const shares = projectVerifyAndFixBudget("standard", "none", 2);
+		const shares = projectVerifyAndFixBudget(2);
 		const budget: WorkflowBudget = {
 			cost: shares.reduce((sum, share) => sum + share.cost, 0),
 			totalTokens: shares.reduce((sum, share) => sum + share.totalTokens, 0),
@@ -584,7 +608,7 @@ describe("verifyAndFix budget", () => {
 	});
 
 	it("refuses a worst case one unit over the run budget", async () => {
-		const shares = projectVerifyAndFixBudget("standard", "none", 2);
+		const shares = projectVerifyAndFixBudget(2);
 		const budget: WorkflowBudget = {
 			cost: shares.reduce((sum, share) => sum + share.cost, 0) - 1,
 			totalTokens: shares.reduce((sum, share) => sum + share.totalTokens, 0),
@@ -647,7 +671,7 @@ describe("verifyAndFix refusals", () => {
 			...implementRequest(),
 			workspace: { mode: "read-only", cwd: "/repo" },
 			handoff: undefined,
-			limits: envelope("standard", "verify").limits,
+			limits: envelope("verify").limits,
 		} as unknown as AgentTaskAuthoringRequest<typeof FixSchema>);
 		await expect(
 			verifyAndFix(
@@ -658,19 +682,16 @@ describe("verifyAndFix refusals", () => {
 		).rejects.toThrow(/needs a worktree implementation handle/);
 	});
 
-	it("refuses an escalation above deep", async () => {
+	it("refuses a model that is neither an exact model nor `inherit`", async () => {
+		await expect(refusal({ model: "session" as never })).rejects.toThrow(
+			/as its model; declare an exact \{provider, id, thinking\} or "inherit"/,
+		);
+		await expect(refusal({ model: undefined as never })).rejects.toThrow(
+			/as its model/,
+		);
 		await expect(
-			refusal({ effort: "deep", escalate: "thinking" }),
-		).rejects.toThrow(/where the effort ladder ends/);
-	});
-
-	it("refuses an unknown effort and an unknown escalation", async () => {
-		await expect(refusal({ effort: "thorough" as never })).rejects.toThrow(
-			/unknown effort/,
-		);
-		await expect(refusal({ escalate: "more" as never })).rejects.toThrow(
-			/unknown escalation/,
-		);
+			refusal({ model: { provider: "p", id: "m", thinking: "vast" } as never }),
+		).rejects.toThrow(/as its model/);
 	});
 
 	it("refuses a missing factory for the rounds asked for", async () => {
@@ -688,7 +709,7 @@ describe("verifyAndFix refusals", () => {
 				{
 					verify: (round) => ({
 						...verifyRequest(round),
-						model: envelope("deep", "verify").model,
+						model: envelope("verify").model,
 					}),
 				},
 				"green",

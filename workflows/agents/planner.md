@@ -2,6 +2,7 @@
 name: planner
 model: { provider: github-copilot, id: gpt-5.6-sol, thinking: medium }
 allowedModels:
+  - inherit
   - github-copilot/gpt-5.6-sol:low
   - github-copilot/gpt-5.6-sol:medium
   - github-copilot/gpt-5.6-sol:high
@@ -28,6 +29,15 @@ from a trusted project's `.pi/agents/*.md` only. Copy it into one of those
 before running the `plan-to-ship` workflow; see the pi-workflow README,
 "Builtin workflows". The frontmatter above is an authority **ceiling**: a
 workflow task may ask for less, never for more.
+
+`allowedModels` also lists `inherit`: `plan-to-ship`'s refiner declares
+`model: "inherit"`, the host session's own model and thinking level. The entry
+admits a DIRECT delegation that asks to inherit, fenced at the host rather than
+here. A pi-workflow run does not use it: the runtime resolves `inherit` once at
+run start and sends the RESOLVED exact model in every request, so preflight
+checks that model against the exact entries above. Add the
+`provider/id:thinking` keys of the models you actually run sessions on, or the
+refiner fails preflight with "model exceeds ceiling: <model>".
 
 How to work:
 

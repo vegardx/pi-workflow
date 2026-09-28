@@ -16,6 +16,7 @@ import {
 	DIVERSE_MODEL_ID,
 	envelope,
 	MODEL_ID,
+	tierModel,
 } from "../src/components/index.js";
 import type { WorkflowDefinition } from "../src/definition.js";
 import { discoverWorkflows } from "../src/registry.js";
@@ -39,7 +40,8 @@ import type {
 //   - structural headlessness: no checkpoint, no worktree, no handoff, over a
 //     dry materialization of the real graph. It is a property of the graph, not
 //     a licence to be started without a model turn;
-//   - the thread count is a pure function of `depth`, or of the sources;
+//   - the thread count is a pure function of the fixed angle list, or of the
+//     sources;
 //   - `forEach`'s key rule: the key is the item's own required id, so
 //     reordering the sources moves the tasks without renaming any of them;
 //   - a dead thread degrades the run instead of failing it, and the coverage
@@ -50,17 +52,18 @@ const AGENT_TEMPLATES = fileURLToPath(
 	new URL("../workflows/agents", import.meta.url),
 );
 const RESEARCHER_AGENT = "researcher";
-const DEPTHS = ["cheap", "standard", "deep"] as const;
 
-/** The angle table the definition ships, by depth: the expected thread keys. */
-const ANGLES_BY_DEPTH: Readonly<Record<Depth, readonly string[]>> =
-	Object.freeze({
-		cheap: ["evidence", "counterpoint"],
-		standard: ["evidence", "counterpoint", "context"],
-		deep: ["evidence", "counterpoint", "context", "alternatives", "risk"],
-	});
-
-type Depth = (typeof DEPTHS)[number];
+/**
+ * The fixed angle list the definition ships: the expected thread keys when the
+ * caller names no sources. It used to be a table keyed by a `depth` dial; the
+ * dial is gone with the rest of the effort dial, and this is the column it
+ * called `standard`.
+ */
+const DEFAULT_ANGLES: readonly string[] = Object.freeze([
+	"evidence",
+	"counterpoint",
+	"context",
+]);
 
 interface Source {
 	readonly id: string;
@@ -71,6 +74,16 @@ interface Source {
 }
 
 const QUESTION = "How does the component library keep replay deterministic?";
+
+/**
+ * The exact model a request carries. pi-subagent 0.15.0 admits `"inherit"` on a
+ * `SubagentRequest`; pi-workflow never sends it, and nothing in `deep-research`
+ * inherits at all.
+ */
+function exactModel(request: SubagentRequest) {
+	expect(request.model).not.toBe("inherit");
+	return request.model === "inherit" ? undefined : request.model;
+}
 
 function pathSource(id: string): Source {
 	return { id, kind: "path", ref: `src/components/${id}.ts` };
@@ -87,13 +100,11 @@ function urlSource(id: string): Source {
 function input(
 	options: {
 		readonly question?: string;
-		readonly depth?: Depth;
 		readonly sources?: readonly Source[];
 	} = {},
 ) {
 	return {
 		question: options.question ?? QUESTION,
-		depth: options.depth ?? "standard",
 		...(options.sources ? { sources: options.sources } : {}),
 	};
 }
@@ -262,7 +273,7 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 			agentScope: "global" as const,
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
-			model: request.model ?? {
+			model: exactModel(request) ?? {
 				provider: "test",
 				id: "model",
 				thinking: "low" as const,
@@ -301,6 +312,7 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 			},
 			outputSchema: structuredClone(request.outputSchema),
 			limits: structuredClone(request.limits),
+			modelSource: request.model === undefined ? "template" : "request",
 		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
 		const identitySha256 = canonicalSha256(plan);
 		return {
@@ -559,9 +571,9 @@ describe("deep-research: discovery", () => {
 		// The worst case the input schema admits: 16 sources, so 16 research
 		// threads and 16 cross-checks, plus one reducer, all at the deep column.
 		expect(found.definition.meta.budget.cost).toBe(
-			16 * envelope("deep", "review").budgetShare.cost +
-				16 * envelope("deep", "verify").budgetShare.cost +
-				envelope("deep", "synthesis").budgetShare.cost,
+			16 * envelope("review").budgetShare.cost +
+				16 * envelope("verify").budgetShare.cost +
+				envelope("synthesis").budgetShare.cost,
 		);
 	});
 
@@ -579,62 +591,50 @@ describe("deep-research: discovery", () => {
 describe("deep-research: structural headlessness", () => {
 	// Asserted here because this definition claims it in its header: nothing it
 	// declares parks, writes, or produces a patch.
-	it("declares no checkpoint, no worktree and no handoff at any depth", async () => {
+	it("declares no checkpoint, no worktree and no handoff", async () => {
 		const definition = await shippedDefinition();
-		for (const depth of DEPTHS) {
-			await expect(
-				headlessBuiltinViolations(definition, input({ depth })),
-			).resolves.toEqual([]);
-			await expect(
-				headlessBuiltinViolations(
-					definition,
-					input({ depth, sources: [pathSource("a"), noteSource("b")] }),
-				),
-			).resolves.toEqual([]);
-		}
+		await expect(
+			headlessBuiltinViolations(definition, input()),
+		).resolves.toEqual([]);
+		await expect(
+			headlessBuiltinViolations(
+				definition,
+				input({ sources: [pathSource("a"), noteSource("b")] }),
+			),
+		).resolves.toEqual([]);
 	});
 });
 
 describe("deep-research: the thread count", () => {
-	it("is the depth dial's angle table when the caller names no sources", async () => {
-		for (const depth of DEPTHS) {
-			const { delegated, finished } = await runDeepResearch({ depth });
-			expect(finished.status).toBe("completed");
-			expect(
-				delegated
-					.researchRequests()
-					.map((request) => researchThreadOf(request)),
-			).toEqual([...ANGLES_BY_DEPTH[depth]]);
-			// Every angle gets its own brief; five threads must not be one thread
-			// five times.
-			const briefs = new Set(
-				delegated
-					.researchRequests()
-					.map((request) => request.task.context[1] ?? ""),
-			);
-			expect(briefs.size).toBe(ANGLES_BY_DEPTH[depth].length);
-		}
+	it("is the fixed angle list when the caller names no sources", async () => {
+		const { delegated, finished } = await runDeepResearch({});
+		expect(finished.status).toBe("completed");
+		expect(
+			delegated.researchRequests().map((request) => researchThreadOf(request)),
+		).toEqual([...DEFAULT_ANGLES]);
+		// Every angle gets its own brief; three threads must not be one thread
+		// three times.
+		const briefs = new Set(
+			delegated
+				.researchRequests()
+				.map((request) => request.task.context[1] ?? ""),
+		);
+		expect(briefs.size).toBe(DEFAULT_ANGLES.length);
 	});
 
-	it("is the source list when the caller names one, at any depth", async () => {
+	it("is the source list when the caller names one", async () => {
 		const sources = [pathSource("alpha"), noteSource("beta")];
-		for (const depth of DEPTHS) {
-			const { delegated, finished } = await runDeepResearch({ depth, sources });
-			expect(finished.status).toBe("completed");
-			expect(
-				delegated
-					.researchRequests()
-					.map((request) => researchThreadOf(request)),
-			).toEqual(["alpha", "beta"]);
-		}
+		const { delegated, finished } = await runDeepResearch({ sources });
+		expect(finished.status).toBe("completed");
+		expect(
+			delegated.researchRequests().map((request) => researchThreadOf(request)),
+		).toEqual(["alpha", "beta"]);
 	});
 });
 
 describe("deep-research: the lowered graph", () => {
 	it("fans out threads, cross-checks each by a different thread, and reduces", async () => {
-		const { delegated, finished, output } = await runDeepResearch({
-			depth: "standard",
-		});
+		const { delegated, finished, output } = await runDeepResearch({});
 		expect(finished.status).toBe("completed");
 		expect(taskPaths(finished).sort()).toEqual([
 			"cross-check/context",
@@ -645,7 +645,7 @@ describe("deep-research: the lowered graph", () => {
 			"research/evidence",
 			"synthesis",
 		]);
-		for (const thread of ANGLES_BY_DEPTH.standard) {
+		for (const thread of DEFAULT_ANGLES) {
 			// One flaky thread must not fail an otherwise complete answer.
 			expect(taskByPath(finished, `research/${thread}`).disposition).toBe(
 				"optional",
@@ -691,7 +691,7 @@ describe("deep-research: the lowered graph", () => {
 		expect(synthesis.contextScopes).toEqual([]);
 		// The reducer's inputs are the threads that reported, named by thread key.
 		const reduced = synthesis.task.context.join("\n");
-		for (const thread of ANGLES_BY_DEPTH.standard) {
+		for (const thread of DEFAULT_ANGLES) {
 			expect(reduced).toContain(thread);
 		}
 
@@ -747,14 +747,14 @@ describe("deep-research: the lowered graph", () => {
 		// it, so a single reporting thread has nobody to ask. That is a missing
 		// cross-check, never a failure.
 		const { finished, output } = await runDeepResearch({
-			depth: "cheap",
-			failThreads: ["counterpoint"],
+			failThreads: ["counterpoint", "context"],
 		});
 		expect(finished.status).toBe("completed-degraded");
 		// No `cross-check/*` task is declared at all — not a blocked one, none:
 		// with one reporting thread there is no assignment to declare. The
 		// reducer still is, and is blocked by the dead thread's barrier.
 		expect(taskPaths(finished).sort()).toEqual([
+			"research/context",
 			"research/counterpoint",
 			"research/evidence",
 			"synthesis",
@@ -764,6 +764,7 @@ describe("deep-research: the lowered graph", () => {
 		expect(output.coverage).toEqual([
 			{ thread: "evidence", reported: true, claims: 2 },
 			{ thread: "counterpoint", reported: false },
+			{ thread: "context", reported: false },
 		]);
 	});
 });
@@ -827,7 +828,6 @@ describe("deep-research: the key rule", () => {
 describe("deep-research: a thread that dies", () => {
 	it("degrades the run and reports the dead thread in the coverage", async () => {
 		const { finished, output } = await runDeepResearch({
-			depth: "standard",
 			failThreads: ["context"],
 		});
 
@@ -895,7 +895,6 @@ describe("deep-research: the output", () => {
 		// A degraded answer also has to validate: `answer` is required, so the
 		// deterministic fallback is part of the contract rather than a blank.
 		const degraded = await runDeepResearch({
-			depth: "cheap",
 			failThreads: ["evidence"],
 		});
 		expect(Value.Check(definition.outputSchema, degraded.finished.output)).toBe(
@@ -904,35 +903,39 @@ describe("deep-research: the output", () => {
 	});
 });
 
-describe("deep-research: the effort dial", () => {
-	it("spends the review, verify and synthesis rows of the effort table", async () => {
-		for (const depth of DEPTHS) {
-			const { delegated, finished } = await runDeepResearch({
-				depth,
-				sources: [pathSource("alpha"), noteSource("beta")],
-			});
-			expect(finished.status).toBe("completed");
-			const research = envelope(depth, "review");
-			const check = envelope(depth, "verify");
-			const reduce = envelope(depth, "synthesis");
-			for (const request of delegated.researchRequests()) {
-				expect(request.model?.id).toBe(MODEL_ID);
-				expect(request.model?.thinking).toBe(research.thinking);
-				expect(request.limits).toEqual(research.limits);
-			}
-			for (const request of delegated.crossCheckRequests()) {
-				// The OTHER family, for the same reason the checker is another
-				// thread: a checker that shares everything with the claimant
-				// agrees with it for free.
-				expect(request.model?.id).toBe(DIVERSE_MODEL_ID);
-				expect(request.model?.thinking).toBe(check.thinking);
-				expect(request.limits).toEqual(check.limits);
-			}
-			expect(delegated.synthesisRequest()?.model?.id).toBe(MODEL_ID);
-			expect(delegated.synthesisRequest()?.model?.thinking).toBe(
-				reduce.thinking,
-			);
-			expect(delegated.synthesisRequest()?.limits).toEqual(reduce.limits);
+describe("deep-research: models per role", () => {
+	it("spends the review, verify and synthesis rows and inherits nothing", async () => {
+		const { delegated, finished } = await runDeepResearch({
+			sources: [pathSource("alpha"), noteSource("beta")],
+		});
+		expect(finished.status).toBe("completed");
+		const research = envelope("review");
+		const check = envelope("verify");
+		const reduce = envelope("synthesis");
+		for (const request of delegated.researchRequests()) {
+			// A researcher is a reviewer-shaped role: the standard reviewer tier.
+			expect(exactModel(request)).toEqual(tierModel("standard"));
+			expect(request.limits).toEqual(research.limits);
+		}
+		for (const request of delegated.crossCheckRequests()) {
+			// The OTHER family, for the same reason the checker is another
+			// thread: a checker that shares everything with the claimant
+			// agrees with it for free.
+			expect(exactModel(request)).toEqual(tierModel("standard", true));
+			expect(exactModel(request)?.id).toBe(DIVERSE_MODEL_ID);
+			expect(request.limits).toEqual(check.limits);
+		}
+		// The reducer keeps the tier too: nothing here inherits the session
+		// model, so the same question asked from any session gets the same
+		// threads, checked the same way.
+		const reducer = delegated.synthesisRequest();
+		expect(exactModel(reducer as SubagentRequest)).toEqual(
+			tierModel("standard"),
+		);
+		expect(exactModel(reducer as SubagentRequest)?.id).toBe(MODEL_ID);
+		expect(reducer?.limits).toEqual(reduce.limits);
+		for (const request of delegated.requests) {
+			expect(request.model).not.toBe("inherit");
 		}
 	});
 });
@@ -953,14 +956,13 @@ describe("deep-research: the service surface", () => {
 		// number.
 		expect(projection.tasks).toBe(4);
 		expect(projection.cost).toBe(
-			3 * envelope("standard", "review").limits.cost +
-				envelope("standard", "synthesis").limits.cost,
+			3 * envelope("review").limits.cost + envelope("synthesis").limits.cost,
 		);
 		expect(projection.fits).toBe(true);
 		expect(projection.budget.cost).toBe(
-			16 * envelope("deep", "review").budgetShare.cost +
-				16 * envelope("deep", "verify").budgetShare.cost +
-				envelope("deep", "synthesis").budgetShare.cost,
+			16 * envelope("review").budgetShare.cost +
+				16 * envelope("verify").budgetShare.cost +
+				envelope("synthesis").budgetShare.cost,
 		);
 	});
 
@@ -991,9 +993,11 @@ describe("deep-research: the service surface", () => {
 			input({
 				sources: [{ id: "alpha", kind: "path", ref: "a.ts", text: "x" }],
 			}),
-			{ ...input(), depth: "deeper" },
+			// `depth` was the effort dial's name here; the schema is closed, so a
+			// plan that still sends it is refused rather than ignored.
+			{ ...input(), depth: "standard" },
 			{ ...input(), extra: true },
-			{ question: QUESTION },
+			{ sources: [pathSource("alpha")] },
 		]) {
 			await expect(
 				service.validate("deep-research", bad),
@@ -1014,7 +1018,7 @@ describe("deep-research: the agent template", () => {
 		if (!researcher) throw new Error("no researcher template");
 		expect(researcher.workspaceModes).toEqual(["read-only"]);
 		expect(researcher.tools).toEqual(["read", "grep", "find", "ls"]);
-		// A researcher never writes, at any depth.
+		// A researcher never writes.
 		expect(researcher.limitCeiling.workspaceWriteBytes).toBe(0);
 		// Both families: a cross-check runs on the one the threads did not.
 		for (const id of [MODEL_ID, DIVERSE_MODEL_ID]) {
@@ -1026,47 +1030,46 @@ describe("deep-research: the agent template", () => {
 		}
 	});
 
-	it("covers every request the definition makes at every depth", async () => {
+	it("covers every request the definition makes", async () => {
 		const agents = await discoverAgents([
 			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
 		]);
-		for (const depth of DEPTHS) {
-			const { delegated, finished } = await runDeepResearch({
-				depth,
-				sources: [pathSource("alpha"), noteSource("beta"), urlSource("gamma")],
-			});
-			expect(finished.status).toBe("completed");
-			// Three threads, three cross-checks, one reducer.
-			expect(delegated.requests.length).toBe(7);
-			for (const request of delegated.requests) {
-				const agent = agents.get(request.agent);
-				if (!agent) throw new Error(`no template for agent ${request.agent}`);
-				// pi-subagent's preflight rules, applied here so a widened request
-				// fails this test instead of a real run.
-				for (const tool of request.tools) {
-					expect(agent.tools).toContain(tool);
-				}
-				for (const scope of request.contextScopes) {
-					expect(agent.contextScopes).toContain(scope);
-				}
-				expect(agent.workspaceModes).toContain(request.workspace.mode);
-				if (request.model) {
-					expect(agent.allowedModels).toContain(
-						`${request.model.provider}/${request.model.id}:${request.model.thinking}`,
-					);
-				}
-				expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
-					request.limits.cumulativeRuntimeMs,
+		const { delegated, finished } = await runDeepResearch({
+			sources: [pathSource("alpha"), noteSource("beta"), urlSource("gamma")],
+		});
+		expect(finished.status).toBe("completed");
+		// Three threads, three cross-checks, one reducer.
+		expect(delegated.requests.length).toBe(7);
+		for (const request of delegated.requests) {
+			const agent = agents.get(request.agent);
+			if (!agent) throw new Error(`no template for agent ${request.agent}`);
+			// pi-subagent's preflight rules, applied here so a widened request
+			// fails this test instead of a real run.
+			for (const tool of request.tools) {
+				expect(agent.tools).toContain(tool);
+			}
+			for (const scope of request.contextScopes) {
+				expect(agent.contextScopes).toContain(scope);
+			}
+			expect(agent.workspaceModes).toContain(request.workspace.mode);
+			// The template lists exact models only, and nothing here inherits.
+			const model = exactModel(request);
+			if (model) {
+				expect(agent.allowedModels).toContain(
+					`${model.provider}/${model.id}:${model.thinking}`,
 				);
-				expect(request.memoryBytes).toBeUndefined();
-				for (const key of Object.keys(request.limits) as Array<
-					keyof typeof request.limits
-				>) {
-					const value = request.limits[key];
-					const ceiling = agent.limitCeiling[key];
-					if (value === undefined || ceiling === undefined) continue;
-					expect(value).toBeLessThanOrEqual(ceiling);
-				}
+			}
+			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
+				request.limits.cumulativeRuntimeMs,
+			);
+			expect(request.memoryBytes).toBeUndefined();
+			for (const key of Object.keys(request.limits) as Array<
+				keyof typeof request.limits
+			>) {
+				const value = request.limits[key];
+				const ceiling = agent.limitCeiling[key];
+				if (value === undefined || ceiling === undefined) continue;
+				expect(value).toBeLessThanOrEqual(ceiling);
 			}
 		}
 	});

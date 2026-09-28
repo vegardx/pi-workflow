@@ -94,10 +94,10 @@ export interface ReviewLens {
 	readonly id: string;
 	/**
 	 * How much reviewer to spend. The component carries it to the `review`
-	 * factory, which resolves it through the caller's effort table (`envelope`);
-	 * it never picks a model from a tier itself, because that table is keyed by
-	 * `ctx.input` and belongs to the workflow. The routing port will read this
-	 * field directly as `modelRole.tier`.
+	 * factory, which resolves it through `tierModel` (`envelope`); it never picks
+	 * a model from a tier itself, because which models a tier means belongs to
+	 * the workflow. The routing port will read this field directly as
+	 * `modelRole.tier`.
 	 */
 	readonly tier?: ReviewTier;
 	/** Ask for a reviewer of another model family; see `diversity`. */

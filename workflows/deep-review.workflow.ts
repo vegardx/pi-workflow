@@ -3,21 +3,17 @@ import {
 	WorkflowHandoffDescriptorSchema,
 } from "@vegardx/pi-workflow";
 import {
-	DIVERSE_MODEL_ID,
-	type Effort,
-	type Envelope,
 	envelope,
 	FindingSchema,
 	MAX_FINDINGS,
 	MAX_REVIEW_LENSES,
 	MAX_REVIEW_SYNTHESIS_LENGTH,
-	MODEL_ID,
-	MODEL_PROVIDER,
 	ReviewCoverageEntrySchema,
 	type ReviewLens,
 	ReviewVerdictSchema,
 	reviewFanOut,
-	THINKING_BY_TIER,
+	type ThinkingLevel,
+	tierModel,
 	workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 import { type Static, Type } from "typebox";
@@ -29,9 +25,24 @@ import { type Static, Type } from "typebox";
  * This is the package-provided (`builtin` scope) definition discovered from
  * the shipped `workflows/` root; it needs no Pi project trust. It is also the
  * smallest definition that exercises the component library end to end
- * (decision D9): `envelope` is the whole effort dial and `reviewFanOut` is the
- * whole graph. There is no hand-written `ctx.fanOut` here, and no stage this
- * file invents on the side.
+ * (decision D9): `envelope` is every limit and `reviewFanOut` is the whole
+ * graph. There is no hand-written `ctx.fanOut` here, and no stage this file
+ * invents on the side.
+ *
+ * There is no effort dial. A lens runs at its TIER (light, standard, heavy —
+ * `standard` when it names none), or at the exact model the caller pinned, and
+ * the synthesis runs at the standard reviewer tier.
+ *
+ * NOTHING HERE INHERITS THE SESSION MODEL, and that is a decision rather than an
+ * omission. `plan-to-ship`'s implementation roles declare `model: "inherit"`
+ * because the work belongs to the session that planned it. A review does not:
+ * its whole value is a fixed point of view a caller can reason about, and
+ * pi-workflow sends the RESOLVED exact model in every request, so an inherited
+ * model outside the `lens-reviewer` template's `allowedModels` would fail
+ * preflight with "model exceeds ceiling" on a host whose session happened to be
+ * on another family. `deep-review` therefore runs on any host, including one
+ * with no session model at all, which is what makes it safe to run from plan
+ * mode.
  *
  * The stage graph:
  *
@@ -115,7 +126,7 @@ const LensSchema = Type.Object(
 
 /**
  * The lenses a caller who names none gets: three points of view that between
- * them cover what a review is for, cheap enough to be the default. A caller
+ * them cover what a review is for, and small enough to be the default. A caller
  * with an opinion passes its own list; the component bounds it at 16.
  */
 const DEFAULT_LENSES = Object.freeze([
@@ -168,11 +179,6 @@ const InputSchema = Type.Object(
 		lenses: Type.Optional(
 			Type.Array(LensSchema, { minItems: 1, maxItems: MAX_REVIEW_LENSES }),
 		),
-		effort: Type.Union([
-			Type.Literal("cheap"),
-			Type.Literal("standard"),
-			Type.Literal("deep"),
-		]),
 		synthesis: Type.Optional(
 			Type.Union([
 				Type.Literal("required"),
@@ -208,20 +214,20 @@ type Output = Static<typeof OutputSchema>;
 
 /**
  * The run budget: the worst case this input schema admits, which is 16 lenses
- * and one synthesis at the deep column. The scheduler admits a task only while
- * the declared maximum still fits, so the number is the envelope table's own
- * sum rather than a guess.
+ * and one synthesis. The scheduler admits a task only while the declared
+ * maximum still fits, so the number is the envelope table's own sum rather than
+ * a guess.
  */
 const WORST_CASE_BUDGET = workflowBudgetFor([
 	...Array.from(
 		{ length: MAX_REVIEW_LENSES },
-		() => envelope("deep", "review").budgetShare,
+		() => envelope("review").budgetShare,
 	),
-	envelope("deep", "synthesis").budgetShare,
+	envelope("synthesis").budgetShare,
 ]);
 
 /** `provider/model` as pi-maestro writes it; the provider is up to the first /. */
-function pinnedModel(model: string, thinking: Envelope["thinking"]) {
+function pinnedModel(model: string, thinking: ThinkingLevel) {
 	const slash = model.indexOf("/");
 	return {
 		provider: model.slice(0, slash),
@@ -234,24 +240,22 @@ function pinnedModel(model: string, thinking: Envelope["thinking"]) {
  * The input lens vocabulary (`model` as a string, `tier` as an intent) mapped
  * onto the component's.
  *
- * `tier` outranks the effort column, exactly as `plan-to-ship` resolves
- * `tasks[].review.tier`. A tiered lens is therefore PINNED here rather than left to the
+ * A TIER is the one dial a review still has, exactly as `plan-to-ship` resolves
+ * `reviews[].tier`. A tiered lens is PINNED here rather than left to the
  * component's diversity seam: the seam carries one exact model and cannot vary
  * its thinking level per lens. An untiered lens keeps the seam, so `diverse`
- * still resolves through `DIVERSE_MODEL_ID` and still logs that the answer is
- * a stand-in. DELETE WHEN ROUTING LANDS: `tier` and `family: "other"` become
- * two fields of one `modelRole` request and this function disappears.
+ * still resolves through the fan-out's diversity model and still logs that the
+ * answer is a stand-in. DELETE WHEN ROUTING LANDS: `tier` and `family: "other"`
+ * become two fields of one `modelRole` request and this function disappears.
  */
-function componentLens(lens: Lens, review: Envelope): ReviewLens {
-	const thinking = lens.tier ? THINKING_BY_TIER[lens.tier] : review.thinking;
+function componentLens(lens: Lens): ReviewLens {
+	const thinking = lens.tier
+		? tierModel(lens.tier).thinking
+		: tierModel("standard").thinking;
 	const pin = lens.model
 		? pinnedModel(lens.model, thinking)
 		: lens.tier
-			? {
-					provider: MODEL_PROVIDER,
-					id: lens.diverse === true ? DIVERSE_MODEL_ID : MODEL_ID,
-					thinking,
-				}
+			? tierModel(lens.tier, lens.diverse === true)
 			: undefined;
 	return {
 		id: lens.id,
@@ -327,9 +331,8 @@ export default defineWorkflow({
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
 	async run(ctx): Promise<Output> {
-		const effort: Effort = ctx.input.effort;
-		const review = envelope(effort, "review");
-		const synthesisStage = envelope(effort, "synthesis");
+		const review = envelope("review");
+		const synthesisStage = envelope("synthesis");
 		const subject: Subject = ctx.input.subject;
 		const lenses: readonly Lens[] = ctx.input.lenses ?? DEFAULT_LENSES;
 		const synthesis = ctx.input.synthesis ?? "required";
@@ -340,23 +343,13 @@ export default defineWorkflow({
 		const fanOut = await reviewFanOut(
 			ctx,
 			REVIEW_NAMESPACE,
-			lenses.map((lens) => componentLens(lens, review)),
+			lenses.map((lens) => componentLens(lens)),
 			{
 				subject: { title: subject.title },
-				// The lens that pins neither a model nor a tier takes the effort
-				// column; a `diverse` one takes the stand-in below.
-				model: {
-					provider: MODEL_PROVIDER,
-					id: MODEL_ID,
-					thinking: review.thinking,
-				},
-				diversity: {
-					model: {
-						provider: MODEL_PROVIDER,
-						id: DIVERSE_MODEL_ID,
-						thinking: review.thinking,
-					},
-				},
+				// The lens that pins neither a model nor a tier takes the standard
+				// reviewer tier; a `diverse` one takes the stand-in below.
+				model: tierModel("standard"),
+				diversity: { model: tierModel("standard", true) },
 				synthesis,
 				...(ctx.input.maxFindings === undefined
 					? {}
@@ -409,11 +402,9 @@ export default defineWorkflow({
 						],
 					},
 					contextMode: "fresh",
-					model: {
-						provider: MODEL_PROVIDER,
-						id: MODEL_ID,
-						thinking: synthesisStage.thinking,
-					},
+					// The reducer is a reviewer too: standard tier, not the session's
+					// model. See this file's header for why nothing here inherits.
+					model: tierModel("standard"),
 					// Optional, and for the reason in this file's header: a
 					// barrier's control edge covers EVERY task it closed over, so a
 					// dead lens blocks the reducer declared after it. Optional turns

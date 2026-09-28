@@ -23,8 +23,9 @@
  *    into data that post-dates a barrier, or a random value.
  * 2. Data a component fans out over originates in `ctx.input` or in a value a
  *    barrier already returned.
- * 3. Effort, model and budget choices are table lookups keyed by `ctx.input`
- *    (and, in a bounded loop, the round ordinal).
+ * 3. Limit and budget choices are table lookups keyed by the stage, and a model
+ *    is either an exact one the definition pinned or `"inherit"`, which the
+ *    runtime resolved once at run start. Never a clock or a measurement.
  *
  * This entry point imports no UI, no service, and no filesystem: it is the
  * authoring half of the package and is safe to load from a definition module.
@@ -35,9 +36,6 @@ export {
 	COMPILED_STAGE_KINDS,
 	type CompiledDeliverable,
 	CompiledDeliverableSchema,
-	CompiledEffortSchema,
-	type CompiledEscalation,
-	CompiledEscalationSchema,
 	CompiledFixStageSchema,
 	CompiledGateStageSchema,
 	CompiledGatesSchema,
@@ -64,20 +62,21 @@ export {
 	type BudgetShare,
 	budgetAdmits,
 	DIVERSE_MODEL_ID,
-	EFFORTS,
-	type Effort,
 	ENVELOPE_STAGES,
+	ENVELOPE_TIERS,
 	type Envelope,
 	type EnvelopeTier,
 	envelope,
-	gateTimeoutMs,
+	GATE_TIMEOUT_MS,
 	MODEL_ID,
 	MODEL_PROVIDER,
 	type StageName,
 	sumBudgetShares,
 	THINKING_BY_TIER,
 	type ThinkingLevel,
+	tierModel,
 	WORKSPACE_WRITE_BYTES,
+	WORKTREE_MEMORY_BYTES,
 	workflowBudgetFor,
 } from "./envelope.js";
 export { WorkflowComponentError } from "./errors.js";
@@ -172,7 +171,6 @@ export {
 	type FixTaskRequest,
 	MAX_CHECK_TAIL_LENGTH,
 	MAX_VERIFY_ROUNDS,
-	nextRung,
 	projectVerifyAndFixBudget,
 	type VerifyAndFixCheck,
 	type VerifyAndFixContext,

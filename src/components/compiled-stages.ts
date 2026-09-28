@@ -73,8 +73,7 @@ const CompiledStageIdSchema = Type.String({ pattern: COMPILED_ID_PATTERN });
  * schema - a reader that embeds it needs them. `Type.Unsafe` keeps the
  * narrow TypeScript type; the pattern is exactly as strict as the union.
  *
- * Every vocabulary NOT on that path (`use`, `effort`, `gates`) stays a
- * readable union.
+ * Every vocabulary NOT on that path (`use`, `gates`) stays a readable union.
  */
 export type CompiledReviewTier = "light" | "standard" | "heavy";
 export const CompiledReviewTierSchema = Type.Unsafe<CompiledReviewTier>({
@@ -86,12 +85,6 @@ export type CompiledSynthesis = "required" | "optional" | "none";
 export const CompiledSynthesisSchema = Type.Unsafe<CompiledSynthesis>({
 	type: "string",
 	pattern: "^(required|optional|none)$",
-});
-
-export type CompiledEscalation = "thinking" | "none";
-export const CompiledEscalationSchema = Type.Unsafe<CompiledEscalation>({
-	type: "string",
-	pattern: "^(thinking|none)$",
 });
 
 /** The deliverable's own work: one worktree, one handoff. Exactly one. */
@@ -123,7 +116,6 @@ export const CompiledVerifyAndFixStageSchema = Type.Object(
 		use: Type.Literal("verify-and-fix"),
 		id: CompiledStageIdSchema,
 		maxRounds: Type.Integer({ minimum: 0, maximum: 3 }),
-		escalate: Type.Optional(CompiledEscalationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -227,26 +219,29 @@ export const CompiledDeliverableSchema = Type.Object(
 );
 export type CompiledDeliverable = Static<typeof CompiledDeliverableSchema>;
 
-export const CompiledEffortSchema = Type.Union([
-	Type.Literal("cheap"),
-	Type.Literal("standard"),
-	Type.Literal("deep"),
-]);
-
 /**
- * How the run is gated. The `ship` decision is never optional: publication
- * proof is a durable decision. There is no gate before the work, because the
- * start of the run is the approval.
+ * How the run is gated, and where it ends.
+ *
+ * - `ship` (the default) — one decision after all the work, before anything is
+ *   published. A person answers it.
+ * - `every-deliverable` — one decision after each deliverable, and the last of
+ *   them IS the ship decision.
+ * - `none` — no ship gate at all. The run completes when every deliverable is
+ *   done and the HOST publishes on completion, on the authority of the yes that
+ *   started the run. It is what a person who left plan mode in `auto` mode
+ *   asked for: one decision, taken up front.
  */
 export const CompiledGatesSchema = Type.Union([
 	Type.Literal("ship"),
 	Type.Literal("every-deliverable"),
+	Type.Literal("none"),
 ]);
 
 /**
  * The whole compiled graph: every deliverable in plan order with its stages,
- * plus the two resolved policy dials that decide what those stages cost and
- * where a person is asked.
+ * plus the one resolved policy dial that decides where a person is asked.
+ * There is no `effort`: the dial is gone, models are set per role, and what a
+ * stage costs is one fixed row per stage (`envelope`).
  */
 export const CompiledStageDocumentSchema = Type.Object(
 	{
@@ -254,8 +249,6 @@ export const CompiledStageDocumentSchema = Type.Object(
 			minItems: 1,
 			maxItems: MAX_COMPILED_DELIVERABLES,
 		}),
-		/** The resolved effort - `policy.effort` with its default applied. */
-		effort: CompiledEffortSchema,
 		/** The resolved gates - `policy.gates` with its default applied. */
 		gates: CompiledGatesSchema,
 	},

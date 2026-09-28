@@ -31,11 +31,13 @@ from a trusted project's `.pi/agents/*.md` only. Copy it into one of those
 before running the `deep-review` workflow; see the pi-workflow README,
 "Builtin workflows". The frontmatter above is an authority **ceiling**: a
 workflow task may ask for less, never for more. It covers the review and
-synthesis stages of the component library's effort table at every effort —
-`cheap`, `standard`, and `deep` — so no column has to be trimmed to fit.
+synthesis rows of the component library's stage table at every review tier —
+`light`, `standard`, and `heavy` — so no tier has to be trimmed to fit.
 `allowedModels` lists both model families on purpose: a lens may ask for a
 reviewer from a family other than the default one, and a model outside this
-list fails preflight with "model exceeds ceiling".
+list fails preflight with "model exceeds ceiling". It does NOT list `inherit`:
+nothing in `deep-review` inherits the host session's model, because a review's
+value is a fixed point of view rather than whatever model the session is on.
 
 `deep-review` declares two kinds of task against this one definition, because
 both are the same authority — read, judge, report:

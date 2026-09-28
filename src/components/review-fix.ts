@@ -16,11 +16,10 @@ import type {
 } from "../definition.js";
 import { isHandoffHandle, isTaskHandle } from "../definition.js";
 import {
-	assertBudgetAdmits,
-	EFFORTS,
-	type Effort,
-	envelope,
-} from "./envelope.js";
+	isModelRequest,
+	type ModelAuthoringRequest,
+} from "../session-model.js";
+import { assertBudgetAdmits, envelope } from "./envelope.js";
 import { WorkflowComponentError } from "./errors.js";
 import {
 	FINDING_ID_PATTERN,
@@ -93,8 +92,9 @@ import type { WorktreeWorkspaceRequest } from "./verify-and-fix.js";
  * 2. `findings` comes from a value a barrier already returned (the settled
  *    synthesis), which is what makes "declare a fixer only when something is
  *    worth fixing" legal before the next barrier.
- * 3. Model, thinking level and limits are `envelope(effort, "fix")` /
- *    `envelope(effort, "synthesis")` lookups, never anything observed.
+ * 3. Limits are `envelope("fix")` / `envelope("synthesis")` lookups and the
+ *    model is the caller's own declaration — an exact model, or `"inherit"`,
+ *    which the runtime resolved once at run start. Never anything observed.
  */
 
 /** A normalized finding's severity; the fixer must address the first two. */
@@ -232,7 +232,11 @@ export interface FindingSynthesisBrief {
 export interface SynthesizeFindingsOptions {
 	/** `reviewFanOut`'s outcomes, in declaration order. */
 	readonly reviews: readonly ReviewOutcome[];
-	readonly effort: Effort;
+	/**
+	 * The model the reducer runs at: an exact `{provider, id, thinking}`, or
+	 * `"inherit"`. Required — the component owns the request's `model` field.
+	 */
+	readonly model: ModelAuthoringRequest;
 	readonly synthesize: (
 		brief: FindingSynthesisBrief,
 	) => FindingSynthesisTaskRequest;
@@ -258,11 +262,15 @@ function assertKey(component: string, key: TaskKey): void {
 	}
 }
 
-function assertEffort(component: string, key: TaskKey, effort: Effort): void {
-	if (!(EFFORTS as readonly unknown[]).includes(effort)) {
+function assertModel(
+	component: string,
+	key: TaskKey,
+	model: ModelAuthoringRequest,
+): void {
+	if (!isModelRequest(model)) {
 		refuse(
 			component,
-			`${component}("${key}") got the unknown effort ${JSON.stringify(effort)}; the effort dial is one of ${EFFORTS.join(", ")}.`,
+			`${component}("${key}") got ${JSON.stringify(model)} as its model; declare an exact {provider, id, thinking} or "inherit".`,
 		);
 	}
 }
@@ -322,13 +330,13 @@ export function synthesizeFindings(
 			`synthesizeFindings("${key}") requires a \`synthesize\` function.`,
 		);
 	}
-	assertEffort("synthesizeFindings", key, options.effort);
-	const synthesisEnvelope = envelope(options.effort, "synthesis");
+	assertModel("synthesizeFindings", key, options.model);
+	const synthesisEnvelope = envelope("synthesis");
 	if (options.budget) {
 		assertBudgetAdmits(
 			options.budget,
 			[synthesisEnvelope.budgetShare],
-			`synthesizeFindings("${key}") at "${options.effort}" effort`,
+			`synthesizeFindings("${key}")`,
 		);
 	}
 
@@ -356,7 +364,7 @@ export function synthesizeFindings(
 		"synthesizeFindings",
 		request,
 		["outputSchema", "inputs", "model", "limits"],
-		`the reporting lenses are its inputs, it reports ${"`FindingSynthesisSchema`"}, and it runs at envelope(${JSON.stringify(options.effort)}, "synthesis")`,
+		`the reporting lenses are its inputs, it reports ${"`FindingSynthesisSchema`"}, and it runs at the caller's model with envelope("synthesis") limits`,
 	);
 
 	return ctx.fanIn(
@@ -373,7 +381,7 @@ export function synthesizeFindings(
 					? { disposition: "optional" as const }
 					: { disposition: options.disposition }),
 				outputSchema: FindingSynthesisSchema,
-				model: synthesisEnvelope.model,
+				model: options.model,
 				limits: synthesisEnvelope.limits,
 			},
 		},
@@ -411,7 +419,11 @@ export interface FixFindingsOptions {
 	readonly findings: readonly NormalizedFinding[];
 	/** The synthesis result handle; the fixer reads the list, not a copy of it. */
 	readonly synthesis: TaskInputHandle;
-	readonly effort: Effort;
+	/**
+	 * The model the fixer runs at: an exact `{provider, id, thinking}`, or
+	 * `"inherit"`. Required — the component owns the request's `model` field.
+	 */
+	readonly model: ModelAuthoringRequest;
 	/**
 	 * Fix rounds left in the deliverable's shared pool. At zero no fixer is
 	 * declared, whatever the findings say.
@@ -445,12 +457,12 @@ export interface FixFindingsResult {
  *
  * Refuses at declaration when:
  * - `key` is not a task key;
- * - `effort` is not on the ladder;
+ * - `model` is neither `"inherit"` nor an exact `{provider, id, thinking}`;
  * - `implementation` is not a worktree handle, so there is no patch to fix;
  * - `remainingRounds` is not a non-negative integer;
  * - the returned declaration is not a worktree task, declares a field the
  *   component owns, or names an input the component wires;
- * - one fixer at this effort does not fit the run's `meta.budget`.
+ * - one fixer does not fit the run's `meta.budget`.
  *
  * Declares nothing, and says why, when no finding is blocking or major, or
  * when the shared fix-round pool is spent.
@@ -464,7 +476,7 @@ export function fixFindings(
 	if (options === null || typeof options !== "object") {
 		refuse("fixFindings", `fixFindings("${key}") requires a declaration.`);
 	}
-	assertEffort("fixFindings", key, options.effort);
+	assertModel("fixFindings", key, options.model);
 	const implementation = options.implementation;
 	if (
 		!isTaskHandle(implementation) ||
@@ -519,12 +531,12 @@ export function fixFindings(
 	if (actionable.length === 0) return skip(NO_ACTIONABLE_FINDINGS_REASON);
 	if (remainingRounds === 0) return skip(NO_FIX_ROUNDS_REASON);
 
-	const fixEnvelope = envelope(options.effort, "fix");
+	const fixEnvelope = envelope("fix");
 	if (options.budget) {
 		assertBudgetAdmits(
 			options.budget,
 			[fixEnvelope.budgetShare],
-			`fixFindings("${key}") at "${options.effort}" effort`,
+			`fixFindings("${key}")`,
 		);
 	}
 	if (typeof options.agent !== "function") {
@@ -542,7 +554,7 @@ export function fixFindings(
 		"fixFindings",
 		declared,
 		["outputSchema", "model", "limits", "handoff"],
-		`a fixer reports ${"`FindingFixReportSchema`"} at envelope(${JSON.stringify(options.effort)}, "fix") and its handoff is always required - a worktree with no changes is a failed fix`,
+		`a fixer reports ${"`FindingFixReportSchema`"} at the caller's model with envelope("fix") limits, and its handoff is always required - a worktree with no changes is a failed fix`,
 	);
 	if (declared.workspace?.mode !== "worktree") {
 		refuse(
@@ -565,7 +577,7 @@ export function fixFindings(
 			? { disposition: options.disposition }
 			: {}),
 		outputSchema: FindingFixReportSchema,
-		model: fixEnvelope.model,
+		model: options.model,
 		limits: fixEnvelope.limits,
 		handoff: "required",
 		inputs: {

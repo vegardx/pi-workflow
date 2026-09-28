@@ -19,7 +19,10 @@ import {
 	MAX_REVIEW_LENSES,
 	MAX_VERIFY_ROUNDS,
 	MODEL_ID,
+	tierModel,
+	WORKTREE_MEMORY_BYTES,
 } from "../src/components/index.js";
+import { WorkflowRunRecordStore } from "../src/run-record.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
 import type {
 	WorkflowRunObservation,
@@ -56,6 +59,27 @@ const W1 = {
 	cumulativeRuntimeMs: 1_800_000,
 } as const;
 const CACHE_MARKER = "npm_config_cache=/tmp/npm-cache";
+/**
+ * The host session's model, as the provider these tests install answers it.
+ * `plan-to-ship` declares `needs.sessionModel: true`, so a run is refused
+ * without one, and every role that inherits carries THIS model exactly.
+ */
+const SESSION_MODEL = {
+	provider: "github-copilot",
+	id: "gpt-5.6-sol",
+	thinking: "high",
+} as const;
+
+/**
+ * The exact model a request carries. pi-subagent 0.15.0 admits the literal
+ * `"inherit"` on a `SubagentRequest`, and pi-workflow NEVER sends it: it
+ * resolves the session model once at run start and lowers the exact answer.
+ * Asserting that here means no test can accidentally accept the literal.
+ */
+function exactModel(request: SubagentRequest) {
+	expect(request.model).not.toBe("inherit");
+	return request.model === "inherit" ? undefined : request.model;
+}
 
 /** The compiler's own input types, so a fixture cannot drift from the schema. */
 type PlanInput = Parameters<typeof compileStages>[0];
@@ -71,7 +95,7 @@ interface PlanOptions {
 	readonly after?: boolean;
 }
 
-/** A plan schema v5 document: tasks are work, reviews are the lens list. */
+/** A plan schema v8 document: tasks are work, reviews are the lens list. */
 function plan(options: PlanOptions = {}): PlanInput {
 	const count = options.deliverables ?? 1;
 	const lenses = options.lensesPerDeliverable ?? ["correctness"];
@@ -127,11 +151,10 @@ function withTaskKey(
 	};
 }
 
-function input(options: PlanOptions & { effort?: string } = {}) {
+function input(options: PlanOptions = {}) {
 	return {
 		plan: plan(options),
 		planDigest: PLAN_DIGEST,
-		...(options.effort === undefined ? {} : { effort: options.effort }),
 	};
 }
 
@@ -362,11 +385,17 @@ function scripted(
 			agentScope: "global" as const,
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
-			model: request.model ?? {
+			// pi-workflow resolves `inherit` itself and sends an exact model, so a
+			// launch plan never sees the literal; `exactModel` is where that is
+			// asserted for every request the scripted client records.
+			model: exactModel(request) ?? {
 				provider: "test",
 				id: "model",
 				thinking: "low" as const,
 			},
+			// Revision 9: where the launch's model came from. pi-workflow always
+			// states one, so a plan it produced is never `"inherited"`.
+			modelSource: request.model === undefined ? "template" : "request",
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -578,6 +607,14 @@ afterEach(async () => {
 	while (services.length > 0) await services.pop()?.shutdown();
 });
 
+/** Where a service created by `serviceFor` keeps one run's record. */
+const storeRoots = new Map<WorkflowService, string>();
+function runDirectory(service: WorkflowService, runId: string): string {
+	const root = storeRoots.get(service);
+	if (!root) throw new Error("no store root for this service");
+	return path.join(root, "runs", runId);
+}
+
 async function serviceFor(delegated: Scripted): Promise<WorkflowService> {
 	const base = path.resolve(".pi", "test-plan-to-ship", randomUUID());
 	const cwd = path.join(base, "project");
@@ -592,7 +629,9 @@ async function serviceFor(delegated: Scripted): Promise<WorkflowService> {
 		registeredRoots: [
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
+		sessionModel: () => SESSION_MODEL,
 	});
+	storeRoots.set(service, path.join(cwd, "state"));
 	services.push(service);
 	return service;
 }
@@ -661,7 +700,6 @@ function examplePlan(): PlanInput {
 		title: "Component catalogue",
 		repos: [{ key: "wf", path: "/repo" }],
 		policy: {
-			effort: "standard",
 			gates: "ship",
 			maxFixRounds: 1,
 			publish: { mode: "pr", base: "main" },
@@ -698,7 +736,6 @@ describe("plan-to-ship: the compiled stage document", () => {
 		const document = compileStageDocument(plan());
 		check(document);
 		expect(document).toEqual({
-			effort: "standard",
 			gates: "ship",
 			deliverables: [
 				{
@@ -730,7 +767,6 @@ describe("plan-to-ship: the compiled stage document", () => {
 		const document = compileStageDocument(examplePlan());
 		check(document);
 		expect(document).toEqual({
-			effort: "standard",
 			gates: "ship",
 			deliverables: [
 				{
@@ -791,10 +827,25 @@ describe("plan-to-ship: the compiled stage document", () => {
 		]);
 	});
 
+	it("carries exactly `deliverables` and `gates`: the effort field is gone", () => {
+		// The compiled document is what pi-maestro derives for itself, so its
+		// shape is a shared contract. Removing the effort dial removed exactly
+		// one field from it and changed nothing else.
+		expect(Object.keys(compileStageDocument(plan())).sort()).toEqual([
+			"deliverables",
+			"gates",
+		]);
+		expect(Object.keys(CompiledStageDocumentSchema.properties).sort()).toEqual([
+			"deliverables",
+			"gates",
+		]);
+		expect(compileStageDocument(plan())).not.toHaveProperty("effort");
+	});
+
 	it("refuses what the lowering refuses, from the same compilation", () => {
 		expect(() =>
 			compileStageDocument(withStages(plan(), [{ use: "implement", id: "x" }])),
-		).toThrow("plan schema v5 does not author stages");
+		).toThrow("plan schema v8 does not author stages");
 	});
 });
 
@@ -803,7 +854,6 @@ describe("plan-to-ship: the compiler", () => {
 		// Spec 2.1: a plan that sets no policy is valid and gets the defaults,
 		// and the stage list is derived, never authored.
 		const document = compileStages(plan());
-		expect(document.effort).toBe("standard");
 		expect(document.gates).toEqual(["ship"]);
 		expect(document.deliverables).toEqual([
 			{
@@ -876,15 +926,9 @@ describe("plan-to-ship: the compiler", () => {
 	});
 
 	it.each([
-		["cheap", 0, 1, ["check-d0-verify-1"]],
+		[0, 1, ["check-d0-verify-1"]],
+		[1, 2, ["check-d0-verify-1", "check-d0-fix-1", "check-d0-verify-2"]],
 		[
-			"standard",
-			1,
-			2,
-			["check-d0-verify-1", "check-d0-fix-1", "check-d0-verify-2"],
-		],
-		[
-			"deep",
 			2,
 			3,
 			[
@@ -896,21 +940,28 @@ describe("plan-to-ship: the compiler", () => {
 			],
 		],
 	] as const)(
-		"maps %s to %i fix round(s) and %i verify round(s)",
-		(effort, fixRounds, verifyRounds, tasks) => {
-			const document = compileStages(plan(), { effort });
+		"maps %i fix round(s) to %i verify round(s)",
+		(maxFixRounds, verifyRounds, tasks) => {
+			const document = compileStages(plan(), { maxFixRounds });
 			const verify = document.deliverables[0]?.stages[1];
-			expect(verify).toMatchObject({ fixRounds, verifyRounds, tasks });
+			expect(verify).toMatchObject({
+				fixRounds: maxFixRounds,
+				verifyRounds,
+				tasks,
+			});
 		},
 	);
 
-	it("honours `policy.maxFixRounds` over the effort column's default", () => {
+	it("defaults `policy.maxFixRounds` to one fix round, and honours 2", () => {
+		// The effort column that used to decide this is gone: the plan's own knob
+		// is the only one, and its default is the old `standard` column's 1.
+		expect(compileStages(plan()).deliverables[0]?.stages[1]).toMatchObject({
+			fixRounds: 1,
+			verifyRounds: 2,
+		});
 		// `maxFixRounds: 2` is the plan vocabulary's maximum and compiles to the
 		// component's cap of 3 VERIFY rounds: a fix is never left unchecked.
-		const document = compileStages(plan(), {
-			effort: "cheap",
-			maxFixRounds: 2,
-		});
+		const document = compileStages(plan(), { maxFixRounds: 2 });
 		expect(document.deliverables[0]?.stages[1]).toMatchObject({
 			key: "check-d0",
 			fixRounds: 2,
@@ -991,12 +1042,12 @@ describe("plan-to-ship: the compiler", () => {
 		[
 			"a task carrying plan schema v4's `review`",
 			() => withTaskKey(plan(), "review", { lens: "correctness" }),
-			'deliverable "d0" task "w0" carries `review`: plan schema v5 moved review routing to `deliverables[].reviews`; a task is work only, so move it to the deliverable\'s `reviews` list and store the plan at `schemaVersion: 5`.',
+			'deliverable "d0" task "w0" carries `review`: plan schema v8 moved review routing to `deliverables[].reviews`; a task is work only, so move it to the deliverable\'s `reviews` list and store the plan at `schemaVersion: 8`.',
 		],
 		[
 			"a task carrying plan schema v3's `by`",
 			() => withTaskKey(plan(), "by", { lens: "correctness" }),
-			'deliverable "d0" task "w0" carries `by`, plan schema v3\'s name for a task review: plan schema v5 moved review routing to `deliverables[].reviews`; a task is work only, so move it to the deliverable\'s `reviews` list and store the plan at `schemaVersion: 5`.',
+			'deliverable "d0" task "w0" carries `by`, plan schema v3\'s name for a task review: plan schema v8 moved review routing to `deliverables[].reviews`; a task is work only, so move it to the deliverable\'s `reviews` list and store the plan at `schemaVersion: 8`.',
 		],
 		[
 			"a deliverable that authors `stages`",
@@ -1005,7 +1056,7 @@ describe("plan-to-ship: the compiler", () => {
 					{ use: "implement", id: "build" },
 					{ use: "verify-and-fix", id: "green" },
 				]),
-			'deliverable "d0" declares `stages`: plan schema v5 does not author stages; the compiler derives them from `reviews` and `policy`, so drop the block and store the plan at `schemaVersion: 5`.',
+			'deliverable "d0" declares `stages`: plan schema v8 does not author stages; the compiler derives them from `reviews` and `policy`, so drop the block and store the plan at `schemaVersion: 8`.',
 		],
 	])(
 		"refuses %s by name, and compiles the same plan without it",
@@ -1025,7 +1076,7 @@ describe("plan-to-ship: the compiler", () => {
 			"a task is work only",
 		);
 		expect(() => compileStages(withStages(plan(), []))).toThrow(
-			"plan schema v5 does not author stages",
+			"plan schema v8 does not author stages",
 		);
 	});
 
@@ -1135,7 +1186,7 @@ describe("plan-to-ship: the start is the approval", () => {
 });
 
 describe("plan-to-ship: the stage walk", () => {
-	async function walkToShip(options: PlanOptions & { effort?: string } = {}) {
+	async function walkToShip(options: PlanOptions = {}) {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const receipt = await service.run("plan-to-ship", input(options));
@@ -1202,7 +1253,7 @@ describe("plan-to-ship: the stage walk", () => {
 		expect(instructions).toMatch(/never a reason to leave the tree unchanged/i);
 	});
 
-	it("verifies the implementer's own patch and takes the verify envelope", async () => {
+	it("verifies the implementer's own patch at the session model", async () => {
 		const { delegated } = await walkToShip();
 		const [verify] = delegated.requestsGoal("Verify deliverable");
 		if (!verify) throw new Error("no verifier request");
@@ -1210,7 +1261,8 @@ describe("plan-to-ship: the stage walk", () => {
 		// A verifier has to apply the handoff before it can run the check, so it
 		// runs in a worktree — with the `verify` row's model and the write grant.
 		expect(verify.workspace.mode).toBe("worktree");
-		expect(verify.model).toEqual(envelope("standard", "verify").model);
+		// The check INHERITS: the resolved session model, never the literal.
+		expect(verify.model).toEqual(SESSION_MODEL);
 		expect(verify.limits.workspaceWriteBytes).toBeGreaterThanOrEqual(
 			W1.workspaceWriteBytes,
 		);
@@ -1225,8 +1277,8 @@ describe("plan-to-ship: the stage walk", () => {
 		const run = await service.run("plan-to-ship", input());
 		const ship = await park(service, run.runId, "ship");
 
-		// The check spent the ONE fix round `standard` pays for, so the review's
-		// fixer has none left and is not declared: total fix rounds per
+		// The check spent the ONE fix round `policy.maxFixRounds` defaults to, so
+		// the review's fixer has none left and is not declared: total fix rounds per
 		// deliverable never exceed `policy.maxFixRounds`.
 		expect(taskPaths(ship)).toEqual([
 			"refine",
@@ -1239,7 +1291,7 @@ describe("plan-to-ship: the stage walk", () => {
 			"ship",
 		]);
 		const [fix] = delegated.requestsGoal("Fix what the check reported");
-		expect(fix?.model).toEqual(envelope("standard", "fix").model);
+		expect(fix?.model).toEqual(SESSION_MODEL);
 		// The reviewer judges the FIXER's patch, not the implementer's.
 		const fixChild = delegated.childFor("Fix what the check reported");
 		const [review] = delegated.requestsFor("reviewer");
@@ -1302,7 +1354,9 @@ describe("plan-to-ship: the stage walk", () => {
 		const [normalize] = delegated.requestsGoal("Normalize the review findings");
 		expect(normalize?.agent).toBe("reviewer");
 		expect(normalize?.workspace.mode).toBe("read-only");
-		expect(normalize?.model).toEqual(envelope("standard", "synthesis").model);
+		// The synthesis is a REVIEWER: the standard reviewer tier, not the
+		// session's model.
+		expect(normalize?.model).toEqual(tierModel("standard"));
 		expect(normalize?.task.instructions.join("\n")).toMatch(
 			/de-duplicated|ONE list/,
 		);
@@ -1312,7 +1366,7 @@ describe("plan-to-ship: the stage walk", () => {
 		const [fix] = delegated.requestsGoal("Address the review findings");
 		expect(fix?.agent).toBe("implementer");
 		expect(fix?.workspace.mode).toBe("worktree");
-		expect(fix?.model).toEqual(envelope("standard", "fix").model);
+		expect(fix?.model).toEqual(SESSION_MODEL);
 		const instructions = fix?.task.instructions.join("\n") ?? "";
 		expect(instructions).toContain("Address EVERY blocking and major finding");
 		// Only the blocking finding of the scripted synthesis is actionable; the
@@ -1701,6 +1755,98 @@ describe("plan-to-ship: the gate policies", () => {
 		).toHaveLength(2);
 	});
 
+	it("completes with no gate at all when the policy is none, and carries the ship inputs as output", async () => {
+		// `policy.gates: "none"` is `auto`: the yes that started the run is the
+		// only approval, so nothing parks and the HOST publishes on completion.
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({
+				deliverables: 2,
+				lensesPerDeliverable: ["a"],
+				policy: { gates: "none" },
+			}),
+		);
+		const finished = await bounded(service.wait(run.runId), "wait");
+
+		expect(finished.status).toBe("completed");
+		// NO CHECKPOINT ANYWHERE: not a decided one, not an expired one.
+		expect(
+			(finished.tasks ?? []).filter((task) => task.kind === "checkpoint"),
+		).toEqual([]);
+		expect(finished.parked ?? false).toBe(false);
+		expect(taskPaths(finished)).toEqual([
+			"refine",
+			"implement-d0",
+			"implement-d1",
+			"check-d0-verify-1",
+			"review-d0/a",
+			"synthesis-d0",
+			"fix-d0",
+			"check-d1-verify-1",
+			"review-d1/a",
+			"synthesis-d1",
+			"fix-d1",
+			"receipt",
+		]);
+		// The SAME receipt a `ship: true` decision commits, so a publication
+		// reader needs no new field: `receipt.planDigest` and one entry per
+		// handoff.
+		const output = finished.output as {
+			approved: boolean;
+			shipped: boolean;
+			receipt: { planDigest: string; refs: string[]; note: string };
+			shipSummary?: {
+				plan: { summary: string };
+				deliverables: readonly {
+					id: string;
+					summary: { summary: string };
+					findings?: { verdict: string };
+					fix?: { checkPassed: boolean };
+				}[];
+			};
+		};
+		expect(output.approved).toBe(true);
+		expect(output.shipped).toBe(true);
+		expect(output.receipt.planDigest).toBe(PLAN_DIGEST);
+		expect(output.receipt.refs).toHaveLength(2);
+		expect(output.receipt.note).toContain(
+			"no ship gate; the host publishes on completion",
+		);
+		// And the ship gate's own inputs, as data, so the host can render the
+		// same summary before it publishes.
+		expect(output.shipSummary?.plan.summary).toBe("Refined.");
+		expect(output.shipSummary?.deliverables.map((entry) => entry.id)).toEqual([
+			"d0",
+			"d1",
+		]);
+		for (const entry of output.shipSummary?.deliverables ?? []) {
+			expect(entry.summary.summary).toEqual(expect.any(String));
+			expect(entry.findings?.verdict).toEqual(expect.any(String));
+			expect(entry.fix?.checkPassed).toBe(true);
+		}
+		// The lowering says the same thing: no gate key at all.
+		expect(
+			compileStages(plan({ deliverables: 2 }), { gates: "none" }).gates,
+		).toEqual([]);
+	});
+
+	it("carries no shipSummary under ship or every-deliverable", async () => {
+		// A person read the same values at the gate, and `inspect` still carries
+		// them as task artifacts, so the output does not repeat them.
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: [] }),
+		);
+		const ship = await park(service, run.runId, "ship");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(run.runId), "wait");
+		expect(finished.output).not.toHaveProperty("shipSummary");
+	});
+
 	it("gates after every deliverable but the last, whose gate is the ship gate", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
@@ -1788,6 +1934,7 @@ describe("plan-to-ship: replay", () => {
 			storeRoot: path.join(cwd, "state"),
 			projectTrusted: () => false,
 			subagents: delegated.provider,
+			sessionModel: () => SESSION_MODEL,
 			registeredRoots: [
 				{ path: BUILTIN_ROOT, scope: "builtin" as const, source: "package" },
 			],
@@ -1926,40 +2073,80 @@ describe("plan-to-ship: a reviewer that dies", () => {
 	});
 });
 
-describe("plan-to-ship: the effort dial", () => {
-	it("reads every model and limit from the envelope table", async () => {
-		const runs: Record<string, Scripted> = {};
-		for (const effort of ["cheap", "deep"] as const) {
-			const delegated = scripted();
-			const service = await serviceFor(delegated);
-			const run = await service.run(
-				"plan-to-ship",
-				input({ effort, lensesPerDeliverable: ["a", "b"] }),
-			);
-			await park(service, run.runId, "ship");
-			runs[effort] = delegated;
+describe("plan-to-ship: models per role", () => {
+	it("inherits the session model for the work and takes the table's limits", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["a", "b"] }),
+		);
+		await park(service, run.runId, "ship");
+
+		// THE WORK INHERITS. Every task of an inheriting role carries the run's
+		// one resolved session model - the literal never reaches a request - and
+		// its limits still come from the stage table.
+		const refine = delegated.requestsGoal("Refine the authored plan")[0];
+		expect(refine?.model).toEqual(SESSION_MODEL);
+		expect(refine?.limits).toEqual(envelope("refine").limits);
+		const implement = delegated.requestsFor("implementer")[0];
+		expect(implement?.model).toEqual(SESSION_MODEL);
+		expect(implement?.limits.cumulativeRuntimeMs).toBe(
+			envelope("implement").limits.cumulativeRuntimeMs,
+		);
+		// One model for the whole run: nothing that inherited differs.
+		const inherited = [
+			...delegated.requestsGoal("Refine the authored plan"),
+			...delegated.requestsFor("implementer"),
+		];
+		expect(inherited.length).toBeGreaterThan(2);
+		for (const request of inherited) {
+			expect(request.model).toEqual(SESSION_MODEL);
 		}
-		const cheap = runs.cheap as Scripted;
-		const deep = runs.deep as Scripted;
 
-		// The lens list is the PLAN's, not the effort column's: both efforts run
-		// every lens the deliverable asked for, exactly once.
-		expect(cheap.requestsFor("reviewer")).toHaveLength(3); // two lenses + synthesis
-		expect(deep.requestsFor("reviewer")).toHaveLength(3);
+		// A REVIEW keeps its tier, and the receipt recorder stays pinned.
+		expect(delegated.requestsFor("reviewer")).toHaveLength(3); // two lenses + synthesis
+		for (const review of delegated.requestsFor("reviewer")) {
+			expect(review.model).not.toEqual(SESSION_MODEL);
+		}
+	});
 
-		expect(cheap.requestsFor("implementer")[0]?.model).toEqual(
-			envelope("cheap", "implement").model,
+	it("records the resolved session model on the run", async () => {
+		const delegated = scripted();
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		await park(service, run.runId, "ship");
+		const record = await WorkflowRunRecordStore.readFrom(
+			runDirectory(service, run.runId),
+			run.runId,
 		);
-		expect(deep.requestsFor("implementer")[0]?.model).toEqual(
-			envelope("deep", "implement").model,
+		expect(record.sessionModel).toEqual(SESSION_MODEL);
+		expect(record.contractRevision).toBe(22);
+	});
+
+	it("refuses the start by name when the host has no session model", async () => {
+		const delegated = scripted();
+		const base = path.resolve(".pi", "test-plan-to-ship", randomUUID());
+		const cwd = path.join(base, "project");
+		await mkdir(cwd, { recursive: true });
+		const service = await createWorkflowService({
+			cwd,
+			agentDir: path.join(base, "agent"),
+			storeRoot: path.join(cwd, "state"),
+			projectTrusted: () => false,
+			subagents: delegated.provider,
+			registeredRoots: [
+				{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
+			],
+			// No provider at all: exactly what an embedder with no session means.
+		});
+		services.push(service);
+		await expect(service.run("plan-to-ship", input())).rejects.toThrow(
+			"plan-to-ship inherits the session model, and this host has none.",
 		);
-		expect(
-			cheap.requestsFor("implementer")[0]?.limits.cumulativeRuntimeMs,
-		).toBeLessThan(
-			deep.requestsFor("implementer")[0]?.limits.cumulativeRuntimeMs ?? 0,
-		);
-		// `cheap` pays for no fix round, so it verifies once; `deep` pays for two.
-		expect(cheap.requestsGoal("Verify deliverable")).toHaveLength(1);
+		// Refused BEFORE the run exists: nothing durable, nothing delegated.
+		await expect(service.listRuns()).resolves.toMatchObject({ runs: [] });
+		expect(delegated.requests).toHaveLength(0);
 	});
 
 	it("resolves a diverse lens to the other-family stand-in and says so", async () => {
@@ -1971,16 +2158,15 @@ describe("plan-to-ship: the effort dial", () => {
 		);
 		await park(service, run.runId, "ship");
 		const [review] = delegated.requestsFor("reviewer");
-		expect(review?.model?.id).toBe(DIVERSE_MODEL_ID);
+		expect(exactModel(review as SubagentRequest)?.id).toBe(DIVERSE_MODEL_ID);
 	});
 
-	it("honours a review task's tier and its exact model pin", async () => {
+	it("honours a review's tier and its exact model pin", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
 			input({
-				effort: "cheap",
 				lensesPerDeliverable: ["security"],
 				tier: "heavy",
 				pinnedModel: "github-copilot/gpt-5.6-luna",
@@ -1990,19 +2176,23 @@ describe("plan-to-ship: the effort dial", () => {
 		expect(delegated.requestsFor("reviewer")[0]?.model).toEqual({
 			provider: "github-copilot",
 			id: "gpt-5.6-luna",
-			// `heavy` outranks the cheap column's `low`.
+			// The lens's own tier decides the thinking level.
 			thinking: "high",
 		});
+		// An untiered lens takes the standard reviewer tier.
+		expect(
+			delegated.requestsGoal("Normalize the review findings")[0]?.model,
+		).toEqual(tierModel("standard"));
 	});
 });
 
 describe("plan-to-ship: the input contract", () => {
-	it("accepts the v5 shape, with and without `effort`", async () => {
+	it("accepts the v8 shape", async () => {
 		const service = await serviceFor(scripted());
 		for (const value of [
 			input(),
-			input({ effort: "deep" }),
-			input({ policy: { effort: "cheap", gates: "ship" } }),
+			input({ policy: { gates: "ship" } }),
+			input({ policy: { gates: "none" } }),
 			input({ lensesPerDeliverable: [] }),
 			{ ...input(), plan: { ...plan(), body: "Why this plan exists." } },
 			input({
@@ -2022,7 +2212,7 @@ describe("plan-to-ship: the input contract", () => {
 		[
 			"tasks[].review",
 			() => withTaskKey(plan(), "review", { lens: "correctness" }),
-			"plan schema v5 moved review routing to `deliverables[].reviews`",
+			"plan schema v8 moved review routing to `deliverables[].reviews`",
 		],
 		[
 			"tasks[].by",
@@ -2032,7 +2222,12 @@ describe("plan-to-ship: the input contract", () => {
 		[
 			"deliverables[].stages",
 			() => withStages(plan(), [{ use: "implement", id: "build" }]),
-			"plan schema v5 does not author stages",
+			"plan schema v8 does not author stages",
+		],
+		[
+			"policy.effort",
+			() => ({ ...plan(), policy: { effort: "deep" as unknown as never } }),
+			"plan schema v8 removed `policy.effort`; models are set per role and budgets are fixed",
 		],
 		[
 			"policy.gates: approve-plan",
@@ -2059,7 +2254,7 @@ describe("plan-to-ship: the input contract", () => {
 		},
 	);
 
-	it("refuses a bad digest, a bad effort, and an unknown plan field", async () => {
+	it("refuses a bad digest and an unknown plan field", async () => {
 		const service = await serviceFor(scripted());
 		for (const bad of [
 			{ ...input(), planDigest: "not-a-digest" },
@@ -2105,16 +2300,12 @@ describe("plan-to-ship: the input contract", () => {
 });
 
 describe("plan-to-ship: the memory dial", () => {
-	it.each([
-		["cheap", 1 * 1024 * 1024 * 1024],
-		["standard", 2 * 1024 * 1024 * 1024],
-		["deep", 4 * 1024 * 1024 * 1024],
-	] as const)(
-		"asks for %s memory on every worktree task and says so in the instructions",
-		async (effort, memoryBytes) => {
+	it.each([[WORKTREE_MEMORY_BYTES]])(
+		"asks for %i bytes of memory on every worktree task and says so in the instructions",
+		async (memoryBytes) => {
 			const delegated = scripted();
 			const service = await serviceFor(delegated);
-			const run = await service.run("plan-to-ship", input({ effort }));
+			const run = await service.run("plan-to-ship", input());
 			const ship = await park(service, run.runId, "ship");
 			await decide(service, ship, "ship", { ship: true });
 			await bounded(service.wait(run.runId), "wait");
@@ -2174,12 +2365,14 @@ describe("plan-to-ship: the agent templates", () => {
 		expect(agents.get("reviewer")?.workspaceModes).toEqual(["read-only"]);
 	});
 
-	it("covers every request a deep run makes", async () => {
+	it("covers every request a run makes", async () => {
 		const delegated = scripted({ check: "fail" });
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
-			input({ effort: "deep", lensesPerDeliverable: ["a", "b"] }),
+			// The widest run the plan vocabulary admits: the fix-round cap, so
+			// every verifier and every fixer the loop can declare is exercised.
+			input({ lensesPerDeliverable: ["a", "b"], policy: { maxFixRounds: 2 } }),
 		);
 		const ship = await park(service, run.runId, "ship");
 		await decide(service, ship, "ship", { ship: true });
@@ -2188,7 +2381,7 @@ describe("plan-to-ship: the agent templates", () => {
 		const agents = await discoverAgents([
 			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
 		]);
-		// The deep column's cap: three verifiers and two fixers.
+		// The cap `policy.maxFixRounds: 2` buys: three verifiers and two fixers.
 		expect(delegated.requestsGoal("Verify deliverable")).toHaveLength(
 			MAX_VERIFY_ROUNDS,
 		);
@@ -2205,9 +2398,13 @@ describe("plan-to-ship: the agent templates", () => {
 				expect(agent.tools).toContain(tool);
 			}
 			expect(agent.workspaceModes).toContain(request.workspace.mode);
-			if (request.model) {
+			// pi-workflow sends the RESOLVED exact model, so preflight checks it
+			// against the template's exact entries as an ordinary request; the
+			// template's `inherit` entry admits a direct delegation, not this.
+			const model = exactModel(request);
+			if (model) {
 				expect(agent.allowedModels).toContain(
-					`${request.model.provider}/${request.model.id}:${request.model.thinking}`,
+					`${model.provider}/${model.id}:${model.thinking}`,
 				);
 			}
 			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(

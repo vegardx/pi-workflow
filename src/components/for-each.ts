@@ -40,10 +40,10 @@ import { WorkflowComponentError } from "./errors.js";
  *    closure would be a guess. It is documented law, and the exact-prefix
  *    replay test is what enforces it in practice — an array built from
  *    anything else changes between materializations and fails there, loudly.
- * 3. **Effort, model and budget choices are table lookups keyed by
- *    `ctx.input`.** `forEach` chooses none of them; it only projects the
- *    worst case of what the caller's table produced and refuses up front
- *    rather than blocking admission mid-run.
+ * 3. **Model, limit and budget choices are the caller's, and deterministic.**
+ *    `forEach` chooses none of them; it only projects the worst case of what
+ *    the caller declared and refuses up front rather than blocking admission
+ *    mid-run.
  *
  * ## Refusals, all at declaration time
  *

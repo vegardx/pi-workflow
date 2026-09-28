@@ -1,12 +1,10 @@
 import { defineWorkflow } from "@vegardx/pi-workflow";
 import {
 	DIVERSE_MODEL_ID,
-	type Effort,
 	envelope,
 	FINDING_ID_PATTERN,
 	forEach,
-	MODEL_ID,
-	MODEL_PROVIDER,
+	tierModel,
 	workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 import { type Static, Type } from "typebox";
@@ -20,8 +18,8 @@ import { type Static, Type } from "typebox";
  * it is worth shipping: nothing downstream parses its output, so it is the
  * place to demonstrate the fan-out / cross-check / reduce shape at full size
  * without a caller's contract riding on it. It is assembled from the component
- * library the same way `deep-review` is — `envelope` is the whole effort dial
- * and `forEach` is every fan-out — and it invents no primitive of its own.
+ * library the same way `deep-review` is — `envelope` is every limit and
+ * `forEach` is every fan-out — and it invents no primitive of its own.
  *
  * The stage graph:
  *
@@ -152,15 +150,15 @@ const CONTEXT_CHUNK = 5_000;
 const MAX_CONTEXT_ENTRIES = 56;
 
 /**
- * The threads a caller who names no sources gets: a fixed table keyed by
- * `depth`, which the input schema REQUIRES. That is replay law 3 — the shape
- * of the graph follows from `ctx.input` and from nothing else — and law 1,
- * because every id below is a literal in this file rather than a counter over
- * runtime data.
+ * The threads a caller who names no sources gets: a FIXED list, and the same
+ * one every run. It used to be a table keyed by a `depth` dial (two points of
+ * view, three, or five); the dial is gone with the rest of the effort dial, and
+ * what is left is the column it called `standard` — three. The briefs are what
+ * stops three threads from writing one answer three times.
  *
- * The count is the depth dial's real meaning here: two points of view, three,
- * or five. The briefs are what stops five threads from writing one answer five
- * times.
+ * Fixed is still replay law 3 — the shape of the graph follows from `ctx.input`
+ * and from nothing else — and law 1, because every id below is a literal in this
+ * file rather than a counter over runtime data.
  */
 interface Angle {
 	readonly id: string;
@@ -182,23 +180,11 @@ const CONTEXT: Angle = Object.freeze({
 	brief:
 		"Why it is the way it is. Look for the history, the constraint, or the decision that produced what you are looking at.",
 });
-const ALTERNATIVES: Angle = Object.freeze({
-	id: "alternatives",
-	brief:
-		"The other answers. Find the approaches that were not taken or the readings of the question that differ from the obvious one, and say what each would cost.",
-});
-const RISK: Angle = Object.freeze({
-	id: "risk",
-	brief:
-		"What breaks if someone acts on the answer. Look for what the answer assumes and what fails when the assumption does not hold.",
-});
-
-const ANGLES_BY_DEPTH: Readonly<Record<Effort, readonly Angle[]>> =
-	Object.freeze({
-		cheap: Object.freeze([EVIDENCE, COUNTERPOINT]),
-		standard: Object.freeze([EVIDENCE, COUNTERPOINT, CONTEXT]),
-		deep: Object.freeze([EVIDENCE, COUNTERPOINT, CONTEXT, ALTERNATIVES, RISK]),
-	});
+const DEFAULT_ANGLES: readonly Angle[] = Object.freeze([
+	EVIDENCE,
+	COUNTERPOINT,
+	CONTEXT,
+]);
 
 /**
  * Where a claim may come from. A closed union per `kind`, so "a note with no
@@ -250,11 +236,6 @@ const SourceSchema = Type.Union([
 const InputSchema = Type.Object(
 	{
 		question: Type.String({ minLength: 1, maxLength: MAX_QUESTION_LENGTH }),
-		depth: Type.Union([
-			Type.Literal("cheap"),
-			Type.Literal("standard"),
-			Type.Literal("deep"),
-		]),
 		sources: Type.Optional(
 			Type.Array(SourceSchema, { minItems: 1, maxItems: MAX_SOURCES }),
 		),
@@ -370,21 +351,14 @@ type Output = Static<typeof OutputSchema>;
 
 /**
  * The run budget: the worst case this input schema admits, which is 16 sources
- * — so 16 research threads and 16 cross-checks — plus one reducer, all at the
- * deep column. The scheduler admits a task only while the declared maximum
- * still fits, so the number is the envelope table's own sum rather than a
- * guess.
+ * — so 16 research threads and 16 cross-checks — plus one reducer. The
+ * scheduler admits a task only while the declared maximum still fits, so the
+ * number is the envelope table's own sum rather than a guess.
  */
 const WORST_CASE_BUDGET = workflowBudgetFor([
-	...Array.from(
-		{ length: MAX_SOURCES },
-		() => envelope("deep", "review").budgetShare,
-	),
-	...Array.from(
-		{ length: MAX_SOURCES },
-		() => envelope("deep", "verify").budgetShare,
-	),
-	envelope("deep", "synthesis").budgetShare,
+	...Array.from({ length: MAX_SOURCES }, () => envelope("review").budgetShare),
+	...Array.from({ length: MAX_SOURCES }, () => envelope("verify").budgetShare),
+	envelope("synthesis").budgetShare,
 ]);
 
 /** A thread, whether it came from a source or from the angle table. */
@@ -396,12 +370,9 @@ interface Thread {
 	readonly source?: Source;
 }
 
-function threadsFor(
-	depth: Effort,
-	sources: readonly Source[] | undefined,
-): readonly Thread[] {
+function threadsFor(sources: readonly Source[] | undefined): readonly Thread[] {
 	if (sources === undefined) {
-		return ANGLES_BY_DEPTH[depth].map((angle) =>
+		return DEFAULT_ANGLES.map((angle) =>
 			Object.freeze({ id: angle.id, brief: angle.brief }),
 		);
 	}
@@ -484,13 +455,12 @@ export default defineWorkflow({
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
 	async run(ctx): Promise<Output> {
-		const depth: Effort = ctx.input.depth;
-		const research = envelope(depth, "review");
-		const check = envelope(depth, "verify");
-		const reduce = envelope(depth, "synthesis");
+		const research = envelope("review");
+		const check = envelope("verify");
+		const reduce = envelope("synthesis");
 		const question = ctx.input.question;
 		const sources: readonly Source[] | undefined = ctx.input.sources;
-		const threads = threadsFor(depth, sources);
+		const threads = threadsFor(sources);
 
 		const questionEntry = `Question:\n${question}`;
 		const threadInstructions = [
@@ -507,7 +477,7 @@ export default defineWorkflow({
 		ctx.phase("research");
 		const researchers = forEach(ctx, RESEARCH_NAMESPACE, threads, {
 			// Law 1: the key is a required field — a source's `id`, or an angle id
-			// that is a literal in the table `depth` selected. Never a counter.
+			// that is a literal in this file. Never a counter.
 			idOf: (thread) => thread.id,
 			disposition: "optional",
 			budget: WORST_CASE_BUDGET,
@@ -523,11 +493,10 @@ export default defineWorkflow({
 					instructions: threadInstructions,
 				},
 				contextMode: "fresh",
-				model: {
-					provider: MODEL_PROVIDER,
-					id: MODEL_ID,
-					thinking: research.thinking,
-				},
+				// A researcher is a reviewer-shaped role: it keeps the standard
+				// reviewer tier rather than the session's model, so a question asked
+				// from a light session still gets threads worth cross-checking.
+				model: tierModel("standard"),
 				outputSchema: ResearchReportSchema,
 				tools: ["read", "grep", "find", "ls"],
 				preloadSkills: [],
@@ -645,11 +614,7 @@ export default defineWorkflow({
 					// claimant agrees with it for free. DELETE WHEN ROUTING LANDS:
 					// this becomes `modelRole: { family: "other" }` and the exact id
 					// stops being written here.
-					model: {
-						provider: MODEL_PROVIDER,
-						id: DIVERSE_MODEL_ID,
-						thinking: check.thinking,
-					},
+					model: tierModel("standard", true),
 					outputSchema: CrossCheckReportSchema,
 					tools: ["read", "grep", "find", "ls"],
 					preloadSkills: [],
@@ -771,11 +736,13 @@ export default defineWorkflow({
 					],
 				},
 				contextMode: "fresh",
-				model: {
-					provider: MODEL_PROVIDER,
-					id: MODEL_ID,
-					thinking: reduce.thinking,
-				},
+				// The reducer keeps the standard reviewer tier, like the threads it
+				// reduces. NOTHING HERE INHERITS THE SESSION MODEL: pi-workflow sends
+				// the resolved exact model in every request, so an inherited model
+				// outside the `researcher` template's `allowedModels` would fail
+				// preflight with "model exceeds ceiling"; a question asked from any
+				// session gets the same threads, checked the same way.
+				model: tierModel("standard"),
 				outputSchema: SynthesisSchema,
 				// Optional, and for the reason in this file's header: a barrier's
 				// control edge covers EVERY task it closed over, so a dead thread

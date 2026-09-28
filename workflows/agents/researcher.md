@@ -32,12 +32,14 @@ from a trusted project's `.pi/agents/*.md` only. Copy it into one of those
 before running the `deep-research` workflow; see the pi-workflow README,
 "Builtin workflows". The frontmatter above is an authority **ceiling**: a
 workflow task may ask for less, never for more. It covers the research,
-cross-check and synthesis stages of the component library's effort table at
-every depth — `cheap`, `standard`, and `deep` — so no column has to be trimmed
-to fit. `allowedModels` lists both model families on purpose: a cross-check
-runs on the family the research threads did not, because a checker that shares
-everything with the claimant agrees with it for free. A model outside this list
-fails preflight with "model exceeds ceiling".
+cross-check and synthesis rows of the component library's stage table, which is
+one row per stage and no longer a column per depth. `allowedModels` lists both
+model families on purpose: a cross-check runs on the family the research threads
+did not, because a checker that shares everything with the claimant agrees with
+it for free. A model outside this list fails preflight with "model exceeds
+ceiling". It does NOT list `inherit`: nothing in `deep-research` inherits the
+host session's model, so the same question asked from any session gets the same
+threads, checked the same way.
 
 `deep-research` declares three kinds of task against this one definition,
 because all three are the same authority — read, judge, report:

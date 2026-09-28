@@ -108,6 +108,13 @@ async function fixture(
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
 		...(options.ceiling ? { delegationCeiling: options.ceiling } : {}),
+		// `plan-to-ship` inherits the session model, so a fixture that starts it
+		// needs one; the ceiling is the axis under test here, not the model.
+		sessionModel: () => ({
+			provider: "github-copilot",
+			id: "gpt-5.6-sol",
+			thinking: "high",
+		}),
 	});
 	services.push(service);
 	const preflight = delegated.ownerClient.preflight as unknown as {
@@ -143,20 +150,26 @@ describe("what a definition needs", () => {
 		);
 		// The three the package ships: the pipeline that writes needs a worktree;
 		// the two reviewers do not.
+		// `plan-to-ship` also inherits the host session's model, and says so.
 		expect(byName.get("plan-to-ship")).toEqual({
 			workspace: "worktree",
+			sessionModel: true,
 			declared: true,
 		});
 		expect(byName.get("deep-review")).toEqual({
 			workspace: "read-only",
+			sessionModel: false,
 			declared: true,
 		});
 		expect(byName.get("deep-research")).toEqual({
 			workspace: "read-only",
+			sessionModel: false,
 			declared: true,
 		});
 		await expect(service.validate("plan-to-ship")).resolves.toMatchObject({
-			workflow: { needs: { workspace: "worktree", declared: true } },
+			workflow: {
+				needs: { workspace: "worktree", sessionModel: true, declared: true },
+			},
 		});
 	});
 
@@ -168,11 +181,13 @@ describe("what a definition needs", () => {
 		const validated = await service.validate("read-only-example");
 		expect(validated.workflow.needs).toEqual({
 			workspace: "worktree",
+			sessionModel: false,
 			declared: false,
 		});
 		expect(DEFAULT_WORKFLOW_NEEDS).toEqual({ workspace: "worktree" });
 		expect(resolveWorkflowNeeds({})).toEqual({
 			workspace: "worktree",
+			sessionModel: false,
 			declared: false,
 		});
 		// And `workflow_validate` says so in the line a person reads.
@@ -330,7 +345,6 @@ describe("startBuiltin under an explicit ceiling", () => {
 				],
 			},
 			planDigest: "a".repeat(64),
-			effort: "cheap",
 		};
 	}
 
@@ -384,17 +398,21 @@ describe("startBuiltin under an explicit ceiling", () => {
 });
 
 describe("the contract revision", () => {
-	it("is 21, and the run record carries an optional ceiling", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(21);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(21);
+	it("is 22, and the run record carries an optional ceiling and session model", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(22);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(22);
 		// The persisted field the revision moved for.
 		expect(Object.keys(WorkflowRunRecordSchema.properties)).toContain(
 			"ceiling",
 		);
+		// The persisted field revision 22 moved for.
+		expect(Object.keys(WorkflowRunRecordSchema.properties)).toContain(
+			"sessionModel",
+		);
 	});
 
-	it("requires pi-subagent revision 8 with the delegation ceiling", () => {
-		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(8);
+	it("requires pi-subagent revision 9 with the delegation ceiling", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(9);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.delegationCeiling,
 		).toBe(true);

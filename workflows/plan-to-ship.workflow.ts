@@ -11,28 +11,28 @@ import {
 	type CompiledStage,
 	type CompiledStageDocument,
 	DIVERSE_MODEL_ID,
-	type Effort,
-	type Envelope,
 	envelope,
 	type FindingFixReport,
+	FindingFixReportSchema,
 	FindingSchema,
 	type FindingSynthesis,
+	FindingSynthesisSchema,
 	fixFindings,
+	GATE_TIMEOUT_MS,
 	gate,
-	gateTimeoutMs,
 	MAX_COMPILED_STAGES,
 	MAX_FINDINGS,
 	MAX_REVIEW_LENSES,
 	MAX_VERIFY_ROUNDS,
-	MODEL_ID,
-	MODEL_PROVIDER,
 	type ReviewFanOutResult,
 	type ReviewLens,
 	type ReviewTier,
 	reviewFanOut,
 	synthesizeFindings,
-	THINKING_BY_TIER,
+	type ThinkingLevel,
+	tierModel,
 	verifyAndFix,
+	WORKTREE_MEMORY_BYTES,
 	workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 import { type Static, Type } from "typebox";
@@ -44,22 +44,26 @@ import { type Static, Type } from "typebox";
  *
  * This file is the package-provided (`builtin` scope) definition registered by
  * the shipped extension; it needs no Pi project trust and is discovered from
- * the installed package, not from the user's project. The input contract is
- * unchanged — a pi-maestro plan by value, its sha256 digest, and the effort
- * dial — and `effort` is now optional, falling back to `plan.policy.effort`
- * and then to `standard`.
+ * the installed package, not from the user's project. The input is a pi-maestro
+ * plan by value and its sha256 digest, and nothing else: THERE IS NO EFFORT
+ * DIAL. Models are set per role — the refiner, the implementers, the check and
+ * the fixer run at `model: "inherit"`, the host session's own model and thinking
+ * level, resolved once at run start; a review runs at its lens's tier; the
+ * synthesis runs at the standard reviewer tier; and the receipt recorder is
+ * pinned, because recording what a run committed is not a thinking task. Limits
+ * and budgets are one fixed row per stage (`envelope`).
  *
  * ## What this definition is
  *
  * A COMPILER over `plan.deliverables` and `plan.policy` (plan-loop spec §1.3
- * and §2.1), and no graph of its own. A plan schema v5 document NEVER AUTHORS
+ * and §2.1), and no graph of its own. A plan schema v8 document NEVER AUTHORS
  * STAGES: the compiler derives them, per deliverable, from the deliverable's
  * `reviews` list and the policy — implement, check, and (when `reviews` is
  * non-empty) a review fan-out, a synthesis and a fix — plus the gates
  * `policy.gates` asks for. Every
  * stage lowers through the component library
  * (`@vegardx/pi-workflow/components`); there is no hand-written `ctx.fanOut`
- * and no effort table on the side. The compilation is available as DATA in two
+ * and no model table on the side. The compilation is available as DATA in two
  * views, from one derivation, and `run` walks exactly what they describe:
  *
  * - `compileStageDocument(plan, policy)` — the PLAN-FACING
@@ -144,14 +148,26 @@ import { type Static, Type } from "typebox";
  *
  * ## Gates come from `policy.gates`, and only from there
  *
+ * `policy.gates` decides what happens at the END of the run, and it is what the
+ * mode a person left plan mode in chooses:
+ *
  * - `ship` (the default) — one `ship` gate at the end: the single human
  *   decision, taken after every deliverable is done and before anything is
- *   published.
+ *   published. This is `ask`.
  * - `every-deliverable` — one gate after each deliverable's stages, and the
  *   last of those IS the `ship` gate.
+ * - `none` — NO ship gate. When every deliverable is done the run COMPLETES and
+ *   the host publishes on completion; how it publishes is the host's, and
+ *   `policy.publish` is still read by nobody here. This is `auto`, and the
+ *   authority for it is the same yes that started the run.
  *
- * There is no "no gates" value: publication proof is a durable decision, so
- * the ship gate is not optional.
+ *   A run under `none` commits the SAME receipt a `ship: true` decision commits
+ *   — `receipt.planDigest`, `receipt.refs`, and one `deliverables[]` entry per
+ *   handoff — so a host's publication reader needs no new field. What the ship
+ *   gate would have shown a person (the refined plan, and per deliverable the
+ *   implementation summary, the normalized findings and the fix report) becomes
+ *   `output.shipSummary`, so the host can render the same summary before it
+ *   publishes.
  *
  * THE START OF THE RUN IS THE APPROVAL. `approve-plan` and `approve-plan+ship`
  * are gone and are refused by name at compile time. A run of this definition
@@ -161,7 +177,7 @@ import { type Static, Type } from "typebox";
  * `/plan run` is that same yes said deliberately — so an up-front gate asked
  * the same person to approve the same digest seconds later and bought nothing.
  *
- * A plan cannot declare a gate of its own: plan schema v5 authors no stages,
+ * A plan cannot declare a gate of its own: plan schema v8 authors no stages,
  * and `deliverables[].stages` is admitted by the input schema only so the
  * compiler can refuse it by name. The two removed `policy.gates` values are
  * admitted by the input schema for the same reason, and for that reason only.
@@ -199,12 +215,12 @@ import { type Static, Type } from "typebox";
  *   materialization barrier's control edge covers every task it closed over -
  *   so the run completes DEGRADED with the verdict, the findings and the
  *   coverage committed. `deep-review` records the same cost.
- * - `modelRole` is not used yet: every task names an exact model through
- *   `envelope`, and a `diverse` lens resolves to `DIVERSE_MODEL_ID` with a log
- *   line saying it is a stand-in. DELETE WHEN ROUTING LANDS.
+ * - `modelRole` is not used yet: a role that does not inherit names an exact
+ *   model, and a `diverse` lens resolves to `DIVERSE_MODEL_ID` with a log line
+ *   saying it is a stand-in. DELETE WHEN ROUTING LANDS.
  * - The declared budget is clamped to the service's own cost ceiling
  *   (`DEFAULT_MAX_WORKFLOW_COST`), so a plan at the input schema's worst case
- *   (16 deliverables, 16 lenses, the deep column) is admitted task by task
+ *   (16 deliverables, 16 lenses) is admitted task by task
  *   until the budget runs out rather than refused up front. `project()` is
  *   where a host sees that before starting.
  *
@@ -254,25 +270,8 @@ const VERIFY_TOOLS = Object.freeze([
 	"bash",
 ] as const);
 
-/**
- * Guest VM memory for a worktree stage, by effort. The `envelope` table carries
- * limits and models but not memory: it is a pi-subagent request field rather
- * than a workflow limit, and the implementer agent's 4 GiB ceiling is what this
- * column narrows. W1 measured 512 MiB (the default when nothing narrows the
- * ceiling) killing a real `npm ci`, so even the cheap column asks for 1 GiB.
- */
-const IMPLEMENT_MEMORY_BYTES: Readonly<Record<Effort, number>> = Object.freeze({
-	cheap: 1 * 1024 * 1024 * 1024,
-	standard: 2 * 1024 * 1024 * 1024,
-	deep: 4 * 1024 * 1024 * 1024,
-});
-
-/** Spec §2.1: what each effort pays for in FIX rounds when the plan is silent. */
-const DEFAULT_FIX_ROUNDS: Readonly<Record<Effort, 0 | 1 | 2>> = Object.freeze({
-	cheap: 0,
-	standard: 1,
-	deep: 2,
-});
+/** FIX rounds when the plan names none; `policy.maxFixRounds` is the knob. */
+const DEFAULT_FIX_ROUNDS = 1 as const;
 
 /**
  * A closed set of strings, as `{ type: "string", enum: [...] }` rather than
@@ -290,8 +289,6 @@ const DEFAULT_FIX_ROUNDS: Readonly<Record<Effort, 0 | 1 | 2>> = Object.freeze({
 function stringEnum<T extends string>(values: readonly T[]) {
 	return Type.Unsafe<T>({ type: "string", enum: [...values] });
 }
-
-const EffortSchema = stringEnum(["cheap", "standard", "deep"] as const);
 
 const ReviewTierSchema = stringEnum(["light", "standard", "heavy"] as const);
 
@@ -314,7 +311,7 @@ const ReviewSchema = Type.Object(
 );
 
 /**
- * A task is WORK, and only work: plan schema v5 has no review, `by` or kind
+ * A task is WORK, and only work: plan schema v8 has no review, `by` or kind
  * field on a task, and review routing lives on `deliverables[].reviews`.
  *
  * `review` and `by` are admitted here as unknown values for one reason: refused
@@ -350,7 +347,7 @@ const DeliverableSchema = Type.Object(
 			Type.Array(ReviewSchema, { maxItems: MAX_REVIEW_LENSES }),
 		),
 		/**
-		 * Plan schema v4 and earlier authored a stage list here. v5 does not, and
+		 * Plan schema v4 and earlier authored a stage list here. v8 does not, and
 		 * this key is admitted only so `compilePlan` can refuse it by name.
 		 */
 		stages: Type.Optional(Type.Unknown()),
@@ -365,15 +362,22 @@ const DeliverableSchema = Type.Object(
  */
 const PolicySchema = Type.Object(
 	{
-		effort: Type.Optional(EffortSchema),
 		/**
-		 * `ship` or `every-deliverable`. The two removed values are admitted
-		 * here only so `compilePlan` can refuse them by name.
+		 * Plan schema v7's effort dial. REMOVED, and admitted here as an unknown
+		 * value for one reason: refused by TypeBox it would read as an unexpected
+		 * property, which a person cannot act on. It parses, and `resolvePolicy`
+		 * refuses it BY NAME.
+		 */
+		effort: Type.Optional(Type.Unknown()),
+		/**
+		 * `ship`, `every-deliverable`, or `none`. The two removed values are
+		 * admitted here only so `compilePlan` can refuse them by name.
 		 */
 		gates: Type.Optional(
 			stringEnum([
 				"ship",
 				"every-deliverable",
+				"none",
 				"approve-plan",
 				"approve-plan+ship",
 			] as const),
@@ -387,7 +391,7 @@ const PolicySchema = Type.Object(
 				{ additionalProperties: false },
 			),
 		),
-		/** FIX rounds. Default 0 cheap / 1 standard / 2 deep. */
+		/** FIX rounds, 0..2. Default 1; the plan's own knob, and the only one. */
 		maxFixRounds: Type.Optional(Type.Integer({ minimum: 0, maximum: 2 })),
 		/** Read by pi-maestro's publication, never by this runtime. */
 		publish: Type.Optional(
@@ -432,8 +436,6 @@ const InputSchema = Type.Object(
 	{
 		plan: PlanSchema,
 		planDigest: Type.String({ pattern: "^[0-9a-f]{64}$" }),
-		/** Optional since stages landed: falls back to `plan.policy.effort`. */
-		effort: Type.Optional(EffortSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -498,8 +500,30 @@ const ReceiptRecordSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** One deliverable's own half of what the ship gate would have shown. */
+const ShipSummaryDeliverableSchema = Type.Object(
+	{
+		id: Type.String({ pattern: IDENTIFIER }),
+		/** The `summary-<d>` input: the implementation report a gate reads. */
+		summary: ImplementationSchema,
+		/** The `findings-<d>` input, when a synthesis ran. */
+		findings: Type.Optional(FindingSynthesisSchema),
+		/** The `fix-<d>` input, when a fixer ran. */
+		fix: Type.Optional(FindingFixReportSchema),
+	},
+	{ additionalProperties: false },
+);
+
 const OutputSchema = Type.Object(
 	{
+		/**
+		 * ALWAYS TRUE, and it is not a vestige: the start of the run IS the
+		 * approval. `approve-plan` is gone, so nothing in the run can answer this
+		 * question a second time, and a run that exists exists because a person
+		 * said yes to the plan it carries. It is kept because a receipt reader
+		 * outside this package pins the field; read `shipped` for the decision and
+		 * `receipt.planDigest` for what was approved.
+		 */
 		approved: Type.Boolean(),
 		shipped: Type.Boolean(),
 		deliverables: Type.Array(
@@ -535,6 +559,30 @@ const OutputSchema = Type.Object(
 		),
 		/** Every blocking or major finding the review stages merged. */
 		findings: Type.Array(FindingSchema, { maxItems: MAX_FINDINGS }),
+		/**
+		 * What the ship gate would have shown a person, as data: the refined plan
+		 * and, per deliverable, the implementation summary, the normalized findings
+		 * and the fix report — the gate's `plan`, `summary-<d>`, `findings-<d>` and
+		 * `fix-<d>` inputs.
+		 *
+		 * Present ONLY under `policy.gates: "none"`, where there is no gate and the
+		 * host publishes on completion: the summary a person would have read is the
+		 * run's terminal output instead, so the host can render it before it
+		 * publishes. Absent under `ship` and `every-deliverable`, where a person
+		 * read the same values at the gate and `inspect` still carries them as task
+		 * artifacts.
+		 */
+		shipSummary: Type.Optional(
+			Type.Object(
+				{
+					plan: RefinedPlanSchema,
+					deliverables: Type.Array(ShipSummaryDeliverableSchema, {
+						maxItems: MAX_DELIVERABLES,
+					}),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		receipt: Type.Object(
 			{
 				/**
@@ -562,8 +610,7 @@ type Finding = Static<typeof FindingSchema>;
 
 /** A policy with every question answered; what the compiler actually reads. */
 interface ResolvedPolicy {
-	readonly effort: Effort;
-	readonly gates: "ship" | "every-deliverable";
+	readonly gates: "ship" | "every-deliverable" | "none";
 	readonly reviewDefault: {
 		readonly tier: ReviewTier;
 		readonly diverse: boolean;
@@ -669,8 +716,10 @@ export const StageLoweringSchema = Type.Object(
 			minItems: 1,
 			maxItems: MAX_DELIVERABLES,
 		}),
-		effort: EffortSchema,
-		/** Every gate key, in the order a run parks on them. */
+		/**
+		 * Every gate key, in the order a run parks on them. EMPTY under
+		 * `policy.gates: "none"`: a run that publishes on completion parks nowhere.
+		 */
 		gates: Type.Array(
 			Type.String({ pattern: "^[a-z][a-z0-9-]*$", maxLength: 128 }),
 			{ maxItems: MAX_DELIVERABLES + 2 },
@@ -723,11 +772,11 @@ function pick<T>(value: unknown, allowed: readonly T[], fallback: T): T {
  * schema admits only so this function can refuse them by name.
  */
 function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
-	const effort = pick<Effort>(
-		policy?.effort,
-		["cheap", "standard", "deep"],
-		"standard",
-	);
+	if (policy?.effort !== undefined) {
+		refuse(
+			"plan schema v8 removed `policy.effort`; models are set per role and budgets are fixed",
+		);
+	}
 	if (
 		policy?.gates === "approve-plan" ||
 		policy?.gates === "approve-plan+ship"
@@ -737,10 +786,9 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 		);
 	}
 	return {
-		effort,
 		gates: pick(
 			policy?.gates,
-			["ship", "every-deliverable"] as const,
+			["ship", "every-deliverable", "none"] as const,
 			"ship" as const,
 		),
 		reviewDefault: {
@@ -754,7 +802,7 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 		maxFixRounds: pick<0 | 1 | 2>(
 			policy?.maxFixRounds,
 			[0, 1, 2],
-			DEFAULT_FIX_ROUNDS[effort],
+			DEFAULT_FIX_ROUNDS,
 		),
 	};
 }
@@ -915,9 +963,8 @@ function derivedStagesFor(
  * anything is spent — rather than part-way through a walk that has already paid
  * for an implementer.
  *
- * `policy` defaults to the plan's own; a caller that overrides it (the run
- * overrides `effort` with its input) gets the override, exactly as the run
- * compiles it.
+ * `policy` defaults to the plan's own; a caller that passes a different one gets
+ * that one, exactly as the run would compile it.
  */
 export function compileStages(
 	plan: Plan,
@@ -953,7 +1000,6 @@ export function compileStageDocument(
 				stage.compiled ? [stage.compiled] : [],
 			),
 		})),
-		effort: compiled.policy.effort,
 		gates: compiled.policy.gates,
 	};
 }
@@ -987,18 +1033,18 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 		}
 		if (deliverable.stages !== undefined) {
 			refuse(
-				`${where} declares \`stages\`: plan schema v5 does not author stages; the compiler derives them from \`reviews\` and \`policy\`, so drop the block and store the plan at \`schemaVersion: 5\`.`,
+				`${where} declares \`stages\`: plan schema v8 does not author stages; the compiler derives them from \`reviews\` and \`policy\`, so drop the block and store the plan at \`schemaVersion: 8\`.`,
 			);
 		}
 		for (const task of deliverable.tasks) {
 			if (task.by !== undefined) {
 				refuse(
-					`${where} task "${task.id}" carries \`by\`, plan schema v3's name for a task review: plan schema v5 moved review routing to \`deliverables[].reviews\`; a task is work only, so move it to the deliverable's \`reviews\` list and store the plan at \`schemaVersion: 5\`.`,
+					`${where} task "${task.id}" carries \`by\`, plan schema v3's name for a task review: plan schema v8 moved review routing to \`deliverables[].reviews\`; a task is work only, so move it to the deliverable's \`reviews\` list and store the plan at \`schemaVersion: 8\`.`,
 				);
 			}
 			if (task.review !== undefined) {
 				refuse(
-					`${where} task "${task.id}" carries \`review\`: plan schema v5 moved review routing to \`deliverables[].reviews\`; a task is work only, so move it to the deliverable's \`reviews\` list and store the plan at \`schemaVersion: 5\`.`,
+					`${where} task "${task.id}" carries \`review\`: plan schema v8 moved review routing to \`deliverables[].reviews\`; a task is work only, so move it to the deliverable's \`reviews\` list and store the plan at \`schemaVersion: 8\`.`,
 				);
 			}
 		}
@@ -1013,7 +1059,7 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 	// deliverable but the LAST, whose gate is the `ship` gate itself; the ship
 	// gate is a run-level gate over every handoff, so it is declared after the
 	// walk rather than as a stage of one deliverable, and it appears in `gates`
-	// rather than in `deliverables[].stages`.
+	// rather than in `deliverables[].stages`. `none` adds none at all.
 	const withPolicyGates = deliverables.map((entry, index) => {
 		const policyGate = policyGateFor(
 			resolved,
@@ -1028,8 +1074,11 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 			if (stage.use === "gate") gateKeys.push(stage.key);
 		}
 	}
-	// Always: the ship decision is the one a receipt is checked against.
-	gateKeys.push("ship");
+	// Under `ship` and `every-deliverable`: the ship decision is the one a
+	// receipt is checked against. Under `none` there is no gate anywhere, and the
+	// receipt is checked against the start of the run instead - the yes that
+	// created it, which is the only approval an `auto` run ever asked for.
+	if (resolved.gates !== "none") gateKeys.push("ship");
 
 	return {
 		policy: resolved,
@@ -1040,7 +1089,6 @@ function compilePlan(plan: Plan, policy: PlanPolicy | undefined): CompiledPlan {
 				id: entry.deliverable.id,
 				stages: [...loweredStages(entry)],
 			})),
-			effort: resolved.effort,
 			gates: gateKeys,
 		},
 	};
@@ -1083,7 +1131,7 @@ function policyGateFor(
 }
 
 /** `provider/model` as pi-maestro writes it; the provider is up to the first /. */
-function pinnedModel(model: string, thinking: Envelope["thinking"]) {
+function pinnedModel(model: string, thinking: ThinkingLevel) {
 	const slash = model.indexOf("/");
 	return {
 		provider: model.slice(0, slash),
@@ -1093,27 +1141,22 @@ function pinnedModel(model: string, thinking: Envelope["thinking"]) {
 }
 
 /**
- * A compiled lens mapped onto the component's vocabulary. A tier outranks the
- * effort column, so every lens is PINNED here rather than left to the
- * component's diversity seam: the seam carries one exact model and cannot vary
- * its thinking level per lens. DELETE WHEN ROUTING LANDS: `tier` and
- * `family: "other"` become two fields of one `modelRole` request and this
- * function disappears.
+ * A compiled lens mapped onto the component's vocabulary. A review is the one
+ * role that still has a dial - its TIER - so every lens is PINNED here rather
+ * than left to the component's diversity seam: the seam carries one exact model
+ * and cannot vary its thinking level per lens. A lens the plan pinned
+ * (`reviews[].model`) keeps that model at its tier's thinking level.
+ * DELETE WHEN ROUTING LANDS: `tier` and `family: "other"` become two fields of
+ * one `modelRole` request and this function disappears.
  */
 function componentLens(lens: LoweredLens): ReviewLens {
-	const thinking = THINKING_BY_TIER[lens.tier];
+	const tiered = tierModel(lens.tier, lens.diverse);
 	return {
 		id: lens.id,
 		tier: lens.tier,
 		...(lens.diverse ? { diverse: true } : {}),
 		...(lens.skill ? { skill: lens.skill } : {}),
-		model: lens.model
-			? pinnedModel(lens.model, thinking)
-			: {
-					provider: MODEL_PROVIDER,
-					id: lens.diverse ? DIVERSE_MODEL_ID : MODEL_ID,
-					thinking,
-				},
+		model: lens.model ? pinnedModel(lens.model, tiered.thinking) : tiered,
 	};
 }
 
@@ -1124,7 +1167,7 @@ function handoffRef(descriptor: WorkflowHandoffDescriptor): string {
 
 /**
  * One deliverable as authored, for an agent's context entry (16 KiB bound).
- * Every task is work — plan schema v5 has no review task — so none is filtered.
+ * Every task is work — plan schema v8 has no review task — so none is filtered.
  */
 function planText(deliverable: Deliverable): string {
 	const tasks = deliverable.tasks.map(
@@ -1149,7 +1192,8 @@ function checkSentence(repoPath: string | undefined): string {
 /**
  * The run budget: the worst case this input schema admits — 16 deliverables,
  * each with an implementer, the 3-verify-round cap with its 2 fixers, 16 lenses
- * and a synthesis, at the deep column — plus the refiner and the recorder.
+ * and a synthesis — plus the refiner and the recorder. One column, because
+ * there is one row per stage.
  *
  * The `fix` stage adds no share: a deliverable's fixers come out of ONE pool of
  * `policy.maxFixRounds` (at most 2, which is `MAX_VERIFY_ROUNDS - 1`), so the
@@ -1161,23 +1205,23 @@ function checkSentence(repoPath: string | undefined): string {
  * scheduler admits against.
  */
 const WORST_CASE = workflowBudgetFor([
-	envelope("deep", "refine").budgetShare,
-	envelope("deep", "record").budgetShare,
+	envelope("refine").budgetShare,
+	envelope("record").budgetShare,
 	...Array.from({ length: MAX_DELIVERABLES }, () => [
-		envelope("deep", "implement").budgetShare,
+		envelope("implement").budgetShare,
 		...Array.from(
 			{ length: MAX_VERIFY_ROUNDS },
-			() => envelope("deep", "verify").budgetShare,
+			() => envelope("verify").budgetShare,
 		),
 		...Array.from(
 			{ length: MAX_VERIFY_ROUNDS - 1 },
-			() => envelope("deep", "fix").budgetShare,
+			() => envelope("fix").budgetShare,
 		),
 		...Array.from(
 			{ length: MAX_REVIEW_LENSES },
-			() => envelope("deep", "review").budgetShare,
+			() => envelope("review").budgetShare,
 		),
-		envelope("deep", "synthesis").budgetShare,
+		envelope("synthesis").budgetShare,
 	]).flat(),
 ]);
 const RUN_BUDGET = Object.freeze({
@@ -1204,6 +1248,12 @@ interface DeliverableOutcome {
 	readonly summaryInput: TaskInputHandle;
 	/** The normalized findings, when the synthesis reported. */
 	readonly findingsInput?: TaskInputHandle;
+	/**
+	 * The same normalized findings BY VALUE. Read from a barrier the walk already
+	 * crossed, and carried because `policy.gates: "none"` puts it in the run's
+	 * own output where the ship gate would have shown it.
+	 */
+	readonly synthesis?: FindingSynthesis;
 	/** The fix report, when a fixer ran. */
 	readonly fixInput?: TaskInputHandle;
 	readonly fixReport?: FindingFixReport;
@@ -1215,8 +1265,8 @@ export default defineWorkflow({
 	meta: {
 		name: "plan-to-ship",
 		description:
-			"Compile a plan's stages into one graph: refine it, implement each deliverable in a worktree, run the project's check, review it through every lens, normalize the findings, fix them, and ask a human before recording a receipt.",
-		version: 4,
+			"Compile a plan's stages into one graph: refine it, implement each deliverable in a worktree, run the project's check, review it through every lens, normalize the findings, fix them, and — unless the plan asked to publish on completion — ask a human before recording a receipt.",
+		version: 5,
 		budget: RUN_BUDGET,
 		// The run parks on human gates, so it outlives any session. Seven days
 		// covers a 48-hour wait at each gate with room for the work.
@@ -1225,7 +1275,10 @@ export default defineWorkflow({
 		// What this definition needs of the host, in pi-subagent's own
 		// vocabulary, so a host can refuse a start above its delegation ceiling
 		// before a run exists.
-		needs: { workspace: "worktree" },
+		// `sessionModel: true` because the refiner, the implementers, the check and
+		// the fixer declare `model: "inherit"`: a host with no session model is
+		// refused before a run exists, by name.
+		needs: { workspace: "worktree", sessionModel: true },
 	},
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
@@ -1234,24 +1287,26 @@ export default defineWorkflow({
 		const planDigest = ctx.input.planDigest;
 		// THE COMPILATION, before anything is declared: every refusal in
 		// `compilePlan` lands here, with nothing spent.
-		const compiled = compilePlan(plan, {
-			...(plan.policy ?? {}),
-			...(ctx.input.effort ? { effort: ctx.input.effort } : {}),
-		});
+		const compiled = compilePlan(plan, plan.policy);
 		const policy = compiled.policy;
-		const effort: Effort = policy.effort;
-		const decisionTimeoutMs = gateTimeoutMs(effort);
-		const refineEnvelope = envelope(effort, "refine");
-		const implementEnvelope = envelope(effort, "implement");
-		const reviewEnvelope = envelope(effort, "review");
-		const recordEnvelope = envelope(effort, "record");
-		const memoryBytes = IMPLEMENT_MEMORY_BYTES[effort];
+		const decisionTimeoutMs = GATE_TIMEOUT_MS;
+		const refineEnvelope = envelope("refine");
+		const implementEnvelope = envelope("implement");
+		const reviewEnvelope = envelope("review");
+		const recordEnvelope = envelope("record");
+		// THE MODEL OF THE WORK. The refiner, the implementers, the check's
+		// verifiers and fixers, and the review fixer all run at the host session's
+		// own model: a person who chose a model for the conversation that produced
+		// this plan chose it for the work the plan describes, and pi-workflow
+		// resolves the literal once at run start so the whole run agrees.
+		const workModel = "inherit" as const;
+		const memoryBytes = WORKTREE_MEMORY_BYTES;
 		const memoryGiB = memoryBytes / 1024 ** 3;
 		const repoPath = plan.repos?.[0]?.path;
 		const check = checkSentence(repoPath);
 
 		ctx.log(
-			`plan-to-ship: ${compiled.lowering.deliverables.length} deliverable(s), effort ${effort}, gates ${policy.gates}, ${compiled.lowering.gates.length} gate(s): ${compiled.lowering.gates.join(", ")}.`,
+			`plan-to-ship: ${compiled.lowering.deliverables.length} deliverable(s), gates ${policy.gates}, ${compiled.lowering.gates.length} gate(s)${compiled.lowering.gates.length > 0 ? `: ${compiled.lowering.gates.join(", ")}` : " - the run completes and the host publishes on completion"}.`,
 		);
 
 		ctx.phase("refine");
@@ -1269,7 +1324,7 @@ export default defineWorkflow({
 				],
 			},
 			contextMode: "fresh",
-			model: refineEnvelope.model,
+			model: workModel,
 			tools: ["read", "grep", "find", "ls"],
 			preloadSkills: [],
 			contextScopes: ["project"],
@@ -1317,7 +1372,7 @@ export default defineWorkflow({
 					],
 				},
 				contextMode: "fresh",
-				model: implementEnvelope.model,
+				model: workModel,
 				tools,
 				preloadSkills: [],
 				contextScopes: ["project"],
@@ -1401,7 +1456,7 @@ export default defineWorkflow({
 						{
 							implementation: final,
 							check: { command: CHECK_COMMAND, install: INSTALL_COMMAND },
-							effort,
+							model: workModel,
 							maxRounds: (lowered.verifyRounds ?? 1) as 0 | 1 | 2 | 3,
 							budget: RUN_BUDGET,
 							verify: (round) => ({
@@ -1544,7 +1599,10 @@ export default defineWorkflow({
 					const merged = findings;
 					const reducer = synthesizeFindings(ctx, lowered.key, {
 						reviews: reviewed.reviews,
-						effort,
+						// The reducer is a REVIEWER, not a worker: it reads lens reports
+						// and normalizes them, so it runs at the standard reviewer tier
+						// rather than at the session's model.
+						model: tierModel("standard"),
 						budget: RUN_BUDGET,
 						// REQUIRED, unlike the lenses it reduces. A deliverable with
 						// reviews runs review, synthesis and fix on its own; the
@@ -1614,7 +1672,7 @@ export default defineWorkflow({
 						implementation: final,
 						findings: synthesized.findings,
 						synthesis: findingsInput,
-						effort,
+						model: workModel,
 						remainingRounds: remainingFixRounds,
 						budget: RUN_BUDGET,
 						agent: (actionable) => ({
@@ -1710,6 +1768,7 @@ export default defineWorkflow({
 				findings,
 				summaryInput: final.output,
 				...(findingsInput ? { findingsInput } : {}),
+				...(normalized ? { synthesis: normalized } : {}),
 				...(fixInput ? { fixInput } : {}),
 				...(fixReport ? { fixReport } : {}),
 				...(fixSkipped ? { fixSkipped } : {}),
@@ -1773,10 +1832,10 @@ export default defineWorkflow({
 			.slice(0, MAX_FINDINGS);
 		const blocking = reviews.filter((review) => review.blocking).length;
 
-		// The ship gate: one, over every handoff, always — except when an earlier
-		// gate stopped the walk, because nothing is declared after a person said
-		// stop.
-		if (!stopped) {
+		// THE SHIP GATE: one, over every handoff — except when an earlier gate
+		// stopped the walk, because nothing is declared after a person said stop,
+		// and except under `policy.gates: "none"`, which asked for no gate at all.
+		if (!stopped && policy.gates !== "none") {
 			ctx.phase("ship");
 			// `plan` is the REFINED plan, and it carries the refiner's `blockers`:
 			// the one thing in this run a person must read that no summary and no
@@ -1821,13 +1880,51 @@ export default defineWorkflow({
 			};
 		}
 
-		const shipped = shipDecision?.ship === true;
+		/**
+		 * `policy.gates: "none"` — the run completes and the host publishes on
+		 * completion. There is no gate anywhere under `none`, so `stopped` cannot
+		 * be set and there is no decision to read: the yes that STARTED the run is
+		 * the approval, and the receipt this run commits is the same receipt a
+		 * `ship: true` decision commits.
+		 *
+		 * What the gate would have shown a person becomes the run's output, read
+		 * from values the walk's own barriers already returned plus the refined
+		 * plan, so the host can render the same summary before it publishes.
+		 */
+		const publishOnCompletion = policy.gates === "none";
+		let shipSummary: Output["shipSummary"];
+		if (publishOnCompletion) {
+			const refined = await ctx.result(refine);
+			shipSummary = {
+				plan: refined,
+				deliverables: outcomes.flatMap((entry, index) => {
+					const summary = summaries[index];
+					if (!summary) return [];
+					return [
+						{
+							id: entry.id,
+							summary,
+							...(entry.synthesis ? { findings: entry.synthesis } : {}),
+							...(entry.fixReport ? { fix: entry.fixReport } : {}),
+						},
+					];
+				}),
+			};
+			ctx.log(
+				`plan-to-ship: \`policy.gates: "none"\`, so the run completes with ${descriptors.length} handoff patch(es) and no ship gate; the host publishes on completion and \`shipSummary\` carries what a gate would have shown.`,
+			);
+		}
+
+		const shipped = publishOnCompletion || shipDecision?.ship === true;
 		const refs = shipped ? descriptors.map(handoffRef) : [];
 		const note = [
 			shipped ? "shipped" : "not shipped",
 			`plan ${planDigest}`,
 			`checks ${passed}/${outcomes.length} passed`,
 			`${blocking} blocking finding(s)`,
+			...(publishOnCompletion
+				? ["no ship gate; the host publishes on completion"]
+				: []),
 			...(stopped ? [`stopped at gate ${stopped.key}`] : []),
 			...(stopped?.note ? [stopped.note] : []),
 			...(shipDecision?.note ? [shipDecision.note] : []),
@@ -1891,6 +1988,7 @@ export default defineWorkflow({
 			})),
 			reviews,
 			findings: [...findings],
+			...(shipSummary ? { shipSummary } : {}),
 			receipt: { planDigest, refs, note },
 		};
 	},

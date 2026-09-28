@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { parse } from "@babel/parser";
 import { ExactModelRequestSchema, RunLimitsSchema } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
@@ -8,17 +8,18 @@ import {
 	assertBudgetAdmits,
 	budgetAdmits,
 	DIVERSE_MODEL_ID,
-	EFFORTS,
-	type Effort,
 	ENVELOPE_STAGES,
+	ENVELOPE_TIERS,
 	envelope,
-	gateTimeoutMs,
+	GATE_TIMEOUT_MS,
 	MODEL_ID,
 	MODEL_PROVIDER,
 	type StageName,
 	sumBudgetShares,
 	THINKING_BY_TIER,
+	tierModel,
 	WORKSPACE_WRITE_BYTES,
+	WORKTREE_MEMORY_BYTES,
 	workflowBudgetFor,
 } from "../src/components/envelope.js";
 import { WorkflowComponentError } from "../src/components/errors.js";
@@ -43,14 +44,29 @@ function declarations(commit: { events: readonly WorkflowEventInput[] }) {
 	);
 }
 
+const WORKFLOWS_ROOT = new URL("../workflows/", import.meta.url);
+
+/** Every `.ts` file under a root, recursively; the sweep's own input. */
+async function sourceFiles(root: URL): Promise<URL[]> {
+	const found: URL[] = [];
+	for (const entry of await readdir(root, { withFileTypes: true })) {
+		const child = new URL(
+			entry.isDirectory() ? `${entry.name}/` : entry.name,
+			root,
+		);
+		if (entry.isDirectory()) found.push(...(await sourceFiles(child)));
+		else if (entry.name.endsWith(".ts")) found.push(child);
+	}
+	return found;
+}
+
 const REVIEW_OUTPUT = Type.Object(
 	{ verdict: Type.String() },
 	{ additionalProperties: false },
 );
 
-describe("the effort table", () => {
-	it("covers every stage at every effort and is a pure lookup", () => {
-		expect([...EFFORTS]).toEqual(["cheap", "standard", "deep"]);
+describe("the stage table", () => {
+	it("covers every stage and is a pure lookup", () => {
 		expect([...ENVELOPE_STAGES]).toEqual([
 			"refine",
 			"implement",
@@ -60,98 +76,123 @@ describe("the effort table", () => {
 			"synthesis",
 			"record",
 		]);
-		for (const effort of EFFORTS) {
-			for (const stage of ENVELOPE_STAGES) {
-				const first = envelope(effort, stage);
-				const second = envelope(effort, stage);
-				// Replay law 3: the lookup reads nothing but its two arguments.
-				expect(first).toEqual(second);
-				expect(first).toBe(second);
-				expect(Object.isFrozen(first)).toBe(true);
-				expect(Object.isFrozen(first.limits)).toBe(true);
-				expect(first.effort).toBe(effort);
-				expect(first.stage).toBe(stage);
-				expect(Value.Check(RunLimitsSchema, first.limits)).toBe(true);
-				expect(Value.Check(ExactModelRequestSchema, first.model)).toBe(true);
-				expect(first.model.thinking).toBe(first.thinking);
-				expect(first.budgetShare).toEqual({
-					cost: first.limits.cost,
-					totalTokens: first.limits.totalTokens,
-					childRuntimeMs: first.limits.cumulativeRuntimeMs,
-				});
-				// A run with a token budget needs `limits.totalTokens` on every
-				// agent task, so the table always declares one.
-				expect(first.limits.totalTokens).toBeGreaterThan(0);
-			}
+		for (const stage of ENVELOPE_STAGES) {
+			const first = envelope(stage);
+			const second = envelope(stage);
+			// Replay law 3: the lookup reads nothing but its one argument.
+			expect(first).toEqual(second);
+			expect(first).toBe(second);
+			expect(Object.isFrozen(first)).toBe(true);
+			expect(Object.isFrozen(first.limits)).toBe(true);
+			expect(first.stage).toBe(stage);
+			expect(Value.Check(RunLimitsSchema, first.limits)).toBe(true);
+			expect(Value.Check(ExactModelRequestSchema, first.model)).toBe(true);
+			expect(first.model.thinking).toBe(first.thinking);
+			expect(first.budgetShare).toEqual({
+				cost: first.limits.cost,
+				totalTokens: first.limits.totalTokens,
+				childRuntimeMs: first.limits.cumulativeRuntimeMs,
+			});
+			// A run with a token budget needs `limits.totalTokens` on every
+			// agent task, so the table always declares one.
+			expect(first.limits.totalTokens).toBeGreaterThan(0);
 		}
+	});
+
+	it("has no effort dial left: one row per stage, and no second argument", () => {
+		// The dial is gone. `envelope` is a one-argument lookup, the row is the
+		// measured `standard` column, and nothing in the module speaks of cheap,
+		// standard or deep as a level of effort.
+		expect(envelope).toHaveLength(1);
+		expect(
+			Object.fromEntries(
+				ENVELOPE_STAGES.map((stage) => [stage, envelope(stage).thinking]),
+			),
+		).toEqual({
+			refine: "medium",
+			implement: "medium",
+			verify: "low",
+			fix: "medium",
+			review: "medium",
+			synthesis: "medium",
+			record: "low",
+		});
 	});
 
 	it("gives only the writing stages a worktree write allowance", () => {
-		for (const effort of EFFORTS) {
-			for (const stage of ENVELOPE_STAGES) {
-				const writes = stage === "implement" || stage === "fix";
-				expect(envelope(effort, stage).limits.workspaceWriteBytes).toBe(
-					writes ? WORKSPACE_WRITE_BYTES : 0,
-				);
-			}
+		for (const stage of ENVELOPE_STAGES) {
+			const writes = stage === "implement" || stage === "fix";
+			expect(envelope(stage).limits.workspaceWriteBytes).toBe(
+				writes ? WORKSPACE_WRITE_BYTES : 0,
+			);
 		}
 		// W1's floor for a real `npm ci` plus build in the guest.
 		expect(WORKSPACE_WRITE_BYTES).toBe(2 * 1024 * 1024 * 1024);
+		// W1 measured 512 MiB killing a real `npm ci`; a worktree stage asks for
+		// the same 2 GiB whatever it is doing, because the dial that used to
+		// narrow it is gone.
+		expect(WORKTREE_MEMORY_BYTES).toBe(2 * 1024 * 1024 * 1024);
 	});
 
-	it("spends more as the effort rises and never less", () => {
-		for (const stage of ENVELOPE_STAGES) {
-			const [cheap, standard, deep] = EFFORTS.map(
-				(effort) => envelope(effort, stage).budgetShare,
-			) as [
-				ReturnType<typeof envelope>["budgetShare"],
-				ReturnType<typeof envelope>["budgetShare"],
-				ReturnType<typeof envelope>["budgetShare"],
-			];
-			expect(standard.cost).toBeGreaterThanOrEqual(cheap.cost);
-			expect(deep.cost).toBeGreaterThanOrEqual(standard.cost);
-			expect(standard.totalTokens).toBeGreaterThanOrEqual(cheap.totalTokens);
-			expect(deep.totalTokens).toBeGreaterThanOrEqual(standard.totalTokens);
+	it("clears the W1 floors on every worktree row", () => {
+		for (const stage of ["implement", "fix"] as const) {
+			const row = envelope(stage);
+			expect(row.limits.attemptTimeoutMs).toBeGreaterThanOrEqual(1_500_000);
+			expect(row.limits.cumulativeRuntimeMs).toBeGreaterThanOrEqual(1_800_000);
 		}
 	});
 
-	it("pins the stand-in routing and the gate timeouts", () => {
+	it("pins the stand-in routing, the tiers and the one gate timeout", () => {
 		// DELETE WHEN ROUTING LANDS: these three literals are the stand-in for
-		// host routing, and the tier map is the review dial that outranks the
-		// effort column.
-		expect(envelope("standard", "review").model).toEqual({
+		// host routing, and the tier map is the one dial a review still has.
+		expect(envelope("review").model).toEqual({
 			provider: MODEL_PROVIDER,
 			id: MODEL_ID,
 			thinking: "medium",
 		});
 		expect(DIVERSE_MODEL_ID).not.toBe(MODEL_ID);
+		expect([...ENVELOPE_TIERS]).toEqual(["light", "standard", "heavy"]);
 		expect(THINKING_BY_TIER).toEqual({
 			light: "low",
 			standard: "medium",
 			heavy: "high",
 		});
-		expect(gateTimeoutMs("cheap")).toBe(14_400_000);
-		expect(gateTimeoutMs("standard")).toBe(86_400_000);
-		expect(gateTimeoutMs("deep")).toBe(172_800_000);
+		for (const tier of ENVELOPE_TIERS) {
+			expect(tierModel(tier)).toEqual({
+				provider: MODEL_PROVIDER,
+				id: MODEL_ID,
+				thinking: THINKING_BY_TIER[tier],
+			});
+			expect(tierModel(tier, true)).toEqual({
+				provider: MODEL_PROVIDER,
+				id: DIVERSE_MODEL_ID,
+				thinking: THINKING_BY_TIER[tier],
+			});
+			expect(Object.isFrozen(tierModel(tier))).toBe(true);
+		}
+		// One number: a decision a person has to take does not get shorter
+		// because the work was cheaper. It is the old `standard` timeout.
+		expect(GATE_TIMEOUT_MS).toBe(86_400_000);
 	});
 
-	it("refuses an effort or a stage the table does not cover", () => {
-		expect(() => envelope("thorough" as Effort, "review")).toThrow(
-			'unknown effort "thorough"; the effort dial is one of cheap, standard, deep.',
-		);
-		expect(() => envelope("deep", "publish" as StageName)).toThrow(
+	it("refuses a stage the table does not cover", () => {
+		expect(() => envelope("publish" as StageName)).toThrow(
 			'unknown envelope stage "publish"; the table covers refine, implement, verify, fix, review, synthesis, record.',
 		);
-		expect(() => gateTimeoutMs("thorough" as Effort)).toThrow(
-			WorkflowComponentError,
-		);
+		let caught: unknown;
+		try {
+			envelope("thorough" as StageName);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(WorkflowComponentError);
 	});
 });
 
 describe("envelope lowering", () => {
 	it("declares exactly what the hand-written request declares", () => {
 		const lowered = materializer();
-		const row = envelope("standard", "review");
+		const row = envelope("review");
 		const loweredHandle = lowered.agent("review", {
 			agent: "reviewer",
 			task: {
@@ -212,7 +253,7 @@ describe("envelope lowering", () => {
 	it("keeps task identity stable across two materializations", () => {
 		const declare = () => {
 			const runtime = materializer();
-			const row = envelope("deep", "implement");
+			const row = envelope("implement");
 			const handle = runtime.agent("implement", {
 				agent: "implementer",
 				task: {
@@ -237,9 +278,9 @@ describe("envelope lowering", () => {
 
 describe("budget accounting", () => {
 	const shares = [
-		envelope("standard", "implement").budgetShare,
-		envelope("standard", "review").budgetShare,
-		envelope("standard", "review").budgetShare,
+		envelope("implement").budgetShare,
+		envelope("review").budgetShare,
+		envelope("review").budgetShare,
 	];
 
 	it("sums the shares of a declared graph", () => {
@@ -316,6 +357,36 @@ describe("budget accounting", () => {
 		).toThrow(
 			"which exceeds the run budget (cost 1, unbounded tokens, 1000 ms).",
 		);
+	});
+});
+
+describe("the effort dial is gone from every source file", () => {
+	it("mentions cheap, standard and deep nowhere as an effort", async () => {
+		// THE GREP. `envelope`'s own tests can pin one table; only a sweep can
+		// pin that no definition, component or runtime module still reads a
+		// `cheap | standard | deep` dial. Prose that says the dial WAS removed is
+		// fine — what is refused is the vocabulary as code: the `Effort` type, the
+		// `EFFORTS` list, the string literals, and the table keys.
+		const roots = [new URL("../src/", import.meta.url), WORKFLOWS_ROOT];
+		const files: URL[] = [];
+		for (const root of roots) files.push(...(await sourceFiles(root)));
+		expect(files.length).toBeGreaterThan(80);
+		const offenders: string[] = [];
+		for (const file of files) {
+			const text = await readFile(file, "utf8");
+			const name = file.pathname;
+			for (const [what, pattern] of [
+				["the Effort type", /\bEfforts?\b/],
+				["the EFFORTS list", /\bEFFORTS\b/],
+				['a "cheap" literal', /["']cheap["']/],
+				['a "deep" literal', /["']deep["']/],
+				["a cheap table row", /^\s*cheap\s*:/m],
+				["a deep table row", /^\s*deep\s*:/m],
+			] as const) {
+				if (pattern.test(text)) offenders.push(`${name}: ${what}`);
+			}
+		}
+		expect(offenders).toEqual([]);
 	});
 });
 
