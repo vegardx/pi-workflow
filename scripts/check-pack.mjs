@@ -352,7 +352,7 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 21 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 22 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows !== true ||
@@ -389,7 +389,7 @@ if (
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.vmMemoryCeiling !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
-	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 8 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 9 ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.delegationCeiling !== true ||
 	typeof ceilingProvider.registerDelegationCeilingProvider !== "function" ||
 	typeof ceilingProvider.resolveDelegationCeiling !== "function" ||
