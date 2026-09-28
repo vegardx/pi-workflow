@@ -16,10 +16,12 @@ import type {
 } from "../definition.js";
 import { isHandoffHandle, isTaskHandle } from "../definition.js";
 import {
+	isModelRequest,
+	type ModelAuthoringRequest,
+} from "../session-model.js";
+import {
 	assertBudgetAdmits,
 	type BudgetShare,
-	EFFORTS,
-	type Effort,
 	envelope,
 	WORKSPACE_WRITE_BYTES,
 } from "./envelope.js";
@@ -101,20 +103,20 @@ import { WorkflowComponentError } from "./errors.js";
  * which is why the generic component is deferred and this one is unrolled.
  *
  * A second consequence of the same rule: everything this component declares
- * before a barrier must be deterministic, so the model, thinking level and
- * limits of every round come from `envelope` — a table keyed by `(effort,
- * stage)` and the round's position in the ladder — and never from the barrier
- * value it just read.
+ * before a barrier must be deterministic, so the limits of every round come
+ * from `envelope` — one fixed row per stage — and the model comes from the
+ * caller's `model` option, never from the barrier value the loop just read.
  *
- * ## Effort, and the one rung of escalation
+ * ## The model is the caller's, and it is one model
  *
- * A verifier always runs at `envelope(effort, "verify")`: its job is to run a
- * command and report what happened, and thinking harder does not change the
- * exit code. A fixer is a **retry** of an implementer that already failed its
- * own check, so with `escalate: "thinking"` it runs one rung up the effort
- * ladder — `envelope(nextRung(effort), "fix")` — and with `escalate: "none"`
- * (the default) at `envelope(effort, "fix")`. There is no rung above `deep`, so
- * asking to escalate from `deep` is refused rather than silently ignored.
+ * There is no effort dial and no rung of escalation: the loop runs its
+ * verifiers and its fixers at the one `model` the caller declared. It may be an
+ * exact `{provider, id, thinking}` or `"inherit"`, the host session's own
+ * model, which the runtime resolves once at run start. A fixer is a retry of an
+ * implementer that already failed its own check, and what it needs is the
+ * implementer's model rather than a different one — so `plan-to-ship` hands the
+ * loop the same `"inherit"` its implementers run at. `limits` still differ per
+ * stage: a verifier runs a command, a fixer edits a worktree.
  *
  * ## `checkRan: false` is a human's problem, not a fix round
  *
@@ -231,8 +233,6 @@ export interface VerifyRoundReport {
 export interface VerifyRound extends VerifyRoundReport {
 	readonly fixKey?: TaskKey;
 	readonly fix?: WorktreeTaskHandle<unknown>;
-	/** The rung the fixer of this round ran at. */
-	readonly fixEffort?: Effort;
 }
 
 /** The three `ctx` members the loop uses; nothing else is read. */
@@ -245,12 +245,15 @@ export interface VerifyAndFixOptions<TFixSchema extends TSchema> {
 	/** The worktree implementer whose handoff round 1 verifies. */
 	readonly implementation: WorktreeTaskHandle<unknown>;
 	readonly check: VerifyAndFixCheck;
-	/** The effort dial; every model and limit in the loop is a lookup on it. */
-	readonly effort: Effort;
+	/**
+	 * The model every verifier and every fixer of the loop runs at: an exact
+	 * `{provider, id, thinking}`, or `"inherit"` for the host session's own.
+	 * Required, because the component owns the `model` field of each round's
+	 * request and there is no table left to fall back to.
+	 */
+	readonly model: ModelAuthoringRequest;
 	/** Verify rounds, 0..3. Default 1. At most `maxRounds - 1` fixers follow. */
 	readonly maxRounds?: 0 | 1 | 2 | 3;
-	/** `"thinking"` runs a fixer one rung up the ladder. Default `"none"`. */
-	readonly escalate?: "thinking" | "none";
 	/** The verifier of round `n`; `previous` is the round before it, if any. */
 	readonly verify: (
 		round: number,
@@ -293,27 +296,17 @@ function refuse(message: string): never {
 	throw new WorkflowComponentError("verifyAndFix", message);
 }
 
-/** The next rung of the effort ladder, or `undefined` above `deep`. */
-export function nextRung(effort: Effort): Effort | undefined {
-	const index = EFFORTS.indexOf(effort);
-	return index < 0 ? undefined : EFFORTS[index + 1];
-}
-
 /**
  * The worst case of a loop that never passes: every verifier plus every fixer
- * the cap allows. Pure - a table lookup on `(effort, escalate, maxRounds)`.
+ * the cap allows. Pure - a table lookup on `maxRounds`.
  */
 export function projectVerifyAndFixBudget(
-	effort: Effort,
-	escalate: "thinking" | "none",
 	maxRounds: number,
 ): readonly BudgetShare[] {
 	const shares: BudgetShare[] = [];
-	const fixEffort =
-		escalate === "thinking" ? (nextRung(effort) ?? effort) : effort;
 	for (let round = 1; round <= maxRounds; round += 1) {
-		shares.push(envelope(effort, "verify").budgetShare);
-		if (round < maxRounds) shares.push(envelope(fixEffort, "fix").budgetShare);
+		shares.push(envelope("verify").budgetShare);
+		if (round < maxRounds) shares.push(envelope("fix").budgetShare);
 	}
 	return Object.freeze(shares);
 }
@@ -368,7 +361,7 @@ function mergeInputs(
  *   verification, and its "green" would be a guess;
  * - `implementation` is not a worktree task handle, so there is no handoff to
  *   verify or to hand a fixer;
- * - `escalate: "thinking"` is asked for at `deep`, where the ladder ends;
+ * - `model` is neither `"inherit"` nor an exact `{provider, id, thinking}`;
  * - a verifier or fixer factory is missing for the rounds asked for;
  * - a returned declaration is not an object, declares a field the component
  *   owns, names an input the loop wires, or - for a fixer - is not a worktree
@@ -418,23 +411,10 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 		);
 	}
 
-	const effort = options.effort;
-	if (!(EFFORTS as readonly unknown[]).includes(effort)) {
+	const model = options.model;
+	if (!isModelRequest(model)) {
 		refuse(
-			`verifyAndFix("${key}") got the unknown effort ${JSON.stringify(effort)}; the effort dial is one of ${EFFORTS.join(", ")}.`,
-		);
-	}
-
-	const escalate = options.escalate ?? "none";
-	if (escalate !== "thinking" && escalate !== "none") {
-		refuse(
-			`verifyAndFix("${key}") got the unknown escalation ${JSON.stringify(options.escalate)}; it is "thinking" or "none".`,
-		);
-	}
-	const escalated = escalate === "thinking" ? nextRung(effort) : effort;
-	if (escalated === undefined) {
-		refuse(
-			`verifyAndFix("${key}") asks to escalate a fixer one rung above "${effort}", where the effort ladder ends (${EFFORTS.join(" -> ")}); drop \`escalate\` or lower the run's effort.`,
+			`verifyAndFix("${key}") got ${JSON.stringify(model)} as its model; declare an exact {provider, id, thinking} or "inherit".`,
 		);
 	}
 
@@ -475,19 +455,19 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 	if (options.budget) {
 		assertBudgetAdmits(
 			options.budget,
-			projectVerifyAndFixBudget(effort, escalate, maxRounds),
-			`verifyAndFix("${key}") at "${effort}" effort over ${maxRounds} verify round(s) and ${Math.max(0, maxRounds - 1)} fix round(s)`,
+			projectVerifyAndFixBudget(maxRounds),
+			`verifyAndFix("${key}") over ${maxRounds} verify round(s) and ${Math.max(0, maxRounds - 1)} fix round(s)`,
 		);
 	}
 
-	const verifyEnvelope = envelope(effort, "verify");
-	const fixEnvelope = envelope(escalated, "fix");
+	const verifyEnvelope = envelope("verify");
+	const fixEnvelope = envelope("fix");
 	// The `verify` row is a read-only row (`workspaceWriteBytes: 0`), but a
 	// verifier that has to apply the handoff before it can run the check needs a
 	// worktree, and the runtime refuses a worktree with no write grant. The one
 	// adjustment is the same constant the `implement` and `fix` rows already
-	// carry, so it is still a table lookup keyed by (effort, stage, workspace)
-	// and nothing observed at run time.
+	// carry, so it is still a table lookup keyed by (stage, workspace) and
+	// nothing observed at run time.
 	const verifyLimits = (mode: string | undefined) =>
 		mode === "worktree"
 			? { ...verifyEnvelope.limits, workspaceWriteBytes: WORKSPACE_WRITE_BYTES }
@@ -511,7 +491,7 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 			`verifyAndFix("${key}") verifier "${verifyKey}"`,
 			declared,
 			["outputSchema", "model", "limits"],
-			`a verifier reports the check report schema at envelope(${JSON.stringify(effort)}, "verify"), so the loop replays identically`,
+			'a verifier reports the check report schema at envelope("verify") and runs at the loop\'s own model, so the loop replays identically',
 		);
 		const verifyRequest = {
 			...declared,
@@ -528,7 +508,7 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 				? { handoff: "optional" as const }
 				: {}),
 			outputSchema: CheckReportSchema,
-			model: verifyEnvelope.model,
+			model,
 			limits: verifyLimits(declared.workspace?.mode),
 			inputs: mergeInputs(
 				`verifyAndFix("${key}") verifier "${verifyKey}"`,
@@ -587,7 +567,7 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 			`verifyAndFix("${key}") fixer "${fixKey}"`,
 			declaredFix,
 			["model", "limits", "handoff"],
-			`a fixer is a retry at envelope(${JSON.stringify(escalated)}, "fix") and its handoff is always required - a worktree with no changes is a failed fix`,
+			'a fixer is a retry at the loop\'s own model with envelope("fix") limits, and its handoff is always required - a worktree with no changes is a failed fix',
 		);
 		if (declaredFix.workspace?.mode !== "worktree") {
 			refuse(
@@ -600,7 +580,7 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 			declaredFix.disposition === undefined
 				? { disposition: options.disposition }
 				: {}),
-			model: fixEnvelope.model,
+			model,
 			limits: fixEnvelope.limits,
 			handoff: "required",
 			inputs: mergeInputs(
@@ -609,9 +589,7 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 				{ [patchInput]: source.handoff, [reportInput]: verifier.output },
 			),
 		}) as WorktreeTaskHandle<Static<TFixSchema>>;
-		history.push(
-			Object.freeze({ ...outcome, fixKey, fix, fixEffort: escalated }),
-		);
+		history.push(Object.freeze({ ...outcome, fixKey, fix }));
 		source = fix;
 	}
 

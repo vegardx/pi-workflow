@@ -2,6 +2,7 @@
 name: implementer
 model: { provider: github-copilot, id: gpt-5.6-sol, thinking: medium }
 allowedModels:
+  - inherit
   - github-copilot/gpt-5.6-sol:low
   - github-copilot/gpt-5.6-sol:medium
   - github-copilot/gpt-5.6-sol:high
@@ -36,11 +37,21 @@ failure and is not one.
 
 `memoryBytes` is the guest VM memory ceiling, 4 GiB here — pi-subagent's
 maximum, and what a real install plus build needs headroom for. It is a
-ceiling, not a grant: `plan-to-ship` asks for 1 GiB at `cheap`, 2 GiB at
-`standard`, and 4 GiB at `deep`, and a task that names nothing gets this
-whole 4 GiB. A task that asks for more than the ceiling is refused at
-preflight with "memory request exceeds agent ceiling". The key needs
-pi-subagent 0.11.0 (contract revision 7); on revision 6 it fails discovery.
+ceiling, not a grant: `plan-to-ship` asks for 2 GiB on every worktree stage, and
+a task that names nothing gets this whole 4 GiB. A task that asks for more than
+the ceiling is refused at preflight with "memory request exceeds agent
+ceiling". The key needs pi-subagent 0.11.0 (contract revision 7); on revision 6
+it fails discovery.
+
+`allowedModels` also lists `inherit`: `plan-to-ship`'s implementation roles
+declare `model: "inherit"`, the host session's own model and thinking level. Two
+things follow, and the second one is the one that bites. The entry itself admits
+a DIRECT delegation that asks to inherit (`modelSource: "inherited"`, fenced at
+the host rather than here). A pi-workflow run does not use it: the runtime
+resolves `inherit` once at run start and sends the RESOLVED exact model in every
+request, so preflight checks that model against the exact entries below. Add the
+`provider/id:thinking` keys of the models you actually run sessions on, or an
+inheriting task fails preflight with "model exceeds ceiling: <model>".
 
 How to work:
 

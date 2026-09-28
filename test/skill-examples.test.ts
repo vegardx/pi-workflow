@@ -316,7 +316,7 @@ describe("workflow authoring skill", () => {
 		await expect(
 			discoverWorkflows({ ...project, projectTrusted: true }),
 		).rejects.toThrow(
-			"workflow import node:fs is not identity-bound by contract revision 21",
+			"workflow import node:fs is not identity-bound by contract revision 22",
 		);
 	});
 });

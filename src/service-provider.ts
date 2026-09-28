@@ -70,7 +70,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { DelegationCeiling } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
-import type { Effort } from "./components/envelope.js";
 import {
 	WORKFLOW_RUNTIME_CONTRACT,
 	type WorkflowRunId,
@@ -153,14 +152,6 @@ export function startableRefusalMessage(ref: string): string {
 	return `Workflow ${ref} is not a builtin a service consumer may start; use workflow_run.`;
 }
 
-/**
- * The refusal `startBuiltin` raises when `effort` is given and the input
- * cannot carry it. The dial is a field of the definition's input, so it is
- * merged into the input object; a non-object input has nowhere to put it.
- */
-export const START_EFFORT_REFUSAL_MESSAGE =
-	"Workflow input must be a JSON object to carry an effort.";
-
 /** The refusal `awaitRun` raises for a run this client did not start. */
 export function foreignRunRefusalMessage(runId: string): string {
 	return `Workflow run ${runId} was not started by this service consumer; use workflow_wait.`;
@@ -176,15 +167,15 @@ export const WORKFLOW_SERVICE_FAILURE_MESSAGE =
 /**
  * What `startBuiltin` takes beyond the reference. `input` is validated against
  * the definition\'s `inputSchema` exactly as `workflow_run` validates its own,
- * with the same refusals and no run created by a refused one. `effort` is the
- * dial the builtin pipelines read from their input: given, it is written onto
- * the input object as `effort` (replacing any the caller already put there)
- * and then validated with the rest, so an unknown value is refused by the
- * definition\'s schema and not by a second list here.
+ * with the same refusals and no run created by a refused one.
+ *
+ * There is no `effort`: the dial is gone. A builtin sets a model PER ROLE — an
+ * exact model, or `"inherit"` for the host session\'s own — and pi-workflow
+ * resolves `inherit` once at run start from the host\'s session-model provider.
+ * A consumer that wants a different model changes the session it starts from.
  */
 export interface WorkflowStartBuiltinOptions {
 	readonly input: unknown;
-	readonly effort?: Effort;
 	/**
 	 * The delegation ceiling this run must stay inside, in pi-subagent's own
 	 * vocabulary. It is EXPLICIT here and not read from the host's registered
@@ -380,19 +371,6 @@ async function delegate<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Writes `effort` onto the input the definition validates. The dial is an
- * ordinary input field, so there is one schema and one refusal; a non-object
- * input has nowhere to carry it and is refused before a run exists.
- */
-function withEffort(input: unknown, effort: Effort | undefined): unknown {
-	if (effort === undefined) return input;
-	if (typeof input !== "object" || input === null || Array.isArray(input)) {
-		throw new WorkflowServiceError("validation", START_EFFORT_REFUSAL_MESSAGE);
-	}
-	return { ...(input as Record<string, unknown>), effort };
-}
-
-/**
  * Narrows a full `WorkflowService` to the client the seam exposes. The
  * allowlist and the started-run ledger live here, on the producer side: a
  * consumer cannot widen either by handing back a different object.
@@ -425,7 +403,7 @@ export function createWorkflowReadClient(
 						startableRefusalMessage(ref),
 					);
 				}
-				const input = withEffort(options.input, options.effort);
+				const input = options.input;
 				// The allowlist names a definition this package ships; a project
 				// definition that took the same name is not it.
 				const resolved = await service.validate(ref, input);

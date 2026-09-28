@@ -36,12 +36,12 @@ import {
 	headlessBuiltinViolations,
 	isCompatibleWorkflowProvider,
 	registerWorkflowServiceProvider,
-	START_EFFORT_REFUSAL_MESSAGE,
 	startableRefusalMessage,
 	WORKFLOW_SERVICE_FAILURE_MESSAGE,
 	type WorkflowReadClient,
 	type WorkflowRunObservation,
 	WorkflowServiceProviderError,
+	type WorkflowStartBuiltinOptions,
 } from "../src/service-provider.js";
 import type {
 	WorkflowSubagentBinding,
@@ -54,6 +54,13 @@ import type {
 // the error mapping, the runtime-owned startable allowlist and the structural
 // property that makes it the opposite of a run nobody is asked about, and the
 // lease-free projection.
+
+/** The host session's model, as the provider these fixtures install answers it. */
+const SESSION_MODEL = {
+	provider: "github-copilot",
+	id: "gpt-5.6-sol",
+	thinking: "high",
+} as const;
 
 const BUILTIN_ROOT = fileURLToPath(new URL("../workflows", import.meta.url));
 const CONTEXT = {} as ExtensionContext;
@@ -144,6 +151,9 @@ async function realService(
 		registeredRoots: [
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
+		// `plan-to-ship` inherits the host session's model, so a service that
+		// starts it needs a provider; the seam is what these tests are about.
+		sessionModel: () => SESSION_MODEL,
 	});
 	services.push(service);
 	storeRoots.set(service, storeRoot);
@@ -288,8 +298,8 @@ function plan(deliverables: number, lenses: readonly string[] = ["contracts"]) {
 	};
 }
 
-function planInput(deliverables = 1, effort = "standard") {
-	return { plan: plan(deliverables), planDigest: "a".repeat(64), effort };
+function planInput(deliverables = 1) {
+	return { plan: plan(deliverables), planDigest: "a".repeat(64) };
 }
 
 describe("registration and discovery", () => {
@@ -672,11 +682,17 @@ function scriptedPlanner(): WorkflowSubagentProvider {
 			agentScope: "global" as const,
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
-			model: request.model ?? {
-				provider: "test",
-				id: "model",
-				thinking: "low" as const,
-			},
+			// pi-workflow resolves `inherit` at run start and sends the exact
+			// model, so a launch plan never carries the literal.
+			model:
+				request.model === "inherit"
+					? SESSION_MODEL
+					: (request.model ?? {
+							provider: "test",
+							id: "model",
+							thinking: "low" as const,
+						}),
+			modelSource: request.model === undefined ? "template" : "request",
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -865,14 +881,12 @@ describe("startBuiltin", () => {
 		);
 		const started = await client.startBuiltin("plan-to-ship", {
 			input: { plan: 1 },
-			effort: "deep",
 		});
 		expect(started).toEqual({ runId: "workflow_a1" });
-		// The dial is a field of the definition's input, so it is merged into
-		// the one input the runtime validates - not a second parameter.
+		// The input reaches `run` verbatim: there is no dial to merge into it.
 		expect(run).toHaveBeenCalledWith(
 			"plan-to-ship",
-			{ plan: 1, effort: "deep" },
+			{ plan: 1 },
 			{ origin: "service-provider" },
 		);
 		// This client started it, so it may await it.
@@ -881,18 +895,15 @@ describe("startBuiltin", () => {
 		).resolves.toEqual({ status: "waiting" });
 	});
 
-	it("refuses an effort the input cannot carry, before any run", async () => {
-		const run = vi.fn();
-		const { client } = await acquire(
-			serviceDouble({ run } as unknown as Partial<WorkflowService>),
+	it("takes no effort option at all: the dial is gone", () => {
+		// The dial was `startBuiltin`'s one non-input option, and removing it is
+		// the whole of the seam's change: a consumer that wants a different model
+		// changes the session it starts the run from.
+		expect(Object.keys({} as WorkflowStartBuiltinOptions)).not.toContain(
+			"effort",
 		);
-		const error = await client
-			.startBuiltin("plan-to-ship", { input: [1, 2], effort: "cheap" })
-			.catch((value: unknown) => value);
-		expect(error).toBeInstanceOf(WorkflowServiceError);
-		expect((error as WorkflowServiceError).code).toBe("validation");
-		expect((error as Error).message).toBe(START_EFFORT_REFUSAL_MESSAGE);
-		expect(run).not.toHaveBeenCalled();
+		const options: WorkflowStartBuiltinOptions = { input: planInput() };
+		expect("effort" in options).toBe(false);
 	});
 
 	it("refuses an input the definition's schema rejects, creating no run", async () => {
@@ -909,7 +920,6 @@ describe("startBuiltin", () => {
 		const { client } = await acquire(service);
 		const { runId } = await client.startBuiltin("plan-to-ship", {
 			input: { plan: plan(1), planDigest: "a".repeat(64) },
-			effort: "cheap",
 		});
 		expect(runId).toMatch(/^workflow_[a-z0-9]+$/);
 
@@ -1168,7 +1178,7 @@ describe("project", () => {
 		// the cost clamped to the service's own ceiling.
 		expect(projection.budget).toEqual({
 			cost: 1_000,
-			childRuntimeMs: 553_500_000,
+			childRuntimeMs: 399_600_000,
 		});
 		expect(projection.fits).toBe(true);
 		expect(Object.isFrozen(projection)).toBe(true);
@@ -1177,12 +1187,12 @@ describe("project", () => {
 	it("grows with the plan, and the builtin is sized for its own ceiling", async () => {
 		const service = await realService();
 		const small = await service.project("plan-to-ship", planInput(1));
-		const large = await service.project("plan-to-ship", planInput(16, "deep"));
+		const large = await service.project("plan-to-ship", planInput(16));
 		expect(large.tasks).toBeGreaterThan(small.tasks);
 		expect(large.cost).toBeGreaterThan(small.cost);
-		// plan-to-ship declares its budget "sized for the deep column at the
-		// input schema's 16 deliverables"; the projection is what makes that
-		// claim checkable instead of a comment.
+		// plan-to-ship declares its budget "sized for the input schema's 16
+		// deliverables"; the projection is what makes that claim checkable
+		// instead of a comment.
 		expect(large.fits).toBe(true);
 	});
 

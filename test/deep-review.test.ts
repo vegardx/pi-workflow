@@ -17,6 +17,7 @@ import {
 	envelope,
 	MAX_REVIEW_LENSES,
 	MODEL_ID,
+	tierModel,
 } from "../src/components/index.js";
 import { discoverWorkflows } from "../src/registry.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
@@ -40,9 +41,6 @@ const AGENT_TEMPLATES = fileURLToPath(
 	new URL("../workflows/agents", import.meta.url),
 );
 const REVIEWER_AGENT = "lens-reviewer";
-const EFFORTS = ["cheap", "standard", "deep"] as const;
-
-type Effort = (typeof EFFORTS)[number];
 
 interface Lens {
 	readonly id: string;
@@ -86,7 +84,6 @@ function handoffSubject() {
 function input(
 	options: {
 		readonly lenses?: readonly Lens[];
-		readonly effort?: Effort;
 		readonly synthesis?: "required" | "optional" | "none";
 		readonly maxFindings?: number;
 		readonly subject?: unknown;
@@ -95,12 +92,21 @@ function input(
 	return {
 		subject: options.subject ?? treeSubject(),
 		...(options.lenses ? { lenses: options.lenses } : {}),
-		effort: options.effort ?? "standard",
 		...(options.synthesis ? { synthesis: options.synthesis } : {}),
 		...(options.maxFindings === undefined
 			? {}
 			: { maxFindings: options.maxFindings }),
 	};
+}
+
+/**
+ * The exact model a request carries. pi-subagent 0.15.0 admits `"inherit"` on a
+ * `SubagentRequest`; pi-workflow never sends it, and nothing in `deep-review`
+ * inherits at all.
+ */
+function exactModel(request: SubagentRequest) {
+	expect(request.model).not.toBe("inherit");
+	return request.model === "inherit" ? undefined : request.model;
 }
 
 /** The lens a goal names: `Review "<subject>" through the "<lens>" lens.` */
@@ -272,11 +278,14 @@ function scripted(
 			agentScope: resolved?.scope ?? ("global" as const),
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
-			model: request.model ?? {
+			// Nothing in `deep-review` inherits, so a request never carries the
+			// literal; asserting it here keeps that true.
+			model: exactModel(request) ?? {
 				provider: "test",
 				id: "model",
 				thinking: "low" as const,
 			},
+			modelSource: request.model === undefined ? "template" : "request",
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -511,7 +520,7 @@ describe("deep-review: discovery", () => {
 		// No gate, no worktree: the definition promises a read-only review, and
 		// the budget covers the worst case the input schema admits.
 		expect(found.definition.meta.budget.cost).toBeGreaterThanOrEqual(
-			MAX_REVIEW_LENSES * envelope("deep", "review").budgetShare.cost,
+			MAX_REVIEW_LENSES * envelope("review").budgetShare.cost,
 		);
 	});
 });
@@ -665,7 +674,7 @@ describe("deep-review: a lens that dies", () => {
 	});
 });
 
-describe("deep-review: the effort dial and diversity", () => {
+describe("deep-review: tiers and diversity", () => {
 	it("selects a different model id for a diverse lens", async () => {
 		const { delegated, finished } = await runDeepReview({
 			lenses: [{ id: "correctness" }, { id: "risk", diverse: true }],
@@ -674,16 +683,15 @@ describe("deep-review: the effort dial and diversity", () => {
 		const byLens = new Map(
 			delegated
 				.lensRequests()
-				.map((request) => [lensOf(request), request.model]),
+				.map((request) => [lensOf(request), exactModel(request)]),
 		);
 		expect(byLens.get("correctness")?.id).toBe(MODEL_ID);
 		expect(byLens.get("risk")?.id).toBe(DIVERSE_MODEL_ID);
 		expect(byLens.get("risk")?.id).not.toBe(byLens.get("correctness")?.id);
 	});
 
-	it("lets a tier outrank the effort column and an exact pin outrank both", async () => {
+	it("lets a lens tier move only that lens, and an exact pin outrank the tier", async () => {
 		const { delegated } = await runDeepReview({
-			effort: "cheap",
 			lenses: [
 				{ id: "correctness" },
 				{ id: "contracts", tier: "heavy" },
@@ -693,12 +701,10 @@ describe("deep-review: the effort dial and diversity", () => {
 		const byLens = new Map(
 			delegated
 				.lensRequests()
-				.map((request) => [lensOf(request), request.model]),
+				.map((request) => [lensOf(request), exactModel(request)]),
 		);
-		// The cheap column is `low`; the tier moves only this lens.
-		expect(byLens.get("correctness")?.thinking).toBe(
-			envelope("cheap", "review").thinking,
-		);
+		// A lens that names no tier takes the standard reviewer tier.
+		expect(byLens.get("correctness")).toEqual(tierModel("standard"));
 		expect(byLens.get("contracts")?.thinking).toBe("high");
 		expect(byLens.get("risk")).toEqual({
 			provider: "github-copilot",
@@ -707,25 +713,37 @@ describe("deep-review: the effort dial and diversity", () => {
 		});
 	});
 
-	it("spends the effort table's review and synthesis rows", async () => {
-		for (const effort of EFFORTS) {
-			const { delegated, finished } = await runDeepReview({
-				effort,
-				lenses: [{ id: "correctness" }],
-			});
-			expect(finished.status).toBe("completed");
-			const review = envelope(effort, "review");
-			const synthesis = envelope(effort, "synthesis");
-			const [lens] = delegated.lensRequests();
-			expect(lens?.model?.thinking).toBe(review.thinking);
-			expect(lens?.limits).toEqual(review.limits);
-			expect(delegated.synthesisRequest()?.limits).toEqual(synthesis.limits);
-			// Read-only at every effort: nothing here may write.
-			for (const request of delegated.requests) {
-				expect(request.workspace.mode).toBe("read-only");
-				expect(request.limits.workspaceWriteBytes).toBe(0);
-			}
+	it("spends the stage table's review and synthesis rows, and inherits nothing", async () => {
+		const { delegated, finished } = await runDeepReview({
+			lenses: [{ id: "correctness" }],
+		});
+		expect(finished.status).toBe("completed");
+		const review = envelope("review");
+		const synthesis = envelope("synthesis");
+		const [lens] = delegated.lensRequests();
+		expect(exactModel(lens as SubagentRequest)).toEqual(tierModel("standard"));
+		expect(lens?.limits).toEqual(review.limits);
+		// The reducer is a reviewer too: the standard tier, never the session's
+		// model. `deep-review` declares no `needs.sessionModel` at all.
+		expect(exactModel(delegated.synthesisRequest() as SubagentRequest)).toEqual(
+			tierModel("standard"),
+		);
+		expect(delegated.synthesisRequest()?.limits).toEqual(synthesis.limits);
+		// Read-only throughout: nothing here may write.
+		for (const request of delegated.requests) {
+			expect(request.workspace.mode).toBe("read-only");
+			expect(request.limits.workspaceWriteBytes).toBe(0);
+			expect(request.model).not.toBe("inherit");
 		}
+	});
+
+	it("runs on a host with no session model at all", async () => {
+		// Nothing here inherits, so the definition declares no
+		// `needs.sessionModel` and a host with no session can still run it -
+		// which is what keeps it safe to run while planning. `serviceFor`
+		// installs no session-model provider.
+		const { finished } = await runDeepReview({ lenses: [{ id: "risk" }] });
+		expect(finished.status).toBe("completed");
 	});
 });
 
@@ -752,10 +770,7 @@ describe("deep-review: the input contract", () => {
 		).resolves.toMatchObject({ valid: true });
 		// Lenses are optional; a caller with no opinion gets the defaults.
 		await expect(
-			service.validate("deep-review", {
-				subject: treeSubject(),
-				effort: "deep",
-			}),
+			service.validate("deep-review", { subject: treeSubject() }),
 		).resolves.toMatchObject({ valid: true });
 
 		for (const bad of [
@@ -774,7 +789,7 @@ describe("deep-review: the input contract", () => {
 					summary: "The spec under review.",
 				},
 			},
-			{ ...input(), effort: "standrd" },
+			{ ...input(), effort: "standard" },
 			{ ...input(), extra: true },
 			{ ...input({ lenses: [{ id: "Correctness" }] }) },
 			{ ...input({ lenses: [] }) },
@@ -816,7 +831,7 @@ describe("deep-review: the agent template", () => {
 		if (!reviewer) throw new Error("no lens-reviewer template");
 		expect(reviewer.workspaceModes).toEqual(["read-only"]);
 		expect(reviewer.tools).toEqual(["read", "grep", "find", "ls"]);
-		// A reviewer never writes, at any effort.
+		// A reviewer never writes, at any tier.
 		expect(reviewer.limitCeiling.workspaceWriteBytes).toBe(0);
 		// Both families: a lens may ask for one other than the default.
 		for (const id of [MODEL_ID, DIVERSE_MODEL_ID]) {
@@ -828,47 +843,49 @@ describe("deep-review: the agent template", () => {
 		}
 	});
 
-	it("covers every request the definition makes at every effort", async () => {
+	it("covers every request the definition makes at every tier", async () => {
 		const agents = await discoverAgents([
 			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
 		]);
-		for (const effort of EFFORTS) {
-			const { delegated, finished } = await runDeepReview({
-				effort,
-				lenses: [
-					{ id: "correctness" },
-					{ id: "contracts", tier: "heavy" },
-					{ id: "risk", diverse: true },
-				],
-			});
-			expect(finished.status).toBe("completed");
-			expect(delegated.requests.length).toBe(4);
-			for (const request of delegated.requests) {
-				const agent = agents.get(request.agent);
-				if (!agent) throw new Error(`no template for agent ${request.agent}`);
-				// pi-subagent's preflight rules, applied here so a widened request
-				// fails this test instead of a real run.
-				for (const tool of request.tools) {
-					expect(agent.tools).toContain(tool);
-				}
-				expect(agent.workspaceModes).toContain(request.workspace.mode);
-				if (request.model) {
-					expect(agent.allowedModels).toContain(
-						`${request.model.provider}/${request.model.id}:${request.model.thinking}`,
-					);
-				}
-				expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
-					request.limits.cumulativeRuntimeMs,
+		const { delegated, finished } = await runDeepReview({
+			lenses: [
+				{ id: "correctness" },
+				{ id: "contracts", tier: "heavy" },
+				{ id: "cheapest", tier: "light" },
+				{ id: "risk", diverse: true },
+			],
+		});
+		expect(finished.status).toBe("completed");
+		expect(delegated.requests.length).toBe(5);
+		for (const request of delegated.requests) {
+			const agent = agents.get(request.agent);
+			if (!agent) throw new Error(`no template for agent ${request.agent}`);
+			// pi-subagent's preflight rules, applied here so a widened request
+			// fails this test instead of a real run.
+			for (const tool of request.tools) {
+				expect(agent.tools).toContain(tool);
+			}
+			expect(agent.workspaceModes).toContain(request.workspace.mode);
+			// Never the literal: the template admits exact models only, and
+			// nothing in `deep-review` inherits.
+			expect(request.model).not.toBe("inherit");
+			const model = request.model === "inherit" ? undefined : request.model;
+			if (model) {
+				expect(agent.allowedModels).toContain(
+					`${model.provider}/${model.id}:${model.thinking}`,
 				);
-				expect(request.memoryBytes).toBeUndefined();
-				for (const key of Object.keys(request.limits) as Array<
-					keyof typeof request.limits
-				>) {
-					const value = request.limits[key];
-					const ceiling = agent.limitCeiling[key];
-					if (value === undefined || ceiling === undefined) continue;
-					expect(value).toBeLessThanOrEqual(ceiling);
-				}
+			}
+			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
+				request.limits.cumulativeRuntimeMs,
+			);
+			expect(request.memoryBytes).toBeUndefined();
+			for (const key of Object.keys(request.limits) as Array<
+				keyof typeof request.limits
+			>) {
+				const value = request.limits[key];
+				const ceiling = agent.limitCeiling[key];
+				if (value === undefined || ceiling === undefined) continue;
+				expect(value).toBeLessThanOrEqual(ceiling);
 			}
 		}
 	});
