@@ -37,9 +37,17 @@ more.
 
 | Ref | In | Out |
 | --- | --- | --- |
-| `plan-to-ship` | `{plan, planDigest, effort}` | `{approved, shipped, deliverables[], reviews[], receipt}` — per deliverable it implements, runs the project's check, reviews through every lens, normalizes the findings and FIXES them (`implement-<d>`, `check-<d>`, `review-<d>/<lens>`, `synthesis-<d>`, `fix-<d>`); `synthesis-<d>` is required, so a synthesis that cannot run fails the run instead of reaching the gate with no fixer; the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`), and never pushes, merges, or applies anything |
-| `deep-review` | `{subject, effort, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
-| `deep-research` | `{question, depth, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |
+| `plan-to-ship` | `{plan, planDigest}` | `{approved, shipped, deliverables[], reviews[], findings[], shipSummary?, receipt}` — per deliverable it implements, runs the project's check, reviews through every lens, normalizes the findings and FIXES them (`implement-<d>`, `check-<d>`, `review-<d>/<lens>`, `synthesis-<d>`, `fix-<d>`); `synthesis-<d>` is required, so a synthesis that cannot run fails the run instead of reaching the gate with no fixer; the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`, and nowhere at all under `policy.gates: none`, where the host publishes on completion and `shipSummary` carries what the gate would have shown), and never pushes, merges, or applies anything. `approved` is always true: the start of the run was the approval |
+| `deep-review` | `{subject, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
+| `deep-research` | `{question, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |
+
+**There is no `effort` input anywhere.** The dial is gone: a definition sets a
+model per role, and `plan-to-ship`'s implementation roles declare
+`model: "inherit"` — the host session's own model and thinking level, resolved
+once at run start. A definition that inherits declares
+`meta.needs.sessionModel: true`, and a host with no session model is refused
+before a run exists: *"plan-to-ship inherits the session model, and this host has
+none."*
 
 A host embedding this package may start ONE allowlisted builtin without a model
 turn, through the service provider. `startBuiltin` creates a run a person

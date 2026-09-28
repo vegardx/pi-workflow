@@ -214,7 +214,7 @@ start cannot be awaited through it either.
 Failures that are not a `WorkflowServiceError` are flattened to one fixed
 message, so a consumer never sees an internal error string or a stack.
 
-`startBuiltin(ref, {input, effort?})` is the one gate, and its frozen allowlist
+`startBuiltin(ref, {input})` is the one gate, and its frozen allowlist
 is `BUILTIN_STARTABLE_WORKFLOWS` — today exactly `["plan-to-ship"]`. Anything
 not on it, every project and `dynamic:<sha256>` ref included, is refused with
 "Workflow `<ref>` is not a builtin a service consumer may start; use
@@ -228,7 +228,6 @@ lease and no allowlist here to be worth having.
 ```ts
 const { runId } = await workflows.startBuiltin("plan-to-ship", {
 	input: { plan, planDigest },
-	effort: "deep",
 });
 ```
 
@@ -239,10 +238,10 @@ ago**. Routing that answer back through the model so it calls `workflow_run`
 adds a turn and no authority. So `startBuiltin` creates the durable run and
 returns its id: it never awaits and never observes. `input` is validated
 against the definition's `inputSchema` with the same refusals `workflow_run`
-raises and no run created by a refused one; `effort` (`"cheap" | "standard" |
-"deep"`) is written onto the input object before that one validation, and
-refuses a non-object input with "Workflow input must be a JSON object to carry
-an effort."
+raises and no run created by a refused one. **There is no `effort`:** the dial is
+gone, models are set per role on the definition, and `plan-to-ship`'s
+implementation roles inherit the host session's own model. A consumer that wants
+a different model changes the session it starts the run from.
 
 The run is an ordinary run: same journal, same checkpoints, visible in
 `/workflow` and the widget, decided with `/workflow decide`, and readable
@@ -334,7 +333,7 @@ needs exceed it is refused **before the run exists**, naming both sides:
 plan-to-ship needs a worktree workspace; the host ceiling allows read-only.
 ```
 
-`startBuiltin(ref, {input, effort?, ceiling?})` takes an **explicit** ceiling and
+`startBuiltin(ref, {input, ceiling?})` takes an **explicit** ceiling and
 refuses the same way. It does not read the provider, and that is deliberate: the
 host starts the plan's run *while switching modes*, so the provider still answers
 for the mode it is leaving. `hostCeiling()` on the read client is there for a
@@ -342,13 +341,64 @@ host that wants to show the current bound before it asks. `/workflow run` — a
 person typing a command — passes none: they are the one who set the mode.
 
 **The run records it and forwards it.** The ceiling is written onto the run
-record at creation (`WORKFLOW_CONTRACT_REVISION` 21) and `task-launcher.ts`
+record at creation (`WORKFLOW_CONTRACT_REVISION` 22) and `task-launcher.ts`
 lowers it onto every `SubagentRequest` the run makes, including a nested run's,
 which inherits its parent's. A run **keeps the ceiling it started with**: the
 answer a host would give now is a different answer, and a run whose bound moved
 under it would be a run whose evidence no longer explains its own launches. A
 launch above it is refused by pi-subagent's preflight and reported as that task's
 failure on the existing path. Runs with no ceiling behave exactly as before.
+
+### The session model a run inherits
+
+A definition sets a model **per role**. A role either pins one exactly —
+`{provider, id, thinking}` — or writes the literal `model: "inherit"`, which
+means the model and thinking level the **host session** is using. There is no
+effort dial behind either: `cheap | standard | deep` is gone, and what is left of
+it is one fixed row per stage in `envelope` (limits and budget shares) plus the
+`light | standard | heavy` tier a review still has.
+
+A definition that inherits declares it, so a start can be refused before
+anything durable exists:
+
+```ts
+meta: { /* … */ needs: { workspace: "worktree", sessionModel: true } }
+```
+
+```text
+deep-review inherits the session model, and this host has none.
+```
+
+`inherit` is resolved **once, at run start**, from the provider an embedder
+installs as `WorkflowServiceOptions.sessionModel` (the shipped extension installs
+`() => resolveSessionModel(pi.events)` from
+`@vegardx/pi-subagent/session-model-provider`), and the exact answer is written
+on the run record as `sessionModel: {provider, id, thinking}`. Every task that
+inherited is then materialized with *that* value — substituted before hashing, so
+`AgentTaskRequestSchema`, task identity and pi-subagent's contract never learn
+the literal exists. Four things follow:
+
+- **a run never mixes models.** Switching model mid-run does not split the run's
+  implementers across two of them.
+- **the journal says which model built the work**, because the resolved model is
+  inside every persisted request and named once on the record.
+- **replay is deterministic.** Resolution reads a frozen record field, never the
+  host's answer of the moment, so a resume re-declares the identical identity. A
+  nested run inherits its parent's resolved value verbatim.
+- **pi-subagent never sees the literal.** The launcher forwards the exact model.
+
+A definition that inherits without declaring `needs.sessionModel` is not quietly
+served: the declaration fails materialization with `agent task declares model:
+"inherit", but the run resolved no session model; declare needs.sessionModel so
+the start is refused instead`.
+
+Because the runtime sends the **resolved exact model**, pi-subagent's preflight
+checks it against the agent template's `allowedModels` as an ordinary request. An
+`inherit` entry in a template admits a *direct* delegation that asks to inherit,
+not a workflow task that already resolved one — so a template used by an
+inheriting role must also list the `provider/id:thinking` keys of the models you
+run sessions on, or the task fails preflight with `model exceeds ceiling:
+<model>`. The shipped `implementer` and `planner` templates say so.
 
 `project(ref, input)` is the lease-free half of the seam: it runs the
 definition's `run(ctx)` against a context that declares nothing durable — no
@@ -510,7 +560,7 @@ because Pi discovers a skill only from a directory containing that file. They
 are tables, not prose: the pi-maestro plan document (deliverables, tasks, stage
 kinds, policy dials, the default stage list, and what a stored plan has already
 been validated for) and the component library (what each component lowers to,
-its key rule and refusals, the effort envelope, the shared `Finding`, and the
+its key rule and refusals, the stage envelope, the shared `Finding`, and the
 compiled stage document). A reviewer that is shown a plan or a compiled graph
 preloads them BY NAME — pi-maestro's plan check is one such reviewer — and a
 preloaded skill costs a context entry rather than bytes, which is why they stay
@@ -585,12 +635,12 @@ lets a builtin definition name `lens-reviewer` and run in a project that has no
 
 `workflows/plan-to-ship.workflow.ts` is the first builtin and the only one that
 writes: a **compiler** over a pi-maestro plan's `deliverables` and `policy`,
-lowered onto the component library into one graph with one approval up front. Its input is the plan document by value, the sha256 digest of that
-document's canonical JSON, and an effort dial that now falls back to
-`plan.policy.effort`:
+lowered onto the component library into one graph with one approval up front. Its
+input is the plan document by value and the sha256 digest of that document's
+canonical JSON, and nothing else:
 
 ```text
-workflow_run { ref: "plan-to-ship", input: { plan, planDigest, effort? } }
+workflow_run { ref: "plan-to-ship", input: { plan, planDigest } }
 ```
 
 It is also the one name on `BUILTIN_STARTABLE_WORKFLOWS`, so a host that has
@@ -599,15 +649,34 @@ provider's `startBuiltin` instead of sending the model a turn to call
 `workflow_run` ([Service provider](#service-provider)). The run is the same
 run either way; only `run-created`'s `origin` differs.
 
-It declares `meta.needs = { workspace: "worktree" }`, because every
-implementer and fixer it runs writes in one. A host whose delegation ceiling
-allows `read-only` therefore cannot start it at all — the start is refused with
-*"plan-to-ship needs a worktree workspace; the host ceiling allows read-only."*,
-before a run exists ([Ceilings](#ceilings)).
+It declares `meta.needs = { workspace: "worktree", sessionModel: true }`, because
+every implementer and fixer it runs writes in one and its implementation roles
+inherit the host session's model. A host whose delegation ceiling allows
+`read-only` cannot start it at all — *"plan-to-ship needs a worktree workspace;
+the host ceiling allows read-only."* — and neither can a host with no session
+model — *"plan-to-ship inherits the session model, and this host has none."*
+Both refusals land before a run exists ([Ceilings](#ceilings), [The session
+model a run inherits](#the-session-model-a-run-inherits)).
 
-**The stage walk.** A plan schema v5 document **authors no stages**. The
+**Models per role.** There is no effort dial:
+
+| role | model |
+| --- | --- |
+| `refine` (`planner`) | `inherit` |
+| `implement`, `check`'s verifiers and fixers, `fix` (`implementer`) | `inherit` |
+| `review-<d>/<lens>` (`reviewer`) | the lens's tier — `light`/`standard`/`heavy` — or the exact `reviews[].model` the plan pinned, at that tier's thinking level |
+| `synthesis-<d>` (`reviewer`) | the standard reviewer tier |
+| the `receipt` finalizer (`planner`) | pinned; recording what the run committed is not a thinking task |
+
+The work inherits because the person who chose a model for the conversation that
+produced the plan chose it for the work the plan describes. A review does not,
+because a review's value is a fixed point of view a reader can reason about.
+Limits, budget shares and the 2 GiB worktree memory grant are one fixed row per
+stage in `envelope`, and every gate waits the same 24 hours.
+
+**The stage walk.** A plan schema v8 document **authors no stages**. The
 compiler derives them, the same list for every deliverable: `implement`, the
-`check` with `policy.maxFixRounds` (0 at `cheap`, 1 at `standard`, 2 at `deep`),
+`check` with `policy.maxFixRounds` (0..2, default 1),
 and — only when the deliverable's `reviews` list is non-empty — a
 `review-fan-out` over those lenses, a `synthesis` that normalizes what they
 found, and a `fix` that acts on it. Each stage lowers through one component, and
@@ -650,26 +719,41 @@ logged to the journal and shown at the gate. A fixer's own word that the check
 passed never turns a `checkRan: false` deliverable into a verified one; the
 claim is shown, the verdict is not changed.
 
-**What v5 deleted is refused by name.** There is no migration from version 3 or
-4, so each deleted key parses — a TypeBox "unexpected property" is not something
-a person can act on — and the compiler then refuses it, one sentence each:
-`tasks[].review` and v3's `tasks[].by` with *"plan schema v5 moved review
-routing to `deliverables[].reviews`; a task is work only"*, and
-`deliverables[].stages` with *"plan schema v5 does not author stages; the
-compiler derives them from `reviews` and `policy`"*. That refusal, and every
+**What the plan schema deleted is refused by name.** There is no migration, so
+each deleted key parses — a TypeBox "unexpected property" is not something a
+person can act on — and the compiler then refuses it, one sentence each:
+`policy.effort` with *"plan schema v8 removed `policy.effort`; models are set per
+role and budgets are fixed"*, `tasks[].review` and v3's `tasks[].by` with *"plan
+schema v8 moved review routing to `deliverables[].reviews`; a task is work
+only"*, and `deliverables[].stages` with *"plan schema v8 does not author stages;
+the compiler derives them from `reviews` and `policy`"*. That refusal, and every
 other rule (`reads` between deliverables, more than 16 reviews, an `after` that
 points forwards), lands **before the first task is declared**, so it costs
 nothing.
 
 **The gates come from `policy.gates`, and only from there.**
 
-| `policy.gates` | gates |
-| --- | --- |
-| `ship` (default) | One `ship` gate over every handoff: the single human decision, after all the work and before publication. |
-| `every-deliverable` | A gate after each deliverable but the last, then `ship`. Answering `{"proceed":false}` stops the walk and declares nothing after it. |
+`policy.gates` decides what happens at the **end** of the run, and it is what the
+mode a person left plan mode in chooses:
 
-There is no "no gates" value: publication proof is a durable decision, so the
-ship gate is not optional.
+| `policy.gates` | gates | mode |
+| --- | --- | --- |
+| `ship` (default) | One `ship` gate over every handoff: the single human decision, after all the work and before publication. | `ask` |
+| `every-deliverable` | A gate after each deliverable but the last, then `ship`. Answering `{"proceed":false}` stops the walk and declares nothing after it. | `ask` |
+| `none` | **No gate anywhere.** When every deliverable is done the run completes and the **host publishes on completion** — on the authority of the yes that started the run. | `auto` |
+
+Under `none` the run commits the *same* receipt a `ship: true` decision commits —
+`receipt.planDigest`, `receipt.refs`, and one `deliverables[]` entry per handoff —
+so a publication reader needs no new field, only `receipt`. What the ship gate
+would have shown a person becomes `output.shipSummary`: the refined plan, and per
+deliverable the implementation summary, the normalized findings and the fix
+report — the gate's own `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>`
+inputs. The host renders that before it publishes.
+
+`output.approved` is **always true**, under every gate policy: the start of the
+run is the approval, `approve-plan` is gone, and nothing in a run can answer that
+question a second time. Read `shipped` for the decision and `receipt.planDigest`
+for what was approved.
 
 **The start of the run is the approval.** `approve-plan` and
 `approve-plan+ship` are gone, and a plan naming either is refused by name at
@@ -708,14 +792,9 @@ the child's release, plus the `planDigest` that was approved. A person — or
 pi-maestro's audited Bash, authorized by the `ship` decision — takes it from
 there with `git cherry-pick <handoffCommit>`.
 
-**The effort dial.** `effort` is `cheap`, `standard`, or `deep`, and it is the
-component library's `envelope` table: a per-stage model, thinking level, token,
-cost and runtime budget, the worktree memory grant (1, 2 and 4 GiB), and how
-long each gate waits. It no longer selects lenses — `deliverables[].reviews` does
-that —
-and a lens's `tier`/`diverse` resolve through `policy.reviewDefault` when the
-lens says nothing. The model ids are a marked stand-in until routing lands;
-`by.model` still pins an exact route.
+A lens's `tier`/`diverse` resolve through `policy.reviewDefault` when the lens
+says nothing. The model ids behind a tier are a marked stand-in until routing
+lands; `reviews[].model` pins an exact route.
 
 **The three agents.** The definition names `planner`, `implementer`, and
 `reviewer`, and the package ships all three under `workflows/agents/`. They
@@ -732,19 +811,21 @@ cp node_modules/@vegardx/pi-workflow/workflows/agents/implementer.md .pi/agents/
 Each template is an authority **ceiling** a task may narrow but never widen:
 the implementer is the only one with `edit`/`write`/`bash`, the only one
 allowed `workspaceModes: [worktree]`, and carries a 2 GiB
-`workspaceWriteBytes` ceiling so a real install and build fit. Pinning
-`by.model` to a route outside a template's `allowedModels` fails preflight with
-`model exceeds ceiling`; add the route in a copy that overrides the template.
+`workspaceWriteBytes` ceiling so a real install and build fit. A model outside a
+template's `allowedModels` fails preflight with `model exceeds ceiling`; add the
+route in a copy that overrides the template. That applies to the model an
+inheriting role resolved as well — see [The session model a run
+inherits](#the-session-model-a-run-inherits).
 
 ### `deep-review`
 
 `workflows/deep-review.workflow.ts` is the shared review stage, so every caller
 declares a reviewed subject the same way. It is also the smallest definition
 built entirely out of the `@vegardx/pi-workflow/components` entry point:
-`envelope` is the whole effort dial and `reviewFanOut` is the whole graph.
+`envelope` is every limit and `reviewFanOut` is the whole graph.
 
 ```text
-workflow_run { ref: "deep-review", input: { subject, lenses?, effort, synthesis?, maxFindings? } }
+workflow_run { ref: "deep-review", input: { subject, lenses?, synthesis?, maxFindings? } }
 ```
 
 `subject` is one of three closed shapes, so a subject with nothing to read is
@@ -781,9 +862,18 @@ is safe to run while planning.
 
 One agent template, `lens-reviewer`, covers both the lens reviewers and the
 reducer; copy it alongside the others. Its ceiling covers the component
-library's `review` and `synthesis` rows at every effort, and its
+library's `review` and `synthesis` rows at every review tier, and its
 `allowedModels` covers both model families, so a `diverse` lens has somewhere
 to route.
+
+**Nothing here inherits the session model,** and that is a decision rather than
+an omission. A lens runs at its tier, the reducer at the standard reviewer tier.
+A review's value is a fixed point of view a reader can reason about, and the
+runtime sends the *resolved* exact model, so an inherited model outside
+`lens-reviewer`'s `allowedModels` would fail preflight on a host whose session
+happened to be on another family. `deep-review` therefore runs on any host,
+including one with no session model at all — which is what keeps it safe to run
+while planning.
 
 A dead lens costs one thing today, stated rather than hidden: a materialization
 barrier's control edge covers every task the barrier closed over, so the
@@ -799,22 +889,23 @@ independent threads at once, has each thread's claims checked by a *different*
 thread, and reports the answer with what it rests on.
 
 ```text
-workflow_run { ref: "deep-research", input: { question, depth, sources? } }
+workflow_run { ref: "deep-research", input: { question, sources? } }
 ```
 
-`question` is up to 2048 characters. `depth` is `cheap`, `standard`, or `deep`
-— here it is also the **thread count**, because a caller who names no `sources`
-gets a fixed per-depth table of angles: two (`evidence`, `counterpoint`), three
-(`+ context`), or five (`+ alternatives`, `risk`). A caller who does name
-`sources` gets one thread per source instead, up to 16 of
-`{ id, kind: "path" | "url" | "note", ref | text, title? }`.
+`question` is up to 2048 characters. A caller who names no `sources` gets three
+fixed angles — `evidence`, `counterpoint`, `context` — which is what the `depth`
+dial's `standard` column selected before the dial was removed. A caller who does
+name `sources` gets one thread per source instead, up to 16 of
+`{ id, kind: "path" | "url" | "note", ref | text, title? }`. Every role runs at
+the standard reviewer tier, the cross-check on the other family; nothing here
+inherits the session model either.
 
 The stages, in order:
 
 1. **`research/<thread>`** — one read-only `researcher` per thread, all at
    once, `disposition: "optional"`. The task key *is* the source id, or the
-   angle id from the table `depth` selected: `forEach`'s `idOf`, reading a
-   field the input schema requires in both cases. Reordering the sources moves
+   angle id from the fixed table: `forEach`'s `idOf`, reading a field that is a
+   literal or a required input field in both cases. Reordering the sources moves
    the tasks without renaming any of them.
 2. **the barrier and the claim merge** — `ctx.settled`, then a deterministic
    rail: the claims of the threads that reported, in (thread, claim) order,
@@ -854,8 +945,9 @@ one is reported at low confidence rather than dressed up as read.
 `@vegardx/pi-workflow/components` is the library the builtins are assembled
 from, and the one package subpath besides the root that the definition import
 gate accepts. It exports `gate` (a checkpoint plus the branch it decides),
-`envelope` (the `(effort, stage)` table that fixes a task's model, thinking
-level, and limits), `forEach` and `reviewFanOut` (bounded fan-out and its
+`envelope` (one fixed row per stage: the thinking level a role that names no
+model of its own runs at, its limits, and its budget share), `forEach` and
+`reviewFanOut` (bounded fan-out and its
 deterministic fan-in), `verifyAndFix`, and the `synthesizeFindings` +
 `fixFindings` pair that turns a fan-out's findings into a fixed patch. It also carries the two shapes the
 builtins share rather than copy: the `Finding` every reviewer reports, and
@@ -886,12 +978,13 @@ epoch already crossed, so the replay work of a resume grows with the number of
 barriers the source has crossed. That is the cost a generic `loopUntil` cannot
 bound, which is why this component is unrolled and that one is deferred.
 
-A verifier always runs at `envelope(effort, "verify")` — its job is to run a
-command and report the exit code, and thinking harder does not change it. A
-fixer is a retry of an implementer that already failed its own check, so with
-`escalate: "thinking"` it runs one rung up the ladder,
-`envelope(nextRung(effort), "fix")`. There is no rung above `deep`, so asking
-to escalate from `deep` is refused rather than silently ignored.
+Every verifier and every fixer runs at the one `model` the caller declared — an
+exact `{provider, id, thinking}`, or `"inherit"`. There is no effort ladder and
+no rung of escalation: a fixer is a retry of an implementer that already failed
+its own check, and what it needs is the implementer's model rather than a
+different one, so `plan-to-ship` hands the loop the same `"inherit"` its
+implementers run at. `limits` still come from the stage table, which is what
+genuinely differs between running a command and editing a worktree.
 
 `checkRan: false` — the check never completed, because an install or a build
 was killed inside the agent's own VM — stops the loop rather than starting a
@@ -952,9 +1045,10 @@ ctx.agent("review", {
 });
 ```
 
-`tier` is `light | standard | heavy`, `effort` is the thinking ladder plus
-`max` (mapped to pi-subagent's `xhigh`), and `family: "other"` is the diversity
-request a reviewer makes so it never marks its own homework. `model` and
+`tier` is `light | standard | heavy`, `effort` is a THINKING LEVEL — the ladder
+plus `max`, mapped to pi-subagent's `xhigh` — and not the removed
+`cheap | standard | deep` dial, and `family: "other"` is the diversity request a
+reviewer makes so it never marks its own homework. `model` and
 `modelRole` are mutually exclusive.
 
 The materializer resolves a role to an exact `{ provider, id, thinking }`

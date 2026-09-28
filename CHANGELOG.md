@@ -9,7 +9,7 @@ surfaces described in
 ## Unreleased
 
 The next release is the major 3.0.0: run state moves out of the project and
-`WORKFLOW_CONTRACT_REVISION` becomes 21, which under the persisted-state rule
+`WORKFLOW_CONTRACT_REVISION` becomes 22, which under the persisted-state rule
 in [docs/contracts.md](docs/contracts.md#public-api-and-stability) is what
 makes it a major. Everything else since 2.0.0 is additive: two new entry
 points — a component library and a service-provider seam — two more builtin
@@ -20,17 +20,90 @@ what a run is doing, and a support-task wiring fix in the extension. One frozen
 shape is retyped — `list()` now returns a listing with the definitions that
 loaded and the files that did not — and otherwise no frozen export, shape or
 message was removed or retyped and no returned union was widened; the required
-pi-subagent contract moves to revision 8, pinned to `0.14.0` for the delegation
-ceiling. The builtin
+pi-subagent contract moves to revision 9, pinned to `0.15.0` for the delegation
+ceiling and the session-model inherit request. The builtin
 `plan-to-ship`'s gate vocabulary does change, its per-deliverable stage list now
 reviews, normalizes and then FIXES, the compiled stage document moves with both,
 and the `plan-review` builtin and `runBuiltin` are removed outright — all over
 unfrozen surfaces, and none of that is persisted state. What does move the
 revision, to 21, is the run record's new `ceiling`: the host delegation ceiling a
-run started under.
+run started under; and to 22, the run record's new `sessionModel`: the host
+session's model a run inherited.
 
 ### Breaking
 
+- **The effort dial is gone; models are set per role.** `cheap | standard | deep`
+  decided every model, thinking level, limit, budget share, fix-round default,
+  worktree memory grant and gate timeout in the package. It is removed, and a
+  definition that still mentions the `Effort` type does not compile:
+  - `plan-to-ship`'s input loses `effort`, `workflow_run`'s input schema for it
+    loses the field with it, `startBuiltin`'s options lose the `effort` option
+    (and `START_EFFORT_REFUSAL_MESSAGE` with it), `deep-review`'s input loses
+    `effort`, and `deep-research`'s loses `depth`. The plan schema's
+    `policy.effort` parses and is then refused **by name**: *plan schema v8
+    removed `policy.effort`; models are set per role and budgets are fixed*.
+  - `envelope(stage)` takes one argument and returns one fixed row per stage — the
+    numbers the removed dial's `standard` column measured — and `Envelope` loses
+    `effort`. `EFFORTS`, the `Effort` type, `gateTimeoutMs(effort)`,
+    `nextRung`, `CompiledEffortSchema` and `CompiledStageDocument.effort` are
+    gone; `GATE_TIMEOUT_MS` (one number, 24 hours), `WORKTREE_MEMORY_BYTES`
+    (2 GiB for every worktree stage), `ENVELOPE_TIERS` and
+    `tierModel(tier, diverse?)` replace what is left of them.
+    `policy.maxFixRounds` stays as the plan's own knob and now defaults to `1`.
+  - `verifyAndFix`, `synthesizeFindings` and `fixFindings` take `model` where they
+    took `effort`, and `verifyAndFix` loses `escalate` (there is no ladder to
+    escalate up) and `VerifyRound.fixEffort` with it. `projectVerifyAndFixBudget`
+    takes `maxRounds` alone. The compiled verify-and-fix stage loses its
+    optional `escalate`, which nothing ever emitted.
+  - A `light | standard | heavy` **review tier** is the one dial left, and reviews
+    are the only thing it applies to.
+- **`model: "inherit"` and the run record's `sessionModel` (revision 22).** A role
+  may write the literal `"inherit"` wherever it can write a model, meaning the
+  host session's own model and thinking level. pi-workflow resolves it ONCE at run
+  start from `WorkflowServiceOptions.sessionModel` — the shipped extension
+  installs `() => resolveSessionModel(pi.events)` from
+  `@vegardx/pi-subagent/session-model-provider` — records the exact answer on the
+  run record as `sessionModel: {provider, id, thinking}`, and the materializer
+  substitutes that value **before hashing**, exactly as it resolves a `modelRole`.
+  So the persisted request, task identity and pi-subagent all see an exact model
+  and never the literal; a run never mixes models; a replay re-declares the
+  identical identity; and a nested run inherits its parent's resolved value.
+  `WorkflowNeeds` gains `sessionModel?: boolean`, `resolveWorkflowNeeds` reports
+  it, and `workflow_list`/`workflow_validate`'s `needs` view gains a required
+  `sessionModel` field. A definition that declares it cannot run on a host with no
+  session model, and the start is refused by name before anything durable exists:
+  *`<name>` inherits the session model, and this host has none.* A definition that
+  inherits WITHOUT declaring it fails materialization by name
+  (`MODEL_INHERIT_UNAVAILABLE_MESSAGE`).
+  `WorkflowRunRecordSchema` is `additionalProperties: false`, so the new field is
+  what moves the revision from 21 to 22: it is the only place that says which
+  model made a run's work. Revision-22 stores refuse revision-21 records; there is
+  no migration.
+  In `plan-to-ship` the refiner, the implementers, the check's verifiers and
+  fixers, and the review fixer inherit; a review runs at its lens's tier, the
+  synthesis at the standard reviewer tier, and the receipt recorder stays pinned.
+  `deep-review` and `deep-research` inherit **nothing** and declare no
+  `needs.sessionModel`: a review's value is a fixed point of view, and because the
+  runtime sends the resolved exact model, an inherited model outside the
+  `lens-reviewer`/`researcher` templates' `allowedModels` would fail preflight on a
+  host whose session was on another family. The shipped `implementer` and `planner`
+  templates list `inherit` — which admits a *direct* delegation that asks to
+  inherit — and say that a template an inheriting role uses must also list the
+  exact `provider/id:thinking` keys of the models you run sessions on.
+- **`policy.gates: "none"` publishes on completion.** `plan-to-ship`'s gate
+  vocabulary gains a third value, and it is what the mode a person left plan mode
+  in chooses: `ship` (the default) and `every-deliverable` are `ask`, and `none` is
+  `auto` — no gate anywhere, the run completes when every deliverable is done, and
+  the HOST publishes on completion on the authority of the yes that started the
+  run. A run under `none` commits the **same receipt** a `ship: true` decision
+  commits — `receipt.planDigest`, `receipt.refs`, one `deliverables[]` entry per
+  handoff — so a publication reader needs no new field, only `receipt`. What the
+  ship gate would have shown a person becomes `output.shipSummary`: the refined
+  plan and, per deliverable, the implementation summary, the normalized findings
+  and the fix report — the gate's own `plan`, `summary-<d>`, `findings-<d>` and
+  `fix-<d>` inputs. `output.approved` is documented as ALWAYS TRUE under every
+  gate policy: the start of the run is the approval, and nothing in a run can
+  answer that question a second time.
 - **One broken definition file no longer fails discovery for every ref.**
   Discovery is per definition file. A file that cannot resolve a module it
   imports (the field failure: a project's own `@vegardx/pi-workflow` import
