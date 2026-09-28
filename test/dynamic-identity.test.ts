@@ -50,9 +50,15 @@ import { installedDynamicTransformerVersion } from "../src/dynamic/transformer-i
  * `MAX_DYNAMIC_PROPOSALS`, `MAX_DYNAMIC_PROPOSAL_RECORD_BYTES`,
  * `MAX_DYNAMIC_APPROVAL_RENDER_BYTES`, `DYNAMIC_REF_PREFIX`,
  * `DYNAMIC_REF_PATTERN`.
+ *
+ * `WORKFLOW_CONTRACT_REVISION` is one of its inputs by construction, so this
+ * literal ROTATES with every revision and every existing dynamic source approval
+ * is invalidated with it - which is exactly what the revision is for. Revision 22
+ * rotated it from
+ * `c4a4e630eef72b097c36bfad82ecf12c598aaabdcc03261503d7beee924aeb5a`.
  */
 const HOST_API_SHA256 =
-	"c4a4e630eef72b097c36bfad82ecf12c598aaabdcc03261503d7beee924aeb5a";
+	"127c5442819796d0d4cc51b104377f06123b883199425925e3cf86043cb7b94d";
 
 /** `deriveDynamicImportPolicySha256([])`: builtin modules only. */
 const IMPORT_POLICY_EMPTY_SHA256 =
