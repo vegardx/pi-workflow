@@ -6,6 +6,7 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { resolveDelegationCeiling } from "@vegardx/pi-subagent/ceiling-provider";
+import { resolveSessionModel } from "@vegardx/pi-subagent/session-model-provider";
 import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
 import { workflowStateRoot } from "./persistence/state-root.js";
@@ -250,6 +251,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			// record and from there onto every request. A host that registered no
 			// provider means no bound, and every run is unbounded as before.
 			delegationCeiling: () => resolveDelegationCeiling(pi.events),
+			// The host session's current model and thinking level, read once per
+			// run start for a definition that declares `needs.sessionModel`.
+			// pi-subagent owns the vocabulary and the registration; this package
+			// resolves `model: "inherit"` from the answer, records it on the run
+			// record, and sends the EXACT model in every request - never the
+			// literal. A host that registered no provider cannot run an
+			// inheriting definition, and the start says so by name.
+			sessionModel: () => resolveSessionModel(pi.events),
 		});
 		return service;
 	}
