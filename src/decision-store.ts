@@ -127,7 +127,10 @@ function invalidRecord(cause?: unknown): WorkflowDecisionRecordError {
 	);
 }
 
-/** `source: "default"` never names an approver; `source: "operator"` always does. */
+/**
+ * `source: "default"` never names an approver, because nobody decided; every
+ * other source always does - `operator` and `service-provider` are both a person.
+ */
 function hasConsistentProvenance(record: WorkflowDecisionRecord): boolean {
 	return record.source === "default"
 		? record.decidedBy === undefined

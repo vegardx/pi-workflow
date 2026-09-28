@@ -225,13 +225,23 @@ try {
 	// deliberately to 2944 KiB, which keeps 122 KiB spare; three slices in a row
 	// have now been mostly prose, so the next thing this package ships records
 	// its own measurement here rather than nudging the bound silently.
-	if (workflow.entryCount > 208 || workflow.unpackedSize > 2944 * 1024) {
+	// Models per role is that next thing, and does exactly that. Unreleased with
+	// the session-model seam, gate policy `none` and the host's decision surface:
+	// measured 198 entries and 2928 KiB unpacked - two entries and 106 KiB over
+	// the row above (src/session-model.*, and README, CHANGELOG, contracts,
+	// compatibility and four skills carrying the removal of the effort dial).
+	// That leaves 16 KiB of the 122 KiB above, far under the 74 KiB the
+	// W2-PLANREVIEW row already called the point to raise at, so the SIZE bound
+	// is raised deliberately to 3072 KiB and this measurement keeps 144 KiB
+	// spare. The ENTRY bound stays at 208: 10 spare entries is still ample, and
+	// four slices in a row have added prose rather than files.
+	if (workflow.entryCount > 208 || workflow.unpackedSize > 3072 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
 		);
 	}
 	process.stdout.write(
-		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 2944 KiB)\n`,
+		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 3072 KiB)\n`,
 	);
 	const rootExports = await readExportList(rootExportList);
 	const runtimeExports = await readExportList(runtimeExportList);
@@ -411,7 +421,7 @@ if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.retryAttempts !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.resumeAttempts !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.executionGenerations !== true ||
-	workflow.WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.finalizers !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart !== true || !workflow.TaskRoleSchema ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.transactionalInvalidation !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.finalizers !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart !== true || workflow.WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderDecide !== true || !workflow.TaskRoleSchema ||
 	typeof runtime.invalidationClosure !== "function" ||
 	typeof runtime.createWorkflowTaskRetrier !== "function" ||
 	!workflow.AgentRetryPolicySchema ||

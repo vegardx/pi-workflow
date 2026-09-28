@@ -140,6 +140,15 @@ export interface TaskViewOptions {
 	 * that passes none leaves `narration.summary` absent.
 	 */
 	readonly taskSummaries?: ReadonlyMap<WorkflowTaskId, string>;
+	/**
+	 * Verified checkpoint input values by task id, already read and digest-checked
+	 * against the journal by the caller. A projection opens no store, so a caller
+	 * that passes none leaves `checkpoint.inputs` absent.
+	 */
+	readonly checkpointInputs?: ReadonlyMap<
+		WorkflowTaskId,
+		Readonly<Record<string, unknown>>
+	>;
 }
 
 /** A frozen deep copy of a persisted JSON value for a view. */
@@ -159,6 +168,9 @@ function checkpointTaskView(
 	task: WorkflowTaskProjection,
 	promptLimit: number | undefined,
 	decisionValues: ReadonlyMap<WorkflowTaskId, unknown> | undefined,
+	checkpointInputs:
+		| ReadonlyMap<WorkflowTaskId, Readonly<Record<string, unknown>>>
+		| undefined,
 ): WorkflowCheckpointTaskView | undefined {
 	const spec = task.task.spec;
 	if (spec.kind !== "checkpoint") return undefined;
@@ -167,6 +179,7 @@ function checkpointTaskView(
 	const decision = execution?.checkpointDecision;
 	const truncated =
 		promptLimit !== undefined && spec.request.prompt.length > promptLimit;
+	const inputs = checkpointInputs?.get(task.task.id);
 	return Object.freeze({
 		prompt: truncated
 			? spec.request.prompt.slice(0, promptLimit)
@@ -184,6 +197,7 @@ function checkpointTaskView(
 		...(request?.expiresAt === undefined
 			? {}
 			: { expiresAt: request.expiresAt }),
+		...(inputs === undefined ? {} : { inputs: frozenJson(inputs) }),
 		...(decision
 			? {
 					decision: Object.freeze({
@@ -360,6 +374,7 @@ export function taskViews(
 				task,
 				options.promptLimit,
 				options.decisionValues,
+				options.checkpointInputs,
 			);
 			// Derived from the key alone, so it is free and cannot drift: a host
 			// narrating a run reads the stage, the kind and the deliverable here
@@ -735,6 +750,11 @@ export interface RunInspectionOptions {
 	readonly decisionValues?: ReadonlyMap<WorkflowTaskId, unknown>;
 	/** Bounded per-task result summaries; see {@link TaskViewOptions}. */
 	readonly taskSummaries?: ReadonlyMap<WorkflowTaskId, string>;
+	/** Verified checkpoint inputs by task id; see {@link TaskViewOptions}. */
+	readonly checkpointInputs?: ReadonlyMap<
+		WorkflowTaskId,
+		Readonly<Record<string, unknown>>
+	>;
 }
 
 export function runInspection(
@@ -774,7 +794,8 @@ export function runInspection(
 		});
 	}
 	if (include.has("budget")) inspection.budget = budgetView(record, state);
-	if (include.has("tasks")) {
+	// `checkpoints` carries its values on a task view, so it implies `tasks`.
+	if (include.has("tasks") || include.has("checkpoints")) {
 		const views = state
 			? taskViews(state, {
 					graph: true,
@@ -784,6 +805,9 @@ export function runInspection(
 						: {}),
 					...(options.taskSummaries
 						? { taskSummaries: options.taskSummaries }
+						: {}),
+					...(options.checkpointInputs
+						? { checkpointInputs: options.checkpointInputs }
 						: {}),
 				})
 			: [];

@@ -513,9 +513,22 @@ export type NestedWorkflowTerminalEvidence = Static<
 	typeof NestedWorkflowTerminalEvidenceSchema
 >;
 
+/**
+ * Who decided a checkpoint.
+ *
+ * - `operator` — a person, through `/workflow decide` or `WorkflowService.decide`.
+ * - `default` — nobody: the headless `use-explicit-default` policy took the
+ *   declared default, so the record names no approver.
+ * - `service-provider` — a person, through the HOST's own dialog, recorded by
+ *   `WorkflowReadClient.decide`. It is an operator decision in every way that
+ *   matters (it names an approver and the model never reaches the method); the
+ *   value exists so run evidence can say the answer came from the host's dialog
+ *   rather than from the `/workflow` command. Revision 22.
+ */
 export const CheckpointDecisionSourceSchema = Type.Union([
 	Type.Literal("operator"),
 	Type.Literal("default"),
+	Type.Literal("service-provider"),
 ]);
 export type CheckpointDecisionSource = Static<
 	typeof CheckpointDecisionSourceSchema
@@ -618,6 +631,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				operatorAttempts: Type.Boolean(),
 				checkpoints: Type.Boolean(),
 				serviceProviderStart: Type.Boolean(),
+				serviceProviderDecide: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -689,6 +703,7 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			operatorAttempts: true,
 			checkpoints: true,
 			serviceProviderStart: true,
+			serviceProviderDecide: true,
 		}),
 	},
 );

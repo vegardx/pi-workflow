@@ -159,6 +159,9 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.operatorAttempts).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.checkpoints).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderStart).toBe(true);
+		// Revision 22: the host's decision surface on the service-provider seam -
+		// `decide`, `resume`, `stop`, and `inspect`'s `checkpoints` section.
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderDecide).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
