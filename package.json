@@ -1,6 +1,6 @@
 {
 	"name": "@vegardx/pi-workflow",
-	"version": "2.0.0",
+	"version": "3.0.0",
 	"description": "Durable workflow runtime for Pi.",
 	"type": "module",
 	"license": "MIT",

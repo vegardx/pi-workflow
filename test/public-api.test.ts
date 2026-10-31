@@ -468,10 +468,10 @@ describe("package entry points", () => {
 			"../compatibility.json",
 		);
 		const api = compatibility.piWorkflow.api;
-		// 2.0.0: the revision-19 bump refuses revision-18 persisted state, which
-		// the stability policy makes a major. Every frozen shape below is
-		// unchanged; `AgentTaskRequestSchema` only gained optional `memoryBytes`.
-		expect(api.version).toBe("2.0.0");
+		// 3.0.0: revision 20 moves run state and refuses revision-19 persisted
+		// state, which the stability policy makes a major; the Pi 1.4 peer floor
+		// is breaking too. `list()`'s listing is the one retyped frozen shape.
+		expect(api.version).toBe("3.0.0");
 		expect(majorOf(api.version)).toBe(majorOf(packageJson.version));
 		expect(api.frozenSurfaces).toEqual([
 			"authoring",
