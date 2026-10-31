@@ -6,6 +6,55 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 7.0.0
+
+Major release: pi-subagent 0.20.0 (contract revision 12) is required. A full
+host no longer refuses attempts at once: an attempt waits for a free VM slot
+and, if none frees in time, fails with the new code `capacity` and zero usage
+that is complete. pi-subagent's `ClassifiedFailureSchema`, embedded in every
+persisted subagent settlement, gains that code, so `WORKFLOW_CONTRACT_REVISION`
+becomes 26, and a release that cannot read the previous revision's runs is a
+major. A host pinning `>=6.0.0 <7` moves to `>=7.0.0 <8`.
+
+### Breaking
+
+- **Revision 26 refuses revision-25 state.** Journals, snapshots, run records,
+  decision records and dynamic proposals written by 6.0.0 are not read; there
+  is no migration. The dynamic host API digest rotates.
+- **`@vegardx/pi-subagent` `0.20.0` (exact) is required**, up from `0.19.0`,
+  at contract revision 12 with the new required feature `capacityWait: true`.
+  Revision 11 is refused.
+- **`WorkflowSubagentBinding` gains the required `maxSlots`**, the host's
+  concurrent VM slots. An embedder that supplies its own
+  `WorkflowServiceOptions.subagents` must report it; a binding without a valid
+  count (an integer from 1 to 32) is refused before the run exists with "The
+  subagent binding reports no valid host VM slot count."
+- **`WORKFLOW_RUNTIME_CONTRACT.requiredSubagent` no longer has pi-subagent's
+  whole contract shape.** It names the revision and the features; pi-subagent's
+  new `capacity` is a host setting, not a requirement, and is not published.
+
+### Added
+
+- **Concurrency is clamped to the host's VM slots.** A run's effective
+  concurrency is also bounded by pi-subagent's `capacity.maxSlots` (default
+  16, host-wide). A definition that asks for more is clamped, not refused;
+  `run-created` records `concurrencyClamp` once and the run's log reads
+  "Concurrency clamped from <n> to <slots>: the host has <slots> VM slots,
+  shared by every run." Nested runs are clamped on their own; the slots are
+  not partitioned, and pi-subagent's slot wait serialises the rest.
+- `createWorkflowSubagentProvider` takes an optional agent directory, from
+  which it reads pi-subagent's settings with pi-subagent's own reader.
+
+### Fixed
+
+- Two runs fanning out side by side on a small host no longer fail on
+  "Workflow child usage evidence is incomplete." when the host runs out of VM
+  slots: a refused attempt is a `capacity` failure (retry `backoff`) with
+  complete zero usage, so an optional task spends its backoff retry and then
+  fails, and the run ends `completed-degraded`.
+- The implementer's cache instruction names pi-subagent 0.20.0's guest cache
+  root, `/var/cache/pi-subagent`, instead of `/tmp/cache`.
+
 ## 6.0.0
 
 Major release: pi-subagent 0.19.0 (contract revision 11) is required. A guest

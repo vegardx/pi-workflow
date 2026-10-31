@@ -12,11 +12,12 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 6.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 25 with
+views. Version 7.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 26 with
 the feature flags `checkpoints: true` and `dynamicWorkflows: true` alongside
-the earlier flags, and it requires pi-subagent 0.19.0, contract revision 11
+the earlier flags, and it requires pi-subagent 0.20.0, contract revision 12
 (`handoffExport: true`, `vmMemoryCeiling: true`,
-`workspaceBudgetRefusal: true` among its required features). The
+`workspaceBudgetRefusal: true`, `capacityWait: true` among its required
+features). A run's concurrency is clamped to the host's VM slots. The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
 of the operator surface; a Pi tool for handoff export remains unavailable.
 
@@ -89,7 +90,10 @@ reason — contract revision 24, for the agent request's `continueFrom`, cannot
 read revision-23 runs — and because the component library and `plan-to-ship`'s
 output change shape with the review loop. 6.0.0 is a major for the same
 reason: contract revision 25, for the pi-subagent revision-11 handshake and its
-1 GiB guest memory floor, cannot read revision-24 runs.
+1 GiB guest memory floor, cannot read revision-24 runs. 7.0.0 is a major for
+the same reason: contract revision 26, for the pi-subagent revision-12
+handshake and its `capacity` failure code, cannot read revision-25 runs; the
+subagent binding also gains the required `maxSlots`.
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:
