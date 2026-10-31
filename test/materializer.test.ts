@@ -911,6 +911,8 @@ describe("worktree agent task materialization", () => {
 			5 * 1024 * 1024 * 1024,
 			64 * 1024 * 1024 + 1,
 			1.5 * 64 * 1024 * 1024,
+			64 * 1024 * 1024,
+			1024 * 1024 * 1024 - 64 * 1024 * 1024,
 		]) {
 			const runtime = materializer();
 			expect(() =>
@@ -918,7 +920,7 @@ describe("worktree agent task materialization", () => {
 			).toThrow(message);
 		}
 		// The bounds themselves are admitted.
-		for (const memoryBytes of [64 * 1024 * 1024, 4 * 1024 * 1024 * 1024]) {
+		for (const memoryBytes of [1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024]) {
 			const runtime = materializer();
 			expect(() =>
 				runtime.agent("memory", { ...request(), memoryBytes }),

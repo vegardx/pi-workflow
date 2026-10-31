@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	DEFAULT_MEMORY_BYTES,
 	HANDOFF_EXPORT_MEDIA_TYPE,
 	type HandoffRef,
 	RetryBackoffError,
@@ -172,7 +173,7 @@ function launchPlan(
 			mountPolicySha256: hash,
 			networkPolicySha256: hash,
 			capacityPolicySha256: hash,
-			memoryBytes: requestValue.memoryBytes ?? 536_870_912,
+			memoryBytes: requestValue.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 			guestDiskBytes: 1024,
 			workspaceWriteBytes: requestValue.limits.workspaceWriteBytes,
 		},
@@ -3626,7 +3627,7 @@ describe("worktree handoff settlement", () => {
 	): WorktreeRecord {
 		return {
 			schema: "pi-subagent-worktree",
-			contractRevision: 10,
+			contractRevision: 11,
 			runId: "run_scheduler",
 			attemptId,
 			repositoryRoot: "/private/repo",

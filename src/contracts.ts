@@ -651,7 +651,7 @@ export type WorkflowRuntimeContract = Static<
 
 const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 	schema: "pi-subagent-runtime",
-	contractRevision: 10,
+	contractRevision: 11,
 	features: Object.freeze({
 		nativeSessionBackend: true,
 		gondolinSandbox: true,

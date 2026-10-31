@@ -88,7 +88,7 @@ describe("package contract", () => {
 			[...Object.keys(packageJson.peerDependencies ?? {})].sort(),
 		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
-			"0.18.0",
+			"0.19.0",
 		);
 		expect(packageJson.peerDependencies?.typebox).toBe(">=1.3.14 <2");
 		expect(packageJson.exports).toEqual({
@@ -386,7 +386,7 @@ describe("compatibility matrix 1.0", () => {
 			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); 2.0.0 raised it from 18 to 19`,
 		);
 		expect(doc).toContain(
-			"| Required `@vegardx/pi-subagent` | `0.18.0` (exact; raised from `0.17.0` by the resume at hand-off; contract revision unchanged at 10) |",
+			"| Required `@vegardx/pi-subagent` | `0.19.0` (exact; raised from `0.18.0` because 0.19.0 raises the guest memory floor to 1 GiB and moves to contract revision 11) |",
 		);
 		expect(doc).toContain(
 			`| Required pi-subagent contract revision | ${WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision} |`,
