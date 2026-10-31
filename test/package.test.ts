@@ -75,19 +75,20 @@ describe("package contract", () => {
 		expect(packageJson.engines?.node).toBe(">=23.6.0");
 		expect(
 			packageJson.peerDependencies?.["@earendil-works/pi-coding-agent"],
-		).toBe(">=0.85.0 <0.86");
-		expect(packageJson.peerDependencies?.["@earendil-works/pi-server"]).toBe(
-			">=0.85.0 <0.86",
-		);
+		).toBe(">=1.4.0 <2");
 		expect(packageJson.peerDependencies?.["@earendil-works/pi-tui"]).toBe(
-			">=0.85.0 <0.86",
+			">=1.4.0 <2",
+		);
+		// Pi 1.2.0 removed pi-server; nothing here imports it.
+		expect(packageJson.peerDependencies).not.toHaveProperty(
+			"@earendil-works/pi-server",
 		);
 		// The TUI package is a peer like the other Pi packages, listed in order.
 		expect(Object.keys(packageJson.peerDependencies ?? {})).toEqual(
 			[...Object.keys(packageJson.peerDependencies ?? {})].sort(),
 		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
-			"0.15.0",
+			"0.16.0",
 		);
 		expect(packageJson.peerDependencies?.typebox).toBe(">=1.3.14 <2");
 		expect(packageJson.exports).toEqual({
@@ -245,7 +246,6 @@ describe("compatibility matrix", () => {
 		expect(compatibility.piSubagent.ciCommit).toBe(ciSubagentCommit);
 		expect(compatibility.pi.packages).toEqual([
 			"@earendil-works/pi-coding-agent",
-			"@earendil-works/pi-server",
 			"@earendil-works/pi-tui",
 		]);
 		for (const name of compatibility.pi.packages) {
@@ -386,7 +386,7 @@ describe("compatibility matrix 1.0", () => {
 			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); 2.0.0 raised it from 18 to 19`,
 		);
 		expect(doc).toContain(
-			"| Required `@vegardx/pi-subagent` | `0.15.0` (exact; raised from `0.14.0` by the session-model inherit request) |",
+			"| Required `@vegardx/pi-subagent` | `0.16.0` (exact; raised from `0.15.0` because 0.16.0 is the release on Pi 1.4; contract revision unchanged at 9) |",
 		);
 		expect(doc).toContain(
 			`| Required pi-subagent contract revision | ${WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision} |`,
