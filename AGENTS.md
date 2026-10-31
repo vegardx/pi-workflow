@@ -29,4 +29,5 @@ workflow state while delegating all physical agent execution to pi-subagent.
 - TypeScript strict mode, tabs, double quotes, Biome defaults.
 - Test observable behavior and every failure transition.
 - Keep public contracts versioned and compatibility explicit.
-- Use Conventional Commits.
+- Use Conventional Commits; the husky `commit-msg` hook
+  (`scripts/commit-msg.mjs`) enforces them.
