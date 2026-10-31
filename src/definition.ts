@@ -363,8 +363,9 @@ export interface AgentTaskAuthoringRequest<
 	readonly contextScopes: readonly ContextScope[];
 	readonly workspace: TWorkspace;
 	/**
-	 * Guest VM memory grant in bytes: a positive multiple of 64 MiB, at most
-	 * 4 GiB, lowered unchanged to pi-subagent. Omitted means the agent
+	 * Guest VM memory grant in bytes: a multiple of 64 MiB from 1 GiB to
+	 * 4 GiB (pi-subagent's `MemoryBytesSchema`), lowered unchanged to
+	 * pi-subagent. Omitted means the agent
 	 * definition's own ceiling. A request above that ceiling is refused by
 	 * pi-subagent preflight ("memory request exceeds agent ceiling"), which the
 	 * launcher relays unchanged.

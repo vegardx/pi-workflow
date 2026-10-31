@@ -133,7 +133,7 @@ describe("workflow authoring skill", () => {
 		// Revision 19: the guest memory grant and the bound that is never retried.
 		expect(skill).toContain("memory request exceeds agent ceiling");
 		expect(skill).toContain(
-			"agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB",
+			"agent memoryBytes must be a multiple of 64 MiB from 1 GiB to 4 GiB",
 		);
 		expect(skill).toContain("| `memoryBytes` |");
 		expect(skill).toContain("`workspace-budget`");

@@ -901,9 +901,9 @@ describe("worktree agent task materialization", () => {
 		);
 	});
 
-	it("rejects a memoryBytes that is not a 64 MiB multiple within 4 GiB", () => {
+	it("rejects a memoryBytes that is not a 64 MiB multiple from 1 GiB to 4 GiB", () => {
 		const message =
-			"agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB";
+			"agent memoryBytes must be a multiple of 64 MiB from 1 GiB to 4 GiB";
 		for (const memoryBytes of [
 			0,
 			-(64 * 1024 * 1024),
