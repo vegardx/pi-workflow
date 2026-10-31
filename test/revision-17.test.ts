@@ -2541,3 +2541,61 @@ describe("revision 17 compatibility and persistence", () => {
 		}
 	});
 });
+
+describe("a worktree child that fails with its workspace retained", () => {
+	// pi-subagent keeps a failed worktree attempt's workspace `retained` for an
+	// explicit retry until release proves cleanup; the VM itself is proved gone.
+	const retained = (): SubagentTerminalEvidence => ({
+		...failedEvidence(),
+		usageComplete: false,
+		failure: {
+			code: "timeout",
+			origin: "service",
+			retry: "manual",
+			message: "Attempt runtime limit exceeded",
+			guidance: "Inspect partial output.",
+		},
+		workspaceCleanup: "retained",
+	});
+
+	it("settles, releases, and terminalizes failed", () => {
+		const graph = worktreeGraph();
+		const state = reduce([
+			...graph.events,
+			...launchLadder(graph.execution, "worktree"),
+			observed(graph.execution, "failed"),
+			settled(graph.execution, retained()),
+			releaseIntended(graph.execution),
+			released(graph.execution, "failed"),
+			terminal(graph.execution, "failed", retained()),
+		]);
+		expect(projectionOf(state, graph.execution).phase).toBe("terminal");
+	});
+
+	it("is refused for a read-only task, which has no workspace to retain", () => {
+		const graph = readOnlyGraph();
+		expect(() =>
+			reduce([
+				...graph.events,
+				...launchLadder(graph.execution, "read-only"),
+				observed(graph.execution, "failed"),
+				settled(graph.execution, retained()),
+			]),
+		).toThrow("task execution child settlement is invalid");
+	});
+
+	it("is refused when the workspace cleanup is blocked rather than retained", () => {
+		const graph = worktreeGraph();
+		expect(() =>
+			reduce([
+				...graph.events,
+				...launchLadder(graph.execution, "worktree"),
+				observed(graph.execution, "failed"),
+				settled(graph.execution, {
+					...retained(),
+					workspaceCleanup: "blocked",
+				}),
+			]),
+		).toThrow("task execution child settlement is invalid");
+	});
+});

@@ -1711,7 +1711,17 @@ Subagent terminal outcomes map using both primary status and cleanup evidence:
 | `failed` with cleanup proved/not-needed | `failed` |
 | `cancelled` with cleanup proved/not-needed | `cancelled` |
 | `interrupted` with cleanup proved/not-needed | `interrupted` |
-| any retained, blocked, or unknown required cleanup | `cleanup-blocked`; preserve the observed subagent status/failure as evidence, block dependents, and mark the run cleanup-blocked |
+| `failed` or `cancelled` worktree child with sandbox cleanup proved and workspace `retained` | release, then `failed` or `cancelled`; the settlement keeps `retained` and the release receipt is the workspace cleanup proof |
+| `interrupted` worktree child with sandbox cleanup proved and workspace `retained` | `interrupted`, unreleased: the workspace is what resume continues in |
+| `cleanup-blocked`, or blocked or unknown required cleanup | `cleanup-blocked`; preserve the observed subagent status/failure as evidence, block dependents, and mark the run cleanup-blocked |
+
+pi-subagent reports a worktree attempt's workspace `retained` on every path
+except `completed`: a failed or cancelled attempt keeps it for an explicit
+retry until `release` proves cleanup, and an interrupted attempt keeps it for
+resume. The reducer therefore admits a `failed`, `cancelled`, or `interrupted`
+settlement of a worktree task whose workspace is `retained` and whose sandbox
+cleanup is proved. A read-only task has no workspace to retain, and its
+settlement is still refused with anything but proved or not-needed cleanup.
 
 Stop writes run and task cancellation intent before calling the owner client's
 `interrupt` and before aborting in-process support work. A restart that finds `stopping` retries the idempotent interruption
