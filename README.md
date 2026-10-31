@@ -12,9 +12,9 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 3.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 22 with
+views. Version 4.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 23 with
 the feature flags `checkpoints: true` and `dynamicWorkflows: true` alongside
-the earlier flags, and it requires pi-subagent 0.16.0, contract revision 9
+the earlier flags, and it requires pi-subagent 0.17.0, contract revision 10
 (`handoffExport: true`, `vmMemoryCeiling: true`,
 `workspaceBudgetRefusal: true` among its required features). The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
@@ -82,7 +82,9 @@ persisted runs, and there is no migration. Its one schema change is additive
 (the optional agent-task `memoryBytes`). 3.0.0 is a major for the same
 reason: contract revision 20 cannot read revision-19 persisted runs, and it
 reads them from a different place (see
-[Where state lives](#where-state-lives)); it also requires Pi 1.4.
+[Where state lives](#where-state-lives)); it also requires Pi 1.4. 4.0.0 is
+a major for the same reason: contract revision 23, for the agent workspace's
+`startAtInput`, cannot read revision-22 runs.
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:

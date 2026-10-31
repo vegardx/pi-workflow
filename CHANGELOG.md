@@ -6,6 +6,61 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 4.0.0
+
+Major release: a consumer of a hand-off now runs ON it, and a failed required
+child fails its task by name. `WORKFLOW_CONTRACT_REVISION` becomes 23 for the
+one persisted field that carries the first, and under the persisted-state rule
+in [docs/contracts.md](docs/contracts.md#public-api-and-stability) a release
+that cannot read the previous revision's runs is a major. A host pinning
+`>=3.0.0 <4` moves to `>=4.0.0 <5`. No frozen export, shape or message was
+removed or retyped.
+
+### Breaking
+
+- **Revision 23 refuses revision-22 state.** Journals, snapshots, run records,
+  decision records and dynamic proposals written by 3.0.0 are not read; there
+  is no migration. The dynamic host API digest rotates, so every dynamic source
+  approval is invalidated.
+- **`@vegardx/pi-subagent` `0.17.0` (exact) is required**, up from `0.16.0`, at
+  contract revision 10 with `workspaceStartAt: true`.
+
+### Added
+
+- **`workspace.startAtInput`.** An agent task may name one of its own handoff
+  inputs; the declaration is refused otherwise. The persisted spec holds the
+  name, because the commit does not exist at declaration; at launch the
+  launcher resolves it to the producer's verified imported `handoffCommit` and
+  sends pi-subagent `workspace.startAt`. A producer that captured no handoff
+  fails the consumer at stage `preflight`, before any preflight call, with
+  "Workflow task workspace start input carries no hand-off commit.".
+- `verifyAndFix` starts verify-n and fix-n at `patch`, `fixFindings` its fixer
+  at its patch input, and `reviewFanOut` every lens at the subject's handoff (a
+  subject with two handoffs is refused). The synthesis and the receipt read no
+  tree and get none.
+
+### Fixed
+
+- **A failed worktree child settles.** pi-subagent reports a worktree
+  attempt's workspace `retained` on every path but `completed`; the reducer
+  refused that settlement, so a timed-out verifier stayed `running` and the run
+  ended on "Static workflow source execution failed." with nothing failed. It
+  now settles, is released, and the task fails before the run.
+- **A required task's failure names itself.** The run's `-> failed` reason is
+  "A required workflow task did not complete: <stage key>. <cause>", where the
+  cause is the task's narration cause (code, origin, retry - never the child's
+  message).
+- A result barrier reports a lane's own error instead of "made no progress".
+- **`plan-to-ship` no longer tells an agent to apply a hand-off.** The guest
+  has no git; the prose now says the workspace already holds the change and
+  the descriptor is for identity only. The agent templates say the same.
+
+### Known
+
+- A check verify task narrates `deliverable: "d0-verify-1"` rather than `"d0"`.
+- pi-subagent still reads AGENTS.md and skills from the live cwd, not from the
+  start-at tree.
+
 ## 3.0.0
 
 Major release: run state moves out of the project and
