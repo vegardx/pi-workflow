@@ -468,10 +468,10 @@ describe("package entry points", () => {
 			"../compatibility.json",
 		);
 		const api = compatibility.piWorkflow.api;
-		// 3.0.0: revision 20 moves run state and refuses revision-19 persisted
-		// state, which the stability policy makes a major; the Pi 1.4 peer floor
-		// is breaking too. `list()`'s listing is the one retyped frozen shape.
-		expect(api.version).toBe("3.0.0");
+		// 4.0.0: revision 23 refuses revision-22 persisted state, which the
+		// stability policy makes a major; its one schema change is the optional
+		// `workspace.startAtInput`.
+		expect(api.version).toBe("4.0.0");
 		expect(majorOf(api.version)).toBe(majorOf(packageJson.version));
 		expect(api.frozenSurfaces).toEqual([
 			"authoring",
