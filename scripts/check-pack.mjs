@@ -399,7 +399,8 @@ if (
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.vmMemoryCeiling !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
-	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 9 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 10 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceStartAt !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.delegationCeiling !== true ||
 	typeof ceilingProvider.registerDelegationCeilingProvider !== "function" ||
 	typeof ceilingProvider.resolveDelegationCeiling !== "function" ||

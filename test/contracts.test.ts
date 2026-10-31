@@ -801,8 +801,13 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 	});
 
-	it("requires pi-subagent revision 9 with session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
-		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(9);
+	it("requires pi-subagent revision 10 with the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
+		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(
+			10,
+		);
+		expect(
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.workspaceStartAt,
+		).toBe(true);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.sessionModelInherit,
 		).toBe(true);
@@ -828,6 +833,7 @@ describe("workflow contracts", () => {
 			"vmMemoryCeiling",
 			"workspaceBudgetRefusal",
 			"sessionModelInherit",
+			"workspaceStartAt",
 		] as const) {
 			expect(
 				isCompatibleSubagentContract({
