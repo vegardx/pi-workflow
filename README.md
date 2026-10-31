@@ -1257,8 +1257,9 @@ release under `"required"`. The handle's
 `handoff` may be named in a later task's `inputs` (the child receives the
 descriptor, not patch bytes) or returned as the workflow output;
 `WorkflowService.exportHandoff(runId, taskId)` returns the descriptor and the
-verified bytes. The workflow never applies, pushes, merges, or checks out a
-handoff. The root exports are `WorkflowHandoffDescriptorSchema`,
+verified bytes. The workflow never applies, pushes, or merges a handoff; a
+task that names one of its handoff inputs as `workspace.startAtInput` runs in a
+workspace pi-subagent checked out at that hand-off's commit. The root exports are `WorkflowHandoffDescriptorSchema`,
 `HandoffPolicySchema`, `AgentWorkspaceRequestSchema`,
 `SubagentHandoffEvidenceSchema`, `MAX_WORKFLOW_HANDOFF_BYTES`,
 `WORKFLOW_HANDOFF_FORMAT_SHA256`, and `isHandoffHandle`;

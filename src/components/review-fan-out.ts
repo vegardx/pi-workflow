@@ -9,6 +9,7 @@ import type {
 	WorkflowContext,
 	WorkspaceAuthoringRequest,
 } from "../definition.js";
+import { isHandoffHandle } from "../definition.js";
 import { WorkflowComponentError } from "./errors.js";
 import {
 	type Finding,
@@ -20,6 +21,7 @@ import {
 	ReviewSynthesisSchema,
 	type ReviewVerdict,
 } from "./finding.js";
+import { startAtHandoff } from "./workspace.js";
 
 /**
  * `reviewFanOut` — one read-only reviewer per lens over one reviewed subject,
@@ -320,6 +322,19 @@ export async function reviewFanOut(
 	});
 
 	const subjectInputs = options.subject.inputs ?? {};
+	// A subject that carries a handoff is reviewed AT it: every lens's
+	// read-only workspace is mounted at that hand-off's commit, so the change
+	// under review is in the tree it reads. Two handoffs name no one tree.
+	const subjectHandoffs = Object.entries(subjectInputs)
+		.filter(([, handle]) => isHandoffHandle(handle))
+		.map(([name]) => name as TaskKey);
+	if (subjectHandoffs.length > 1) {
+		throw new WorkflowComponentError(
+			"reviewFanOut",
+			`reviewFanOut("${namespace}") subject carries ${subjectHandoffs.length} handoffs (${subjectHandoffs.map((name) => JSON.stringify(name)).join(", ")}); a review reads one tree, so pass at most one.`,
+		);
+	}
+	const subjectHandoff = subjectHandoffs[0];
 	const requests = resolved.map((entry) => {
 		const request = options.review(entry);
 		if (request === null || typeof request !== "object") {
@@ -344,6 +359,16 @@ export async function reviewFanOut(
 		}
 		return {
 			...request,
+			...(subjectHandoff === undefined
+				? {}
+				: {
+						workspace: startAtHandoff(
+							"reviewFanOut",
+							`reviewFanOut("${namespace}") lens ${JSON.stringify(entry.key)}`,
+							request.workspace,
+							subjectHandoff,
+						),
+					}),
 			...(entry.model === undefined ? {} : { model: entry.model }),
 			outputSchema: ReviewReportSchema,
 			disposition: options.disposition ?? "optional",

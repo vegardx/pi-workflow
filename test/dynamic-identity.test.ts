@@ -55,10 +55,12 @@ import { installedDynamicTransformerVersion } from "../src/dynamic/transformer-i
  * literal ROTATES with every revision and every existing dynamic source approval
  * is invalidated with it - which is exactly what the revision is for. Revision 22
  * rotated it from
- * `c4a4e630eef72b097c36bfad82ecf12c598aaabdcc03261503d7beee924aeb5a`.
+ * `c4a4e630eef72b097c36bfad82ecf12c598aaabdcc03261503d7beee924aeb5a`, and
+ * revision 23 from
+ * `127c5442819796d0d4cc51b104377f06123b883199425925e3cf86043cb7b94d`.
  */
 const HOST_API_SHA256 =
-	"127c5442819796d0d4cc51b104377f06123b883199425925e3cf86043cb7b94d";
+	"5ce78c6642c8ec09befe382fedec7a9a6cd081b04d533a640604e69c7601df5b";
 
 /** `deriveDynamicImportPolicySha256([])`: builtin modules only. */
 const IMPORT_POLICY_EMPTY_SHA256 =

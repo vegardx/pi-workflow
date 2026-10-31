@@ -79,7 +79,7 @@ function verifyRequest(round: number) {
 			goal: `Run \`npm run check\` over the patch, round ${round}`,
 			context: [],
 			instructions: [
-				"Apply the `patch` input's handoff ref, then run the check.",
+				"The workspace starts at the `patch` hand-off; run the check.",
 				"Report the check truthfully; `checkRan` is true only if it completed.",
 			],
 		},
@@ -100,7 +100,7 @@ function fixRequest(round: number) {
 			goal: `Fix what the check reported, round ${round}`,
 			context: [],
 			instructions: [
-				"Apply the `patch` input's handoff ref, read `check`, then fix it.",
+				"The workspace starts at the `patch` hand-off; read `check`, then fix it.",
 			],
 		},
 		contextMode: "fresh" as const,
@@ -242,6 +242,7 @@ describe("verifyAndFix lowering", () => {
 		const handImpl = implementation(hand);
 		const verifier = hand.materializer.agent("green-verify-1", {
 			...verifyRequest(1),
+			workspace: { mode: "worktree", cwd: "/repo", startAtInput: "patch" },
 			handoff: "optional",
 			outputSchema: CheckReportSchema,
 			model: LOOP_MODEL,
@@ -269,6 +270,7 @@ describe("verifyAndFix lowering", () => {
 		const handImpl = implementation(hand);
 		const verifyOne = hand.materializer.agent("green-verify-1", {
 			...verifyRequest(1),
+			workspace: { mode: "worktree", cwd: "/repo", startAtInput: "patch" },
 			handoff: "optional",
 			outputSchema: CheckReportSchema,
 			model: LOOP_MODEL,
@@ -278,6 +280,7 @@ describe("verifyAndFix lowering", () => {
 		hand.barrier([verifyOne]);
 		const fixOne = hand.materializer.agent("green-fix-1", {
 			...fixRequest(1),
+			workspace: { mode: "worktree", cwd: "/repo", startAtInput: "patch" },
 			model: LOOP_MODEL,
 			limits: envelope("fix").limits,
 			handoff: "required",
@@ -285,6 +288,7 @@ describe("verifyAndFix lowering", () => {
 		}) as WorktreeTaskHandle<unknown>;
 		const verifyTwo = hand.materializer.agent("green-verify-2", {
 			...verifyRequest(2),
+			workspace: { mode: "worktree", cwd: "/repo", startAtInput: "patch" },
 			handoff: "optional",
 			outputSchema: CheckReportSchema,
 			model: LOOP_MODEL,
@@ -801,3 +805,52 @@ function foreignArtifactHandle() {
 	const h = harness();
 	return implementation(h).output;
 }
+
+describe("verifyAndFix workspace start", () => {
+	it("refuses a verifier that starts its workspace at another input", async () => {
+		const component = harness([PASSED]);
+		const impl = implementation(component);
+		await expect(
+			verifyAndFix(
+				component.ctx,
+				"green",
+				options(impl, {
+					verify: (round) => ({
+						...verifyRequest(round),
+						workspace: {
+							mode: "worktree" as const,
+							cwd: "/repo",
+							startAtInput: "elsewhere",
+						},
+					}),
+				}),
+			),
+		).rejects.toThrow(
+			'verifyAndFix("green") verifier "green-verify-1" starts its workspace at "elsewhere", but the component starts it at the handoff it wires as "patch".',
+		);
+	});
+
+	it("is refused by the materializer when it names no handoff input", () => {
+		const hand = harness();
+		const handImpl = implementation(hand);
+		const verifier = hand.materializer.agent("verify", {
+			...verifyRequest(1),
+			handoff: "optional",
+			outputSchema: CheckReportSchema,
+			model: LOOP_MODEL,
+			limits: verifyWorktreeLimits(),
+			inputs: { patch: handImpl.handoff },
+		});
+		expect(() =>
+			hand.materializer.agent("fix", {
+				...fixRequest(1),
+				workspace: { mode: "worktree", cwd: "/repo", startAtInput: "check" },
+				model: LOOP_MODEL,
+				limits: envelope("fix").limits,
+				inputs: { patch: handImpl.handoff, check: verifier.output },
+			}),
+		).toThrow(
+			"workspace startAtInput must name one of the task's handoff inputs",
+		);
+	});
+});

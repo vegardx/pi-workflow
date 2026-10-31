@@ -423,6 +423,10 @@ function scripted(
 				mode: request.workspace.mode,
 				hostPathSha256: "a".repeat(64),
 				baselineSha256: "c".repeat(64),
+				// The real preflight echoes the commit it checked the workspace out at.
+				...(request.workspace.startAt === undefined
+					? {}
+					: { startAt: request.workspace.startAt }),
 			},
 			sandbox: {
 				backend: "gondolin" as const,
@@ -1365,6 +1369,65 @@ describe("plan-to-ship: the stage walk", () => {
 		});
 	});
 
+	it("starts every consumer of a hand-off at that hand-off, and nothing else", async () => {
+		// One fix round for the check, one for the review: every task that reads
+		// a patch runs in a workspace the host checked out at that patch's commit.
+		const delegated = scripted({ check: "fail-then-pass" });
+		const service = await serviceFor(delegated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({ policy: { maxFixRounds: 2 } }),
+		);
+		const ship = await park(service, run.runId, "ship");
+		expect(taskPaths(ship)).toContain("fix-d0");
+
+		const startOf = (goal: string, index = 0) =>
+			delegated.requestsGoal(goal)[index]?.workspace;
+		const commitOf = (goal: string, index = 0) => {
+			const child = [...delegated.children.values()].filter((entry) =>
+				entry.request.task.goal.startsWith(goal),
+			)[index];
+			if (!child) throw new Error(`no child for ${goal}`);
+			return commitFor(child.attemptId);
+		};
+		const implemented = commitOf("Implement deliverable");
+		const fixed = commitOf("Fix what the check reported");
+		// verify-1 and fix-1 start at the implementer's hand-off; verify-2, the
+		// lens, and the review fixer at the check fixer's.
+		expect(startOf("Verify deliverable", 0)).toMatchObject({
+			mode: "worktree",
+			startAt: implemented,
+		});
+		expect(startOf("Fix what the check reported")).toMatchObject({
+			mode: "worktree",
+			startAt: implemented,
+		});
+		expect(startOf("Verify deliverable", 1)).toMatchObject({
+			startAt: fixed,
+		});
+		expect(startOf("Review deliverable")).toMatchObject({
+			mode: "read-only",
+			startAt: fixed,
+		});
+		expect(startOf("Address the review findings")).toMatchObject({
+			mode: "worktree",
+			startAt: fixed,
+		});
+		// Producers, the synthesis and the refiner read no hand-off.
+		for (const goal of [
+			"Refine the authored plan",
+			"Implement deliverable",
+			"Normalize the review findings",
+		]) {
+			expect(startOf(goal)).toBeDefined();
+			expect(startOf(goal)).not.toHaveProperty("startAt");
+		}
+		// The persisted reference never reaches pi-subagent.
+		for (const request of delegated.requests) {
+			expect(request.workspace).not.toHaveProperty("startAtInput");
+		}
+	});
+
 	it("stops the loop on a check that did not run and says the change is unverified", async () => {
 		const delegated = scripted({ check: "not-run" });
 		const service = await serviceFor(delegated);
@@ -2175,7 +2238,7 @@ describe("plan-to-ship: models per role", () => {
 			run.runId,
 		);
 		expect(record.sessionModel).toEqual(SESSION_MODEL);
-		expect(record.contractRevision).toBe(22);
+		expect(record.contractRevision).toBe(23);
 	});
 
 	it("refuses the start by name when the host has no session model", async () => {

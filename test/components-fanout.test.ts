@@ -594,6 +594,47 @@ describe("reviewFanOut", () => {
 		]);
 	});
 
+	it("starts every lens at the subject's hand-off, and refuses two", async () => {
+		const h = harness();
+		const producer = h.ctx.agent("implement", worktreeRequest());
+		await reviewFanOut(h.ctx, "review", lenses, {
+			subject: {
+				title: "The handoff",
+				inputs: { summary: producer.output, handoff: producer.handoff },
+			},
+			model: MODEL,
+			synthesis: "none",
+			review: () => review("Review the handoff."),
+		});
+		const workspaces = h
+			.finish([])
+			.flatMap((event) =>
+				event.type === "task-declared" && event.data.task.spec.kind === "agent"
+					? [event.data.task.spec.request.workspace]
+					: [],
+			);
+		expect(workspaces.slice(1)).toEqual([
+			expect.objectContaining({ mode: "read-only", startAtInput: "handoff" }),
+			expect.objectContaining({ mode: "read-only", startAtInput: "handoff" }),
+		]);
+		expect(workspaces[0]).not.toHaveProperty("startAtInput");
+
+		const two = harness();
+		const first = two.ctx.agent("first", worktreeRequest());
+		const second = two.ctx.agent("second", worktreeRequest());
+		await expect(
+			reviewFanOut(two.ctx, "review", lenses, {
+				subject: {
+					title: "Two patches",
+					inputs: { a: first.handoff, b: second.handoff },
+				},
+				model: MODEL,
+				synthesis: "none",
+				review: () => review("Review both."),
+			}),
+		).rejects.toThrow(/subject carries 2 handoffs \("a", "b"\)/u);
+	});
+
 	it("resolves diversity by pin, then seam, then the caller's default", async () => {
 		const h = harness();
 		const result = await reviewFanOut(

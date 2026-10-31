@@ -38,7 +38,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 22 as const,
+			contractRevision: 23 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -67,7 +67,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const record = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 22 as const,
+			contractRevision: 23 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -111,7 +111,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const root = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 22 as const,
+			contractRevision: 23 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -168,7 +168,7 @@ describe("workflow run record", () => {
 			}),
 		).rejects.toThrow("invalid workflow run record");
 		await expect(
-			store.create({ ...root, contractRevision: 21 as unknown as 22 }),
+			store.create({ ...root, contractRevision: 22 as unknown as 23 }),
 		).rejects.toThrow("invalid workflow run record");
 		const nested = { ...root, depth: 1, parent };
 		await store.create(nested);
@@ -186,7 +186,7 @@ describe("workflow run record", () => {
 		};
 		const nested = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 22 as const,
+			contractRevision: 23 as const,
 			runId: "workflow_record" as const,
 			depth: 1,
 			parent,
@@ -263,7 +263,7 @@ describe("workflow run record", () => {
 		await expect(
 			store.create({
 				schema: "pi-workflow-run",
-				contractRevision: 22,
+				contractRevision: 23,
 				runId: "workflow_record",
 				depth: 0,
 				definitionName: "example",
@@ -288,7 +288,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const base = {
 			schema: "pi-workflow-run" as const,
-			contractRevision: 22 as const,
+			contractRevision: 23 as const,
 			runId: "workflow_record" as const,
 			depth: 0,
 			definitionName: "example",
@@ -381,7 +381,7 @@ describe("workflow run record", () => {
 		const { store } = await fixture();
 		const persisted = {
 			schema: "pi-workflow-run",
-			contractRevision: 22,
+			contractRevision: 23,
 			runId: "workflow_record",
 			depth: 0,
 			definitionName: "example",

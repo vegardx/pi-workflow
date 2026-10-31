@@ -433,7 +433,10 @@ An in-memory-only successful drive does not satisfy the first slice.
   settlement and import; otherwise "Completed worktree task has no verified
   handoff artifact.";
 - private paths, branches, and ref names never appear in the journal or store;
-- the workflow never applies, pushes, merges, or checks out a handoff;
+- the workflow never applies, pushes, or merges a handoff; a consumer naming a
+  handoff input as `workspace.startAtInput` is sent pi-subagent
+  `workspace.startAt` with that hand-off's imported commit, and fails before
+  preflight by name when the producer captured none;
 - the materializer rejects `handoff` on a read-only request, a worktree
   request without a positive `workspaceWriteBytes`, and a handoff input whose
   producer is not a worktree agent task, with the fixed messages, and the

@@ -37,8 +37,71 @@ import {
 	deriveTaskExecutionId,
 	deriveWorkflowFailureSha256,
 } from "./execution.js";
+import { verifyWorkflowHandoffEvidence } from "./handoff.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
+
+/** The task's `startAtInput` names no handoff input it can resolve. */
+export const START_AT_INPUT_UNRESOLVED_MESSAGE =
+	"Workflow task workspace start names no resolvable handoff input.";
+/** The referenced producer's hand-off could not be verified. */
+export const START_AT_HANDOFF_UNVERIFIED_MESSAGE =
+	"Workflow task workspace start hand-off could not be verified.";
+/** The referenced producer completed without capturing a hand-off commit. */
+export const START_AT_HANDOFF_ABSENT_MESSAGE =
+	"Workflow task workspace start input carries no hand-off commit.";
+
+class WorkflowStartAtError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "WorkflowStartAtError";
+	}
+}
+
+/**
+ * The commit the host checks the task's workspace out at: the imported
+ * `handoffCommit` of the handoff input `startAtInput` names, resolved now
+ * because it did not exist when the task was declared.
+ */
+async function resolveStartAt(
+	task: MaterializedAgentTask,
+	current: WorkflowStateProjection,
+	artifacts: WorkflowArtifactStore | undefined,
+): Promise<string | undefined> {
+	const name = task.spec.request.workspace.startAtInput;
+	if (name === undefined) return undefined;
+	const input = task.spec.inputs[name];
+	const producer =
+		input === undefined ? undefined : current.tasks[input.producerTaskId];
+	if (
+		input?.output !== "handoff" ||
+		input.runId !== current.runId ||
+		producer === undefined ||
+		artifacts === undefined
+	) {
+		throw new WorkflowStartAtError(START_AT_INPUT_UNRESOLVED_MESSAGE);
+	}
+	let verified: Awaited<ReturnType<typeof verifyWorkflowHandoffEvidence>>;
+	try {
+		verified = await verifyWorkflowHandoffEvidence(
+			current,
+			producer,
+			artifacts,
+		);
+	} catch (error) {
+		throw new WorkflowStartAtError(START_AT_HANDOFF_UNVERIFIED_MESSAGE, {
+			cause: error,
+		});
+	}
+	const commit =
+		verified.status === "imported"
+			? verified.execution.handoffImport?.handoffCommit
+			: undefined;
+	if (commit === undefined) {
+		throw new WorkflowStartAtError(START_AT_HANDOFF_ABSENT_MESSAGE);
+	}
+	return commit;
+}
 
 export type WorkflowTaskLaunchOutcome =
 	| {
@@ -279,6 +342,9 @@ function preflightMismatch(
 	if (plan.workspace.mode !== request.workspace.mode) {
 		return "workspace mode";
 	}
+	if (plan.workspace.startAt !== request.workspace.startAt) {
+		return "workspace start";
+	}
 	// The baseline digest is persisted as replay identity on the preflight
 	// event; a plan without a well-formed digest cannot be journaled. The launch
 	// plan schema already bounds it, and this states the workflow's own need of
@@ -317,6 +383,7 @@ async function lowerRequest(
 	artifacts?: WorkflowArtifactStore,
 	agentRoots: readonly string[] = [],
 	ceiling?: DelegationCeiling,
+	startAt?: string,
 ): Promise<SubagentRequest> {
 	const hasInputs = Object.keys(task.spec.inputs).length > 0;
 	if (hasInputs && !artifacts) {
@@ -351,7 +418,13 @@ async function lowerRequest(
 		tools: [...task.spec.request.tools],
 		preloadSkills: [...task.spec.request.preloadSkills],
 		contextScopes: [...task.spec.request.contextScopes],
-		workspace: structuredClone(task.spec.request.workspace),
+		// The persisted reference never leaves the workflow; pi-subagent gets
+		// the commit it resolved to.
+		workspace: {
+			mode: task.spec.request.workspace.mode,
+			cwd: task.spec.request.workspace.cwd,
+			...(startAt === undefined ? {} : { startAt }),
+		},
 		...(task.spec.request.memoryBytes === undefined
 			? {}
 			: { memoryBytes: task.spec.request.memoryBytes }),
@@ -699,6 +772,28 @@ export function createWorkflowTaskLauncher(
 			);
 		}
 
+		let startAt: string | undefined;
+		try {
+			startAt = await resolveStartAt(
+				agentTask,
+				current,
+				await artifactsFor(agentTask),
+			);
+		} catch (error) {
+			const message =
+				error instanceof WorkflowStartAtError
+					? error.message
+					: START_AT_HANDOFF_UNVERIFIED_MESSAGE;
+			await terminalizeWorkflowFailure(
+				journal,
+				execution,
+				"preflight",
+				message,
+			);
+			throw new WorkflowTaskLaunchError("preflight", message, {
+				cause: error,
+			});
+		}
 		let request: SubagentRequest;
 		try {
 			request = await lowerRequest(
@@ -708,6 +803,7 @@ export function createWorkflowTaskLauncher(
 				await artifactsFor(agentTask),
 				options.agentRoots ?? [],
 				options.ceiling,
+				startAt,
 			);
 		} catch (error) {
 			const message =
