@@ -192,12 +192,12 @@ const REVIEWER_AGENT = "reviewer";
 /**
  * W1: a package-manager cache inside the worktree lands in the handoff patch
  * and breaches its 16 MiB bound, which fails the task after the work is done.
- * pi-subagent redirects the usual caches to `/tmp/cache` in the guest by
- * itself, so the instruction is a prohibition on undoing that, plus the
- * explicit export for any manager it does not know.
+ * pi-subagent redirects the usual caches to `/var/cache/pi-subagent` in the
+ * guest by itself, so the instruction is a prohibition on undoing that, plus
+ * the explicit export for any manager it does not know.
  */
 const CACHE_INSTRUCTION =
-	"Keep every package-manager cache OUT of the workspace tree. The guest already points the usual caches at /tmp/cache (`XDG_CACHE_HOME`, `npm_config_cache`, and friends): never point one back into the workspace, and export an explicit out-of-tree path (`npm_config_cache=/tmp/npm-cache`, `YARN_CACHE_FOLDER=/tmp/yarn-cache`, `PNPM_STORE_DIR=/tmp/pnpm-store`, or the equivalent) for any manager the guest does not already redirect. A cache written under the workspace becomes part of the handoff patch and breaches its 16 MiB bound, which fails this task after the work is finished.";
+	"Keep every package-manager cache OUT of the workspace tree. The guest already points the usual caches at /var/cache/pi-subagent (`XDG_CACHE_HOME`, `npm_config_cache`, and friends): never point one back into the workspace, and export an explicit out-of-tree path (`npm_config_cache=/tmp/npm-cache`, `YARN_CACHE_FOLDER=/tmp/yarn-cache`, `PNPM_STORE_DIR=/tmp/pnpm-store`, or the equivalent) for any manager the guest does not already redirect. A cache written under the workspace becomes part of the handoff patch and breaches its 16 MiB bound, which fails this task after the work is finished.";
 
 /** The install and check a verifier attempts when the repository names none. */
 const INSTALL_COMMAND = "npm ci";
