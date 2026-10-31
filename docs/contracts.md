@@ -2244,13 +2244,17 @@ therefore additive without a contract revision.
 | `summary` | the task's committed `result` artifact | `inspect` with `include` carrying both `"tasks"` and `"output"` |
 
 `taskKind` is
-`implement | check | review | synthesis | fix | gate | refine | other`. The
-convention is the stage-key convention `workflows/plan-to-ship.workflow.ts`
+`implement | check | review | normalize | resume | synthesis | gate | refine | other`.
+The convention is the stage-key convention `workflows/plan-to-ship.workflow.ts`
 documents: a stage key is `<stage id>-<deliverable id>`, and a fan-out member is
 `<stage id>-<deliverable id>/<member>` whose kind is its namespace's. A leading
-segment that is one of the six known stage ids names the kind and the rest of
-that segment names the deliverable; anything else is `other`, with its own key —
-the honest answer for a project definition that names its tasks its own way.
+segment that is one of the known stage ids (`implement`, `check`, `recheck`,
+`review`, `normalize`, `resume`, `synthesis`, `refine`) names the kind and the
+rest of that segment names the deliverable; `recheck`, the check after a
+resume, narrates as `check`. Nothing follows the deliverable id in such a key,
+so `deliverable` is always the plan's id. Anything else is `other`, with its
+own key — the honest answer for a project definition that names its tasks its
+own way.
 
 `cause` is COMPOSED from the closed vocabularies the journal already carries —
 the delegated run's status, the failure `code`, its `origin`, its `retry` class,

@@ -20,11 +20,15 @@ describe("taskNarration", () => {
 	it.each([
 		["implement-d0", [], "implement", "d0"],
 		["check-d0", [], "check", "d0"],
-		["check-d0-verify-1", [], "check", "d0-verify-1"],
-		["synthesis-d0", [], "synthesis", "d0"],
-		["fix-d0", [], "fix", "d0"],
+		// The check after a resume is a second stage id, not a `-2` suffix, so
+		// its deliverable is the deliverable and nothing else (the verify task
+		// used to narrate `d0-verify-1`).
+		["recheck-d0", [], "check", "d0"],
+		["normalize-d0", [], "normalize", "d0"],
+		["resume-d0", [], "resume", "d0"],
+		["synthesis", [], "synthesis", undefined],
 		["refine", [], "refine", undefined],
-		["fix-my-thing", [], "fix", "my-thing"],
+		["resume-my-thing", [], "resume", "my-thing"],
 	] as const)(
 		"narrates %s as %s of %s",
 		(key, namespace, taskKind, deliverable) => {
@@ -89,13 +93,14 @@ describe("taskNarration", () => {
 		});
 	});
 
-	it("names the eight kinds a narrator branches on", () => {
+	it("names the nine kinds a narrator branches on", () => {
 		expect([...NARRATED_TASK_KINDS]).toEqual([
 			"implement",
 			"check",
 			"review",
+			"normalize",
+			"resume",
 			"synthesis",
-			"fix",
 			"gate",
 			"refine",
 			"other",

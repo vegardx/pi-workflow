@@ -326,8 +326,9 @@ export const WorkflowNarratedTaskKindSchema = Type.Union([
 	Type.Literal("implement"),
 	Type.Literal("check"),
 	Type.Literal("review"),
+	Type.Literal("normalize"),
+	Type.Literal("resume"),
 	Type.Literal("synthesis"),
-	Type.Literal("fix"),
 	Type.Literal("gate"),
 	Type.Literal("refine"),
 	/** The honest answer for a key this convention does not name. */
