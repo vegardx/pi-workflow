@@ -6,7 +6,7 @@ nested run executor, artifact store, and static source runtime (exported from
 `@vegardx/pi-workflow/runtime`) implement the current subset; later
 interfaces remain design contracts. Version 1.0.0 freezes the public surfaces
 listed under [Public API and stability](#public-api-and-stability). The
-runtime contract is revision 25 and declares the feature flags `supportTaskExecution: true`,
+runtime contract is revision 26 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
@@ -102,8 +102,13 @@ turn, for the agent request's `continueFrom` and the execution's continue
 intent, so the release that carries it is 5.0.0. Revision 25 refuses
 revision-24 records in turn, for the pi-subagent revision-11 handshake, whose
 `MemoryBytesSchema` no longer admits the sub-1 GiB grants a revision-24 agent
-task spec could carry, so the release that carries it is 6.0.0. Runs journaled
-by revision 25 are readable by every 6.x release under the same rule.
+task spec could carry, so the release that carries it is 6.0.0. Revision 26
+refuses revision-25 records in turn, for the pi-subagent revision-12
+handshake: the `ClassifiedFailureSchema` that every persisted subagent
+settlement embeds gains the failure code `capacity`, which a revision-25
+reader cannot validate, so the release that carries it is 7.0.0. Runs
+journaled by revision 26 are readable by every 7.x release under the same
+rule.
 
 **1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
 `registeredRoots`, and the package ships its own `workflows/` directory, which
@@ -310,7 +315,7 @@ source identity. The `@vegardx/pi-workflow/components` subpath is an allowed
 import (trusted package code, the same trade the root import makes); the
 `@vegardx/pi-workflow/runtime` subpath is not: the gate matches specifiers
 exactly, so a definition that imports it fails with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 25". A support implementation is identified by its registered
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 26". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,
 with the same messages, applies to dynamic workflow source proposed through
@@ -800,7 +805,7 @@ the same validation messages (`DYNAMIC_CONTEXT_PROPERTIES` = `cwd`, `input`,
 `runId`, `signal`; `DYNAMIC_CONTEXT_METHODS` = `agent`, `checkpoint`,
 `fanIn`, `fanOut`, `finalize`, `handoff`, `log`, `phase`, `pipeline`,
 `result`, `results`, `settled`, `support`, `workflow`, and nothing more).
-`ctx.artifact` is not available in revision 25 on either frontend. In the VM
+`ctx.artifact` is not available in revision 26 on either frontend. In the VM
 declarations are synchronous RPC calls answered by the static-runtime context
 and barriers are asynchronous replies; see [Dynamic workflows](#dynamic-workflows).
 
@@ -899,7 +904,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 25;
+`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 26;
 a checkpoint task (`ctx.checkpoint`) lowers to `CheckpointTaskSpec`, whose
 `request` is the `CheckpointTaskRequest` described in
 [Checkpoints](#checkpoints). `role` is `"task"` for every ordinary
@@ -2554,10 +2559,10 @@ this order, each a `WorkflowServiceError` (code in brackets):
    UTF-8." (a lone surrogate or a NUL byte) [validation];
 3. the import gate of static definitions with its messages verbatim
    ("workflow import <specifier> is not identity-bound by contract revision
-   25", "dynamic workflow imports are not supported by contract revision 25",
+   26", "dynamic workflow imports are not supported by contract revision 26",
    "dynamic imports and CommonJS require are not supported by contract
-   revision 25", "TypeScript import assignment is not supported by contract
-   revision 25", "workflow definition syntax is invalid"); the allow-list is
+   revision 26", "TypeScript import assignment is not supported by contract
+   revision 26", "workflow definition syntax is invalid"); the allow-list is
    `@vegardx/pi-workflow`, `typebox`, and the module specifiers of the
    registered support tasks [validation];
 4. the dynamic-only rules: "dynamic workflow source may not use import.meta"

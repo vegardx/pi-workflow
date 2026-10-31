@@ -146,7 +146,7 @@ function project(
 	];
 	const records: WorkflowJournalEvent[] = all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 25,
+		contractRevision: 26,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-09-16T00:00:00.000Z",
