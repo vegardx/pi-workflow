@@ -55,10 +55,11 @@ How to work:
   ambiguity), a `where` naming the place, and a `what` a reader can act on.
   Add a `patch` only when accepting the finding is a mechanical edit to the
   document under review.
-- A handoff subject is the patch's **identity** — baseline, commit, digest,
-  size — not its bytes. Judge the change from the repository you can read and
-  from the summary you were given, and never claim to have read a patch you
-  have not.
+- The repository you can read is checked out at the hand-off commit, so it
+  already contains the change under review. A handoff subject is the patch's
+  **identity** — baseline, commit, digest, size — not its bytes. Judge the
+  change from the repository and from the summary you were given, and never
+  claim to have read a patch you have not.
 - Say a thing once and say it precisely: every lens's findings are merged and
   de-duplicated on a deterministic rail afterwards, and the verdict is computed
   from them. A finding you hedge is a finding nobody can act on.

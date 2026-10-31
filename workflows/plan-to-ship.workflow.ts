@@ -261,7 +261,7 @@ const DEFAULT_IMPLEMENT_TOOLS = Object.freeze([
 	"write",
 	"bash",
 ] as const);
-/** What a verifier needs: read the tree, apply a patch, run a command. */
+/** What a verifier needs: read the tree and run the install and the check. */
 const VERIFY_TOOLS = Object.freeze([
 	"read",
 	"grep",
@@ -1465,7 +1465,7 @@ export default defineWorkflow({
 									goal: `Verify deliverable "${deliverable.id}" of plan "${plan.slug}", round ${round}.`,
 									context: [planText(deliverable)],
 									instructions: [
-										"The `patch` input is the handoff descriptor of the change under test — baseline, commit, digest, size, and the durable ref. Apply that ref in your worktree before you do anything else; nothing applied it for you.",
+										"Your workspace already contains the change under test: the host checked it out at the hand-off commit before you started. The `patch` input is that hand-off's descriptor — baseline, commit, digest, size, and the durable ref — for identity only; there is nothing to fetch or apply.",
 										CACHE_INSTRUCTION,
 										check,
 										`The sandbox has ${memoryGiB} GiB of memory and one CPU, so a heavy install or build may be killed before the check ever runs. Report that as \`checkRan: false\`; it means unverified, not broken, and a person reads it.`,
@@ -1490,7 +1490,7 @@ export default defineWorkflow({
 										`The check that failed: ${previous.report.checkCommand}\n${previous.report.checkTail}`,
 									],
 									instructions: [
-										"The `patch` input is the handoff descriptor of the change to fix. Apply that ref in your worktree first; the runtime never applies a patch for you.",
+										"Your workspace already contains the change to fix: the host checked it out at the hand-off commit before you started. The `patch` input is that hand-off's descriptor, for identity only; there is nothing to fetch or apply. Edit on top of it.",
 										"The `check` input is the verifier's report. Fix what it names, and nothing else: widening the change here is how a fix round becomes a second implementation nobody planned.",
 										CACHE_INSTRUCTION,
 										check,
@@ -1552,7 +1552,7 @@ export default defineWorkflow({
 									context: [planText(deliverable)],
 									instructions: [
 										`Apply exactly one point of view: ${resolvedLens.lens.id}. Other reviewers cover the rest.`,
-										"The `handoff` input is the patch's identity — baseline, commit, digest, size — not its bytes. Judge the change from the repository and the `summary` input; never claim to have read the patch.",
+										"The repository you can read is checked out at the hand-off commit, so it already contains the change under review. The `handoff` input is that patch's identity — baseline, commit, digest, size — for identity only, not its bytes. Judge the change from the repository and the `summary` input; never claim to have read the patch.",
 										"The summary reports whether the repository's check ran and passed. Treat a check that did not run as unverified, not as broken.",
 										"Report findings, not prose: each one carries a stable lowercase `id`, a `severity` of blocking, major or minor, a `kind` of gap, graph, budget, risk or ambiguity, a `where` naming the place, and a `what` a reader can act on.",
 										'Return `verdict: "request-changes"` only when you found something that must change before this patch is cherry-picked, and mark those findings `blocking`. A human reads them at the gate.',
@@ -1684,7 +1684,7 @@ export default defineWorkflow({
 									`The review verdict: ${synthesized.verdict}`.slice(0, 8_000),
 								],
 								instructions: [
-									"The `patch` input is the handoff descriptor of the change to fix — baseline, commit, digest, size, and the durable ref. Apply that ref in your worktree before you do anything else; nothing applied it for you.",
+									"Your workspace already contains the change to fix: the host checked it out at the hand-off commit before you started. The `patch` input is that hand-off's descriptor — baseline, commit, digest, size, and the durable ref — for identity only; there is nothing to fetch or apply. Edit on top of it.",
 									"The `findings` input is the normalized review: one list, each entry with an `id`, a `severity`, the `lens` that raised it, a `where`, a `summary`, and sometimes a `suggestion`.",
 									`Address EVERY blocking and major finding — ${actionable.length} of them. A minor finding is yours to judge; fix it only if it is cheap and safe.`,
 									"Do not widen the change. You are answering findings, not reimplementing the deliverable, and no reviewer looks at this patch again.",

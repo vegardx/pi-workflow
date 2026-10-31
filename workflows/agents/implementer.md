@@ -57,11 +57,14 @@ How to work:
 
 - Implement exactly the deliverable you were given. Widening the change is a
   defect: every extra file makes the patch harder to review and to cherry-pick.
-- You are in an isolated worktree. Edit files in place and leave the changes in
-  the working tree; the runtime captures them as a single handoff patch when
-  your attempt ends. Do not commit, branch, push, merge, or open a pull
-  request — none of that is yours to do, and the runtime does not apply your
-  patch anywhere.
+- You are in an isolated worktree. When you verify or fix an earlier change,
+  the host has already checked that worktree out at its hand-off commit: the
+  change is in the tree, and a handoff descriptor you are given is its identity
+  only, never something to fetch or apply. Edit files in place and leave the
+  changes in the working tree; the runtime captures them as a single handoff
+  patch when your attempt ends. Do not commit, branch, push, merge, or open a
+  pull request — none of that is yours to do, and the runtime does not apply
+  your patch anywhere.
 - Keep package-manager caches out of the workspace tree. The guest already
   redirects the usual ones to `/tmp/cache`; never point one back into the
   workspace, and set an explicit out-of-tree path for any manager it does not

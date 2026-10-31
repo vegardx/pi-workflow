@@ -1305,17 +1305,24 @@ describe("plan-to-ship: the stage walk", () => {
 		const [verify] = delegated.requestsGoal("Verify deliverable");
 		if (!verify) throw new Error("no verifier request");
 		expect(verify.agent).toBe("implementer");
-		// A verifier has to apply the handoff before it can run the check, so it
-		// runs in a worktree — with the `verify` row's model and the write grant.
+		// A verifier runs the install and the check, which write to the tree, so
+		// it runs in a worktree — with the `verify` row's model and the write grant.
 		expect(verify.workspace.mode).toBe("worktree");
 		// The check INHERITS: the resolved session model, never the literal.
 		expect(verify.model).toEqual(SESSION_MODEL);
 		expect(verify.limits.workspaceWriteBytes).toBeGreaterThanOrEqual(
 			W1.workspaceWriteBytes,
 		);
-		expect(verify.task.instructions.join("\n")).toMatch(
-			/Apply that ref in your worktree/,
-		);
+		// The host checked the workspace out at the hand-off; the guest has no
+		// git, so no task is ever told to apply a ref itself.
+		const instructions = verify.task.instructions.join("\n");
+		expect(instructions).toMatch(/already contains the change under test/);
+		expect(instructions).toMatch(/for identity only/);
+		for (const request of delegated.requests) {
+			expect(request.task.instructions.join("\n")).not.toMatch(
+				/apply (that|the) (ref|patch|handoff)/i,
+			);
+		}
 	});
 
 	it("fixes what a failing check reported and reviews the fixer's patch", async () => {
