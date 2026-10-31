@@ -1727,7 +1727,8 @@ describe("support task scheduling", () => {
 		).toEqual({
 			from: "running",
 			to: "failed",
-			reason: "A required workflow task did not complete.",
+			reason:
+				"A required workflow task did not complete: prepare. The run failed at support-execution.",
 		});
 		expect(implementation).toHaveBeenCalledOnce();
 	});
@@ -2696,7 +2697,8 @@ describe("nested workflow scheduling", () => {
 		).toEqual({
 			from: "running",
 			to: "failed",
-			reason: "A required workflow task did not complete.",
+			reason:
+				"A required workflow task did not complete: child. The task ended failed.",
 		});
 		expect(subagentCallCount(ownerClient)).toBe(0);
 	});
@@ -4292,7 +4294,8 @@ describe("checkpoint scheduling", () => {
 			statusChanges(await journal.readEvents(), "run-status-changed").at(-1),
 		).toMatchObject({
 			to: "failed",
-			reason: "A required workflow task did not complete.",
+			reason:
+				"A required workflow task did not complete: approve. The run failed at checkpoint-expired.",
 		});
 	});
 
@@ -4676,7 +4679,8 @@ describe("checkpoint scheduling", () => {
 		expectCancelledBeforeRunEnded(events, checkpointId, executionId);
 		expect(statusChanges(events, "run-status-changed").at(-1)).toMatchObject({
 			to: "failed",
-			reason: "A required workflow task did not complete.",
+			reason:
+				"A required workflow task did not complete: prepare. The run failed at support-execution.",
 		});
 	});
 

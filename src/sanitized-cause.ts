@@ -148,6 +148,25 @@ export function sanitizedTaskFailureCause(
 	return `The task ended ${outcome}.`;
 }
 
+/** The fixed prefix of a run that failed because a required task did not. */
+export const REQUIRED_TASK_FAILURE_PREFIX =
+	"A required workflow task did not complete";
+
+/**
+ * The `-> failed` reason of a run whose required task did not complete: the
+ * fixed prefix a consumer matches on, the task's stage key, and the same
+ * closed-vocabulary cause the task's narration carries. A task key is a
+ * bounded identifier, so nothing here is prose.
+ */
+export function requiredTaskFailureReason(
+	task: { readonly namespace: readonly string[]; readonly key: string },
+	evidence: Parameters<typeof sanitizedTaskFailureCause>[0],
+	outcome: string,
+): string {
+	const stage = [...task.namespace, task.key].join("/");
+	return `${REQUIRED_TASK_FAILURE_PREFIX}: ${stage}. ${sanitizedTaskFailureCause(evidence, outcome)}`;
+}
+
 /**
  * Module specifiers are bare names by the import gate, so a specifier that
  * looks like a path or a URL is not one this package would admit and is

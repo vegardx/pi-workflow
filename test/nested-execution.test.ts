@@ -1225,7 +1225,9 @@ describe("nested workflow execution", () => {
 		).rejects.toThrow();
 		expect(
 			runReasons(await journalEvents(fx.storeRoot, strict.runId)),
-		).toContain("A required workflow task did not complete.");
+		).toContain(
+			"A required workflow task did not complete: second. The run failed at nested-input.",
+		);
 
 		const lenient = await service.run("lenient-input-parent", { value: "yes" });
 		await expect(service.wait(lenient.runId)).resolves.toMatchObject({
@@ -1806,7 +1808,9 @@ describe("nested workflow execution", () => {
 		});
 		expect(
 			runReasons(await journalEvents(fx.storeRoot, strict.runId)),
-		).toContain("A required workflow task did not complete.");
+		).toContain(
+			"A required workflow task did not complete: child. The task ended failed.",
+		);
 
 		const lenient = await service.run("lenient-parent", { value: "yes" });
 		await expect(service.wait(lenient.runId)).resolves.toMatchObject({

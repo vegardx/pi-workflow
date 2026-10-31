@@ -56,7 +56,8 @@ const ANSWER_SCHEMA = Type.Object({ answer: Type.String() });
 type EmptyContext = SupportTaskExecutionContext<Static<typeof EMPTY_SCHEMA>>;
 type UpperContext = SupportTaskExecutionContext<{ value: string }>;
 
-const REQUIRED_TASK_REASON = "A required workflow task did not complete.";
+const REQUIRED_TASK_REASON =
+	"A required workflow task did not complete: cleanup. The run failed at support-execution.";
 const FINALIZATION_FAILED_REASON = "Workflow output finalization failed.";
 const DEPENDENCY_BLOCKED_REASON =
 	"A workflow task dependency did not complete successfully.";

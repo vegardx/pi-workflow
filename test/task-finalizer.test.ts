@@ -1662,7 +1662,8 @@ describe("checkpoint cancellation before run failure", () => {
 		expect(runChanges.at(-1)).toEqual({
 			from: "running",
 			to: "failed",
-			reason: "A required workflow task did not complete.",
+			reason:
+				"A required workflow task did not complete: answer. The delegated run failed: tool (origin tool, retry never).",
 		});
 	});
 

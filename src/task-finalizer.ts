@@ -47,6 +47,7 @@ import {
 } from "./execution.js";
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { hasOpenCheckpoint } from "./reducer.js";
+import { requiredTaskFailureReason } from "./sanitized-cause.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 
 const addFormats = (addFormatsModule.default ??
@@ -808,12 +809,20 @@ export function createWorkflowTaskFinalizer(
 			current.status !== "stopping"
 		) {
 			const from = await cancelOpenCheckpoints(current);
+			const projected = current.tasks[task.task.id];
+			const terminal = projected?.currentExecutionId
+				? current.executions[projected.currentExecutionId]?.terminal
+				: undefined;
 			await append({
 				type: "run-status-changed",
 				data: {
 					from,
 					to: "failed",
-					reason: "A required workflow task did not complete.",
+					reason: requiredTaskFailureReason(
+						{ namespace: task.task.namespace, key: task.task.spec.key },
+						terminal?.evidence,
+						terminalOutcome,
+					),
 				},
 			});
 			return;

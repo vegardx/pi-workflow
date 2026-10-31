@@ -1723,6 +1723,13 @@ settlement of a worktree task whose workspace is `retained` and whose sandbox
 cleanup is proved. A read-only task has no workspace to retain, and its
 settlement is still refused with anything but proved or not-needed cleanup.
 
+A required task that ends `failed` or `cancelled` fails the run with the reason
+`A required workflow task did not complete: <stage key>. <cause>`, where the
+stage key is `${namespace}/${key}` and the cause is the same closed-vocabulary
+sentence the task's narration carries (for a subagent: `The delegated run
+failed: <code> (origin <origin>, retry <retry>).`). The child's failure message
+never travels into the reason. The task's own `-> failed` is journalled first.
+
 Stop writes run and task cancellation intent before calling the owner client's
 `interrupt` and before aborting in-process support work. A restart that finds `stopping` retries the idempotent interruption
 and waits for terminal child evidence; it never infers cancellation from a lost
@@ -3006,7 +3013,8 @@ its execution at stage `checkpoint-expired`; an expired
 earliest expiry, and inside `decide`, which expires an overdue checkpoint
 instead of accepting the operator's value ("Checkpoint has expired."). A
 required checkpoint that fails or is cancelled fails the run ("A required
-workflow task did not complete."); an optional one is visible degradation and
+workflow task did not complete: <stage key>. The run failed at
+checkpoint-expired." for an expiry); an optional one is visible degradation and
 `settled` reports `{ status: "rejected", outcome: "failed", failure: {
 message: "Checkpoint expired without a decision.", code: "checkpoint-expired"
 } }`.
