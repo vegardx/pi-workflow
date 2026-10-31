@@ -334,7 +334,7 @@ function childProvider(outcomes: readonly ChildOutcome[]) {
 	} as unknown as SubagentClient;
 	const bind = vi.fn(async (runId: string) => {
 		ownerId = `pi-workflow:${runId}`;
-		return { workflowRunId: runId, ownerId, client: ownerClient };
+		return { workflowRunId: runId, ownerId, client: ownerClient, maxSlots: 16 };
 	});
 	return {
 		provider: { bind } as WorkflowSubagentProvider,

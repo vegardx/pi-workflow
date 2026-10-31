@@ -138,6 +138,7 @@ function provider(calls: string[] = []): WorkflowSubagentProvider {
 					workflowRunId: runId,
 					ownerId: `pi-workflow:${runId}`,
 					client: strictClient(calls),
+					maxSlots: 16,
 				}) satisfies WorkflowSubagentBinding,
 		),
 	};
@@ -250,7 +251,12 @@ function taskProvider() {
 	} as unknown as SubagentClient;
 	const bind = vi.fn(async (runId: string) => {
 		taskOwnerId = `pi-workflow:${runId}`;
-		return { workflowRunId: runId, ownerId: taskOwnerId, client: ownerClient };
+		return {
+			workflowRunId: runId,
+			ownerId: taskOwnerId,
+			client: ownerClient,
+			maxSlots: 16,
+		};
 	});
 	return { provider: { bind } as WorkflowSubagentProvider, ownerClient };
 }

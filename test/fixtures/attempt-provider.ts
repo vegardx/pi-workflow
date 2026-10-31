@@ -132,7 +132,10 @@ export type Script =
  * `retry`/`resume` hand out fresh attempt ids for the named child, which
  * `release` then echoes back with the child's last status.
  */
-export function attemptProvider(script: Script) {
+export function attemptProvider(
+	script: Script,
+	options: { readonly maxSlots?: number } = {},
+) {
 	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
 	const outcomesFor = (launch: number) =>
 		typeof script === "function" ? script(launch) : script;
@@ -253,6 +256,7 @@ export function attemptProvider(script: Script) {
 			workflowRunId: runId,
 			ownerId: taskOwnerId,
 			client: ownerClient,
+			maxSlots: options.maxSlots ?? 16,
 		} satisfies WorkflowSubagentBinding;
 	});
 	return {

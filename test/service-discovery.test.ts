@@ -53,6 +53,7 @@ function provider(): WorkflowSubagentProvider {
 				workflowRunId: runId,
 				ownerId: `pi-workflow:${runId}`,
 				client: new Proxy({} as SubagentClient, { get: () => unavailable }),
+				maxSlots: 16,
 			};
 		},
 	};

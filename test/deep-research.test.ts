@@ -405,6 +405,7 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 					workflowRunId: runId,
 					ownerId,
 					client,
+					maxSlots: 16,
 				} satisfies WorkflowSubagentBinding;
 			}),
 		} as WorkflowSubagentProvider,

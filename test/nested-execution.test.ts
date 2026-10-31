@@ -131,6 +131,7 @@ function provider(calls: string[], bound: string[]): WorkflowSubagentProvider {
 				workflowRunId: runId,
 				ownerId: `pi-workflow:${runId}`,
 				client: strictClient(calls),
+				maxSlots: 16,
 			} satisfies WorkflowSubagentBinding;
 		}),
 	};
@@ -162,6 +163,7 @@ function gatedProvider(
 					workflowRunId: runId,
 					ownerId: `pi-workflow:${runId}`,
 					client: strictClient([]),
+					maxSlots: 16,
 				} satisfies WorkflowSubagentBinding;
 			}),
 		},
@@ -286,7 +288,7 @@ function agentProvider() {
 		const ownerId = `pi-workflow:${runId}`;
 		const client = clientFor(ownerId);
 		clients.set(runId, client);
-		return { workflowRunId: runId, ownerId, client };
+		return { workflowRunId: runId, ownerId, client, maxSlots: 16 };
 	});
 	return { provider: { bind } as WorkflowSubagentProvider, clients, bound };
 }

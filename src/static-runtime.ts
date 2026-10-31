@@ -46,6 +46,7 @@ import {
 } from "./definition.js";
 import type {
 	TaskExecutionProjection,
+	WorkflowConcurrencyClamp,
 	WorkflowRunOrigin,
 	WorkflowStateProjection,
 	WorkflowTaskProjection,
@@ -279,6 +280,11 @@ export interface StaticWorkflowRuntimeOptions<TInput, TOutput> {
 	 */
 	readonly origin?: WorkflowRunOrigin;
 	/**
+	 * Recorded verbatim on `run-created` when the service lowered the run's
+	 * concurrency to the host's VM slots; ignored on replay, like `origin`.
+	 */
+	readonly concurrencyClamp?: WorkflowConcurrencyClamp;
+	/**
 	 * The host's model router, handed to every materializer this runtime makes.
 	 * Absent means a `modelRole` declaration fails materialization rather than
 	 * resolving to a guess.
@@ -492,6 +498,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				definitionIdentitySha256,
 				inputSha256,
 				...(options.origin === undefined ? {} : { origin: options.origin }),
+				...(options.concurrencyClamp === undefined
+					? {}
+					: { concurrencyClamp: options.concurrencyClamp }),
 			});
 			return;
 		}

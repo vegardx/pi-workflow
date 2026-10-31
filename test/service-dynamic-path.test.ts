@@ -31,6 +31,7 @@ function provider(): WorkflowSubagentProvider {
 					workflowRunId: runId,
 					ownerId: `pi-workflow:${runId}`,
 					client: {} as SubagentClient,
+					maxSlots: 16,
 				}) satisfies WorkflowSubagentBinding,
 		),
 	};

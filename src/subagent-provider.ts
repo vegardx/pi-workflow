@@ -1,10 +1,13 @@
-import type {
-	EventBus,
-	ExtensionContext,
+import {
+	type EventBus,
+	type ExtensionContext,
+	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import {
-	SUBAGENT_RUNTIME_CONTRACT,
+	createSubagentRuntimeContract,
+	readSubagentSettings,
 	type SubagentClient,
+	type SubagentRuntimeContract,
 	type SubagentService,
 } from "@vegardx/pi-subagent";
 import {
@@ -133,10 +136,23 @@ export const SUBAGENT_ACQUISITION_FAILURE_MESSAGE =
 export const SUBAGENT_BINDING_FAILURE_MESSAGE =
 	"Failed to bind the subagent client to the workflow run.";
 
+/**
+ * The settings file names a host path, so its own message never crosses the
+ * seam; pi-subagent refuses to load on the same file and names the path there.
+ */
+export const SUBAGENT_SETTINGS_FAILURE_MESSAGE =
+	"The pi-subagent host settings could not be read.";
+
 export interface WorkflowSubagentBinding {
 	readonly workflowRunId: WorkflowRunId;
 	readonly ownerId: string;
 	readonly client: SubagentClient;
+	/**
+	 * The host's concurrent VM slots, shared by every seat and every run on
+	 * this host (pi-subagent's `capacity.maxSlots`). A run's concurrency is
+	 * clamped to it at creation.
+	 */
+	readonly maxSlots: number;
 }
 
 export interface WorkflowSubagentProvider {
@@ -147,9 +163,28 @@ function ownerId(workflowRunId: WorkflowRunId): string {
 	return `pi-workflow:${workflowRunId}`;
 }
 
+/**
+ * pi-subagent publishes `capacity.maxSlots` only on its provider record, which
+ * `acquireSubagentService` does not return, so the contract is rebuilt here
+ * with pi-subagent's own reader from the same settings file the runtime read
+ * at load.
+ */
+function hostSubagentContract(agentDir: string): SubagentRuntimeContract {
+	try {
+		return createSubagentRuntimeContract(readSubagentSettings(agentDir));
+	} catch (error) {
+		throw new WorkflowSubagentProviderError(
+			"incompatible",
+			SUBAGENT_SETTINGS_FAILURE_MESSAGE,
+			{ cause: error },
+		);
+	}
+}
+
 export function createWorkflowSubagentProvider(
 	events: EventBus,
 	context: ExtensionContext,
+	agentDir: string = getAgentDir(),
 ): WorkflowSubagentProvider {
 	let pinnedService: SubagentService | undefined;
 	let tail = Promise.resolve();
@@ -163,7 +198,8 @@ export function createWorkflowSubagentProvider(
 				"Invalid workflow run identity for subagent owner binding.",
 			);
 		}
-		if (!isCompatibleSubagentContract(SUBAGENT_RUNTIME_CONTRACT)) {
+		const contract = hostSubagentContract(agentDir);
+		if (!isCompatibleSubagentContract(contract)) {
 			throw new WorkflowSubagentProviderError(
 				"incompatible",
 				"The installed pi-subagent runtime contract is incompatible.",
@@ -233,6 +269,7 @@ export function createWorkflowSubagentProvider(
 			workflowRunId,
 			ownerId: registration.id,
 			client: restrictedClient,
+			maxSlots: contract.capacity.maxSlots,
 		});
 	}
 

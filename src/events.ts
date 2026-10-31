@@ -1,3 +1,4 @@
+import { MAX_SLOTS } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import {
 	CheckpointDecisionSourceSchema,
@@ -63,6 +64,29 @@ const HandoffBytesSchema = Type.Integer({
 export const WorkflowRunOriginSchema = Type.Literal("service-provider");
 export type WorkflowRunOrigin = Static<typeof WorkflowRunOriginSchema>;
 
+/**
+ * Revision 26: the run's concurrency was lowered to the host's VM slots at
+ * creation. `concurrency` is what the definition, the service limit, and (for
+ * a nested run) the parent's request allowed; `maxSlots` is the host's
+ * `capacity.maxSlots`, which the run record's `concurrency` then equals. The
+ * slots are shared by every run on the host, so a clamped run can still wait
+ * for a slot inside pi-subagent; this records only why fan-out is narrower
+ * than declared.
+ */
+export const WorkflowConcurrencyClampSchema = Type.Object(
+	{
+		concurrency: Type.Integer({
+			minimum: 2,
+			maximum: MAX_WORKFLOW_CONCURRENCY,
+		}),
+		maxSlots: Type.Integer({ minimum: 1, maximum: MAX_SLOTS }),
+	},
+	{ additionalProperties: false },
+);
+export type WorkflowConcurrencyClamp = Static<
+	typeof WorkflowConcurrencyClampSchema
+>;
+
 const RunCreatedEventSchema = Type.Object(
 	{
 		type: Type.Literal("run-created"),
@@ -72,6 +96,8 @@ const RunCreatedEventSchema = Type.Object(
 				inputSha256: Sha256Schema,
 				/** Revision 20, additive: see {@link WorkflowRunOriginSchema}. */
 				origin: Type.Optional(WorkflowRunOriginSchema),
+				/** Revision 26: see {@link WorkflowConcurrencyClampSchema}. */
+				concurrencyClamp: Type.Optional(WorkflowConcurrencyClampSchema),
 			},
 			{ additionalProperties: false },
 		),

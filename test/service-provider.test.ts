@@ -304,6 +304,7 @@ async function shipService(): Promise<WorkflowService> {
 			// call throws proves no agent task was ever reached.
 			bind: async (runId) => ({
 				workflowRunId: runId,
+				maxSlots: 16,
 				ownerId: `pi-workflow:${runId}`,
 				client: new Proxy(
 					{},
@@ -338,6 +339,7 @@ async function gateInputsService(): Promise<WorkflowService> {
 		subagents: {
 			bind: async (runId) => ({
 				workflowRunId: runId,
+				maxSlots: 16,
 				ownerId: `pi-workflow:${runId}`,
 				client: new Proxy(
 					{},
@@ -885,6 +887,7 @@ function scriptedPlanner(): WorkflowSubagentProvider {
 				workflowRunId: runId,
 				ownerId,
 				client,
+				maxSlots: 16,
 			} satisfies WorkflowSubagentBinding;
 		}),
 	} as WorkflowSubagentProvider;

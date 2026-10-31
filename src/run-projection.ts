@@ -965,6 +965,17 @@ function logEntry(
 		return taskId === undefined ? {} : taskKeyOf(state, taskId);
 	};
 	switch (input.type) {
+		case "run-created": {
+			// The one creation fact an operator needs from the log: why fan-out
+			// is narrower than the definition declared.
+			const clamp = input.data.concurrencyClamp;
+			if (clamp === undefined) return undefined;
+			return Object.freeze({
+				...base,
+				kind: "run" as const,
+				message: `Concurrency clamped from ${clamp.concurrency} to ${clamp.maxSlots}: the host has ${clamp.maxSlots} VM slots, shared by every run.`,
+			});
+		}
 		case "workflow-effect": {
 			const abandoned = state?.effects[input.data.ordinal - 1]?.abandoned;
 			return Object.freeze({
