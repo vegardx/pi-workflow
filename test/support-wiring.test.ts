@@ -15,10 +15,15 @@ import workflowExtension from "../src/extension.js";
 import type { WorkflowJournalEvent } from "../src/persistence/journal.js";
 import { workflowStateRoot } from "../src/persistence/state-root.js";
 import { reduceWorkflowEvents } from "../src/reducer.js";
-import type { WorkflowServiceOptions } from "../src/service.js";
+import { REVIEWS_RECORD_SUPPORT_NAME } from "../src/review-record-support.js";
+import {
+	createWorkflowService,
+	type WorkflowServiceOptions,
+} from "../src/service.js";
 import {
 	defineSupportTask,
 	type SupportTaskExecutionContext,
+	type SupportTaskRegistration,
 } from "../src/support.js";
 import {
 	BUILTIN_SUPPORT_TASKS,
@@ -279,11 +284,38 @@ describe("support task wiring", () => {
 		vi.unstubAllEnvs();
 	});
 
-	it("ships no builtin implementation, so the default registry is empty", () => {
-		expect(BUILTIN_SUPPORT_TASKS).toEqual([]);
+	it("ships the reviews record as its one builtin, outside the host registry", () => {
+		// The builtin commits the record it is handed, unchanged; the service
+		// registers it for every host, so the host registry stays empty.
+		expect(BUILTIN_SUPPORT_TASKS.map((entry) => entry.name)).toEqual([
+			REVIEWS_RECORD_SUPPORT_NAME,
+		]);
+		expect(BUILTIN_SUPPORT_TASKS[0]?.exportName).toBeUndefined();
 		expect(Object.isFrozen(BUILTIN_SUPPORT_TASKS)).toBe(true);
 		expect(supportTaskRegistrations()).toEqual([]);
 		expect(Object.isFrozen(supportTaskRegistrations())).toBe(true);
+	});
+
+	it("refuses a host registration that takes a builtin's name", async () => {
+		const cwd = path.resolve(".pi", "test-support-wiring", randomUUID());
+		await mkdir(cwd, { recursive: true });
+		await expect(
+			createWorkflowService({
+				cwd,
+				agentDir,
+				storeRoot: path.join(cwd, "state"),
+				projectTrusted: () => false,
+				subagents: { bind: vi.fn() } as never,
+				supportTasks: [
+					{
+						...(BUILTIN_SUPPORT_TASKS[0] as SupportTaskRegistration),
+						execute: () => ({}),
+					},
+				],
+			}),
+		).rejects.toThrow(
+			`Duplicate support task implementation: ${REVIEWS_RECORD_SUPPORT_NAME}`,
+		);
 	});
 
 	it("installs host-process registrations by name, sorted and removable", () => {

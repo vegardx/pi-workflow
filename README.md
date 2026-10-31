@@ -1115,8 +1115,11 @@ pass the matching `helper.registration(execute)` objects to
 persisted descriptor against that constructor registry by exact implementation
 identity, runs the implementation in the host process without a subagent,
 model, VM, or worktree, and commits the output as a workflow-owned artifact.
-The root exports are `defineSupportTask`, `SupportTaskExecutionRecordSchema`,
-and `SupportTaskTerminalEvidenceSchema`; the engine pieces
+Every service also registers the one builtin, `pi-workflow/reviews-record`
+(`reviewsRecordTask`), which commits the review record it is handed unchanged.
+The root exports are `defineSupportTask`, `reviewsRecordTask`,
+`REVIEWS_RECORD_SUPPORT_NAME`, `SupportTaskExecutionRecordSchema`, and
+`SupportTaskTerminalEvidenceSchema`; the engine pieces
 `createWorkflowSupportTaskExecutor`, `supportRegistrationIdentity`, and
 `deriveSupportImplementationIdentitySha256` are exported from
 `@vegardx/pi-workflow/runtime`; see

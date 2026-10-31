@@ -1,3 +1,4 @@
+import { reviewsRecordRegistration } from "./review-record-support.js";
 import {
 	type SupportTaskRegistration,
 	supportRegistrationIdentity,
@@ -13,7 +14,8 @@ import {
  * deliberate:
  *
  * - Only **package or builtin** code may provide one. Registrations are
- *   compiled into this package (`BUILTIN_SUPPORT_TASKS`) or installed by an
+ *   compiled into this package (`BUILTIN_SUPPORT_TASKS`, which every
+ *   `createWorkflowService` registers before the host's own) or installed by an
  *   embedder that is already running in the host process
  *   (`registerSupportTask`). There is no manifest key, no filesystem scan, and
  *   no project-provided registration: a project workflow is authoring input,
@@ -29,7 +31,7 @@ import {
  *   authority decision, not a convenience.
  */
 export const BUILTIN_SUPPORT_TASKS: readonly SupportTaskRegistration[] =
-	Object.freeze([]);
+	Object.freeze([reviewsRecordRegistration]);
 
 export const SUPPORT_REGISTRY_DUPLICATE_MESSAGE =
 	"Duplicate support task implementation:";
@@ -76,22 +78,13 @@ export function registerSupportTask(
 }
 
 /**
- * Every registration the extension passes as `supportTasks`: this package's
- * builtins first, then host-process registrations, each sorted by name so the
- * constructed registry does not depend on registration order. Empty by
- * default — pi-workflow ships no builtin support implementation yet — which is
- * why `ctx.support` still resolves nothing unless a helper was registered,
- * while the wiring itself is live.
+ * Every host-process registration the extension passes as `supportTasks`,
+ * sorted by name so the constructed registry does not depend on registration
+ * order. The builtins are not among them: the service registers
+ * `BUILTIN_SUPPORT_TASKS` itself, for every host.
  */
 export function supportTaskRegistrations(): readonly SupportTaskRegistration[] {
-	const byName = new Map<string, SupportTaskRegistration>();
-	for (const registration of BUILTIN_SUPPORT_TASKS) {
-		byName.set(registration.name, registration);
-	}
-	for (const registration of installed.values()) {
-		byName.set(registration.name, registration);
-	}
 	return Object.freeze(
-		[...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
+		[...installed.values()].sort((a, b) => a.name.localeCompare(b.name)),
 	);
 }

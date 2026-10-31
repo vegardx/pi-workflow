@@ -245,6 +245,7 @@ import {
 	type SupportTaskRegistration,
 	supportRegistrationIdentity,
 } from "./support.js";
+import { BUILTIN_SUPPORT_TASKS } from "./support-registry.js";
 import {
 	createWorkflowTaskFinalizer,
 	type WorkflowTaskFinalizer,
@@ -610,6 +611,11 @@ export interface WorkflowServiceOptions {
 	readonly maxWorkflowTotalTokens?: number;
 	readonly maxWorkflowChildRuntimeMs?: number;
 	readonly maxWorkflowTimeoutMs?: number;
+	/**
+	 * Host-process support implementations, registered after the package's
+	 * own `BUILTIN_SUPPORT_TASKS`; a name that collides with a builtin is a
+	 * conflict.
+	 */
 	readonly supportTasks?: readonly SupportTaskRegistration[];
 	/**
 	 * The host's router; a `modelRole` declaration resolves through it before
@@ -977,7 +983,10 @@ export async function createWorkflowService(
 	}
 	const headless = options.checkpoints?.headless ?? false;
 	const dynamicOverrides = validateDynamicOptions(options.dynamic);
-	for (const registration of options.supportTasks ?? []) {
+	for (const registration of [
+		...BUILTIN_SUPPORT_TASKS,
+		...(options.supportTasks ?? []),
+	]) {
 		if (typeof registration.execute !== "function") {
 			throw new WorkflowServiceError(
 				"validation",
