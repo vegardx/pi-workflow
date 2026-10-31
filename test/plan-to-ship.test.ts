@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -83,6 +83,11 @@ function exactModel(request: SubagentRequest) {
 
 /** The compiler's own input types, so a fixture cannot drift from the schema. */
 type PlanInput = Parameters<typeof compileStages>[0];
+/** One journal line, as far as these tests read it. */
+type JournalLine = {
+	readonly type: string;
+	readonly data: Record<string, unknown>;
+};
 type PolicyInput = NonNullable<Parameters<typeof compileStages>[1]>;
 
 interface PlanOptions {
@@ -353,6 +358,12 @@ function scripted(
 		readonly check?: CheckScript;
 		/** The synthesis normalizes to minor findings only, so nothing is fixed. */
 		readonly minorOnly?: boolean;
+		/**
+		 * Every verifier attempt ends the way the 2026-10-31 verifier did: the
+		 * service killed it at its runtime limit, its usage is incomplete, and
+		 * its worktree is retained.
+		 */
+		readonly failVerify?: boolean;
 	} = {},
 ) {
 	const nonce = randomUUID().replaceAll("-", "").slice(0, 8);
@@ -468,6 +479,42 @@ function scripted(
 						goal.includes(`"${options.failLens}" lens`)))) ||
 			(options.failSynthesis === true &&
 				goal.startsWith("Normalize the review findings"));
+		const timedOut =
+			options.failVerify === true && goal.startsWith("Verify deliverable");
+		if (timedOut) {
+			const result = {
+				runId,
+				status: "failed" as const,
+				usage: {
+					input: 18,
+					output: 893,
+					cacheRead: 30930,
+					cacheWrite: 7541,
+					totalTokens: 39382,
+					cost: 0.068009,
+				},
+				usageComplete: false,
+				runtimeMs: 907912,
+				failure: {
+					code: "timeout",
+					origin: "service",
+					retry: "manual",
+					message: "Attempt runtime limit exceeded",
+					guidance:
+						"Inspect partial output and explicitly retry only if repeating the task is safe.",
+				},
+				sandboxCleanup: "proved" as const,
+				workspaceCleanup: "retained" as const,
+				truncated: false,
+			};
+			statuses.set(runId, result.status);
+			return {
+				result,
+				output: "",
+				sessionFile: "/private/repo/session.jsonl",
+				error: "Attempt runtime limit exceeded",
+			};
+		}
 		const result = {
 			runId,
 			status: failed ? ("failed" as const) : ("completed" as const),
@@ -2426,5 +2473,71 @@ describe("plan-to-ship: the agent templates", () => {
 			}
 		}
 		expect(MODEL_ID).toBeDefined();
+	});
+});
+
+describe("plan-to-ship: a verifier that times out", () => {
+	it("fails the task by name before the run, and the run says which task and why", async () => {
+		// The 2026-10-31 run: the verifier hit its runtime limit, pi-subagent
+		// settled it `failed` with its worktree `retained`, the reducer refused
+		// that settlement, the task stayed `running`, and the run ended on the
+		// generic source-failure reason with nothing failed.
+		const delegated = scripted({ failVerify: true });
+		const service = await serviceFor(delegated);
+		const run = await service.run("plan-to-ship", input());
+		const finished = await bounded(service.wait(run.runId), "wait");
+
+		expect(finished.status).toBe("failed");
+		const inspected = await service.inspect(run.runId, { include: ["run"] });
+		expect(inspected.run.taskCounts.failed).toBe(1);
+		const cause =
+			"The delegated run failed: timeout (origin service, retry manual).";
+		expect(taskByKey(finished, "check-d0-verify-1")).toMatchObject({
+			status: "failed",
+			outcome: "failed",
+			narration: { taskKind: "check", cause },
+		});
+
+		const events = (
+			await readFile(
+				path.join(runDirectory(service, run.runId), "events.jsonl"),
+				"utf8",
+			)
+		)
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as JournalLine);
+		const verifier = taskByKey(finished, "check-d0-verify-1").id;
+		const taskFailed = events.findIndex(
+			(event) =>
+				event.type === "task-status-changed" &&
+				event.data.taskId === verifier &&
+				event.data.to === "failed",
+		);
+		const runFailed = events.findIndex(
+			(event) =>
+				event.type === "run-status-changed" && event.data.to === "failed",
+		);
+		expect(taskFailed).toBeGreaterThan(-1);
+		expect(runFailed).toBeGreaterThan(taskFailed);
+		expect(events[runFailed]?.data.reason).toBe(
+			`A required workflow task did not complete: check-d0-verify-1. ${cause}`,
+		);
+		// The settlement records the retained worktree, and the release is what
+		// proves its cleanup.
+		expect(
+			events.slice(taskFailed - 5, taskFailed).map((event) => event.type),
+		).toEqual([
+			"task-execution-child-observed",
+			"task-execution-child-settled",
+			"task-execution-release-intended",
+			"task-execution-released",
+			"task-execution-terminal",
+		]);
+		expect(events[taskFailed - 4]?.data.evidence).toMatchObject({
+			status: "failed",
+			workspaceCleanup: "retained",
+			failure: { code: "timeout" },
+		});
 	});
 });

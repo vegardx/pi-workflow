@@ -77,7 +77,8 @@ no attempt (failed):
           → task-execution-release-intended → task-execution-released (failed)
           → task-execution-terminal (outcome failed, evidence = settlement)
           → task-status-changed (running → failed)
-          → run-status-changed (→ failed) for a required task
+          → run-status-changed (→ failed, "A required workflow task did not
+            complete: <stage key>. <cause>") for a required task
 
 operator: task-execution-terminal (outcome interrupted)
           → task-execution-attempt-intended (kind resume, origin operator,

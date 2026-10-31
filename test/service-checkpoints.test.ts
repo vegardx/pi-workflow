@@ -1232,7 +1232,8 @@ describe("checkpoint expiry", () => {
 			expect(requiredEvents.at(-1)?.data).toMatchObject({
 				from: "waiting",
 				to: "failed",
-				reason: "A required workflow task did not complete.",
+				reason:
+					"A required workflow task did not complete: approve. The run failed at checkpoint-expired.",
 			});
 			expect(runStatuses(requiredEvents)).toEqual([
 				"running",

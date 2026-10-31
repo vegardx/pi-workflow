@@ -50,6 +50,7 @@ import {
 import type { WorkflowRunJournal } from "./persistence/journal.js";
 import { hasOpenCheckpoint } from "./reducer.js";
 import { isReopenedTask, OPERATOR_RESUME_REASON } from "./run-actions.js";
+import { requiredTaskFailureReason } from "./sanitized-cause.js";
 import type { WorkflowSubagentBinding } from "./subagent-provider.js";
 import type { SupportTaskRegistration } from "./support.js";
 import {
@@ -726,10 +727,17 @@ export function createWorkflowSequentialScheduler(
 				after.status === "finalizing")
 		) {
 			const from = await cancelOpenCheckpointsBefore(after);
+			const terminal = task.currentExecutionId
+				? after.executions[task.currentExecutionId]?.terminal
+				: undefined;
 			await changeRun(
 				from,
 				"failed",
-				"A required workflow task did not complete.",
+				requiredTaskFailureReason(
+					{ namespace: task.task.namespace, key: task.task.spec.key },
+					terminal?.evidence,
+					task.status,
+				),
 			);
 			return { state: "terminal", runStatus: "failed" };
 		}

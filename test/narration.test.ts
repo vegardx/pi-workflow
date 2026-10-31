@@ -7,7 +7,10 @@ import {
 	narrationSummary,
 	taskNarration,
 } from "../src/narration.js";
-import { sanitizedTaskFailureCause } from "../src/sanitized-cause.js";
+import {
+	requiredTaskFailureReason,
+	sanitizedTaskFailureCause,
+} from "../src/sanitized-cause.js";
 
 // What a host needs to narrate a run, as a pure derivation over a task key.
 // Every expectation is the documented key convention of
@@ -233,5 +236,25 @@ describe("the terminal predicates", () => {
 		] as const) {
 			expect(isNarratedFailure(outcome)).toBe(true);
 		}
+	});
+});
+
+describe("requiredTaskFailureReason", () => {
+	it("names the stage key and the composed cause, never the child's words", () => {
+		const failure = {
+			code: "timeout",
+			origin: "service",
+			retry: "manual",
+			message: "git: command not found in /Users/someone/repo",
+		};
+		const reason = requiredTaskFailureReason(
+			{ namespace: ["review-d0"], key: "correctness" },
+			{ kind: "subagent", status: "failed", failure },
+			"failed",
+		);
+		expect(reason).toBe(
+			"A required workflow task did not complete: review-d0/correctness. The delegated run failed: timeout (origin service, retry manual).",
+		);
+		expect(reason).not.toContain("/Users");
 	});
 });
