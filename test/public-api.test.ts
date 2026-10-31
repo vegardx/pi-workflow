@@ -468,10 +468,10 @@ describe("package entry points", () => {
 			"../compatibility.json",
 		);
 		const api = compatibility.piWorkflow.api;
-		// 5.0.0: revision 24 refuses revision-23 persisted state, which the
-		// stability policy makes a major; the request gains the optional
-		// `continueFrom` and the root the reviews-record support task.
-		expect(api.version).toBe("5.0.0");
+		// 6.0.0: revision 25 refuses revision-24 persisted state, which the
+		// stability policy makes a major; `memoryBytes` narrows to pi-subagent
+		// revision 11's 1 GiB floor.
+		expect(api.version).toBe("6.0.0");
 		expect(majorOf(api.version)).toBe(majorOf(packageJson.version));
 		expect(api.frozenSurfaces).toEqual([
 			"authoring",
