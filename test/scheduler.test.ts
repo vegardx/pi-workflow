@@ -3626,7 +3626,7 @@ describe("worktree handoff settlement", () => {
 	): WorktreeRecord {
 		return {
 			schema: "pi-subagent-worktree",
-			contractRevision: 9,
+			contractRevision: 10,
 			runId: "run_scheduler",
 			attemptId,
 			repositoryRoot: "/private/repo",

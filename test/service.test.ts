@@ -1623,7 +1623,7 @@ function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
 function worktreeRecord(handoffCommit?: string): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 9,
+		contractRevision: 10,
 		runId: "run_servicechild",
 		attemptId: "attempt_servicechild",
 		repositoryRoot: "/private/repo",
