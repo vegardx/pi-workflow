@@ -128,8 +128,11 @@ function nestedTaskSpec() {
 
 describe("workflow contracts", () => {
 	it("binds the exact current subagent runtime contract", () => {
-		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent).toEqual(
-			SUBAGENT_RUNTIME_CONTRACT,
+		const { capacity: _hostCapacity, ...required } = SUBAGENT_RUNTIME_CONTRACT;
+		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent).toEqual(required);
+		// Slots are the host's setting, read at bind time; never a requirement.
+		expect("capacity" in WORKFLOW_RUNTIME_CONTRACT.requiredSubagent).toBe(
+			false,
 		);
 		expect(isWorkflowRuntimeContract(WORKFLOW_RUNTIME_CONTRACT)).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features).toMatchObject({
@@ -699,9 +702,12 @@ describe("workflow contracts", () => {
 		const incompatible = structuredClone(WORKFLOW_RUNTIME_CONTRACT);
 		incompatible.requiredSubagent.features.structuredOutput = false;
 		expect(isWorkflowRuntimeContract(incompatible)).toBe(true);
-		expect(isCompatibleSubagentContract(incompatible.requiredSubagent)).toBe(
-			false,
-		);
+		expect(
+			isCompatibleSubagentContract({
+				...SUBAGENT_RUNTIME_CONTRACT,
+				features: incompatible.requiredSubagent.features,
+			}),
+		).toBe(false);
 	});
 
 	it("validates one materialized read-only agent task", () => {
@@ -805,10 +811,13 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 	});
 
-	it("requires pi-subagent revision 11 with the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
+	it("requires pi-subagent revision 12 with the capacity wait, the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(
-			11,
+			12,
 		);
+		expect(
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.capacityWait,
+		).toBe(true);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.workspaceStartAt,
 		).toBe(true);
@@ -842,6 +851,22 @@ describe("workflow contracts", () => {
 				contractRevision: 10,
 			}),
 		).toBe(false);
+		// Revision 11 refused a full host at once with incomplete usage.
+		expect(
+			isCompatibleSubagentContract({
+				...SUBAGENT_RUNTIME_CONTRACT,
+				contractRevision: 11,
+			}),
+		).toBe(false);
+		// Any configured slot count is compatible: it is a host fact.
+		for (const maxSlots of [1, 4, 32]) {
+			expect(
+				isCompatibleSubagentContract({
+					...SUBAGENT_RUNTIME_CONTRACT,
+					capacity: { maxSlots },
+				}),
+			).toBe(true);
+		}
 		for (const feature of [
 			"handoffExport",
 			"vmMemoryCeiling",
@@ -849,6 +874,7 @@ describe("workflow contracts", () => {
 			"sessionModelInherit",
 			"workspaceStartAt",
 			"resumeAtHandoff",
+			"capacityWait",
 		] as const) {
 			expect(
 				isCompatibleSubagentContract({

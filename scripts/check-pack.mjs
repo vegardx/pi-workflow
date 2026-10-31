@@ -399,10 +399,13 @@ if (
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.vmMemoryCeiling !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
-	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 11 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 12 ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceStartAt !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.resumeAtHandoff !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.delegationCeiling !== true ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.capacityWait !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.capacityWait !== true ||
+	"capacity" in workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent ||
 	typeof ceilingProvider.registerDelegationCeilingProvider !== "function" ||
 	typeof ceilingProvider.resolveDelegationCeiling !== "function" ||
 	!subagent.DelegationCeilingSchema ||

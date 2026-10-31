@@ -338,6 +338,7 @@ function attemptProvider(outcomes: readonly ChildOutcome[]) {
 				mountPolicySha256: SHA,
 				networkPolicySha256: SHA,
 				capacityPolicySha256: SHA,
+				rootfsPolicySha256: SHA,
 				memoryBytes: request.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: 0,

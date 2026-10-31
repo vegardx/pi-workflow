@@ -173,6 +173,7 @@ function launchPlan(
 			mountPolicySha256: hash,
 			networkPolicySha256: hash,
 			capacityPolicySha256: hash,
+			rootfsPolicySha256: hash,
 			memoryBytes: requestValue.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 			guestDiskBytes: 1024,
 			workspaceWriteBytes: requestValue.limits.workspaceWriteBytes,
@@ -3627,7 +3628,7 @@ describe("worktree handoff settlement", () => {
 	): WorktreeRecord {
 		return {
 			schema: "pi-subagent-worktree",
-			contractRevision: 11,
+			contractRevision: 12,
 			runId: "run_scheduler",
 			attemptId,
 			repositoryRoot: "/private/repo",

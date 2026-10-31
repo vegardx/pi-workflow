@@ -25,8 +25,8 @@
 	},
 	"piSubagent": {
 		"package": "@vegardx/pi-subagent",
-		"peerRange": "0.19.0",
-		"contractRevision": 11,
+		"peerRange": "0.20.0",
+		"contractRevision": 12,
 		"requiredFeatures": {
 			"nativeSessionBackend": true,
 			"gondolinSandbox": true,
@@ -55,9 +55,10 @@
 			"delegationCeiling": true,
 			"sessionModelInherit": true,
 			"workspaceStartAt": true,
-			"resumeAtHandoff": true
+			"resumeAtHandoff": true,
+			"capacityWait": true
 		},
-		"ciCommit": "4cd314f4ad980c3232107e27ece347f4eb6de34f"
+		"ciCommit": "cae442ca5f234ef94ea5bcc1061195c0198c1779"
 	},
 	"pi": {
 		"packages": ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"],
@@ -96,7 +97,7 @@
 			"platform": "linux-x64",
 			"status": "build-only",
 			"node": "24.16.0",
-			"piSubagentCommit": "4cd314f4ad980c3232107e27ece347f4eb6de34f",
+			"piSubagentCommit": "cae442ca5f234ef94ea5bcc1061195c0198c1779",
 			"evidence": [".github/workflows/ci.yml"]
 		}
 	]

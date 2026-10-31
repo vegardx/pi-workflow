@@ -7,7 +7,10 @@ import {
 	type ExtensionAPI,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { SubagentService } from "@vegardx/pi-subagent";
+import {
+	SUBAGENT_RUNTIME_CONTRACT,
+	type SubagentService,
+} from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { Value } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -82,7 +85,11 @@ function capture(options: { subagents?: boolean } = {}) {
 	let events: ExtensionAPI["events"];
 	if (options.subagents) {
 		events = createEventBus();
-		registerSubagentServiceProvider(events, async () => idleSubagentService());
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => idleSubagentService(),
+		);
 	} else {
 		events = {
 			on: vi.fn(),
