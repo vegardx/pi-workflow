@@ -34,7 +34,8 @@ major. A host pinning `>=5.0.0 <6` moves to `>=6.0.0 <7`.
 ### Changed
 
 - pi-subagent no longer charges guest boot time to `attemptTimeoutMs`; a boot
-  that hangs fails as `sandbox-launch`, which the workflow already classifies.
+  that hangs fails as `sandbox-launch`, which pi-subagent classifies and the
+  workflow relays unchanged.
 
 ## 5.0.0
 
