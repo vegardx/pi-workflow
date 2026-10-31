@@ -216,6 +216,18 @@ The materializer's refusal changes with it to "agent memoryBytes must be a
 multiple of 64 MiB from 1 GiB to 4 GiB", stated from pi-subagent's constants.
 No export, tool or other message changed. The dynamic host API digest rotates.
 
+**7.0.0.** `WORKFLOW_CONTRACT_REVISION` becomes 26, which refuses revision-25
+runs and so makes this a major. The required pi-subagent is `0.20.0`,
+contract revision 12, with the new required feature `capacityWait: true`. Its
+`ClassifiedFailureSchema`, which every persisted subagent settlement embeds,
+gains the failure code `capacity`. `WorkflowSubagentBinding` gains the
+required `maxSlots`, which narrows what an embedder's provider must supply, and
+`WORKFLOW_RUNTIME_CONTRACT.requiredSubagent` names pi-subagent's revision and
+features without its new host `capacity`. `run-created` gains the optional
+`concurrencyClamp` ("Host VM slots" under [Agent tasks](#agent-tasks)). `createWorkflowSubagentProvider`
+gains an optional third parameter. No other export, tool or message changed.
+The dynamic host API digest rotates.
+
 ## Static definition
 
 A saved workflow uses a `.workflow.ts`, `.workflow.mts`, `.workflow.js`, or
@@ -1747,7 +1759,7 @@ the child's summed usage. Incomplete child usage fails closed and stops further
 spending. The child's effective budget is the minimum of its declaration, the
 parent's reservation, and service caps; its effective concurrency is the
 minimum of its declaration, the intent, the service maximum, and the host's VM
-slots (see "Host VM slots" above). Because the
+slots ("Host VM slots" under [Agent tasks](#agent-tasks)). Because the
 child's full declared budget is reserved at admission, a parent that performs
 any agent or support work before launching a child must declare headroom above
 the child's declared budget, or the child is deferred or blocked.
