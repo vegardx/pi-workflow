@@ -281,7 +281,7 @@ const ceilingProvider = await import("@vegardx/pi-subagent/ceiling-provider");
 const { readFile } = await import("node:fs/promises");
 // D4: the manifest is an exported entry, read through the exports map.
 const manifest = (await import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })).default;
-if (manifest?.name !== "@vegardx/pi-workflow" || manifest.version !== "6.0.0") throw new Error("packed ./package.json export did not return the 6.0.0 manifest");
+if (manifest?.name !== "@vegardx/pi-workflow" || manifest.version !== "7.0.0") throw new Error("packed ./package.json export did not return the 7.0.0 manifest");
 // Spec 2.4 items 2-4: both entry points export exactly the pinned lists, the
 // lists are disjoint, and deep dist/ paths are not reachable.
 const pinned = {
@@ -468,8 +468,8 @@ if (
 if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piWorkflow.version !== manifest.version ||
-	compatibility.piWorkflow.version !== "6.0.0" ||
-	compatibility.piWorkflow.api?.version !== "6.0.0" ||
+	compatibility.piWorkflow.version !== "7.0.0" ||
+	compatibility.piWorkflow.api?.version !== "7.0.0" ||
 	JSON.stringify(compatibility.piWorkflow.api.frozenSurfaces) !== JSON.stringify(["authoring", "service", "contract", "extension"]) ||
 	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen", "./components": "unfrozen", "./service-provider": "unfrozen" }) ||
 	compatibility.piWorkflow.api.exportList !== ${JSON.stringify(rootExportList)} ||
