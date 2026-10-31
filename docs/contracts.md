@@ -1156,6 +1156,35 @@ select appends nothing, so idle lanes of a parked or barrier-blocked run never
 flap the status, and a re-drive whose sweep expires or defaults the checkpoint
 before any lane has work ends the run from `waiting`.
 
+**Host VM slots (revision 26).** Every pi-subagent attempt runs in its own VM,
+and a host runs at most `capacity.maxSlots` of them at once across every seat
+and every run (pi-subagent's `maxSlots` setting, default 16). The service reads
+that number through the subagent binding (`WorkflowSubagentBinding.maxSlots`,
+which `createWorkflowSubagentProvider` rebuilds with pi-subagent's own
+`readSubagentSettings` and `createSubagentRuntimeContract`, because
+`acquireSubagentService` does not return the published contract). A run's
+effective concurrency is the minimum of the definition's `concurrency`, the
+service's `maxConcurrency`, the parent intent's for a nested run, and the
+host's slots. A definition that asks for more than the host has is clamped,
+not refused, and the run records it once: `run-created` carries
+`concurrencyClamp: { concurrency, maxSlots }` (what the run would otherwise
+have had, and the slots), and the run's log shows "Concurrency clamped from
+<concurrency> to <maxSlots>: the host has <maxSlots> VM slots, shared by every
+run." The clamp is fixed at creation like the rest of the record; a resumed run
+keeps it whatever the host's setting is later. The slots are not partitioned
+between a parent and its nested runs: each is clamped on its own, and whatever
+they start together beyond the slots waits inside pi-subagent for a free slot
+(bounded by its `capacityWaitMs` and the attempt's remaining runtime) before
+failing with code `capacity`, origin `service`, retry `backoff`. That failure
+is backoff-class like any other: an agent task whose `retry.on` includes
+`"backoff"` spends a retry on it, and an optional task that exhausts its
+retries fails and leaves the run `completed-degraded`. A refused attempt never
+had a model session, so its settlement reports zero usage with
+`usageComplete: true`, and the budget does not count it as incomplete
+evidence. A binding whose `maxSlots` is not an integer from 1 to 32 is refused
+before the run exists: "The subagent binding reports no valid host VM slot
+count."
+
 The journal stores bounded child-settlement evidence and a digest of the complete
 child result, not model output, structured values, session paths, or
 subagent-private store paths. Imported structured output is represented by a canonical JSON workflow-owned
@@ -1717,7 +1746,8 @@ the parent reserves the intent budget; settlement replaces the reservation with
 the child's summed usage. Incomplete child usage fails closed and stops further
 spending. The child's effective budget is the minimum of its declaration, the
 parent's reservation, and service caps; its effective concurrency is the
-minimum of its declaration, the intent, and the service maximum. Because the
+minimum of its declaration, the intent, the service maximum, and the host's VM
+slots (see "Host VM slots" above). Because the
 child's full declared budget is reserved at admission, a parent that performs
 any agent or support work before launching a child must declare headroom above
 the child's declared budget, or the child is deferred or blocked.

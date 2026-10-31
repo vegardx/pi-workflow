@@ -915,6 +915,7 @@ function attemptProvider(outcomes: readonly ChildOutcome[]) {
 			workflowRunId: runId,
 			ownerId: taskOwnerId,
 			client: ownerClient,
+			maxSlots: 16,
 		} satisfies WorkflowSubagentBinding;
 	});
 	return { provider: { bind } as WorkflowSubagentProvider, ownerClient };

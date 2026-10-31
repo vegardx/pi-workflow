@@ -1,20 +1,46 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import {
 	createEventBus,
 	type EventBus,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	DEFAULT_MAX_SLOTS,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentService,
 } from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createWorkflowSubagentProvider,
 	SUBAGENT_ACQUISITION_FAILURE_MESSAGE,
 	SUBAGENT_BINDING_FAILURE_MESSAGE,
+	SUBAGENT_SETTINGS_FAILURE_MESSAGE,
 } from "../src/subagent-provider.js";
+import { useTempAgentDir } from "./fixtures/agent-dir.js";
+
+// Every provider here reads pi-subagent's host settings from the agent
+// directory; point it at a throwaway one rather than the developer's own.
+beforeEach(async () => {
+	await useTempAgentDir(
+		path.resolve(".pi", "test-subagent-provider", randomUUID()),
+	);
+});
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
+
+/** An agent directory whose pi-subagent settings file holds `content`. */
+async function agentDirWithSettings(content: string): Promise<string> {
+	const agentDir = path.resolve(".pi", "test-subagent-provider", randomUUID());
+	await mkdir(path.join(agentDir, "subagents"), { recursive: true });
+	await writeFile(path.join(agentDir, "subagents", "settings.json"), content);
+	return agentDir;
+}
 
 /** pi-subagent's store refusal, verbatim: a fixed message with no host path. */
 const REVISION_REFUSAL =
@@ -386,6 +412,60 @@ describe("workflow subagent provider", () => {
 
 		await expect(provider.bind("invalid" as never)).rejects.toMatchObject({
 			code: "validation",
+		});
+		expect(acquire).not.toHaveBeenCalled();
+	});
+
+	it("reports the host's VM slots from pi-subagent's settings", async () => {
+		const events = createEventBus();
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(),
+		);
+		const agentDir = await agentDirWithSettings('{ "maxSlots": 3 }');
+
+		const binding = await createWorkflowSubagentProvider(
+			events,
+			context,
+			agentDir,
+		).bind("workflow_slots");
+		expect(binding.maxSlots).toBe(3);
+	});
+
+	it("reports pi-subagent's default slots when the host sets none", async () => {
+		const events = createEventBus();
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(),
+		);
+
+		const binding = await createWorkflowSubagentProvider(events, context).bind(
+			"workflow_defaultslots",
+		);
+		expect(binding.maxSlots).toBe(DEFAULT_MAX_SLOTS);
+	});
+
+	it("refuses to bind when the host's settings are invalid, without naming the path", async () => {
+		const events = createEventBus();
+		const acquire = vi.fn(async () => service());
+		registerSubagentServiceProvider(events, SUBAGENT_RUNTIME_CONTRACT, acquire);
+		const agentDir = await agentDirWithSettings('{ "maxSlots": 64 }');
+
+		const error = await createWorkflowSubagentProvider(
+			events,
+			context,
+			agentDir,
+		)
+			.bind("workflow_badsettings")
+			.then(
+				() => undefined,
+				(failure: unknown) => failure,
+			);
+		expect(error).toMatchObject({
+			code: "incompatible",
+			message: SUBAGENT_SETTINGS_FAILURE_MESSAGE,
 		});
 		expect(acquire).not.toHaveBeenCalled();
 	});

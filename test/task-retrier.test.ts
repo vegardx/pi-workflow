@@ -165,6 +165,7 @@ function binding(ownerClient: SubagentClient): WorkflowSubagentBinding {
 		workflowRunId: RUN_ID,
 		ownerId: `pi-workflow:${RUN_ID}`,
 		client: ownerClient,
+		maxSlots: 16,
 	};
 }
 

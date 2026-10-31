@@ -432,6 +432,7 @@ function worktreeProvider(options: WorktreeProviderOptions) {
 			workflowRunId: runId,
 			ownerId: taskOwnerId,
 			client: ownerClient,
+			maxSlots: 16,
 		} satisfies WorkflowSubagentBinding;
 	});
 	return {
@@ -2290,7 +2291,11 @@ describe("worktree agent tasks end to end", () => {
 		const clientGate = await createWorkflowService({
 			...clientFixture,
 			projectTrusted: () => true,
-			subagents: createWorkflowSubagentProvider(clientEvents, context),
+			subagents: createWorkflowSubagentProvider(
+				clientEvents,
+				context,
+				clientFixture.agentDir,
+			),
 		});
 		try {
 			await expect(
@@ -2337,7 +2342,11 @@ describe("worktree agent tasks end to end", () => {
 		const contractGate = await createWorkflowService({
 			...contractFixture,
 			projectTrusted: () => true,
-			subagents: createWorkflowSubagentProvider(revisionFiveEvents, context),
+			subagents: createWorkflowSubagentProvider(
+				revisionFiveEvents,
+				context,
+				contractFixture.agentDir,
+			),
 		});
 		try {
 			await expect(

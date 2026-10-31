@@ -441,7 +441,7 @@ function agentProvider(): WorkflowSubagentProvider {
 				return { ...receipt, status: "completed" as const };
 			},
 		} as unknown as SubagentClient;
-		return { workflowRunId, ownerId, client };
+		return { workflowRunId, ownerId, client, maxSlots: 16 };
 	};
 	return { bind };
 }

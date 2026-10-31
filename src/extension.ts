@@ -238,7 +238,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			// (`persistence/state-root.ts`).
 			storeRoot: workflowStateRoot(ctx.cwd, agentDir),
 			projectTrusted: () => ctx.isProjectTrusted(),
-			subagents: createWorkflowSubagentProvider(pi.events, ctx),
+			subagents: createWorkflowSubagentProvider(pi.events, ctx, agentDir),
 			registeredRoots: builtinRoots(ctx.cwd, agentDir),
 			// Host-process support implementations, the constructor form the
 			// contract's `supportTaskExecution` feature promises. Package and

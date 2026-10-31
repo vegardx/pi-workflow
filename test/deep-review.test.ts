@@ -412,6 +412,7 @@ function scripted(
 					workflowRunId: runId,
 					ownerId,
 					client,
+					maxSlots: 16,
 				} satisfies WorkflowSubagentBinding;
 			}),
 		} as WorkflowSubagentProvider,

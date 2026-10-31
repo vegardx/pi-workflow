@@ -228,6 +228,7 @@ function roleProvider() {
 			workflowRunId: runId,
 			ownerId,
 			client,
+			maxSlots: 16,
 		} satisfies WorkflowSubagentBinding;
 	});
 	return { provider: { bind } as WorkflowSubagentProvider, models };

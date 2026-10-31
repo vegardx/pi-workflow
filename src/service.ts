@@ -7,6 +7,7 @@ import {
 	type DelegationCeiling,
 	DelegationCeilingSchema,
 	HANDOFF_EXPORT_MEDIA_TYPE,
+	MAX_SLOTS,
 } from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
@@ -106,6 +107,7 @@ import {
 } from "./dynamic/vm-host.js";
 import type {
 	TaskExecutionProjection,
+	WorkflowConcurrencyClamp,
 	WorkflowRunOrigin,
 	WorkflowStateProjection,
 } from "./events.js";
@@ -750,6 +752,27 @@ type OwnedRun = {
 	nextChange(): Promise<void>;
 	wake(): void;
 };
+
+/**
+ * A run's concurrency under the host's VM slots. The slots are host-wide, so a
+ * parent and its nested runs share them: each run is clamped on its own and
+ * pi-subagent's slot wait serialises whatever the runs together start beyond
+ * them. A definition asking for more than the host has is clamped, not refused.
+ */
+function slotBoundConcurrency(
+	bound: number,
+	maxSlots: number,
+): { concurrency: number; clamp?: WorkflowConcurrencyClamp } {
+	if (!Number.isSafeInteger(maxSlots) || maxSlots < 1 || maxSlots > MAX_SLOTS) {
+		throw new WorkflowServiceError(
+			"validation",
+			"The subagent binding reports no valid host VM slot count.",
+		);
+	}
+	return bound > maxSlots
+		? { concurrency: maxSlots, clamp: { concurrency: bound, maxSlots } }
+		: { concurrency: bound };
+}
 
 function summary(workflow: DiscoveredWorkflow): WorkflowDefinitionSummary {
 	return Object.freeze({
@@ -1475,6 +1498,7 @@ export async function createWorkflowService(
 		binding: WorkflowSubagentBinding,
 		discovered: readonly DiscoveredWorkflow[],
 		origin?: WorkflowRunOrigin,
+		concurrencyClamp?: WorkflowConcurrencyClamp,
 	): Promise<OwnedRun> {
 		const journal = await WorkflowRunJournal.open(
 			storeRoot,
@@ -1579,6 +1603,7 @@ export async function createWorkflowService(
 				scheduler,
 				signal: controller.signal,
 				...(origin === undefined ? {} : { origin }),
+				...(concurrencyClamp === undefined ? {} : { concurrencyClamp }),
 				...(options.modelRouting === undefined
 					? {}
 					: { modelRouting: options.modelRouting }),
@@ -2267,6 +2292,14 @@ export async function createWorkflowService(
 								),
 							}),
 				};
+				const slots = slotBoundConcurrency(
+					Math.min(
+						workflow.definition.meta.concurrency,
+						maxConcurrency,
+						request.concurrency,
+					),
+					binding.maxSlots,
+				);
 				const record: WorkflowRunRecord = {
 					schema: "pi-workflow-run",
 					contractRevision: WORKFLOW_CONTRACT_REVISION,
@@ -2276,11 +2309,7 @@ export async function createWorkflowService(
 					definitionIdentitySha256: workflow.identity.identitySha256,
 					definitionSourceSha256: workflow.identity.sourceSha256,
 					definitionKind: "static",
-					concurrency: Math.min(
-						workflow.definition.meta.concurrency,
-						maxConcurrency,
-						request.concurrency,
-					),
+					concurrency: slots.concurrency,
 					declaredBudget: limits.declaredBudget,
 					effectiveBudget,
 					declaredTimeoutMs: limits.declaredTimeoutMs,
@@ -2316,7 +2345,15 @@ export async function createWorkflowService(
 						: { sessionModel: parentSessionModel }),
 				};
 				await WorkflowRunRecordStore.open(journal).create(record);
-				const run = await compose(record, workflow, lease, binding, discovered);
+				const run = await compose(
+					record,
+					workflow,
+					lease,
+					binding,
+					discovered,
+					undefined,
+					slots.clamp,
+				);
 				owned.set(request.childRunId, run);
 			} catch (error) {
 				await lease.release();
@@ -2561,6 +2598,10 @@ export async function createWorkflowService(
 				const sessionModel = assertSessionModel(workflow);
 				const id = runId();
 				const binding = await options.subagents.bind(id);
+				const slots = slotBoundConcurrency(
+					Math.min(workflow.definition.meta.concurrency, maxConcurrency),
+					binding.maxSlots,
+				);
 				const lease = await acquireWorkflowRunLease({
 					storeRoot,
 					runId: id,
@@ -2604,10 +2645,7 @@ export async function createWorkflowService(
 									hostApiSha256: dynamic.hostApiSha256,
 								}
 							: { definitionKind: "static" as const }),
-						concurrency: Math.min(
-							workflow.definition.meta.concurrency,
-							maxConcurrency,
-						),
+						concurrency: slots.concurrency,
 						...limits,
 						deadlineAt: new Date(
 							createdAt.getTime() + limits.effectiveTimeoutMs,
@@ -2633,6 +2671,7 @@ export async function createWorkflowService(
 						binding,
 						discovery.workflows,
 						runOptions?.origin,
+						slots.clamp,
 					);
 					owned.set(id, run);
 					return { runId: id, status: "created" as const };

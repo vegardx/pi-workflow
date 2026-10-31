@@ -93,6 +93,7 @@ function inertProvider(): WorkflowSubagentProvider {
 					workflowRunId: id,
 					ownerId: `pi-workflow:${id}`,
 					client: {} as WorkflowSubagentBinding["client"],
+					maxSlots: 16,
 				}) satisfies WorkflowSubagentBinding,
 		),
 	};
