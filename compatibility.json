@@ -2,7 +2,7 @@
 	"schema": "pi-workflow-compatibility",
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
-		"version": "5.0.0",
+		"version": "6.0.0",
 		"contractRevision": 25,
 		"features": {
 			"checkpoints": true,
@@ -11,7 +11,7 @@
 			"serviceProviderDecide": true
 		},
 		"api": {
-			"version": "5.0.0",
+			"version": "6.0.0",
 			"frozenSurfaces": ["authoring", "service", "contract", "extension"],
 			"entryPoints": {
 				".": "frozen",

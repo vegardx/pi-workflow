@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` 5.0.0, contract revision 24. Every
+This skill covers `@vegardx/pi-workflow` 6.0.0, contract revision 25. Every
 rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
