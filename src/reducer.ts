@@ -550,10 +550,23 @@ function observedStatusCanFollow(previous: string, next: string): boolean {
 	return false;
 }
 
-function validSubagentSettlement(evidence: SubagentTerminalEvidence): boolean {
+/**
+ * pi-subagent keeps a worktree attempt's workspace `retained` on every path
+ * but `completed`: a failed or cancelled attempt keeps it for an explicit
+ * retry until `release` proves cleanup, and an interrupted one keeps it for
+ * resume. That is recoverable state with a proved VM, not a cleanup block.
+ */
+function validSubagentSettlement(
+	evidence: SubagentTerminalEvidence,
+	worktree: boolean,
+): boolean {
 	const cleanupIsProved =
 		cleanupProved(evidence.sandboxCleanup) &&
 		cleanupProved(evidence.workspaceCleanup);
+	const workspaceIsRecoverable =
+		cleanupProved(evidence.sandboxCleanup) &&
+		(cleanupProved(evidence.workspaceCleanup) ||
+			(worktree && evidence.workspaceCleanup === "retained"));
 	if (evidence.status === "completed") {
 		return (
 			cleanupIsProved &&
@@ -574,7 +587,7 @@ function validSubagentSettlement(evidence: SubagentTerminalEvidence): boolean {
 			evidence.handoff === undefined
 		);
 	}
-	return cleanupIsProved;
+	return workspaceIsRecoverable;
 }
 
 function isSupportFailureStage(stage: string): boolean {
@@ -1305,7 +1318,10 @@ function applyEvent(
 				!observation ||
 				!isTerminalSubagentStatus(observation.status) ||
 				observation.status !== evidence.status ||
-				!validSubagentSettlement(evidence)
+				!validSubagentSettlement(
+					evidence,
+					isWorktreeTaskSpec(agentTaskSpec(state, projection, event.sequence)),
+				)
 			) {
 				fail("task execution child settlement is invalid", event.sequence);
 			}

@@ -70,6 +70,15 @@ no attempt (interrupted):
             "Interrupted child retained for recovery; no release performed.")
           → run-status-changed (→ interrupted) for a required task
 
+no attempt (failed):
+          task-execution-child-observed (failed)
+          → task-execution-child-settled (status failed; a worktree child's
+            workspace may be retained)
+          → task-execution-release-intended → task-execution-released (failed)
+          → task-execution-terminal (outcome failed, evidence = settlement)
+          → task-status-changed (running → failed)
+          → run-status-changed (→ failed) for a required task
+
 operator: task-execution-terminal (outcome interrupted)
           → task-execution-attempt-intended (kind resume, origin operator,
             optional reason; reopens the execution)
