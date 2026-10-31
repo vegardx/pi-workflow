@@ -4,8 +4,8 @@
  *
  * A host — pi-maestro is the one this exists for — watches a run it started and
  * posts each task completion into the person's conversation, then gives the
- * model a turn on the interesting ones: a synthesis result, a fix report, a
- * failure, the ship gate. To do that from the outside it needs four things per
+ * model a turn on the interesting ones: a normalized review, the implementer's
+ * answer to it, a failure, the ship gate. To do that from the outside it needs four things per
  * completed task that the durable facts alone do not spell out:
  *
  * - **the stage key**, as one string (`${namespace}/${key}`), because that is
@@ -27,7 +27,8 @@
  * convention `workflows/plan-to-ship.workflow.ts` documents: a stage key is
  * `<stage id>-<deliverable id>`, and a fan-out member is
  * `<stage id>-<deliverable id>/<member>`. A leading segment this module knows
- * (`implement`, `check`, `review`, `synthesis`, `fix`, `refine`) names the kind
+ * (`implement`, `check`, `recheck`, `review`, `normalize`, `resume`,
+ * `synthesis`, `refine`) names the kind
  * and the rest of that segment names the deliverable; a checkpoint is `gate`
  * whatever it is called; anything else is `other`, which is an honest answer
  * and not a failure. A project definition that names its tasks differently gets
@@ -50,8 +51,9 @@ export const NARRATED_TASK_KINDS = Object.freeze([
 	"implement",
 	"check",
 	"review",
+	"normalize",
+	"resume",
 	"synthesis",
-	"fix",
 	"gate",
 	"refine",
 	"other",
@@ -62,14 +64,18 @@ export type NarratedTaskKind = (typeof NARRATED_TASK_KINDS)[number];
  * The stage ids this convention knows, mapped to the kind they narrate as.
  * The left column is `plan-to-ship`'s documented stage id list; a definition
  * that reuses one of these ids gets the same narration, which is the point.
+ * `recheck` is the check that runs after a resume, and narrates as a `check`;
+ * `synthesis` is `deep-research`'s reducer.
  */
 const KIND_BY_STAGE_ID: Readonly<Record<string, NarratedTaskKind>> =
 	Object.freeze({
 		implement: "implement",
 		check: "check",
+		recheck: "check",
 		review: "review",
+		normalize: "normalize",
+		resume: "resume",
 		synthesis: "synthesis",
-		fix: "fix",
 		refine: "refine",
 	});
 
@@ -97,8 +103,10 @@ const DELIVERABLE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
  * (`review-d0/correctness`) narrates as its namespace's kind, because a lens is
  * a review. Splitting `<stage id>-<deliverable id>` takes the SHORTEST leading
  * run that is a known stage id, so `check-d0` is `check` of `d0` and
- * `fix-my-thing` is `fix` of `my-thing`. A key that is exactly a known stage id
- * (`refine`) names no deliverable.
+ * `resume-my-thing` is `resume` of `my-thing`. A key that is exactly a known
+ * stage id (`refine`) names no deliverable. Nothing follows the deliverable id
+ * in a key this convention names: a stage that runs twice takes a second stage
+ * id (`recheck`), never a suffix a reader would take for part of the id.
  */
 function classify(stage: string): {
 	kind: NarratedTaskKind;

@@ -296,8 +296,8 @@ terminal status — and only that one — carries `task`:
 workflows.observe(({ runId, status, sequence, task }) => {
 	if (!task) return;                       // most appends settle no task
 	const { stage, taskKind, deliverable, cause } = task.narration;
-	// stage      "check-d0-verify-1" — `${namespace}/${key}`, as one string
-	// taskKind   implement | check | review | synthesis | fix | gate | refine | other
+	// stage      "recheck-d0" — `${namespace}/${key}`, as one string
+	// taskKind   implement | check | review | normalize | resume | synthesis | gate | refine | other
 	// deliverable "d0" — when the stage key names one
 	// cause      a sanitized sentence, for a task that did not complete —
 	//            composed from the journalled codes, never the child's prose

@@ -18,7 +18,7 @@
  *   terminal status carries `task: {taskId, status, outcome?, narration}`, and
  *   `narration` is `{stage, taskKind, deliverable?, cause?}` — the stage key as
  *   one string, the kind a narrator branches on
- *   (`implement | check | review | synthesis | fix | gate | refine | other`),
+ *   (`implement | check | review | normalize | resume | synthesis | gate | refine | other`),
  *   the deliverable the key names, and for a task that did not complete a
  *   sanitized cause composed from the journalled failure codes, never from the
  *   child's own prose. It carries no `summary`: an observation is a synchronous
@@ -27,7 +27,8 @@
  *   `narration` on every projected task, with `narration.summary` filled in —
  *   the agent's own `summary`/`verdict`/`answer`/`synthesis` when its result has
  *   one, else a bounded rendering of the structured result. That is what a host
- *   hands the model when it wants a turn on a synthesis result or a fix report.
+ *   hands the model when it wants a turn on a normalized review or a resumed
+ *   implementer's answer to it.
  *
  * Everything in `narration` is DERIVED from durable state, so it is additive
  * and moves no contract revision.

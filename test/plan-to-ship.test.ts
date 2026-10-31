@@ -1723,7 +1723,7 @@ describe("plan-to-ship: what a host needs to narrate", () => {
 			["check-d0-verify-1", "check", "d0-verify-1", "completed"],
 			["review-d0/correctness", "review", "d0", "completed"],
 			["synthesis-d0", "synthesis", "d0", "completed"],
-			["fix-d0", "fix", "d0", "completed"],
+			["fix-d0", "other", undefined, "completed"],
 			["ship", "gate", undefined, "completed"],
 			["receipt", "other", undefined, "completed"],
 		]);
