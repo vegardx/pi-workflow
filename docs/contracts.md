@@ -668,8 +668,12 @@ scheduler to run until the selected task settles and finalizes, revalidates its
 workflow-owned artifact, and returns an immutable concrete value.
 `ctx.results(handles)` is the bounded fail-fast multi-task barrier.
 `ctx.settled(handles)` is a distinct persisted barrier returning
-`{ status: "fulfilled", value }` or
-`{ status: "rejected", taskId, outcome, failure? }` in declaration order.
+`{ status: "fulfilled", value, attempt? }` or
+`{ status: "rejected", taskId, outcome, failure?, attempt? }` in declaration
+order. `attempt` is `{ subagentRunId, subagentAttemptId }` of the child an
+agent execution settled under, read from the journal (revision 24), so a
+definition can attribute a result to the attempt that produced it without
+asking the model who it was; it is absent for a task that launched no child.
 Required-task failure still fails the workflow; rejected settled values are
 therefore intended for tasks explicitly declared with optional disposition.
 Merely constructing a handle never starts work synchronously in the workflow

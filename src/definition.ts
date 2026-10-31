@@ -433,8 +433,18 @@ export type SettledTaskFailure = Readonly<{
 	guidance?: string;
 }>;
 
+/**
+ * The pi-subagent run and attempt that settled an agent task, read from the
+ * journal: what a definition stamps as attribution, so a model's own words
+ * never have to say who it was.
+ */
+export type SettledTaskAttempt = Readonly<{
+	subagentRunId: string;
+	subagentAttemptId: string;
+}>;
+
 export type SettledTaskResult<T> =
-	| Readonly<{ status: "fulfilled"; value: T }>
+	| Readonly<{ status: "fulfilled"; value: T; attempt?: SettledTaskAttempt }>
 	| Readonly<{
 			status: "rejected";
 			taskId: WorkflowTaskId;
@@ -443,6 +453,7 @@ export type SettledTaskResult<T> =
 				"pending" | "ready" | "running" | "waiting" | "cancelling" | "completed"
 			>;
 			failure?: SettledTaskFailure;
+			attempt?: SettledTaskAttempt;
 	  }>;
 
 export interface FanOutOptions<
