@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` 3.0.0, contract revision 22. Every
+This skill covers `@vegardx/pi-workflow` 3.0.0, contract revision 23. Every
 rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
@@ -13,7 +13,7 @@ launch contracts). Quoted strings are the exact messages the runtime throws.
 Worked examples that load through the real definition loader and through the
 dynamic manifest VM are in [references/examples.md](references/examples.md).
 
-Not available in revision 22: `ctx.artifact`, fork context, a Pi tool for
+Not available in revision 23: `ctx.artifact`, fork context, a Pi tool for
 handoff export, a model-callable checkpoint decide tool (there is none by design: a model must
 never decide a checkpoint; only a human decides, through `/workflow decide`),
 and a model-callable dynamic-source approve, reject, or proposals tool (none
@@ -176,16 +176,16 @@ Static imports are limited to `@vegardx/pi-workflow`,
 `@vegardx/pi-workflow/components`, `typebox`, and the module specifiers of
 support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 22". Relative imports of helper files are therefore
+contract revision 23". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 22",
+"dynamic workflow imports are not supported by contract revision 23",
 "dynamic imports and CommonJS require are not supported by contract revision
 22", and "TypeScript import assignment is not supported by contract revision
 22". Import-like text inside strings and comments is fine. The
 `@vegardx/pi-workflow/runtime` subpath is not importable from a definition and
 is not part of the authoring API; definitions import from
 `@vegardx/pi-workflow` and `@vegardx/pi-workflow/components` only, and the gate refuses the subpath with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 22".
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 23".
 The loader resolves imports from the definition file's location, so
 `@vegardx/pi-workflow` and `typebox` must be resolvable there.
 
@@ -449,9 +449,20 @@ returned reference against the settled `{ attemptId, baselineHead,
 handoffCommit }`, its `git-format-patch` format, digest, size (at most 16 MiB),
 and single-commit shape, stores the bytes as a workflow-owned
 `application/x-git-format-patch` artifact, and records the import before it
-releases the child. The workflow never applies, pushes, merges, or checks out
-a handoff, and it never reads a worktree path or branch; downstream tasks
-cannot run on top of a handoff.
+releases the child. The workflow never applies, pushes, or merges a
+handoff, and it never reads a worktree path or branch.
+
+A downstream task runs ON a handoff by naming it: `workspace: { mode, cwd,
+startAtInput: "patch" }` with `inputs: { patch: producer.handoff }`. The name
+must be one of the task's own handoff inputs, or the declaration is refused
+("workspace startAtInput must name one of the task's handoff inputs"). At
+launch the runtime resolves it to the imported `handoffCommit` and pi-subagent
+checks the workspace out there (a worktree attempt starts at it; a read-only
+attempt is mounted at it); a producer that captured no handoff fails the
+consumer before preflight with "Workflow task workspace start input carries no
+hand-off commit.". A worktree consumer's own handoff is still one commit on the
+repository baseline. `verifyAndFix`, `fixFindings` and `reviewFanOut` set it
+for you.
 
 - `handoff: "required"` (the default): a completed child that captured no
   changes is released and then fails at stage `handoff-import` with
@@ -1096,10 +1107,12 @@ const loop = await verifyAndFix(ctx, "check", {
 
 The dependency between rounds is a **data** dependency, never a bare `after`:
 a verifier names the current patch's handoff handle in its `inputs`, and a
-fixer names that handoff plus the failing verifier's report. The runtime
-never applies a handoff to a worktree, so what the task receives is the
-descriptor — baseline, commit, digest, size, and the durable ref — and the
-caller's prose is what tells the fixer to apply it
+fixer names that handoff plus the failing verifier's report. The component
+sets each one's `workspace.startAtInput` to that input, so the host checks the
+workspace out at the hand-off commit and the change under test is already in
+the tree; the descriptor — baseline, commit, digest, size, and the durable
+ref — is the patch's identity for the report, never something to apply. Do
+not tell an agent to apply a ref: the guest has no git
 ([Worktree tasks and handoffs](#worktree-tasks-and-handoffs)).
 
 ### Normalize a fan-out's findings, then fix them

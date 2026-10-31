@@ -209,9 +209,22 @@ export type WorktreeTaskHandle<T> = TaskHandle<T> & {
 	readonly handoff: HandoffHandle;
 };
 
+/**
+ * `startAtInput` names one of the task's own handoff `inputs`: the host checks
+ * the workspace out at that hand-off's commit, so the change is already in the
+ * tree. Neither the runtime nor the agent ever applies a handoff.
+ */
 export type WorkspaceAuthoringRequest =
-	| { readonly mode: "read-only"; readonly cwd: string }
-	| { readonly mode: "worktree"; readonly cwd: string };
+	| {
+			readonly mode: "read-only";
+			readonly cwd: string;
+			readonly startAtInput?: TaskKey;
+	  }
+	| {
+			readonly mode: "worktree";
+			readonly cwd: string;
+			readonly startAtInput?: TaskKey;
+	  };
 
 /**
  * The handle an agent declaration returns: a worktree handle when the request

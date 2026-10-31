@@ -26,6 +26,7 @@ import {
 	WORKSPACE_WRITE_BYTES,
 } from "./envelope.js";
 import { WorkflowComponentError } from "./errors.js";
+import { startAtHandoff } from "./workspace.js";
 
 /**
  * `verifyAndFix` — a bounded verify-then-fix loop over one implementer's
@@ -507,6 +508,18 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 			declared.handoff === undefined
 				? { handoff: "optional" as const }
 				: {}),
+			// The verifier checks the patch it is handed, so its workspace starts
+			// at that hand-off; nothing in the guest could apply it.
+			...(declared.workspace === undefined
+				? {}
+				: {
+						workspace: startAtHandoff(
+							"verifyAndFix",
+							`verifyAndFix("${key}") verifier "${verifyKey}"`,
+							declared.workspace,
+							patchInput,
+						),
+					}),
 			outputSchema: CheckReportSchema,
 			model,
 			limits: verifyLimits(declared.workspace?.mode),
@@ -580,6 +593,12 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 			declaredFix.disposition === undefined
 				? { disposition: options.disposition }
 				: {}),
+			workspace: startAtHandoff(
+				"verifyAndFix",
+				`verifyAndFix("${key}") fixer "${fixKey}"`,
+				declaredFix.workspace,
+				patchInput,
+			),
 			model,
 			limits: fixEnvelope.limits,
 			handoff: "required",

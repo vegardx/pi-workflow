@@ -31,6 +31,7 @@ import {
 } from "./finding.js";
 import type { ReviewOutcome } from "./review-fan-out.js";
 import type { WorktreeWorkspaceRequest } from "./verify-and-fix.js";
+import { startAtHandoff } from "./workspace.js";
 
 /**
  * `synthesizeFindings` and `fixFindings` — the two halves of "review, then
@@ -576,6 +577,12 @@ export function fixFindings(
 		...(options.disposition !== undefined && declared.disposition === undefined
 			? { disposition: options.disposition }
 			: {}),
+		workspace: startAtHandoff(
+			"fixFindings",
+			`fixFindings("${key}") fixer`,
+			declared.workspace,
+			patchInput,
+		),
 		outputSchema: FindingFixReportSchema,
 		model: options.model,
 		limits: fixEnvelope.limits,

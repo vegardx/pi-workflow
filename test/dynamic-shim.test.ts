@@ -1738,14 +1738,14 @@ export default probe;
 			modules: createDynamicModules([]),
 		});
 		expect(exported).toEqual({
-			revision: 22,
+			revision: 23,
 			handle: false,
 			typed: "string",
 			now: 42,
 			leaked: "undefined",
 		});
 		expect(
-			Value.Check(Type.Object({ revision: Type.Literal(22) }), exported),
+			Value.Check(Type.Object({ revision: Type.Literal(23) }), exported),
 		).toBe(true);
 		const missing = transformDynamicSource({
 			source:

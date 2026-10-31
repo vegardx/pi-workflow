@@ -10,7 +10,7 @@ import { type Static, type TSchema, Type } from "typebox";
  * `test/dynamic-vm-host.test.ts` pins that import boundary.
  */
 
-export const WORKFLOW_CONTRACT_REVISION = 22 as const;
+export const WORKFLOW_CONTRACT_REVISION = 23 as const;
 /** Upper bound of one imported handoff; equals the artifact byte bound. */
 export const MAX_WORKFLOW_HANDOFF_BYTES = 16 * 1024 * 1024;
 /**
@@ -358,11 +358,20 @@ export const HandoffPolicySchema = Type.Union([
 ]);
 export type HandoffPolicy = Static<typeof HandoffPolicySchema>;
 
+/**
+ * The name of one of the task's own handoff `inputs`. The host checks the
+ * task's workspace out at that hand-off's commit; the commit itself is not
+ * known at declaration, so the spec holds the reference and the launcher
+ * resolves it to the imported `handoffCommit` (pi-subagent `startAt`).
+ */
+const StartAtInputSchema = Type.Optional(TaskKeySchema);
+
 export const AgentWorkspaceRequestSchema = Type.Union([
 	Type.Object(
 		{
 			mode: Type.Literal("read-only"),
 			cwd: Type.String({ minLength: 1, maxLength: 4096 }),
+			startAtInput: StartAtInputSchema,
 		},
 		{ additionalProperties: false },
 	),
@@ -370,6 +379,7 @@ export const AgentWorkspaceRequestSchema = Type.Union([
 		{
 			mode: Type.Literal("worktree"),
 			cwd: Type.String({ minLength: 1, maxLength: 4096 }),
+			startAtInput: StartAtInputSchema,
 		},
 		{ additionalProperties: false },
 	),

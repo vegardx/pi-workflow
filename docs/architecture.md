@@ -144,8 +144,10 @@ content-addressed `.patch` blob in the same fenced artifact store, and persists
 `task-execution-handoff-imported` (or `task-execution-handoff-absent` when the
 child captured no changes). The workflow exposes the handoff only as a JSON
 descriptor to the author and to downstream tasks, and as bytes through the
-service's `exportHandoff`; it never applies, pushes, merges, or checks out a
-handoff and never reads a subagent worktree path or branch.
+service's `exportHandoff`; it never applies, pushes, or merges a handoff and
+never reads a subagent worktree path or branch. A consumer that names a handoff
+input as `workspace.startAtInput` runs in a workspace pi-subagent checked out at
+that hand-off's commit.
 
 Resume reconstructs state from the append-only journal and re-executes the
 workflow function from its entry point. Matching task, result, phase, and log

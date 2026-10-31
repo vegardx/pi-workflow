@@ -974,8 +974,8 @@ interface AgentTask<T> extends TaskRequestBase {
 }
 
 type WorkspaceRequest =
-	| { mode: "read-only"; cwd: string }
-	| { mode: "worktree"; cwd: string };
+	| { mode: "read-only"; cwd: string; startAtInput?: TaskKey }
+	| { mode: "worktree"; cwd: string; startAtInput?: TaskKey };
 
 type HandoffPolicy = "required" | "optional";
 
@@ -1262,10 +1262,28 @@ reducer ("task input names a handoff of a non-worktree task"); input digests
 select the artifact whose `output` matches the reference, so result inputs
 hash exactly as before. The workflow declares, retains, verifies, and exposes
 the handoff and exports its bytes through `WorkflowService.exportHandoff`; it
-never applies, pushes, merges, or checks out a handoff, and it never reads
-subagent-private paths or branches. Chaining a second writer task on top of a
-handoff would need a pi-subagent workspace-input contract that does not exist;
-the workflow does not apply a patch into a downstream worktree.
+never applies, pushes, or merges a handoff, and it never reads subagent-private
+paths or branches.
+
+A downstream task runs ON a handoff through `workspace.startAtInput`
+(revision 23): the name of one of the task's own handoff `inputs`, refused at
+declaration otherwise ("workspace startAtInput must name one of the task's
+handoff inputs"). The persisted spec holds the name, because the commit does
+not exist when the consumer is declared. At launch the launcher resolves it to
+the producer's verified imported `handoffCommit` and sends pi-subagent
+`workspace.startAt` (contract revision 10, feature `workspaceStartAt`); the
+name itself is never lowered. pi-subagent checks a worktree attempt out at
+that commit and mounts a read-only attempt at a detached worktree there, and
+squashes a worktree consumer's export so its handoff is still one commit on the
+repository baseline. A producer whose handoff cannot be verified, or that
+captured none, fails the consumer at stage `preflight` before any preflight
+call, with "Workflow task workspace start hand-off could not be verified." or
+"Workflow task workspace start input carries no hand-off commit.". A launch
+plan whose `workspace.startAt` differs from the request is refused like any
+other plan mismatch ("workspace start"). `verifyAndFix` starts verify-n and
+fix-n at `patch`, `fixFindings` its fixer at its patch input, and
+`reviewFanOut` every lens at the subject's one handoff input (a subject with
+two is refused).
 
 Retry and resume attempts on a worktree child follow the rules in the next
 section: same execution, same generation, no new preflight. pi-subagent

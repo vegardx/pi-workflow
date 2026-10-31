@@ -312,6 +312,9 @@ function worktreeProvider(options: WorktreeProviderOptions) {
 				mode: request.workspace.mode,
 				hostPathSha256: "a".repeat(64),
 				baselineSha256: "c".repeat(64),
+				...(request.workspace.startAt === undefined
+					? {}
+					: { startAt: request.workspace.startAt }),
 			},
 			sandbox: {
 				backend: "gondolin" as const,
@@ -1584,6 +1587,110 @@ describe("worktree agent tasks end to end", () => {
 			expect(await eventTypes(fixture.storeRoot, receipt.runId)).toEqual(types);
 		} finally {
 			await shutdownQuietly(recovery);
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("starts a consumer's workspace at the hand-off its startAtInput names", async () => {
+		const name = "worktree-start-at";
+		const fixture = await worktreeFixture({
+			name,
+			body: `const reader = ctx.agent("reader", {
+      agent: "researcher",
+      task: { goal: "Review the change", context: [], instructions: ["Review and return structured output."] },
+      contextMode: "fresh",
+      tools: ["read"],
+      preloadSkills: [],
+      contextScopes: ["project"],
+      workspace: { mode: "read-only", cwd: ctx.cwd, startAtInput: "patch" },
+      inputs: { patch: writer.handoff },
+      outputSchema: ${ANSWER_JSON_SCHEMA},
+      limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 0, retries: 0, resumes: 0 }
+    });
+    return ctx.result(reader);`,
+		});
+		const delegated = worktreeProvider({
+			launches: [
+				[{ status: "completed", handoff: "captured" }],
+				[{ status: "completed" }],
+			],
+		});
+		const service = await serviceFor(fixture, delegated);
+		try {
+			const receipt = await service.run(name, {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "completed" });
+			const events = await journalEvents(fixture.storeRoot, receipt.runId);
+			const imported = dataOf<{ handoffCommit: string }>(
+				events.find(
+					(event) => event.type === "task-execution-handoff-imported",
+				),
+			);
+			const readerRequest = delegated.preflight.mock.calls[1]?.[0];
+			// pi-subagent gets the resolved commit, never the persisted reference.
+			expect(readerRequest?.workspace).toEqual({
+				mode: "read-only",
+				cwd: fixture.cwd,
+				startAt: imported.handoffCommit,
+			});
+			const state = reduceWorkflowEvents(events);
+			const reader = taskByKey(state, "reader");
+			expect(
+				reader.task.spec.kind === "agent" && reader.task.spec.request.workspace,
+			).toEqual({
+				mode: "read-only",
+				cwd: fixture.cwd,
+				startAtInput: "patch",
+			});
+		} finally {
+			await shutdownQuietly(service);
+		}
+	});
+
+	it("refuses by name, before preflight, to start at a hand-off that captured no commit", async () => {
+		const name = "worktree-start-at-absent";
+		const fixture = await worktreeFixture({
+			name,
+			policy: "optional",
+			body: `const reader = ctx.agent("reader", {
+      agent: "researcher",
+      task: { goal: "Review the change", context: [], instructions: ["Review and return structured output."] },
+      contextMode: "fresh",
+      tools: ["read"],
+      preloadSkills: [],
+      contextScopes: ["project"],
+      workspace: { mode: "read-only", cwd: ctx.cwd, startAtInput: "patch" },
+      inputs: { patch: writer.handoff },
+      outputSchema: ${ANSWER_JSON_SCHEMA},
+      limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 0, retries: 0, resumes: 0 }
+    });
+    return ctx.result(reader);`,
+		});
+		const delegated = worktreeProvider({
+			launches: [[{ status: "completed", handoff: "none" }]],
+		});
+		const service = await serviceFor(fixture, delegated);
+		try {
+			const receipt = await service.run(name, {});
+			await expect(
+				bounded(service.wait(receipt.runId), "wait"),
+			).resolves.toMatchObject({ status: "failed" });
+			const state = await stateOf(fixture.storeRoot, receipt.runId);
+			const reader = taskByKey(state, "reader");
+			expect(reader.status).toBe("failed");
+			expect(executionOf(state, reader).terminal).toMatchObject({
+				outcome: "failed",
+				evidence: {
+					kind: "workflow",
+					stage: "preflight",
+					message:
+						"Workflow task workspace start input carries no hand-off commit.",
+				},
+			});
+			// Only the writer was ever preflighted.
+			expect(delegated.preflight).toHaveBeenCalledOnce();
+		} finally {
 			await shutdownQuietly(service);
 		}
 	});

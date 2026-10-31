@@ -696,7 +696,16 @@ export class WorkflowTaskMaterializer {
 			request.outputSchema,
 			"agent task output schema",
 		);
-		const workspace: WorkspaceAuthoringRequest = request.workspace;
+		// An explicit `startAtInput: undefined` is the same request as none, so it
+		// must not reach the spec or its identity; any other key stays and is
+		// refused by the schema below.
+		const { startAtInput: authoredStartAt, ...authoredWorkspace } =
+			request.workspace;
+		const workspace = (
+			authoredStartAt === undefined
+				? authoredWorkspace
+				: { ...authoredWorkspace, startAtInput: authoredStartAt }
+		) as WorkspaceAuthoringRequest;
 		// Before the request is assembled: a `modelRole` becomes an exact model
 		// here, so nothing downstream — validation, the spec, the identity hash —
 		// can tell a routed declaration from a hand-written one.
@@ -754,6 +763,15 @@ export class WorkflowTaskMaterializer {
 		) {
 			throw new WorkflowMaterializationError(
 				"handoff policy requires a worktree workspace",
+			);
+		}
+		const startAtInput = agentRequest.workspace.startAtInput;
+		if (
+			startAtInput !== undefined &&
+			inputs[startAtInput]?.output !== "handoff"
+		) {
+			throw new WorkflowMaterializationError(
+				"workspace startAtInput must name one of the task's handoff inputs",
 			);
 		}
 		if (
