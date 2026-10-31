@@ -437,6 +437,14 @@ An in-memory-only successful drive does not satisfy the first slice.
   handoff input as `workspace.startAtInput` is sent pi-subagent
   `workspace.startAt` with that hand-off's imported commit, and fails before
   preflight by name when the producer captured none;
+- a continuation (`continueFrom`) is refused at declaration unless it names a
+  handoff input of a task that launched its own run and declares that
+  producer's plan fields; it is never preflighted: the launcher persists
+  `task-execution-continue-intended`, calls pi-subagent
+  `resume(runId, { continueFromHandoff: true, message })`, adopts a receipt
+  naming another attempt of the same run, and fails at stage `launch` by name
+  otherwise; a continuation that changed nothing settles, imports and exports
+  the producer's hand-off;
 - the materializer rejects `handoff` on a read-only request, a worktree
   request without a positive `workspaceWriteBytes`, and a handoff input whose
   producer is not a worktree agent task, with the fixed messages, and the

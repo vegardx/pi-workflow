@@ -186,6 +186,10 @@ byte-prefix parse cache and the resume-from-last-reduction keep the total to
 
 ### What this means for `loopUntil` and for `verifyAndFix`
 
+> 5.0.0 removed `verifyAndFix` and its fix rounds: the implementer is resumed
+> once in its own session instead. The measurement below stands as the record
+> of why a bounded loop was the most a replayed source could afford.
+
 Projecting the two laws over `maxFixRounds` on the 4-deliverable plan (each
 extra round adds 2 barriers and 2 tasks per deliverable, ≈ 8 barriers and
 126 journal records overall):

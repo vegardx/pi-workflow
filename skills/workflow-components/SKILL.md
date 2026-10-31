@@ -37,39 +37,31 @@ A graph that breaks one of these is a replay bug, not a style problem.
 | `envelope(stage)` | `meta.budget` + per-task `limits`/`thinking` | pure table keyed by `stage` alone | an unknown stage name |
 | `forEach(ctx, ns, items, {idOf, task, disposition?})` | `ctx.fanOut` | `key(item) = idOf(item)` | >64 items; a duplicate id; an `idOf` reading an optional field; a budget over-projection |
 | `reviewFanOut(ctx, ns, lenses, {subject, synthesis, diversity})` | `ctx.fanOut` (`optional`) + `ctx.settled` + optional `ctx.fanIn` | `key = lens.id`; duplicates take `-2`, `-3` **by declaration ordinal** | >16 lenses |
-| `verifyAndFix(ctx, ns, {implementation, check, model, maxRounds, verify, agent})` | a fixed bounded loop of `ctx.agent` + `ctx.result` | flat keys `<ns>-verify-<n>` / `<ns>-fix-<n>`, `n` from 1 | `maxRounds` outside `0..MAX_VERIFY_ROUNDS`; a `model` that is neither an exact `{provider, id, thinking}` nor `"inherit"`; a worst-case budget the run cannot admit |
-| `synthesizeFindings(ctx, key, {reviews, model, synthesize})` | `ctx.fanIn` over the lenses that REPORTED (`optional`) | key literal; each input is named by its lens key | a missing `synthesize`; a bad `model`; a declaration naming `outputSchema`, `inputs`, `model` or `limits`. Returns `undefined` when no lens reported |
-| `fixFindings(ctx, key, {implementation, findings, synthesis, model, remainingRounds, agent})` | one `ctx.agent` in a worktree, `handoff: "required"` | key literal | an `implementation` that is not a worktree handle; a bad `model`; a negative `remainingRounds`; a fixer that is not a worktree task or declares `outputSchema`/`model`/`limits`/`handoff`; an input name it already wires |
+| `verifyHandoff(ctx, key, {handoff, check, model, request})` | one `ctx.agent` at the hand-off (`startAtInput`), no barrier | key literal; a second check takes a second key | a blank `check.command`; a subject that is not a worktree handle; a bad `model`; a request naming `outputSchema`, `model`, `limits`, the `patch` input, or another workspace start; a budget the run cannot admit |
+| `reviewLenses(ctx, ns, lenses, {subject, review, model?})` | `ctx.fanOut` (`optional`, read-only at the subject's one hand-off) + `ctx.settled` | `key = lens.id`, `-2`, `-3` by ordinal | >16 lenses; a lens with no exact model; a subject without exactly one hand-off; a lens that is not read-only |
 
-`synthesizeFindings` declares the reducer `optional` by default, because a
-barrier's control edge covers every lens it closed over and a half-dead fan-out
-would otherwise fail the run. A caller whose FIXER depends on the normalized
-list passes `disposition: "required"` and accepts that cost: an optional reducer
-makes a synthesis that failed look like a deliverable nobody had to fix.
-`plan-to-ship` passes `"required"`.
+A verifier verifies and never fixes; `checkRan: false` is unverified, never
+green, and nothing to fix. The agent that wrote the change answers the report
+in its own session (an agent task with `continueFrom`), and a second
+`verifyHandoff` checks what it handed back.
 
-`maxRounds` counts **verify** rounds, so at most `maxRounds - 1` fixers run and
-a fix is never left unchecked. Every verifier and every fixer runs at the ONE
-`model` the caller declared: there is no effort ladder and no escalation, because
-a fixer is a retry of an implementer and what it needs is the implementer's model.
-`checkRan: false` escalates to a human and never counts as green.
+The review record is pure functions over barrier values, and the harness that
+runs them **merges without judging**:
 
-`synthesizeFindings` + `fixFindings` are the "review, then fix" pair, and they
-are the reason `reviewFanOut` may be asked for `synthesis: "none"`. The
-synthesis returns STRUCTURE, not prose — one de-duplicated list of
-`{id, severity, lens, where, summary, suggestion?}` plus a one-paragraph
-`verdict` — because an agent, not only a person, reads it next. `fixFindings`
-declares a fixer only when a finding is `blocking` or `major` **and**
-`remainingRounds` is positive; otherwise it returns `skipped` with the reason,
-which is how one shared fix-round pool bounds a deliverable's total fixers.
-Nothing re-reviews a fixed patch: the fix report is the evidence.
+| Function | Does |
+| --- | --- |
+| `clusterFindings(reviewers)` | one lens's findings at one place (same file, lines within ±2 of the first, or both file-level) become one cluster `c1..cn`, in location order |
+| `normalizeCandidates(reviewers, clusters)` | what a merge-only model is offered, or `undefined` with fewer than two reporting lenses or one lens's clusters only |
+| `applyModelMerges(clusters, reviewers, answer)` | applies `{merges: [[id, id, …]]}` or refuses it whole: an unknown or repeated id, a group of one, any other field |
+| `implementerView(clusters, reviewers)` | `{items: [{id, claim, location, evidence}]}` by file then line — no severity, lens, model, agreement or suggestion |
+| `checkResumeReport(view, report)` | every shown id exactly once, in a `resumeReportSchema` answer |
+| `reviewerEntries`, `withDispositions`, `reviewCounts` | the `ReviewsRecordSchema` record's rows, its dispositions, and the counts a gate states |
 
 | Field | Values |
 | --- | --- |
-| `FindingSynthesisSchema.findings[]` | `{id, severity: blocking\|major\|minor, lens (≤128), where (≤512), summary (≤2048), suggestion? (≤2048)}`, ≤64 |
-| `FindingSynthesisSchema.verdict` | ≤8192, one paragraph for a person |
-| `FindingFixReportSchema.findings[]` | `{id, outcome: addressed\|out-of-scope, note?}` or `{id, outcome: disputed, note}` — a dispute with no note is refused by the schema |
-| `FindingFixReportSchema.checkPassed` | the project's check after the edits |
+| `LensReportSchema.findings[]` | `{claim (≤1024), location: {file (≤512), line?}, evidence (≤4096), severity: high\|medium\|low, suggestion? (≤2048)}`, ≤64 |
+| `ReviewsRecordSchema` | `{deliverable, handoffCommit, reviewers: [{reviewerKey, lens, model, thinking?, attemptId?, status, findings}], clusters: [{id, claim, location, severity, reportedBy, agreement: {count, of}, suggestions, raw, disposition?}], normalizer: {mode, model?, promptDigest?}}` |
+| a disposition | `{kind: fixed\|declined\|out-of-scope, reasoning (≤2048)}` |
 
 Deferred, on purpose: `sequence` (`ctx.pipeline` is one line), `branch`,
 `retrying`, `loopUntil`, `mapReduce`, `dynamicStage`, `subWorkflow`.
@@ -132,17 +124,18 @@ deliverable's `reviews` list and the plan's `policy`.
 | `use` | Fields |
 | --- | --- |
 | `implement` | `id`, `tools?` |
-| `verify-and-fix` | `id`, `maxRounds` (0–3 **verify** rounds = plan fix rounds + 1) |
-| `review-fan-out` | `id`, `lenses` (≤16 of `{id, tier?, diverse?, skill?, model?}`), `synthesis?` |
-| `synthesis` | `id` — a STRUCTURED normalization of the fan-out's findings, which is not the same thing as `review-fan-out`'s own prose `synthesis` field |
-| `fix` | `id`, `maxRounds` (0–2 **fix** rounds: the deliverable's whole shared pool, which `verify-and-fix` draws from too) |
+| `check` | `id` — `check`, or `recheck` for the check after a resume |
+| `review-fan-out` | `id`, `lenses` (≤16 of `{id, tier?, diverse?, skill?, model?}`) |
+| `normalize` | `id` — the harness's clustering and the merge-only model call |
+| `resume` | `id` — the implementer answering the check and the review |
 | `gate` | `id`, `question`, `show?` |
 
 `dynamic` and `sub-workflow` cannot appear: the plan has no stage vocabulary to
 name them with, and the second does not exist. Nor does a `gate`, in practice:
 `gates` alone says where a person is asked, so `plan-to-ship` derives
-`implement`, `verify-and-fix` and — only when the deliverable's `reviews` list
-is non-empty — `review-fan-out`, `synthesis` and `fix`, and nothing else.
+`implement` and `check`, then — only when the deliverable's `reviews` list is
+non-empty — `review-fan-out` and `normalize`, then — under `policy.resumes: 1`
+— `resume` and the `recheck` `check`, and nothing else.
 
 ## Builtin workflows assembled from the library
 
