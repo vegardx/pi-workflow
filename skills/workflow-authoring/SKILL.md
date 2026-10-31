@@ -1032,6 +1032,28 @@ re-prompt. Ask for findings in the reviewer's own prose too: an agent told to
 "report findings, not prose" fills the schema; one told to "review carefully"
 writes an essay into `what`.
 
+### Reviewers report, the harness clusters, the implementer answers
+
+| | |
+| --- | --- |
+| Intent | Let every reviewer report standardized findings, merge them WITHOUT judging, and hand the implementer a de-biased view it answers item by item — so a person reads attribution, agreement and a disposition for every finding. |
+| Lowers to | nothing. `LensReportSchema`, `ReviewsRecordSchema`, `ImplementerViewSchema`, `clusterFindings`, `normalizeCandidates`, `applyModelMerges`, `implementerView`, `resumeReportSchema`, `checkDispositions` and `withDispositions` are pure functions over JSON values. |
+| Keying | cluster ids are `c1..cn` in location order (file, then line, a file-level finding first); a merged cluster keeps its first reporter's id. |
+| Replay laws | law 2: every input is a value a barrier already returned. Attribution — lens, model, thinking, attempt — is stamped from the launch the workflow declared, never from a model's words. |
+| Refuses | a reported finding with no attempt to attribute it to; a normalize answer that names an unknown or repeated cluster, a group of one, or anything besides `merges` (the deterministic clusters stand); dispositions that skip, repeat or invent an item. |
+| Budget | none. |
+| Hand-write when | never for a review an implementer answers: a bespoke shape is an attribution nobody can audit. |
+
+A lens reports `{findings: [{claim, location: {file, line?}, evidence,
+severity: high | medium | low, suggestion?}]}` and nothing else — no verdict.
+The deterministic merge joins findings of the SAME lens at the same place
+(same file, lines within ±2 of the cluster's first finding, or both
+file-level); whether two lenses saw the same thing is a semantic question,
+and only a normalize model may answer it, and only by merging. The resumed
+implementer sees `{items: [{id, claim, location, evidence}]}` ordered by
+file then line: severity, lens, model, agreement and suggestion are withheld
+so it answers the finding, not its reporter.
+
 ### A bounded loop with a barrier per round
 
 | | |
