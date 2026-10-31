@@ -6,12 +6,12 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
-## Unreleased
+## 3.0.0
 
-The next release is the major 3.0.0: run state moves out of the project and
+Major release: run state moves out of the project and
 `WORKFLOW_CONTRACT_REVISION` becomes 22, which under the persisted-state rule
 in [docs/contracts.md](docs/contracts.md#public-api-and-stability) is what
-makes it a major. Everything else since 2.0.0 is additive: two new entry
+makes it a major, and the Pi peers move to `>=1.4.0 <2`. Everything else since 2.0.0 is additive: two new entry
 points — a component library and a service-provider seam — two more builtin
 workflows built out of the first, two short reference skills, a model-routing
 port the host installs, a lease-free read of a settled run's output and of a
@@ -20,8 +20,9 @@ what a run is doing, and a support-task wiring fix in the extension. One frozen
 shape is retyped — `list()` now returns a listing with the definitions that
 loaded and the files that did not — and otherwise no frozen export, shape or
 message was removed or retyped and no returned union was widened; the required
-pi-subagent contract moves to revision 9, pinned to `0.15.0` for the delegation
-ceiling and the session-model inherit request. The builtin
+pi-subagent contract moves to revision 9 for the delegation ceiling and the
+session-model inherit request, pinned to `0.16.0`, the pi-subagent release on
+Pi 1.4. The builtin
 `plan-to-ship`'s gate vocabulary does change, its per-deliverable stage list now
 reviews, normalizes and then FIXES, the compiled stage document moves with both,
 and the `plan-review` builtin and `runBuiltin` are removed outright — all over
@@ -32,6 +33,21 @@ session's model a run inherited.
 
 ### Breaking
 
+- **Pi 1.4 is required.** The `@earendil-works/pi-coding-agent` and
+  `@earendil-works/pi-tui` peers move from `>=0.85.0 <0.86` to `>=1.4.0 <2`; a
+  host on Pi 0.x must stay on 2.x. `@earendil-works/pi-server` is no longer a
+  peer: Pi 1.2.0 removed it and nothing here imported it. No source change was
+  needed: the extension registers no `before_agent_start`, `turn_end` or
+  `agent_settled` handler, sends no session messages, and its tools throw
+  rather than return `isError` results, so none of Pi's 0.86-1.4 behavioural
+  changes reach it. Pi's sessions-directory key, which the run-state root
+  mirrors, is unchanged.
+- **`@vegardx/pi-subagent` `0.16.0` (exact) is required**, up from `0.15.0`.
+  0.16.0 is pi-subagent on Pi 1.4; its contract stays at revision 9 with the
+  same features, so `REQUIRED_SUBAGENT_CONTRACT` and the revision do not move.
+- **macOS arm64 is not yet re-qualified on Pi 1.4.** The host record stays
+  `qualified` against Pi 0.85.0, which this release no longer supports; a host
+  run on Pi 1.4.0 is pending ([docs/compatibility.md](docs/compatibility.md)).
 - **The effort dial is gone; models are set per role.** `cheap | standard | deep`
   decided every model, thinking level, limit, budget share, fix-round default,
   worktree memory grant and gate timeout in the package. It is removed, and a

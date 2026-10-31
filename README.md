@@ -12,10 +12,11 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 2.0.0; runtime contract revision 21 with the feature flags
-`checkpoints: true` and `dynamicWorkflows: true` alongside the earlier flags,
-and it requires pi-subagent contract revision 7 (`handoffExport: true`,
-`vmMemoryCeiling: true`, `workspaceBudgetRefusal: true`). The
+views. Version 3.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 22 with
+the feature flags `checkpoints: true` and `dynamicWorkflows: true` alongside
+the earlier flags, and it requires pi-subagent 0.16.0, contract revision 9
+(`handoffExport: true`, `vmMemoryCeiling: true`,
+`workspaceBudgetRefusal: true` among its required features). The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
 of the operator surface; a Pi tool for handoff export remains unavailable.
 
@@ -78,10 +79,10 @@ it adds the optional `WorkflowServiceOptions.registeredRoots` and the
 package's own builtin workflow root, and changes nothing frozen. 2.0.0 is a
 major for one reason only: contract revision 19 cannot read revision-18
 persisted runs, and there is no migration. Its one schema change is additive
-(the optional agent-task `memoryBytes`). The unreleased release is a major for
-the same reason: contract revision 21 cannot read revision-20 persisted runs,
-and it reads them from a different place (see
-[Where state lives](#where-state-lives)).
+(the optional agent-task `memoryBytes`). 3.0.0 is a major for the same
+reason: contract revision 20 cannot read revision-19 persisted runs, and it
+reads them from a different place (see
+[Where state lives](#where-state-lives)); it also requires Pi 1.4.
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:
