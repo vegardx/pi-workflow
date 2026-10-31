@@ -6,6 +6,7 @@ import * as addFormatsModule from "ajv-formats";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { WorkflowArtifactStore } from "./artifact-store.js";
+import { currentSubagentAttemptId } from "./attempts.js";
 import {
 	CHECKPOINT_RUN_ENDING_REASON,
 	cancelOpenWorkflowCheckpoints,
@@ -34,6 +35,7 @@ import {
 	isWorkflowDefinition,
 	type NestedWorkflowRequest,
 	type PipelineStage,
+	type SettledTaskAttempt,
 	type SettledTaskResult,
 	type TaskHandle,
 	validateJsonSchemaDocument,
@@ -43,6 +45,7 @@ import {
 	type WorktreeTaskHandle,
 } from "./definition.js";
 import type {
+	TaskExecutionProjection,
 	WorkflowRunOrigin,
 	WorkflowStateProjection,
 	WorkflowTaskProjection,
@@ -309,6 +312,23 @@ export class StaticWorkflowRuntimeError extends Error {
 		super(message, options);
 		this.name = "StaticWorkflowRuntimeError";
 	}
+}
+
+/**
+ * The pi-subagent run and attempt an agent execution settled under, from the
+ * journal; nothing for an execution that never launched a child.
+ */
+function settledAttempt(
+	execution: TaskExecutionProjection | undefined,
+): SettledTaskAttempt | undefined {
+	const subagentRunId = execution?.launchReceipt?.subagentRunId;
+	const subagentAttemptId = execution
+		? currentSubagentAttemptId(execution)
+		: undefined;
+	if (subagentRunId === undefined || subagentAttemptId === undefined) {
+		return undefined;
+	}
+	return Object.freeze({ subagentRunId, subagentAttemptId });
 }
 
 /** The runtime decides worktree handling from the materialized spec only. */
@@ -1492,10 +1512,16 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 					return Promise.all(
 						tasks.map(async (task) => {
 							const projected = current.tasks[task.ref.taskId];
+							const attempt = settledAttempt(
+								projected?.currentExecutionId
+									? current.executions[projected.currentExecutionId]
+									: undefined,
+							);
 							if (projected?.status === "completed") {
 								return Object.freeze({
 									status: "fulfilled" as const,
 									value: await loadTaskResult(task.ref.taskId),
+									...(attempt ? { attempt } : {}),
 								});
 							}
 							if (!projected) throw new Error("settled task disappeared");
@@ -1529,6 +1555,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 								taskId: task.ref.taskId,
 								outcome: projected.status,
 								...(failure ? { failure: Object.freeze(failure) } : {}),
+								...(attempt ? { attempt } : {}),
 							});
 						}),
 					) as Promise<{

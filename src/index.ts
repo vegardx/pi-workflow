@@ -174,6 +174,7 @@ export {
 	type NestedWorkflowRequest,
 	type PipelineStage,
 	resolveWorkflowNeeds,
+	type SettledTaskAttempt,
 	type SettledTaskFailure,
 	type SettledTaskResult,
 	type TaskHandle,

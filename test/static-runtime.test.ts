@@ -1307,6 +1307,7 @@ describe("static workflow runtime", () => {
 
 	it("returns declaration-ordered fulfilled settled results", async () => {
 		const { journal, artifacts } = await fixture();
+		const attempts: unknown[] = [];
 		const definition = defineWorkflow({
 			meta: {
 				name: "settled",
@@ -1330,6 +1331,7 @@ describe("static workflow runtime", () => {
 					},
 				);
 				const outcomes = await ctx.settled(tasks);
+				attempts.push(...outcomes.map((outcome) => outcome.attempt));
 				return {
 					values: outcomes.map((outcome) =>
 						outcome.status === "fulfilled" ? outcome.value.answer : "rejected",
@@ -1362,6 +1364,12 @@ describe("static workflow runtime", () => {
 		expect(
 			Object.values(state.tasks).map((task) => task.task.namespace),
 		).toEqual([["items"], ["items"]]);
+		// Attribution comes from the journal: the run and attempt each child
+		// settled under, never a field the child wrote.
+		expect(attempts.slice(-2)).toEqual([
+			{ subagentRunId: "run_first", subagentAttemptId: "attempt_first" },
+			{ subagentRunId: "run_second", subagentAttemptId: "attempt_second" },
+		]);
 	});
 
 	it("materializes a namespace-scoped pipeline with explicit artifact flow", async () => {
