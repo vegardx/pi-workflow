@@ -72,7 +72,7 @@ function firstLineObjectId(content: Buffer): string | undefined {
 
 /**
  * Replay identity of a completed worktree task (spec 5, D8): the current
- * execution was preflighted as a worktree, and either recorded a handoff
+ * execution was preflighted as a worktree (or continued one), and either recorded a handoff
  * absence under the optional policy, or imported a handoff artifact that is
  * declared for this execution, reads through the store with its digest and
  * patch shape intact, names the imported commit on its first line, and whose
@@ -100,7 +100,12 @@ export async function verifyWorkflowHandoffEvidence(
 	) {
 		throw new WorkflowHandoffVerificationError("no-current-execution");
 	}
-	if (execution.preflight?.workspaceMode !== "worktree") {
+	// A continuation has no preflight of its own: it is an attempt of its
+	// producer's worktree run, and its continue intent is the proof.
+	if (
+		execution.preflight?.workspaceMode !== "worktree" &&
+		execution.continueIntent === undefined
+	) {
 		throw new WorkflowHandoffVerificationError("preflight-not-worktree");
 	}
 	const settlement = execution.settlement;

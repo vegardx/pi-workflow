@@ -379,6 +379,18 @@ export interface AgentTaskAuthoringRequest<
 	readonly limits: RunLimits;
 	readonly retry?: AgentRetryPolicyRequest;
 	readonly resume?: AgentResumePolicyRequest;
+	/**
+	 * Run as the next attempt of another task's child run: the name of one of
+	 * this task's handoff `inputs`. pi-subagent resumes the producer's session
+	 * in a worktree at the run's latest hand-off and sends this task, rendered,
+	 * as one user message. The child reruns the producer's own launch plan, so
+	 * the agent, model, tools, skills, context scopes, workspace, memory and
+	 * limits must equal the producer's; `outputSchema` may only narrow what the
+	 * producer's schema admits, because the child validates against that one
+	 * and the workflow against this one. The task's handoff is the run's latest
+	 * export, which is the producer's when the continuation changed nothing.
+	 */
+	readonly continueFrom?: TaskKey;
 	readonly disposition?: TaskDisposition;
 	readonly after?: readonly TaskRef[];
 	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;

@@ -2238,7 +2238,7 @@ describe("plan-to-ship: models per role", () => {
 			run.runId,
 		);
 		expect(record.sessionModel).toEqual(SESSION_MODEL);
-		expect(record.contractRevision).toBe(23);
+		expect(record.contractRevision).toBe(24);
 	});
 
 	it("refuses the start by name when the host has no session model", async () => {

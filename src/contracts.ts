@@ -97,6 +97,13 @@ export const AgentTaskRequestSchema = Type.Object(
 		limits: RunLimitsSchema,
 		retry: Type.Optional(AgentRetryPolicySchema),
 		resume: Type.Optional(AgentResumePolicySchema),
+		/**
+		 * Revision 24: the name of one of the task's handoff `inputs` whose
+		 * producer's child run this task CONTINUES. The launcher resumes that
+		 * run at its latest hand-off with this task's rendered message instead
+		 * of launching a new child (`src/continuation.ts`).
+		 */
+		continueFrom: Type.Optional(TaskKeySchema),
 	},
 	{ additionalProperties: false },
 );

@@ -458,11 +458,10 @@ export function createWorkflowTaskFinalizer(
 	}
 
 	/**
-	 * Exports the current attempt's handoff from pi-subagent and proves it is
+	 * Exports the run's latest handoff from pi-subagent and proves it is
 	 * the settled handoff before any byte reaches the workflow store.
 	 */
 	async function exportVerifiedHandoff(
-		execution: SettledExecution,
 		settled: SubagentHandoffEvidence,
 		child: RunReceipt,
 	): Promise<{ ref: HandoffRef; content: Buffer }> {
@@ -490,10 +489,11 @@ export function createWorkflowTaskFinalizer(
 		}
 		const ref = candidate.ref;
 		const content = candidate.content;
-		const attemptId = currentSubagentAttemptId(execution);
+		// The settled hand-off names the attempt that captured it: the current
+		// one, or - for a continuation that changed nothing - its producer's,
+		// which the settlement already proved.
 		if (
 			ref.runId !== child.runId ||
-			ref.attemptId !== attemptId ||
 			ref.attemptId !== settled.attemptId ||
 			ref.baselineHead !== settled.baselineHead ||
 			ref.handoffCommit !== settled.handoffCommit ||
@@ -561,7 +561,7 @@ export function createWorkflowTaskFinalizer(
 				throw handoffImportError(HANDOFF_ARTIFACT_MISSING_MESSAGE);
 			}
 		} else {
-			const exported = await exportVerifiedHandoff(execution, settled, child);
+			const exported = await exportVerifiedHandoff(settled, child);
 			ref = await artifacts.putBytes(exported.content, {
 				runId: journal.runId,
 				producerTaskId: task.task.id,
@@ -589,7 +589,7 @@ export function createWorkflowTaskFinalizer(
 				data: {
 					executionId: execution.execution.id,
 					subagentRunId: child.runId,
-					subagentAttemptId: child.attemptId,
+					subagentAttemptId: settled.attemptId,
 					artifactId: ref.id,
 					handoffCommit: settled.handoffCommit,
 					baselineHead: settled.baselineHead,

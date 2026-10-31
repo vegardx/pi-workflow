@@ -279,7 +279,7 @@ source identity. The `@vegardx/pi-workflow/components` subpath is an allowed
 import (trusted package code, the same trade the root import makes); the
 `@vegardx/pi-workflow/runtime` subpath is not: the gate matches specifiers
 exactly, so a definition that imports it fails with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 23". A support implementation is identified by its registered
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 24". A support implementation is identified by its registered
 explicit implementation digest, not by tracing its dependency graph.
 Multi-file definition provenance remains future work. The same import gate,
 with the same messages, applies to dynamic workflow source proposed through
@@ -758,7 +758,7 @@ the same validation messages (`DYNAMIC_CONTEXT_PROPERTIES` = `cwd`, `input`,
 `runId`, `signal`; `DYNAMIC_CONTEXT_METHODS` = `agent`, `checkpoint`,
 `fanIn`, `fanOut`, `finalize`, `handoff`, `log`, `phase`, `pipeline`,
 `result`, `results`, `settled`, `support`, `workflow`, and nothing more).
-`ctx.artifact` is not available in revision 23 on either frontend. In the VM
+`ctx.artifact` is not available in revision 24 on either frontend. In the VM
 declarations are synchronous RPC calls answered by the static-runtime context
 and barriers are asynchronous replies; see [Dynamic workflows](#dynamic-workflows).
 
@@ -857,7 +857,7 @@ interface MaterializedTask {
 }
 ```
 
-`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 23;
+`kind` is `"agent" | "support" | "workflow" | "checkpoint"` in revision 24;
 a checkpoint task (`ctx.checkpoint`) lowers to `CheckpointTaskSpec`, whose
 `request` is the `CheckpointTaskRequest` described in
 [Checkpoints](#checkpoints). `role` is `"task"` for every ordinary
@@ -1305,6 +1305,39 @@ other plan mismatch ("workspace start"). `verifyAndFix` starts verify-n and
 fix-n at `patch`, `fixFindings` its fixer at its patch input, and
 `reviewFanOut` every lens at the subject's one handoff input (a subject with
 two is refused).
+
+A task CONTINUES another task's child run through `request.continueFrom`
+(revision 24): the name of one of its own handoff `inputs`, refused at
+declaration otherwise ("continueFrom must name one of the task's handoff
+inputs"). The producer must have launched its own run ("continueFrom must name
+a task that launched its own child run"). pi-subagent reruns the producer's
+launch plan, so the continuation must declare the producer's agent, model,
+tools, skills, context scopes, workspace (without `startAtInput`), memory and
+limits, and no retry or resume policy; its `outputSchema` may only narrow the
+producer's, because the child validates against the producer's and the
+workflow imports against the continuation's. Its rendered task — goal, context,
+instructions (`renderContinuationMessage`) — is the one user message of the
+continued session and must fit `MAX_RESUME_MESSAGE_BYTES` (64 KiB); its inputs
+are data and order dependencies and are not projected into that message.
+
+A continuation has no preflight. The launcher verifies the producer's imported
+handoff (failing at stage `preflight` with "Workflow continuation names no
+producer run with a hand-off to resume." or "Workflow continuation hand-off
+could not be verified."), persists `task-execution-continue-intended`
+`{ operationId, subagentRunId, previousAttemptId }` (phase
+`continue-intended`), and calls pi-subagent
+`resume(subagentRunId, { continueFromHandoff: true, message })` (feature
+`resumeAtHandoff`). A receipt naming the same run and another attempt is
+persisted as the launch receipt; the reducer lets a continuation share its
+producer's run, and no other. A call that returns no receipt is reconciled
+through the producer's launch operation: a current attempt other than
+`previousAttemptId` is adopted, anything else fails the task at stage `launch`
+with "Subagent did not resume the producer's run at its hand-off." — the same
+on restart from `continue-intended`. The continuation then waits, settles,
+imports and releases like any agent task. Its hand-off is the run's latest
+export: when the continued attempt changed nothing, pi-subagent carries the
+producer's hand-off, and the settlement, the import and the export may name the
+producer's attempt and commit — that one, and no other.
 
 Retry and resume attempts on a worktree child follow the rules in the next
 section: same execution, same generation, no new preflight. pi-subagent
@@ -2475,10 +2508,10 @@ this order, each a `WorkflowServiceError` (code in brackets):
    UTF-8." (a lone surrogate or a NUL byte) [validation];
 3. the import gate of static definitions with its messages verbatim
    ("workflow import <specifier> is not identity-bound by contract revision
-   23", "dynamic workflow imports are not supported by contract revision 23",
+   24", "dynamic workflow imports are not supported by contract revision 24",
    "dynamic imports and CommonJS require are not supported by contract
-   revision 23", "TypeScript import assignment is not supported by contract
-   revision 23", "workflow definition syntax is invalid"); the allow-list is
+   revision 24", "TypeScript import assignment is not supported by contract
+   revision 24", "workflow definition syntax is invalid"); the allow-list is
    `@vegardx/pi-workflow`, `typebox`, and the module specifiers of the
    registered support tasks [validation];
 4. the dynamic-only rules: "dynamic workflow source may not use import.meta"

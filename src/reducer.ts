@@ -439,6 +439,47 @@ function agentTaskSpec(
 	return spec;
 }
 
+/**
+ * The producer execution a continuation resumes: the current execution of the
+ * task its `continueFrom` input names. Undefined for any other task.
+ */
+function continuedProducer(
+	state: WorkflowStateProjection,
+	projection: AgentExecutionProjection,
+	sequence: number,
+): TaskExecutionProjection | undefined {
+	const spec = agentTaskSpec(state, projection, sequence);
+	const name = spec.request.continueFrom;
+	if (name === undefined) return undefined;
+	const input = spec.inputs[name];
+	const producerTask =
+		input === undefined ? undefined : state.tasks[input.producerTaskId];
+	const executionId = producerTask?.currentExecutionId;
+	return executionId === undefined ? undefined : state.executions[executionId];
+}
+
+/**
+ * A continuation that changed nothing settles carrying the hand-off its run
+ * already had: the producer's imported one, named by the producer's attempt.
+ */
+function carriesContinuedHandoff(
+	state: WorkflowStateProjection,
+	projection: AgentExecutionProjection,
+	handoff: { readonly attemptId: string; readonly handoffCommit?: string },
+	sequence: number,
+): boolean {
+	const imported = continuedProducer(
+		state,
+		projection,
+		sequence,
+	)?.handoffImport;
+	return (
+		imported !== undefined &&
+		handoff.attemptId === imported.subagentAttemptId &&
+		handoff.handoffCommit === imported.handoffCommit
+	);
+}
+
 function receiptedAttempts(
 	projection: TaskExecutionProjection,
 	kind?: "retry" | "resume",
@@ -1194,6 +1235,31 @@ function applyEvent(
 			projection.phase = "launch-intended";
 			break;
 		}
+		case "task-execution-continue-intended": {
+			const projection = agentExecutionProjection(
+				state,
+				input.data.executionId,
+				event.sequence,
+			);
+			const producer = continuedProducer(state, projection, event.sequence);
+			const producerRunId = producer?.launchReceipt?.subagentRunId;
+			if (
+				projection.phase !== "created" ||
+				!producer ||
+				input.data.operationId !== projection.execution.operationId ||
+				input.data.subagentRunId !== producerRunId ||
+				producer.handoffImport === undefined
+			) {
+				fail("task execution continue intent is out of order", event.sequence);
+			}
+			const { executionId: _executionId, ...continueIntent } = input.data;
+			projection.continueIntent = {
+				...continueIntent,
+				sequence: event.sequence,
+			};
+			projection.phase = "continue-intended";
+			break;
+		}
 		case "task-execution-launch-uncertain": {
 			const projection = agentExecutionProjection(
 				state,
@@ -1237,7 +1303,29 @@ function applyEvent(
 				input.data.executionId,
 				event.sequence,
 			);
-			if (
+			const continueIntent = projection.continueIntent;
+			if (projection.phase === "continue-intended") {
+				// A continuation shares its producer's child run, and only that
+				// one: the receipt names the run the intent named and a new
+				// attempt of it.
+				const producer = continuedProducer(state, projection, event.sequence);
+				if (
+					!continueIntent ||
+					!producer ||
+					input.data.operationId !== projection.execution.operationId ||
+					input.data.subagentRunId !== continueIntent.subagentRunId ||
+					input.data.subagentAttemptId === continueIntent.previousAttemptId ||
+					Object.values(state.executions).some(
+						(candidate) =>
+							candidate.execution.id !== projection.execution.id &&
+							candidate.execution.id !== producer.execution.id &&
+							candidate.launchReceipt?.subagentRunId ===
+								input.data.subagentRunId,
+					)
+				) {
+					fail("task execution launch receipt is out of order", event.sequence);
+				}
+			} else if (
 				(projection.phase !== "launch-intended" &&
 					projection.phase !== "launch-uncertain") ||
 				input.data.operationId !== projection.execution.operationId ||
@@ -1338,7 +1426,13 @@ function applyEvent(
 					fail("read-only task settlement carries a handoff", event.sequence);
 				}
 				if (
-					evidence.handoff.attemptId !== currentSubagentAttemptId(projection)
+					evidence.handoff.attemptId !== currentSubagentAttemptId(projection) &&
+					!carriesContinuedHandoff(
+						state,
+						projection,
+						evidence.handoff,
+						event.sequence,
+					)
 				) {
 					fail("settlement handoff names another attempt", event.sequence);
 				}
@@ -1691,7 +1785,17 @@ function applyEvent(
 				!settlement ||
 				observation.status !== "completed" ||
 				input.data.subagentRunId !== receipt.subagentRunId ||
-				input.data.subagentAttemptId !== currentSubagentAttemptId(projection)
+				(input.data.subagentAttemptId !==
+					currentSubagentAttemptId(projection) &&
+					!carriesContinuedHandoff(
+						state,
+						projection,
+						{
+							attemptId: input.data.subagentAttemptId,
+							handoffCommit: input.data.handoffCommit,
+						},
+						event.sequence,
+					))
 			) {
 				fail("task execution handoff import is invalid", event.sequence);
 			}
@@ -2614,7 +2718,8 @@ function applyEvent(
 						projection.phase !== "preflighted") ||
 					(evidence.stage === "launch" &&
 						projection.phase !== "preflighted" &&
-						projection.phase !== "launch-intended") ||
+						projection.phase !== "launch-intended" &&
+						projection.phase !== "continue-intended") ||
 					(evidence.stage === "reconciliation" &&
 						projection.phase !== "launch-absent") ||
 					(evidence.stage === "stop" &&

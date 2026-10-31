@@ -109,7 +109,7 @@ describe("workflow decision record schema", () => {
 		expect(WorkflowDecisionRecordSchema.properties.contractRevision.const).toBe(
 			WORKFLOW_CONTRACT_REVISION,
 		);
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(23);
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(24);
 		expect(WorkflowDecisionRecordSchema.properties.schema.const).toBe(
 			"pi-workflow-decision",
 		);
