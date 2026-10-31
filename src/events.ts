@@ -192,6 +192,28 @@ const TaskExecutionLaunchIntendedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * Revision 24: a continuation's intent to resume its producer's child run at
+ * the run's latest hand-off, persisted before `resume` is called. A receipt
+ * naming another attempt of the same run settles it as launched.
+ */
+const TaskExecutionContinueIntendedEventSchema = Type.Object(
+	{
+		type: Type.Literal("task-execution-continue-intended"),
+		data: Type.Object(
+			{
+				executionId: TaskExecutionIdSchema,
+				operationId: SubagentOperationIdSchema,
+				subagentRunId: SubagentRunIdSchema,
+				/** The run's attempt before the resume; the receipt must name another. */
+				previousAttemptId: SubagentAttemptIdSchema,
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskExecutionLaunchUncertainEventSchema = Type.Object(
 	{
 		type: Type.Literal("task-execution-launch-uncertain"),
@@ -661,6 +683,7 @@ export const WorkflowEventInputSchema = Type.Union([
 	TaskExecutionCreatedEventSchema,
 	TaskExecutionPreflightedEventSchema,
 	TaskExecutionLaunchIntendedEventSchema,
+	TaskExecutionContinueIntendedEventSchema,
 	TaskExecutionLaunchUncertainEventSchema,
 	TaskExecutionLaunchAbsentEventSchema,
 	TaskExecutionLaunchReceiptedEventSchema,
@@ -710,6 +733,7 @@ const TaskExecutionPhaseSchema = Type.Union([
 	Type.Literal("created"),
 	Type.Literal("preflighted"),
 	Type.Literal("launch-intended"),
+	Type.Literal("continue-intended"),
 	Type.Literal("launch-uncertain"),
 	Type.Literal("launch-absent"),
 	Type.Literal("launched"),
@@ -758,6 +782,16 @@ const SequencedLaunchIntentSchema = Type.Object(
 		operationId: SubagentOperationIdSchema,
 		preflightId: Type.String({ minLength: 1, maxLength: 128 }),
 		planIdentitySha256: Sha256Schema,
+		sequence: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+const SequencedContinueIntentSchema = Type.Object(
+	{
+		operationId: SubagentOperationIdSchema,
+		subagentRunId: SubagentRunIdSchema,
+		previousAttemptId: SubagentAttemptIdSchema,
 		sequence: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
@@ -990,6 +1024,7 @@ export const TaskExecutionProjectionSchema = Type.Object(
 		createdSequence: Type.Integer({ minimum: 1 }),
 		preflight: Type.Optional(SequencedPreflightSchema),
 		launchIntent: Type.Optional(SequencedLaunchIntentSchema),
+		continueIntent: Type.Optional(SequencedContinueIntentSchema),
 		launchUncertain: Type.Optional(SequencedLaunchUncertainSchema),
 		launchAbsent: Type.Optional(SequencedLaunchAbsentSchema),
 		launchReceipt: Type.Optional(SequencedLaunchReceiptSchema),

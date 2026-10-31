@@ -18,7 +18,11 @@ import {
 	validateWorkflowTaskContext,
 } from "./artifact-input.js";
 import { WorkflowArtifactStore } from "./artifact-store.js";
-import { currentSubagentAttempt } from "./attempts.js";
+import {
+	currentSubagentAttempt,
+	currentSubagentAttemptId,
+} from "./attempts.js";
+import { renderContinuationMessage } from "./continuation.js";
 import {
 	type MaterializedAgentTask,
 	type SubagentOperationId,
@@ -50,6 +54,16 @@ export const START_AT_HANDOFF_UNVERIFIED_MESSAGE =
 /** The referenced producer completed without capturing a hand-off commit. */
 export const START_AT_HANDOFF_ABSENT_MESSAGE =
 	"Workflow task workspace start input carries no hand-off commit.";
+
+/** The continuation's producer has no child run, attempt or hand-off to resume. */
+export const CONTINUE_PRODUCER_UNRESOLVED_MESSAGE =
+	"Workflow continuation names no producer run with a hand-off to resume.";
+/** The producer's hand-off could not be verified before the resume. */
+export const CONTINUE_HANDOFF_UNVERIFIED_MESSAGE =
+	"Workflow continuation hand-off could not be verified.";
+/** pi-subagent did not start a new attempt of the producer's run. */
+export const CONTINUE_REFUSED_MESSAGE =
+	"Subagent did not resume the producer's run at its hand-off.";
 
 class WorkflowStartAtError extends Error {
 	constructor(message: string, options?: ErrorOptions) {
@@ -656,6 +670,181 @@ export function createWorkflowTaskLauncher(
 		return { state: "absent", executionId: execution.execution.id };
 	}
 
+	/** The producer execution a continuation resumes, from durable state. */
+	function continuedProducer(
+		task: MaterializedAgentTask,
+		current: WorkflowStateProjection,
+	): TaskExecutionProjection | undefined {
+		const name = task.spec.request.continueFrom;
+		const input = name === undefined ? undefined : task.spec.inputs[name];
+		const producerTask =
+			input === undefined ? undefined : current.tasks[input.producerTaskId];
+		const executionId = producerTask?.currentExecutionId;
+		return executionId === undefined
+			? undefined
+			: current.executions[executionId];
+	}
+
+	async function failContinuation(
+		execution: TaskExecutionProjection,
+		stage: "preflight" | "launch",
+		message: string,
+		cause?: unknown,
+	): Promise<never> {
+		await terminalizeWorkflowFailure(journal, execution, stage, message);
+		throw new WorkflowTaskLaunchError(
+			stage,
+			message,
+			cause === undefined ? undefined : { cause },
+		);
+	}
+
+	/**
+	 * A resume whose call did not return a receipt may still have started the
+	 * attempt. The producer's launch operation maps to the run's current
+	 * receipt: an attempt other than the one before the resume is ours.
+	 */
+	async function reconcileContinuation(
+		execution: TaskExecutionProjection,
+		producer: TaskExecutionProjection,
+		cause?: unknown,
+	): Promise<WorkflowTaskLaunchOutcome> {
+		const intent = execution.continueIntent;
+		const operationId =
+			producer.execution.kind === "agent"
+				? producer.execution.operationId
+				: undefined;
+		let receipt: RunReceipt | undefined;
+		if (intent && operationId) {
+			try {
+				receipt = await binding.client.findByOperation(operationId);
+			} catch (error) {
+				throw new WorkflowTaskLaunchError(
+					"reconciliation",
+					"Subagent operation lookup failed; continuation remains uncertain.",
+					{ cause: error },
+				);
+			}
+		}
+		if (
+			intent &&
+			receipt &&
+			isRunReceipt(receipt) &&
+			receipt.runId === intent.subagentRunId &&
+			receipt.attemptId !== intent.previousAttemptId
+		) {
+			return persistReceipt(execution, receipt);
+		}
+		return failContinuation(
+			execution,
+			"launch",
+			CONTINUE_REFUSED_MESSAGE,
+			cause,
+		);
+	}
+
+	async function continueCurrent(
+		task: MaterializedAgentTask,
+		created: TaskExecutionProjection,
+		current: WorkflowStateProjection,
+	): Promise<WorkflowTaskLaunchOutcome> {
+		const producer = continuedProducer(task, current);
+		if (created.phase === "continue-intended") {
+			if (!producer) {
+				return failContinuation(
+					created,
+					"launch",
+					CONTINUE_PRODUCER_UNRESOLVED_MESSAGE,
+				);
+			}
+			return reconcileContinuation(created, producer);
+		}
+		if (created.phase !== "created") {
+			throw new WorkflowTaskLaunchError(
+				"validation",
+				"Workflow task execution is not launchable.",
+			);
+		}
+		const runId = producer?.launchReceipt?.subagentRunId;
+		const previousAttemptId = producer
+			? currentSubagentAttemptId(producer)
+			: undefined;
+		const producerTask =
+			producer === undefined
+				? undefined
+				: current.tasks[producer.execution.taskId];
+		const artifacts = await artifactsFor(task);
+		if (
+			!producer ||
+			!producerTask ||
+			runId === undefined ||
+			previousAttemptId === undefined ||
+			producer.handoffImport === undefined ||
+			artifacts === undefined
+		) {
+			return failContinuation(
+				created,
+				"preflight",
+				CONTINUE_PRODUCER_UNRESOLVED_MESSAGE,
+			);
+		}
+		try {
+			const verified = await verifyWorkflowHandoffEvidence(
+				current,
+				producerTask,
+				artifacts,
+			);
+			if (verified.status !== "imported") {
+				return failContinuation(
+					created,
+					"preflight",
+					CONTINUE_PRODUCER_UNRESOLVED_MESSAGE,
+				);
+			}
+		} catch (error) {
+			if (error instanceof WorkflowTaskLaunchError) throw error;
+			return failContinuation(
+				created,
+				"preflight",
+				CONTINUE_HANDOFF_UNVERIFIED_MESSAGE,
+				error,
+			);
+		}
+		await append(journal, {
+			type: "task-execution-continue-intended",
+			data: {
+				executionId: created.execution.id,
+				operationId: agentOperationId(created),
+				subagentRunId: runId,
+				previousAttemptId,
+			},
+		});
+		const intended = (await state(journal)).executions[created.execution.id];
+		if (!intended) {
+			throw new WorkflowTaskLaunchError(
+				"launch",
+				"Task execution disappeared after its continue intent.",
+			);
+		}
+		let receipt: RunReceipt;
+		try {
+			receipt = await binding.client.resume(runId, {
+				continueFromHandoff: true,
+				message: renderContinuationMessage(task.spec.request.task),
+			});
+		} catch (error) {
+			return reconcileContinuation(intended, producer, error);
+		}
+		if (
+			!isRunReceipt(receipt) ||
+			receipt.runId !== runId ||
+			receipt.attemptId === previousAttemptId
+		) {
+			return failContinuation(intended, "launch", CONTINUE_REFUSED_MESSAGE);
+		}
+		return persistReceipt(intended, receipt);
+	}
+
 	async function launchCurrent(
 		taskId: WorkflowTaskId,
 	): Promise<WorkflowTaskLaunchOutcome> {
@@ -749,6 +938,9 @@ export function createWorkflowTaskLauncher(
 				"validation",
 				"Workflow task execution could not be created.",
 			);
+		}
+		if (agentTask.spec.request.continueFrom !== undefined) {
+			return continueCurrent(agentTask, execution, current);
 		}
 		if (execution.phase === "launch-intended") {
 			await append(journal, {

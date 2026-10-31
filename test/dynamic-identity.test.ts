@@ -57,10 +57,12 @@ import { installedDynamicTransformerVersion } from "../src/dynamic/transformer-i
  * rotated it from
  * `c4a4e630eef72b097c36bfad82ecf12c598aaabdcc03261503d7beee924aeb5a`, and
  * revision 23 from
- * `127c5442819796d0d4cc51b104377f06123b883199425925e3cf86043cb7b94d`.
+ * `127c5442819796d0d4cc51b104377f06123b883199425925e3cf86043cb7b94d`, and
+ * revision 24 from
+ * `5ce78c6642c8ec09befe382fedec7a9a6cd081b04d533a640604e69c7601df5b`.
  */
 const HOST_API_SHA256 =
-	"5ce78c6642c8ec09befe382fedec7a9a6cd081b04d533a640604e69c7601df5b";
+	"8f4dcced977ac45a70afea9d4bc36db86bd525e1c4512ca02682fa83aad4cd3c";
 
 /** `deriveDynamicImportPolicySha256([])`: builtin modules only. */
 const IMPORT_POLICY_EMPTY_SHA256 =

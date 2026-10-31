@@ -1,7 +1,7 @@
-import type { ExactModelRequest } from "@vegardx/pi-subagent";
+import { canonicalSha256, type ExactModelRequest } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { deriveJsonValueSha256 } from "../digest.js";
+
 import { MAX_CHECK_TAIL_LENGTH } from "./verify-and-fix.js";
 
 /**
@@ -344,7 +344,7 @@ export function reviewerKey(input: {
 	readonly promptSha256: string;
 	readonly model: ExactModelRequest;
 }): string {
-	return deriveJsonValueSha256({
+	return canonicalSha256({
 		lens: input.lens,
 		promptSha256: input.promptSha256,
 		model: modelName(input.model),
@@ -358,7 +358,7 @@ export function promptDigest(task: {
 	readonly context?: readonly string[];
 	readonly instructions?: readonly string[];
 }): string {
-	return deriveJsonValueSha256({
+	return canonicalSha256({
 		goal: task.goal,
 		context: [...(task.context ?? [])],
 		instructions: [...(task.instructions ?? [])],

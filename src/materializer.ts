@@ -6,6 +6,7 @@ import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { continuationMessageFits } from "./continuation.js";
 import {
 	type AgentTaskRequest,
 	AgentTaskRequestSchema,
@@ -743,6 +744,9 @@ export class WorkflowTaskMaterializer {
 			...(request.resume === undefined
 				? {}
 				: { resume: { attempts: request.resume.attempts } }),
+			...(request.continueFrom === undefined
+				? {}
+				: { continueFrom: request.continueFrom }),
 		};
 		// Before the whole-request check: a malformed grant is worth naming, and
 		// the generic "invalid agent task request" would swallow it.
@@ -773,6 +777,9 @@ export class WorkflowTaskMaterializer {
 			throw new WorkflowMaterializationError(
 				"workspace startAtInput must name one of the task's handoff inputs",
 			);
+		}
+		if (agentRequest.continueFrom !== undefined) {
+			this.assertContinuation(agentRequest, inputs);
 		}
 		if (
 			agentRequest.workspace.mode === "worktree" &&
@@ -1220,6 +1227,71 @@ export class WorkflowTaskMaterializer {
 				output: "result",
 			},
 		);
+	}
+
+	/**
+	 * A continuation reruns its producer's launch plan, so everything that plan
+	 * fixes must be what the continuation declares: a request that differs
+	 * would persist a spec that does not describe what ran.
+	 */
+	private assertContinuation(
+		request: AgentTaskRequest,
+		inputs: Readonly<Record<TaskKey, WorkflowArtifactHandleRef>>,
+	): void {
+		const name = request.continueFrom as TaskKey;
+		const input = inputs[name];
+		if (input?.output !== "handoff") {
+			throw new WorkflowMaterializationError(
+				"continueFrom must name one of the task's handoff inputs",
+			);
+		}
+		const producer = this.seen.get(input.producerTaskId)?.spec;
+		if (producer?.kind !== "agent") {
+			throw new WorkflowMaterializationError(
+				"continueFrom must name one of the task's handoff inputs",
+			);
+		}
+		if (producer.request.continueFrom !== undefined) {
+			throw new WorkflowMaterializationError(
+				"continueFrom must name a task that launched its own child run",
+			);
+		}
+		if (
+			request.workspace.startAtInput !== undefined ||
+			request.retry !== undefined ||
+			request.resume !== undefined
+		) {
+			throw new WorkflowMaterializationError(
+				"a continuation starts at its run's hand-off and declares no startAtInput, retry or resume policy",
+			);
+		}
+		const { startAtInput: _producerStart, ...producerWorkspace } =
+			producer.request.workspace;
+		if (
+			request.agent !== producer.request.agent ||
+			!isDeepStrictEqual(request.model, producer.request.model) ||
+			!isDeepStrictEqual(request.tools, producer.request.tools) ||
+			!isDeepStrictEqual(
+				request.preloadSkills,
+				producer.request.preloadSkills,
+			) ||
+			!isDeepStrictEqual(
+				request.contextScopes,
+				producer.request.contextScopes,
+			) ||
+			!isDeepStrictEqual(request.workspace, producerWorkspace) ||
+			request.memoryBytes !== producer.request.memoryBytes ||
+			!isDeepStrictEqual(request.limits, producer.request.limits)
+		) {
+			throw new WorkflowMaterializationError(
+				"a continuation must declare its producer's agent, model, tools, skills, context scopes, workspace, memory and limits",
+			);
+		}
+		if (!continuationMessageFits(request.task)) {
+			throw new WorkflowMaterializationError(
+				"a continuation's rendered message exceeds the resume message bound",
+			);
+		}
 	}
 
 	private resolveInputs(

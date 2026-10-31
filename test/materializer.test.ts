@@ -115,7 +115,7 @@ function records(
 	];
 	return all.map((event, index) => ({
 		schema: "pi-workflow-event",
-		contractRevision: 23,
+		contractRevision: 24,
 		sequence: index + 1,
 		eventId: `event-${index + 1}`,
 		timestamp: "2026-08-20T00:00:00.000Z",
@@ -1654,5 +1654,120 @@ describe("checkpoint task materialization", () => {
 				}),
 			),
 		).toThrow("handoff input producer is not a worktree agent task");
+	});
+});
+
+describe("continuation materialization", () => {
+	function resumeRequest(writer: {
+		handoff: Parameters<typeof isHandoffHandle>[0];
+	}) {
+		return {
+			...worktreeRequest("Answer the review"),
+			continueFrom: "implementation",
+			inputs: { implementation: writer.handoff },
+		};
+	}
+
+	it("persists the continued input in the spec and its identity", () => {
+		const runtime = materializer();
+		const writer = runtime.agent("writer", worktreeRequest());
+		const resumed = runtime.agent("resume", resumeRequest(writer) as never);
+		const commit = runtime.closeEpoch("final", [writer, resumed]);
+		const declared = commit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		);
+		const spec = declared[1]?.spec;
+		if (spec?.kind !== "agent") throw new Error("missing continuation");
+		expect(spec.request.continueFrom).toBe("implementation");
+		const plain = materializer();
+		const plainWriter = plain.agent("writer", worktreeRequest());
+		const fresh = plain.agent("resume", {
+			...worktreeRequest("Answer the review"),
+			inputs: { implementation: plainWriter.handoff },
+		});
+		const plainCommit = plain.closeEpoch("final", [plainWriter, fresh]);
+		const plainSpec = plainCommit.events.flatMap((event) =>
+			event.type === "task-declared" ? [event.data.task] : [],
+		)[1]?.spec;
+		expect(plainSpec?.identitySha256).not.toBe(spec.identitySha256);
+		const projected = reduceWorkflowEvents(records(commit.events));
+		expect(projected.tasks[declared[1]?.id ?? ""]?.task).toEqual(declared[1]);
+	});
+
+	it.each([
+		[
+			"an input that is not a handoff",
+			(writer: ReturnType<WorkflowTaskMaterializer["agent"]>) => ({
+				continueFrom: "implementation",
+				inputs: { implementation: writer.output },
+			}),
+			"continueFrom must name one of the task's handoff inputs",
+		],
+		[
+			"a different agent",
+			() => ({ agent: "reviewer" }),
+			"a continuation must declare its producer's agent, model, tools, skills, context scopes, workspace, memory and limits",
+		],
+		[
+			"different tools",
+			() => ({ tools: ["read"] }),
+			"a continuation must declare its producer's agent, model, tools, skills, context scopes, workspace, memory and limits",
+		],
+		[
+			"different limits",
+			() => ({
+				limits: { ...worktreeRequest().limits, cost: 1 },
+			}),
+			"a continuation must declare its producer's agent, model, tools, skills, context scopes, workspace, memory and limits",
+		],
+		[
+			"a retry policy",
+			() => ({ retry: { attempts: 1 } }),
+			"a continuation starts at its run's hand-off and declares no startAtInput, retry or resume policy",
+		],
+		[
+			"a workspace start",
+			() => ({
+				workspace: {
+					mode: "worktree" as const,
+					cwd: "/repo",
+					startAtInput: "implementation",
+				},
+			}),
+			"a continuation starts at its run's hand-off and declares no startAtInput, retry or resume policy",
+		],
+		[
+			"a message over the resume bound",
+			() => ({
+				task: {
+					goal: "Answer",
+					context: Array.from({ length: 5 }, () => "x".repeat(16_000)),
+					instructions: ["Answer."],
+				},
+			}),
+			"a continuation's rendered message exceeds the resume message bound",
+		],
+	])("refuses %s", (_label, override, message) => {
+		const runtime = materializer();
+		const writer = runtime.agent("writer", worktreeRequest());
+		expect(() =>
+			runtime.agent("resume", {
+				...resumeRequest(writer),
+				...override(writer),
+			} as never),
+		).toThrow(message);
+	});
+
+	it("refuses to continue a continuation", () => {
+		const runtime = materializer();
+		const writer = runtime.agent("writer", worktreeRequest());
+		const first = runtime.agent("first", resumeRequest(writer) as never);
+		expect(() =>
+			runtime.agent("second", {
+				...worktreeRequest("Again"),
+				continueFrom: "implementation",
+				inputs: { implementation: first.handoff },
+			} as never),
+		).toThrow("continueFrom must name a task that launched its own child run");
 	});
 });

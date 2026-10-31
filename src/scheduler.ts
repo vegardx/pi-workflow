@@ -1688,6 +1688,7 @@ export function createWorkflowSequentialScheduler(
 					!execution.settlement &&
 					(execution.launchReceipt !== undefined ||
 						execution.phase === "launch-intended" ||
+						execution.phase === "continue-intended" ||
 						execution.phase === "launch-uncertain" ||
 						execution.phase === "launch-absent")
 				);
