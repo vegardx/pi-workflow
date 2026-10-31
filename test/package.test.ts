@@ -222,7 +222,7 @@ describe("compatibility matrix", () => {
 				),
 			),
 		).resolves.toBeUndefined();
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(25);
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(26);
 		expect(compatibility.piWorkflow.features).toEqual({
 			checkpoints: true,
 			dynamicWorkflows: true,

@@ -3,7 +3,7 @@
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
 		"version": "6.0.0",
-		"contractRevision": 25,
+		"contractRevision": 26,
 		"features": {
 			"checkpoints": true,
 			"dynamicWorkflows": true,
