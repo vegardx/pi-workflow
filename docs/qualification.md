@@ -10,15 +10,15 @@ earlier host runs (revisions 1 through 7) and are not repeated here.
 
 Fill in at qualification time. The pi-subagent commit must be the one that
 actually ran; the earlier reports record `55e84bd731e2017510ee85b2df898e7f2d3679f2`,
-while CI pins `efbf17be3c1892207b5b18c3ae830e72a3f7b56e` (pi-subagent 0.15.0,
-contract revision 9).
+while CI pins `6e54e24192ca80c509b355a24cea2a781c3e64b7` (pi-subagent 0.16.0,
+contract revision 9, on Pi 1.4.0). No item below has been run on Pi 1.4.0.
 
 | Component | Value |
 | --- | --- |
 | Host | macOS arm64 (Darwin 25.6.0) |
 | Node.js | 24.16.0 |
-| Pi (`@earendil-works/pi-coding-agent`) | 0.85.0 |
-| pi-subagent | 0.15.0 @ `<commit>` |
+| Pi (`@earendil-works/pi-coding-agent`) | 1.4.0 |
+| pi-subagent | 0.16.0 @ `<commit>` |
 | pi-workflow | 1.0.0 @ `<commit>` |
 | Tarball | `<npm pack filename>` sha256 `<sha256>` |
 | Model | `<provider/model>` |
@@ -99,7 +99,7 @@ command run and the observed result next to each item when it is checked.
 ## Exercised on CI (Linux x64, `ubuntu-latest`, Node.js 24.16.0)
 
 Per `.github/workflows/ci.yml`, against pi-subagent
-`efbf17be3c1892207b5b18c3ae830e72a3f7b56e` built from source:
+`6e54e24192ca80c509b355a24cea2a781c3e64b7` built from source:
 
 - `npx biome check .`, `npx tsc --noEmit` (including the type-shape fixture
   `test/public-api.types.ts`), `npm run build`, `npm run pack:check` (packed
@@ -134,11 +134,11 @@ by-hand run on any host:
   real Gondolin VM, a real pi-subagent refusal of an over-ceiling request, and
   a real `workspace-budget` refusal from an exhausted `workspaceWriteBytes`.
   All three are covered by unit tests and the packed-contract check against
-  pi-subagent 0.15.0 only; no host run has exercised them;
+  pi-subagent 0.16.0 only; no host run has exercised them;
 - the revision-22 session model: a run resolving `model: "inherit"` from a real
   host session and a real pi-subagent preflight accepting or refusing the
   resolved model against an agent template's `allowedModels`. Covered by unit
-  tests and the packed-contract check against pi-subagent 0.15.0 only; no host
+  tests and the packed-contract check against pi-subagent 0.16.0 only; no host
   run has exercised it;
 - lease contention and fencing, journal corruption, and restart recovery.
 
