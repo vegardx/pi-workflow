@@ -654,6 +654,9 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 				if (
 					pending.every((taskId) => after.tasks[taskId]?.status !== "completed")
 				) {
+					// A lane that failed after appending is not "no progress": its
+					// own error is the finding, so it is not hidden behind this one.
+					if (errors.length > 0) throw errors[0];
 					throw new StaticWorkflowRuntimeError(
 						"execution",
 						"Workflow scheduler made no progress toward the result barrier.",

@@ -1134,6 +1134,68 @@ describe("static workflow runtime nested workflows", () => {
 });
 
 describe("static workflow runtime", () => {
+	it("fails a result barrier on the error of a lane that appended, not on no progress", async () => {
+		// One lane appends and then throws while the others go idle: the lane's
+		// own error is the finding. Reporting "no progress" instead hid a
+		// reducer refusal for a whole run on 2026-10-31.
+		const { journal, artifacts } = await fixture();
+		const definition = defineWorkflow({
+			meta: {
+				name: "lane-error",
+				description: "Lane error",
+				version: 1,
+				budget: { cost: 1000, childRuntimeMs: 3600000 },
+				timeoutMs: 3600000,
+			},
+			inputSchema: Type.Object({}),
+			outputSchema: Type.Object({ answer: Type.String() }),
+			async run(ctx) {
+				return ctx.result(ctx.agent("answer", request()));
+			},
+		});
+		const laneError = new Error("lane failed after appending");
+		let drives = 0;
+		const scheduler: WorkflowSequentialScheduler = {
+			concurrency: 2,
+			stopSignal: new AbortController().signal,
+			async drive(): Promise<WorkflowSchedulerOutcome> {
+				drives += 1;
+				if (drives === 1) {
+					await journal.append("run-status-changed", {
+						from: "created",
+						to: "running",
+					});
+					throw laneError;
+				}
+				return { state: "idle", runStatus: "running" };
+			},
+			async reconcile() {
+				throw new Error("no cleanup-blocked task");
+			},
+			async decide() {
+				throw new Error("no decisions");
+			},
+			async stop() {
+				return { state: "terminal", runStatus: "cancelled" } as const;
+			},
+		};
+		const runtime = createStaticWorkflowRuntime({
+			definition,
+			definitionIdentitySha256,
+			input: {},
+			cwd: "/repo",
+			journal,
+			artifacts,
+			scheduler,
+		});
+		const error = await runtime.drive().then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(StaticWorkflowRuntimeError);
+		expect((error as StaticWorkflowRuntimeError).cause).toBe(laneError);
+	});
+
 	it("commits and replays a concrete workflow output", async () => {
 		const { journal, artifacts } = await fixture();
 		let calls = 0;
