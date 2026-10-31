@@ -147,12 +147,12 @@ import { WorkflowComponentError } from "./errors.js";
  *
  * The dependency between rounds is a **data** dependency, never a bare `after`:
  * `verify-<n>` names the current patch's handoff handle in its `inputs`, and
- * `fix-<n>` names that handoff plus the failing verifier's report. The runtime
- * never applies a handoff to a worktree (`docs/authority.md`), so what a task
- * receives is the descriptor — baseline, commit, digest, size, and the durable
- * `refs/pi-subagent/handoffs/<runId>/<attemptId>` ref — and the caller's prose
- * is what tells the fixer to apply it. The component does not pretend
- * otherwise.
+ * `fix-<n>` names that handoff plus the failing verifier's report. Neither the
+ * runtime nor the agent applies a handoff (`docs/authority.md`): the host
+ * checks the task's workspace out at the hand-off commit, so the change under
+ * test is already in the tree, and the descriptor — baseline, commit, digest,
+ * size, and the durable `refs/pi-subagent/handoffs/<runId>/<attemptId>` ref —
+ * is the patch's identity for the task's report, never something to apply.
  */
 
 /**
@@ -463,8 +463,8 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 	const verifyEnvelope = envelope("verify");
 	const fixEnvelope = envelope("fix");
 	// The `verify` row is a read-only row (`workspaceWriteBytes: 0`), but a
-	// verifier that has to apply the handoff before it can run the check needs a
-	// worktree, and the runtime refuses a worktree with no write grant. The one
+	// verifier runs the install and the check, which write to the tree, so it
+	// needs a worktree, and the runtime refuses a worktree with no write grant. The one
 	// adjustment is the same constant the `implement` and `fix` rows already
 	// carry, so it is still a table lookup keyed by (stage, workspace) and
 	// nothing observed at run time.
@@ -499,10 +499,10 @@ export async function verifyAndFix<TFixSchema extends TSchema>(
 			declared.disposition === undefined
 				? { disposition: options.disposition }
 				: {}),
-			// A verifier is not a producer. When it runs in a worktree - to apply
-			// the handoff before running the check - its own patch is not what
-			// anyone ships, and a verifier that changed nothing must not fail on
-			// "handoff absent". An explicit policy from the caller is kept.
+			// A verifier is not a producer. When it runs in a worktree - to run the
+			// install and the check - its own patch is not what anyone ships, and a
+			// verifier that changed nothing must not fail on "handoff absent". An
+			// explicit policy from the caller is kept.
 			...(declared.workspace?.mode === "worktree" &&
 			declared.handoff === undefined
 				? { handoff: "optional" as const }

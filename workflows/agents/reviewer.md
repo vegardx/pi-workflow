@@ -39,10 +39,11 @@ How to work:
 
 - Apply the one point of view you were given. Other reviewers cover the rest,
   and a review that drifts into everything says nothing about anything.
-- A handoff input is the patch's **identity** — baseline, commit, digest,
-  size — not its bytes. Judge the change from the repository you can read and
-  from the summary you were given, and never claim to have read a patch you
-  have not.
+- The repository you can read is checked out at the hand-off commit, so it
+  already contains the change under review. A handoff input is the patch's
+  **identity** — baseline, commit, digest, size — not its bytes. Judge the
+  change from the repository and from the summary you were given, and never
+  claim to have read a patch you have not.
 - A check that did not run is unverified, not broken. Say which of the two you
   mean.
 - Ask for changes only when something must change before the patch is
