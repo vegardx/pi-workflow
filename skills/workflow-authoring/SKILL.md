@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` 4.0.0, contract revision 23. Every
+This skill covers `@vegardx/pi-workflow` 5.0.0, contract revision 24. Every
 rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
@@ -1110,15 +1110,17 @@ without project trust. They are the worked examples of the patterns above.
 
 | Ref | In | Out | Parks for a human? |
 | --- | --- | --- | --- |
-| `plan-to-ship` | `{plan, planDigest}` — a pi-maestro plan by value with its sha256 digest, and nothing else | `{approved, shipped, deliverables[], reviews[], findings[], shipSummary?, receipt}`; the receipt names each durable handoff ref and the approved plan digest | Yes: the `ship` gate, `headless: "block"` — unless `policy.gates` is `none`, which declares no gate and leaves `shipSummary` for the host to render before it publishes |
+| `plan-to-ship` | `{plan, planDigest}` — a pi-maestro plan by value with its sha256 digest, and nothing else | `{approved, shipped, deliverables[], reviews[], shipSummary?, receipt}`; `reviews[]` is one review record per reviewed deliverable, and the receipt names each durable handoff ref and the approved plan digest | Yes: the `ship` gate, `headless: "block"` — unless `policy.gates` is `none`, which declares no gate and leaves `shipSummary` for the host to render before it publishes |
 | `deep-review` | `{subject, lenses?, synthesis?, maxFindings?}` — one `worktree-handoff`, `tree`, or `document` subject | `{verdict, findings (≤64), coverage[], synthesis?}` | No gate, no worktree, no handoff |
 | `deep-research` | `{question, depth, sources?}` — one question, the depth dial doubling as the thread count, and up to 16 `path`/`url`/`note` sources | `{answer, claims[], crossChecks[], coverage[]}`; a coverage row per thread says which one did not report | No gate, no worktree, no handoff — structurally headless, which is a property of the graph and not a licence to start it without a model turn |
 
 `plan-to-ship` never pushes, merges, or applies anything; it records a
-receipt. Per deliverable it walks `implement-<d>`, `check-<d>`, `review-<d>/…`,
-`synthesis-<d>`, `fix-<d>` — the review's findings are normalized and then
-FIXED inside the deliverable, so what reaches the ship gate is a patch that
-answered them, not a list nobody acted on. `deep-research`'s threads read the
+receipt. Per deliverable it walks `implement-<d>`, then `check-<d>` beside
+`review-<d>/…`, `normalize-<d>` when more than one lens reported,
+`resume-<d>` — the implementer, continued in its own session, answering every
+finding `fixed`, `declined` or `out-of-scope` — `recheck-<d>` when that changed
+the hand-off, and the record `reviews-<d>`, so what reaches the ship gate is a
+patch whose author answered every finding, with the reasoning beside it. `deep-research`'s threads read the
 project's own context files, and the independence it needs is between the
 THREADS, which `contextMode: "fresh"` delivers: each thread is its own
 conversation, so no thread can agree with another's reasoning by inheritance.
