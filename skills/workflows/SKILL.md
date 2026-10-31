@@ -5,7 +5,7 @@ description: Use when running, waiting on, inspecting, recovering, or stopping a
 
 # Operating pi-workflow runs
 
-This skill covers `@vegardx/pi-workflow` 4.0.0, contract revision 23. It is
+This skill covers `@vegardx/pi-workflow` 5.0.0, contract revision 24. It is
 about running workflows, not writing them. Every tool name, parameter, bound,
 status, subcommand, legality rule, and quoted message below is taken from the
 runtime source (`src/tools.ts`, `src/service-views.ts`, `src/run-actions.ts`,
@@ -37,7 +37,7 @@ more.
 
 | Ref | In | Out |
 | --- | --- | --- |
-| `plan-to-ship` | `{plan, planDigest}` | `{approved, shipped, deliverables[], reviews[], findings[], shipSummary?, receipt}` — per deliverable it implements, runs the project's check, reviews through every lens, normalizes the findings and FIXES them (`implement-<d>`, `check-<d>`, `review-<d>/<lens>`, `synthesis-<d>`, `fix-<d>`); `synthesis-<d>` is required, so a synthesis that cannot run fails the run instead of reaching the gate with no fixer; the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`, and nowhere at all under `policy.gates: none`, where the host publishes on completion and `shipSummary` carries what the gate would have shown), and never pushes, merges, or applies anything. `approved` is always true: the start of the run was the approval |
+| `plan-to-ship` | `{plan, planDigest}` | `{approved, shipped, deliverables[], reviews[], shipSummary?, receipt}` — per deliverable it implements, runs the project's check beside every lens, clusters the findings without judging them, RESUMES the implementer in its own session to answer each one `fixed`, `declined` or `out-of-scope`, and rechecks what it changed (`implement-<d>`, `check-<d>`, `review-<d>/<lens>`, `normalize-<d>`, `resume-<d>`, `recheck-<d>`, the record `reviews-<d>`); `reviews[]` is one record per reviewed deliverable, with attribution, agreement and dispositions, and a decline never holds the run; the start of the run is the approval, so it parks only on `ship` (plus a per-deliverable gate under `policy.gates: every-deliverable`, and nowhere at all under `policy.gates: none`, where the host publishes on completion and `shipSummary` carries what the gate would have shown), and never pushes, merges, or applies anything. `approved` is always true: the start of the run was the approval |
 | `deep-review` | `{subject, lenses?, synthesis?, maxFindings?}` | `{verdict, findings, coverage, synthesis?}` — one read-only reviewer per lens, no gate |
 | `deep-research` | `{question, sources?}` | `{answer, claims, crossChecks, coverage}` — independent read-only threads, each thread's claims cross-checked by a different thread, no gate; structurally headless but not on the headless allowlist |
 
