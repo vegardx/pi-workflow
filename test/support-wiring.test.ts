@@ -6,7 +6,10 @@ import {
 	type ExtensionAPI,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { SubagentService } from "@vegardx/pi-subagent";
+import {
+	SUBAGENT_RUNTIME_CONTRACT,
+	type SubagentService,
+} from "@vegardx/pi-subagent";
 import { registerSubagentServiceProvider } from "@vegardx/pi-subagent/service-provider";
 import { type Static, Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -182,7 +185,9 @@ function capture() {
 	const tools: ToolDefinition[] = [];
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const events = createEventBus();
-	registerSubagentServiceProvider(events, async () => idleSubagentService());
+	registerSubagentServiceProvider(events, SUBAGENT_RUNTIME_CONTRACT, async () =>
+		idleSubagentService(),
+	);
 	const api = {
 		events,
 		registerTool(tool: ToolDefinition) {

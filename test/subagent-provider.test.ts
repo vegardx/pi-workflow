@@ -90,7 +90,7 @@ describe("workflow subagent provider", () => {
 		const events = createEventBus();
 		const shared = service();
 		const acquire = vi.fn(async () => shared);
-		registerSubagentServiceProvider(events, acquire);
+		registerSubagentServiceProvider(events, SUBAGENT_RUNTIME_CONTRACT, acquire);
 		const provider = createWorkflowSubagentProvider(events, context);
 
 		expect(acquire).not.toHaveBeenCalled();
@@ -123,8 +123,16 @@ describe("workflow subagent provider", () => {
 
 	it("rejects duplicate and incompatible providers", async () => {
 		const duplicateEvents = createEventBus();
-		registerSubagentServiceProvider(duplicateEvents, async () => service());
-		registerSubagentServiceProvider(duplicateEvents, async () => service());
+		registerSubagentServiceProvider(
+			duplicateEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(),
+		);
+		registerSubagentServiceProvider(
+			duplicateEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(),
+		);
 		await expect(
 			createWorkflowSubagentProvider(duplicateEvents, context).bind(
 				"workflow_duplicate",
@@ -141,7 +149,11 @@ describe("workflow subagent provider", () => {
 		const events = createEventBus();
 		const shutdown = vi.fn();
 		const overpowered = Object.assign(client(), { shutdown });
-		registerSubagentServiceProvider(events, async () => service(overpowered));
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(overpowered),
+		);
 		const binding = await createWorkflowSubagentProvider(events, context).bind(
 			"workflow_restricted",
 		);
@@ -153,8 +165,10 @@ describe("workflow subagent provider", () => {
 		const revisionFiveEvents = createEventBus();
 		const revisionFive = client() as unknown as Record<string, unknown>;
 		delete revisionFive.exportHandoff;
-		registerSubagentServiceProvider(revisionFiveEvents, async () =>
-			service(revisionFive as unknown as SubagentClient),
+		registerSubagentServiceProvider(
+			revisionFiveEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(revisionFive as unknown as SubagentClient),
 		);
 		await expect(
 			createWorkflowSubagentProvider(revisionFiveEvents, context).bind(
@@ -167,7 +181,11 @@ describe("workflow subagent provider", () => {
 
 		const events = createEventBus();
 		const owner = client();
-		registerSubagentServiceProvider(events, async () => service(owner));
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service(owner),
+		);
 		const binding = await createWorkflowSubagentProvider(events, context).bind(
 			"workflow_handoff",
 		);
@@ -182,6 +200,7 @@ describe("workflow subagent provider", () => {
 		const badServiceEvents = createEventBus();
 		registerSubagentServiceProvider(
 			badServiceEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
 			async () => ({ forOwner: vi.fn() }) as unknown as SubagentService,
 		);
 		await expect(
@@ -191,8 +210,10 @@ describe("workflow subagent provider", () => {
 		).rejects.toMatchObject({ code: "incompatible" });
 
 		const badClientEvents = createEventBus();
-		registerSubagentServiceProvider(badClientEvents, async () =>
-			service({ preflight: vi.fn() } as unknown as SubagentClient),
+		registerSubagentServiceProvider(
+			badClientEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => service({ preflight: vi.fn() } as unknown as SubagentClient),
 		);
 		await expect(
 			createWorkflowSubagentProvider(badClientEvents, context).bind(
@@ -211,10 +232,14 @@ describe("workflow subagent provider", () => {
 		const pending = new Promise<SubagentService>((resolve) => {
 			resolveService = resolve;
 		});
-		const unregister = registerSubagentServiceProvider(events, async () => {
-			started?.();
-			return pending;
-		});
+		const unregister = registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => {
+				started?.();
+				return pending;
+			},
+		);
 		const provider = createWorkflowSubagentProvider(events, context);
 		const binding = provider.bind("workflow_pending");
 		await acquisitionStarted;
@@ -228,6 +253,7 @@ describe("workflow subagent provider", () => {
 		const firstService = service();
 		const unregister = registerSubagentServiceProvider(
 			events,
+			SUBAGENT_RUNTIME_CONTRACT,
 			async () => firstService,
 		);
 		const provider = createWorkflowSubagentProvider(events, context);
@@ -239,7 +265,11 @@ describe("workflow subagent provider", () => {
 		});
 
 		const secondService = service();
-		registerSubagentServiceProvider(events, async () => secondService);
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => secondService,
+		);
 		await expect(provider.bind("workflow_replaced")).rejects.toMatchObject({
 			code: "replaced",
 		});
@@ -248,9 +278,13 @@ describe("workflow subagent provider", () => {
 
 	it("classifies provider and owner-binding acquisition failures", async () => {
 		const providerEvents = createEventBus();
-		registerSubagentServiceProvider(providerEvents, async () => {
-			throw new Error("provider failed");
-		});
+		registerSubagentServiceProvider(
+			providerEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => {
+				throw new Error("provider failed");
+			},
+		);
 		await expect(
 			createWorkflowSubagentProvider(providerEvents, context).bind(
 				"workflow_providerfailure",
@@ -262,7 +296,11 @@ describe("workflow subagent provider", () => {
 		vi.mocked(shared.forOwner).mockImplementation(() => {
 			throw new Error("owner failed");
 		});
-		registerSubagentServiceProvider(ownerEvents, async () => shared);
+		registerSubagentServiceProvider(
+			ownerEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => shared,
+		);
 		await expect(
 			createWorkflowSubagentProvider(ownerEvents, context).bind(
 				"workflow_ownerfailure",
@@ -276,9 +314,13 @@ describe("workflow subagent provider", () => {
 			"IncompatibleContractRevisionError",
 			REVISION_REFUSAL,
 		);
-		registerSubagentServiceProvider(events, async () => {
-			throw refusal;
-		});
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => {
+				throw refusal;
+			},
+		);
 
 		const error = await createWorkflowSubagentProvider(events, context)
 			.bind("workflow_staterevision")
@@ -301,7 +343,11 @@ describe("workflow subagent provider", () => {
 		vi.mocked(shared.forOwner).mockImplementation(() => {
 			throw refusal;
 		});
-		registerSubagentServiceProvider(events, async () => shared);
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => shared,
+		);
 
 		const error = await createWorkflowSubagentProvider(events, context)
 			.bind("workflow_ownerfenced")
@@ -314,9 +360,13 @@ describe("workflow subagent provider", () => {
 
 	it("keeps the fixed message when the cause is not a fixed one", async () => {
 		const events = createEventBus();
-		registerSubagentServiceProvider(events, async () => {
-			throw new Error("ENOENT: /Users/someone/.config/pi/agent/subagents");
-		});
+		registerSubagentServiceProvider(
+			events,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => {
+				throw new Error("ENOENT: /Users/someone/.config/pi/agent/subagents");
+			},
+		);
 
 		const error = await createWorkflowSubagentProvider(events, context)
 			.bind("workflow_opaquefailure")
@@ -331,7 +381,7 @@ describe("workflow subagent provider", () => {
 	it("rejects invalid run identities before provider acquisition", async () => {
 		const events = createEventBus();
 		const acquire = vi.fn(async () => service());
-		registerSubagentServiceProvider(events, acquire);
+		registerSubagentServiceProvider(events, SUBAGENT_RUNTIME_CONTRACT, acquire);
 		const provider = createWorkflowSubagentProvider(events, context);
 
 		await expect(provider.bind("invalid" as never)).rejects.toMatchObject({
@@ -344,7 +394,7 @@ describe("workflow subagent provider", () => {
 		const events = createEventBus();
 		const shared = service();
 		const acquire = vi.fn(async () => shared);
-		registerSubagentServiceProvider(events, acquire);
+		registerSubagentServiceProvider(events, SUBAGENT_RUNTIME_CONTRACT, acquire);
 		const provider = createWorkflowSubagentProvider(events, context);
 
 		const [first, second] = await Promise.all([

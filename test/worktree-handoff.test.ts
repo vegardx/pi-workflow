@@ -179,7 +179,7 @@ function childIds(nonce: string, launch: number): FakeChild {
 function worktreeRecord(child: FakeChild, captured: boolean): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 11,
+		contractRevision: 12,
 		runId: child.runId,
 		attemptId: child.attemptId,
 		repositoryRoot: PRIVATE_REPO,
@@ -324,6 +324,7 @@ function worktreeProvider(options: WorktreeProviderOptions) {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
+				rootfsPolicySha256: "a".repeat(64),
 				memoryBytes: request.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: request.limits.workspaceWriteBytes,
@@ -2277,8 +2278,10 @@ describe("worktree agent tasks end to end", () => {
 		} as unknown as Record<string, unknown>;
 		delete withoutExport.exportHandoff;
 		const clientEvents = createEventBus();
-		registerSubagentServiceProvider(clientEvents, async () =>
-			subagentService(withoutExport as unknown as SubagentClient),
+		registerSubagentServiceProvider(
+			clientEvents,
+			SUBAGENT_RUNTIME_CONTRACT,
+			async () => subagentService(withoutExport as unknown as SubagentClient),
 		);
 		const clientFixture = await worktreeFixture({
 			name: "worktree-gate-client",

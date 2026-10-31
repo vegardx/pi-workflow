@@ -183,6 +183,7 @@ function taskProvider() {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
+				rootfsPolicySha256: "a".repeat(64),
 				memoryBytes: request.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: 0,
@@ -1624,7 +1625,7 @@ function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
 function worktreeRecord(handoffCommit?: string): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 11,
+		contractRevision: 12,
 		runId: "run_servicechild",
 		attemptId: "attempt_servicechild",
 		repositoryRoot: "/private/repo",

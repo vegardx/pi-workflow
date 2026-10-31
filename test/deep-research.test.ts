@@ -303,6 +303,7 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
+				rootfsPolicySha256: "a".repeat(64),
 				memoryBytes: request.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: request.limits.workspaceWriteBytes,

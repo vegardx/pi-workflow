@@ -609,11 +609,29 @@ export {
 	SubagentRunStatusSchema,
 };
 
+/**
+ * What this runtime requires of pi-subagent: the revision and every feature
+ * value. pi-subagent's own contract also reports `capacity`, which is the
+ * host's setting rather than something a consumer can require, so it is read
+ * from the host at bind time (`subagent-provider.ts`) and never published here.
+ */
+const RequiredSubagentContractSchema = Type.Object(
+	{
+		schema: SubagentRuntimeContractSchema.properties.schema,
+		contractRevision: SubagentRuntimeContractSchema.properties.contractRevision,
+		features: SubagentRuntimeContractSchema.properties.features,
+	},
+	{ additionalProperties: false },
+);
+export type RequiredSubagentContract = Static<
+	typeof RequiredSubagentContractSchema
+>;
+
 export const WorkflowRuntimeContractSchema = Type.Object(
 	{
 		schema: Type.Literal("pi-workflow-runtime"),
 		contractRevision: Type.Literal(WORKFLOW_CONTRACT_REVISION),
-		requiredSubagent: SubagentRuntimeContractSchema,
+		requiredSubagent: RequiredSubagentContractSchema,
 		features: Type.Object(
 			{
 				staticWorkflows: Type.Boolean(),
@@ -649,9 +667,9 @@ export type WorkflowRuntimeContract = Static<
 	typeof WorkflowRuntimeContractSchema
 >;
 
-const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
+const REQUIRED_SUBAGENT_CONTRACT: RequiredSubagentContract = Object.freeze({
 	schema: "pi-subagent-runtime",
-	contractRevision: 11,
+	contractRevision: 12,
 	features: Object.freeze({
 		nativeSessionBackend: true,
 		gondolinSandbox: true,
@@ -681,6 +699,7 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		sessionModelInherit: true,
 		workspaceStartAt: true,
 		resumeAtHandoff: true,
+		capacityWait: true,
 	}),
 });
 
