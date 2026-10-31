@@ -2,7 +2,7 @@ import { canonicalSha256, type ExactModelRequest } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-import { MAX_CHECK_TAIL_LENGTH } from "./verify-and-fix.js";
+import { MAX_CHECK_TAIL_LENGTH } from "./verify.js";
 
 /**
  * The review loop's vocabulary: what a lens reports, the record the harness
@@ -692,6 +692,33 @@ export function checkDispositions(
 	return missing.length === 0
 		? undefined
 		: `it leaves ${missing.join(", ")} unanswered`;
+}
+
+/**
+ * Why a resumed implementer's report does not answer the view it was shown,
+ * or `undefined` when it is a `resumeReportSchema` answer over exactly the
+ * shown ids, each once. The resumed child validates against its producer's
+ * schema, so this is where the narrower contract is enforced.
+ */
+export function checkResumeReport(
+	view: ImplementerView,
+	report: unknown,
+): string | undefined {
+	const ids = view.items.map((item) => item.id);
+	if (!Value.Check(resumeReportSchema(ids), report)) {
+		const answered = (report as { dispositions?: unknown })?.dispositions;
+		if (Array.isArray(answered)) {
+			const problem = checkDispositions(
+				view,
+				answered.filter(
+					(entry): entry is { id: string } => typeof entry?.id === "string",
+				),
+			);
+			if (problem !== undefined) return problem;
+		}
+		return "its answer is not a resume report over the items it was shown";
+	}
+	return checkDispositions(view, (report as ResumeReport).dispositions);
 }
 
 /** The reviewers' rows of the record, stamped from the declared launch. */

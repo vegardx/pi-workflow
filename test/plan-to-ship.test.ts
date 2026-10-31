@@ -10,6 +10,7 @@ import {
 	type SubagentClient,
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
+import type { Static } from "typebox";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -17,8 +18,8 @@ import {
 	DIVERSE_MODEL_ID,
 	envelope,
 	MAX_REVIEW_LENSES,
-	MAX_VERIFY_ROUNDS,
 	MODEL_ID,
+	ReviewsRecordSchema,
 	tierModel,
 	WORKTREE_MEMORY_BYTES,
 } from "../src/components/index.js";
@@ -58,7 +59,6 @@ const W1 = {
 	attemptTimeoutMs: 1_500_000,
 	cumulativeRuntimeMs: 1_800_000,
 } as const;
-const CACHE_MARKER = "npm_config_cache=/tmp/npm-cache";
 /**
  * The host session's model, as the provider these tests install answers it.
  * `plan-to-ship` declares `needs.sessionModel: true`, so a run is refused
@@ -177,7 +177,10 @@ function patchFor(commit: string): Buffer {
 	);
 }
 
-/** How a scripted verifier answers, per round. */
+/**
+ * How a scripted verifier answers: the first check, then the recheck of what
+ * the resumed implementer handed back.
+ */
 type CheckScript = "pass" | "fail-then-pass" | "fail" | "not-run";
 
 function implementation(summary: string) {
@@ -203,6 +206,7 @@ function checkReport(script: CheckScript, round: number) {
 	}
 	const passed =
 		script === "pass" || (script === "fail-then-pass" && round >= 2);
+
 	return {
 		summary: passed ? "The check passed." : "The check failed.",
 		checkCommand: "npm run check",
@@ -212,12 +216,71 @@ function checkReport(script: CheckScript, round: number) {
 	};
 }
 
+/** One standard lens finding. */
+function lensFinding(
+	file: string,
+	line: number | undefined,
+	claim: string,
+	severity: "high" | "medium" | "low" = "high",
+	suggestion?: string,
+) {
+	return {
+		claim,
+		location: { file, ...(line === undefined ? {} : { line }) },
+		evidence: `Seen at ${file}${line === undefined ? "" : `:${line}`}.`,
+		severity,
+		...(suggestion === undefined ? {} : { suggestion }),
+	};
+}
+
+/** What every scripted lens reports unless a test says otherwise. */
+const DEFAULT_FINDINGS = [
+	lensFinding(
+		"a.txt",
+		1,
+		"Missing a test.",
+		"high",
+		"Add one next to the change.",
+	),
+];
+
+/** The ids a resume message shows, in the order it shows them. */
+function shownIds(message: string): string[] {
+	return [...message.matchAll(/"id":"(c[0-9]+)"/g)].map(
+		(match) => match[1] as string,
+	);
+}
+
+interface ScriptOptions {
+	readonly check?: CheckScript;
+	/** Per lens id, the findings it reports; `DEFAULT_FINDINGS` otherwise. */
+	readonly findings?: Readonly<Record<string, readonly unknown[]>>;
+	/** The normalize model's answer, given the ids it was offered. */
+	readonly merges?: (ids: readonly string[]) => unknown;
+	/** The resumed implementer's dispositions, given the ids it was shown. */
+	readonly dispositions?: (ids: readonly string[]) => unknown[];
+}
+
 /** The structured output a scripted child returns, keyed by what it was asked. */
 function outputFor(
 	request: SubagentRequest,
-	script: CheckScript,
-	minorOnly = false,
+	options: ScriptOptions,
+	message?: string,
 ): unknown {
+	if (message !== undefined) {
+		const ids = shownIds(message);
+		return {
+			...implementation("Answered the check and the review"),
+			dispositions:
+				options.dispositions?.(ids) ??
+				ids.map((id, index) => ({
+					id,
+					kind: index === 0 ? "fixed" : "declined",
+					reasoning:
+						index === 0 ? "Added the test." : "The behaviour is intended.",
+				})),
+		};
+	}
 	const goal = request.task.goal;
 	if (goal.startsWith("Refine the authored plan")) {
 		return {
@@ -236,68 +299,19 @@ function outputFor(
 	}
 	if (goal.startsWith("Implement deliverable"))
 		return implementation("Edited a.txt");
-	if (goal.startsWith("Fix what the check reported")) {
-		return implementation("Fixed what the check reported");
-	}
 	if (goal.startsWith("Verify deliverable")) {
-		const round = Number(/round (\d+)/.exec(goal)?.[1] ?? "1");
-		return checkReport(script, round);
+		const round = goal.includes("resumed implementer") ? 2 : 1;
+		return checkReport(options.check ?? "pass", round);
 	}
 	if (goal.startsWith("Review deliverable")) {
-		return {
-			verdict: "request-changes",
-			findings: [
-				{
-					id: "missing-test",
-					severity: "blocking",
-					kind: "gap",
-					where: "/deliverables/0",
-					what: "Missing a test.",
-				},
-			],
-		};
+		const lens = /through the "([^"]+)" lens/.exec(goal)?.[1] ?? "";
+		return { findings: options.findings?.[lens] ?? DEFAULT_FINDINGS };
 	}
-	if (goal.startsWith("Normalize the review findings")) {
-		if (minorOnly) {
-			return {
-				findings: [
-					{
-						id: "naming",
-						severity: "minor",
-						lens: "correctness",
-						where: "/deliverables/0",
-						summary: "The helper could be named better.",
-					},
-				],
-				verdict: "Nothing blocking; one naming nit.",
-			};
-		}
-		return {
-			findings: [
-				{
-					id: "missing-test",
-					severity: "blocking",
-					lens: "correctness",
-					where: "/deliverables/0",
-					summary: "Missing a test.",
-					suggestion: "Add one next to the change.",
-				},
-				{
-					id: "naming",
-					severity: "minor",
-					lens: "correctness",
-					where: "/deliverables/0",
-					summary: "The helper could be named better.",
-				},
-			],
-			verdict: "One lens asked for a test; nothing else is blocking.",
-		};
-	}
-	if (goal.startsWith("Address the review findings")) {
-		return {
-			findings: [{ id: "missing-test", outcome: "addressed" }],
-			checkPassed: true,
-		};
+	if (goal.startsWith("Find the clusters")) {
+		const ids = [
+			...request.task.context.join("\n").matchAll(/"id":"(c[0-9]+)"/g),
+		].map((match) => match[1] as string);
+		return options.merges?.(ids) ?? { merges: [] };
 	}
 	if (goal.startsWith("Record the plan-to-ship receipt")) {
 		return { recorded: true, refs: [] };
@@ -341,6 +355,10 @@ interface Child {
 	readonly runId: string;
 	readonly attemptId: string;
 	readonly request: SubagentRequest;
+	/** A resumed attempt: the message it was continued with. */
+	readonly message?: string;
+	/** A resumed attempt: the attempt whose hand-off it continued from. */
+	readonly previousAttemptId?: string;
 }
 
 /**
@@ -349,15 +367,16 @@ interface Child {
  * Worktree children capture a handoff; read-only children never do.
  */
 function scripted(
-	options: {
+	options: ScriptOptions & {
 		readonly failReview?: boolean;
 		/** Fail only the lens whose name the goal names; the rest report. */
 		readonly failLens?: string;
-		/** Every lens reports; the reducer over them fails. */
-		readonly failSynthesis?: boolean;
-		readonly check?: CheckScript;
-		/** The synthesis normalizes to minor findings only, so nothing is fixed. */
-		readonly minorOnly?: boolean;
+		/** The normalize call fails. */
+		readonly failNormalize?: boolean;
+		/** pi-subagent refuses to resume the run. */
+		readonly refuseResume?: boolean;
+		/** The resumed attempt changes nothing, so the run keeps its hand-off. */
+		readonly resumeChangesNothing?: boolean;
 		/**
 		 * Every verifier attempt ends the way the 2026-10-31 verifier did: the
 		 * service killed it at its runtime limit, its usage is incomplete, and
@@ -472,17 +491,58 @@ function scripted(
 		return child;
 	};
 
+	/** The attempt whose hand-off a child's run carries. */
+	const handoffAttempt = (child: Child): string =>
+		child.message !== undefined && options.resumeChangesNothing === true
+			? (child.previousAttemptId as string)
+			: child.attemptId;
+	const resumes: { runId: string; message: string }[] = [];
+	const resume = vi.fn(
+		async (
+			runId: string,
+			resumeInput?: { continueFromHandoff: true; message: string },
+		) => {
+			const child = childOf(runId);
+			if (!resumeInput || options.refuseResume === true) {
+				throw new Error("resume at hand-off refused: spent resumes");
+			}
+			resumes.push({ runId, message: resumeInput.message });
+			const next: Child = {
+				runId,
+				attemptId: `${child.attemptId}r`,
+				request: child.request,
+				message: resumeInput.message,
+				previousAttemptId: handoffAttempt(child),
+			};
+			children.set(runId, next);
+			statuses.delete(runId);
+			return { runId, attemptId: next.attemptId, status: "active" };
+		},
+	);
+	const findByOperation = vi.fn(async (operationId: string) => {
+		for (const child of children.values()) {
+			if (child.request.operationId === operationId) {
+				return {
+					runId: child.runId,
+					attemptId: child.attemptId,
+					status: statuses.get(child.runId) ?? "completed",
+				};
+			}
+		}
+		return undefined;
+	});
+
 	const wait = vi.fn(async (runId: string) => {
 		const child = childOf(runId);
 		const worktree = child.request.workspace.mode === "worktree";
 		const goal = child.request.task.goal;
 		const failed =
-			(goal.startsWith("Review deliverable") &&
+			(child.message === undefined &&
+				goal.startsWith("Review deliverable") &&
 				(options.failReview === true ||
 					(options.failLens !== undefined &&
 						goal.includes(`"${options.failLens}" lens`)))) ||
-			(options.failSynthesis === true &&
-				goal.startsWith("Normalize the review findings"));
+			(options.failNormalize === true && goal.startsWith("Find the clusters"));
 		const timedOut =
 			options.failVerify === true && goal.startsWith("Verify deliverable");
 		if (timedOut) {
@@ -525,11 +585,7 @@ function scripted(
 			...(failed
 				? {}
 				: {
-						structuredOutput: outputFor(
-							child.request,
-							options.check ?? "pass",
-							options.minorOnly === true,
-						),
+						structuredOutput: outputFor(child.request, options, child.message),
 					}),
 			usage: {
 				input: 1,
@@ -568,15 +624,15 @@ function scripted(
 						schema: "pi-subagent-worktree",
 						contractRevision: 8,
 						runId,
-						attemptId: child.attemptId,
+						attemptId: handoffAttempt(child),
 						repositoryRoot: "/private/repo",
 						worktreePath: `/private/repo/.pi/worktrees/${runId}`,
 						recordPath: `/private/repo/.pi/worktrees/${runId}.json`,
 						branch: `pi-subagent/reservations/${runId}`,
 						baselineHead: BASELINE_HEAD,
 						createdAt: "2026-01-01T00:00:00.000Z",
-						handoffCommit: commitFor(child.attemptId),
-						handoffRef: `refs/pi-subagent/handoffs/${runId}/${child.attemptId}`,
+						handoffCommit: commitFor(handoffAttempt(child)),
+						handoffRef: `refs/pi-subagent/handoffs/${runId}/${handoffAttempt(child)}`,
 					}
 				: undefined,
 			structuredOutput: result.structuredOutput,
@@ -593,12 +649,13 @@ function scripted(
 
 	const exportHandoff = vi.fn(async (runId: string) => {
 		const child = childOf(runId);
-		const handoffCommit = commitFor(child.attemptId);
+		const attemptId = handoffAttempt(child);
+		const handoffCommit = commitFor(attemptId);
 		const content = patchFor(handoffCommit);
 		return {
 			ref: {
 				runId,
-				attemptId: child.attemptId,
+				attemptId,
 				baselineHead: BASELINE_HEAD,
 				handoffCommit,
 				format: "git-format-patch" as const,
@@ -617,6 +674,8 @@ function scripted(
 		wait,
 		release,
 		exportHandoff,
+		resume,
+		findByOperation,
 	} as unknown as SubagentClient;
 
 	return {
@@ -633,6 +692,9 @@ function scripted(
 		requests,
 		children,
 		launch,
+		resume,
+		/** Every resume message, in order. */
+		resumes,
 		/** Every request for one agent, in declaration order. */
 		requestsFor(agent: string) {
 			return requests.filter((request) => request.agent === agent);
@@ -752,7 +814,7 @@ function examplePlan(): PlanInput {
 		repos: [{ key: "wf", path: "/repo" }],
 		policy: {
 			gates: "ship",
-			maxFixRounds: 1,
+			resumes: 1,
 			publish: { mode: "pr", base: "main" },
 		},
 		deliverables: [
@@ -771,75 +833,76 @@ function examplePlan(): PlanInput {
 	};
 }
 
+/** The exact model a lens with no tier and no pin runs at, as the record names it. */
+const MODEL_PROVIDER_ID = `${tierModel("standard").provider}/${tierModel("standard").id}`;
+
+/** The run's journal, line by line. */
+async function journal(
+	service: WorkflowService,
+	runId: string,
+): Promise<JournalLine[]> {
+	return (
+		await readFile(
+			path.join(runDirectory(service, runId), "events.jsonl"),
+			"utf8",
+		)
+	)
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line) as JournalLine);
+}
+
+/** The full stage list a reviewed, resumed deliverable compiles to. */
+const REVIEWED_STAGES = [
+	{ use: "implement", id: "implement" },
+	{ use: "check", id: "check" },
+	{
+		use: "review-fan-out",
+		id: "review",
+		lenses: [{ id: "correctness", tier: "standard", diverse: false }],
+	},
+	{ use: "normalize", id: "normalize" },
+	{ use: "resume", id: "resume" },
+	{ use: "check", id: "recheck" },
+];
+
 describe("plan-to-ship: the compiled stage document", () => {
-	// The plan-facing view of the SAME compilation the run walks: what
-	// a host's plan check reads and what pi-maestro
-	// derives for itself from the stored plan. It must therefore be exactly the
-	// derived stage list of spec 2.1 - no task keys, no policy gates, and
-	// `maxRounds` in the component's VERIFY rounds.
+	// The plan-facing view of the SAME compilation the run walks: what a host's
+	// plan check reads and what pi-maestro derives for itself from the stored
+	// plan. No task keys, no policy gates.
 	function check(document: unknown): void {
 		const errors = [...Value.Errors(CompiledStageDocumentSchema, document)];
 		expect(errors.map((error) => error.message)).toEqual([]);
 		expect(Value.Check(CompiledStageDocumentSchema, document)).toBe(true);
 	}
 
-	it("derives the stage list pi-maestro derives, from `reviews` and `policy`", () => {
+	it("derives implement, check, review, normalize, resume and recheck from `reviews` and `policy`", () => {
 		const document = compileStageDocument(plan());
 		check(document);
 		expect(document).toEqual({
 			gates: "ship",
-			deliverables: [
-				{
-					id: "d0",
-					stages: [
-						{ use: "implement", id: "implement" },
-						// The plan counts one FIX round; a compiled document records
-						// the two VERIFY rounds the component was asked for.
-						{ use: "verify-and-fix", id: "check", maxRounds: 2 },
-						{
-							use: "review-fan-out",
-							id: "review",
-							lenses: [{ id: "correctness", tier: "standard", diverse: false }],
-							// The fan-out declares no reducer of its own: the
-							// normalization the fixer reads is its own stage.
-							synthesis: "none",
-						},
-						{ use: "synthesis", id: "synthesis" },
-						// The fix stage draws on the deliverable's WHOLE fix-round
-						// pool, the same one the check stage spends from.
-						{ use: "fix", id: "fix", maxRounds: 1 },
-					],
-				},
-			],
+			deliverables: [{ id: "d0", stages: REVIEWED_STAGES }],
 		});
 	});
 
 	it("derives the spec's own example plan", () => {
 		const document = compileStageDocument(examplePlan());
 		check(document);
-		expect(document).toEqual({
-			gates: "ship",
-			deliverables: [
-				{
-					id: "catalogue",
-					stages: [
-						{ use: "implement", id: "implement" },
-						{ use: "verify-and-fix", id: "check", maxRounds: 2 },
-						{
-							use: "review-fan-out",
-							id: "review",
-							synthesis: "none",
-							lenses: [
-								{ id: "contracts", tier: "heavy", diverse: true },
-								{ id: "replay", tier: "standard", diverse: false },
-							],
-						},
-						{ use: "synthesis", id: "synthesis" },
-						{ use: "fix", id: "fix", maxRounds: 1 },
-					],
-				},
-			],
-		});
+		expect(document.deliverables[0]?.stages).toEqual([
+			{ use: "implement", id: "implement" },
+			{ use: "check", id: "check" },
+			{
+				use: "review-fan-out",
+				id: "review",
+				lenses: [
+					{ id: "contracts", tier: "heavy", diverse: true },
+					{ id: "replay", tier: "standard", diverse: false },
+				],
+			},
+			{ use: "normalize", id: "normalize" },
+			{ use: "resume", id: "resume" },
+			{ use: "check", id: "recheck" },
+		]);
 	});
 
 	it.each(["ship", "every-deliverable"] as const)(
@@ -850,38 +913,39 @@ describe("plan-to-ship: the compiled stage document", () => {
 			});
 			check(document);
 			expect(document.gates).toBe(gates);
-			// A gate the POLICY adds is not a stage of the plan: `gates` already
-			// says where a person is asked, and pi-maestro's own derivation of this
-			// document has no way to know the compiler's gate keys.
 			for (const deliverable of document.deliverables) {
-				expect(deliverable.stages.map((stage) => stage.use)).toEqual([
-					"implement",
-					"verify-and-fix",
-					"review-fan-out",
-					"synthesis",
-					"fix",
-				]);
+				expect(deliverable.stages).toEqual(REVIEWED_STAGES);
 			}
-			// The lowering, from the same compilation, is where the gates are named.
 			expect(compileStages(plan({ deliverables: 3 }), { gates }).gates).toEqual(
 				gates === "ship" ? ["ship"] : ["approve-d0", "approve-d1", "ship"],
 			);
 		},
 	);
 
-	it("omits the review, synthesis and fix stages when the deliverable lists no review", () => {
+	it("omits review and normalize when the deliverable lists no review, and keeps the resume", () => {
+		// A failing check is something to answer even with no reviewer.
 		const document = compileStageDocument(plan({ lensesPerDeliverable: [] }));
 		check(document);
-		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
-			"implement",
-			"verify-and-fix",
+		expect(document.deliverables[0]?.stages).toEqual([
+			{ use: "implement", id: "implement" },
+			{ use: "check", id: "check" },
+			{ use: "resume", id: "resume" },
+			{ use: "check", id: "recheck" },
 		]);
 	});
 
-	it("carries exactly `deliverables` and `gates`: the effort field is gone", () => {
-		// The compiled document is what pi-maestro derives for itself, so its
-		// shape is a shared contract. Removing the effort dial removed exactly
-		// one field from it and changed nothing else.
+	it("omits resume and recheck under `policy.resumes: 0`", () => {
+		const document = compileStageDocument(plan(), { resumes: 0 });
+		check(document);
+		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
+			"implement",
+			"check",
+			"review-fan-out",
+			"normalize",
+		]);
+	});
+
+	it("carries exactly `deliverables` and `gates`", () => {
 		expect(Object.keys(compileStageDocument(plan())).sort()).toEqual([
 			"deliverables",
 			"gates",
@@ -890,7 +954,6 @@ describe("plan-to-ship: the compiled stage document", () => {
 			"deliverables",
 			"gates",
 		]);
-		expect(compileStageDocument(plan())).not.toHaveProperty("effort");
 	});
 
 	it("refuses what the lowering refuses, from the same compilation", () => {
@@ -901,9 +964,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 });
 
 describe("plan-to-ship: the compiler", () => {
-	it("compiles a plan with no `policy` to the derived stage list", () => {
-		// Spec 2.1: a plan that sets no policy is valid and gets the defaults,
-		// and the stage list is derived, never authored.
+	it("compiles a plan with no `policy` to every key the run may declare", () => {
 		const document = compileStages(plan());
 		expect(document.gates).toEqual(["ship"]);
 		expect(document.deliverables).toEqual([
@@ -916,115 +977,49 @@ describe("plan-to-ship: the compiler", () => {
 						key: "implement-d0",
 						tasks: ["implement-d0"],
 					},
-					{
-						use: "verify-and-fix",
-						id: "check",
-						key: "check-d0",
-						// `standard` pays for one FIX round, which is two VERIFY rounds.
-						fixRounds: 1,
-						verifyRounds: 2,
-						tasks: ["check-d0-verify-1", "check-d0-fix-1", "check-d0-verify-2"],
-					},
+					{ use: "check", id: "check", key: "check-d0", tasks: ["check-d0"] },
 					{
 						use: "review-fan-out",
 						id: "review",
 						key: "review-d0",
-						// Seeded from `reviews`, with the policy's review defaults.
 						lenses: [{ id: "correctness", tier: "standard", diverse: false }],
-						synthesis: "none",
 						tasks: ["review-d0/correctness"],
 					},
 					{
-						use: "synthesis",
-						id: "synthesis",
-						key: "synthesis-d0",
-						tasks: ["synthesis-d0"],
+						use: "normalize",
+						id: "normalize",
+						key: "normalize-d0",
+						// The model call, worst case, then the record.
+						tasks: ["normalize-d0", "reviews-d0"],
 					},
 					{
-						use: "fix",
-						id: "fix",
-						key: "fix-d0",
-						// The SHARED pool, the same number the check stage reports.
-						fixRounds: 1,
-						tasks: ["fix-d0"],
+						use: "resume",
+						id: "resume",
+						key: "resume-d0",
+						tasks: ["resume-d0"],
+					},
+					{
+						use: "check",
+						id: "recheck",
+						key: "recheck-d0",
+						tasks: ["recheck-d0"],
 					},
 				],
 			},
 		]);
 	});
 
-	it("omits the review, synthesis and fix stages when the deliverable lists no review", () => {
-		const document = compileStages(plan({ lensesPerDeliverable: [] }));
-		expect(document.deliverables[0]?.stages.map((stage) => stage.use)).toEqual([
-			"implement",
-			"verify-and-fix",
-		]);
-	});
-
-	it("derives the five stage keys of a reviewed deliverable, in order", () => {
-		// The documented key list; a host names a task by these and a finding
-		// points at one, so they are pinned here rather than implied.
-		const document = compileStages(plan());
-		expect(
-			document.deliverables[0]?.stages.map((stage) => [stage.id, stage.key]),
-		).toEqual([
-			["implement", "implement-d0"],
-			["check", "check-d0"],
-			["review", "review-d0"],
-			["synthesis", "synthesis-d0"],
-			["fix", "fix-d0"],
-		]);
-	});
-
-	it.each([
-		[0, 1, ["check-d0-verify-1"]],
-		[1, 2, ["check-d0-verify-1", "check-d0-fix-1", "check-d0-verify-2"]],
-		[
-			2,
-			3,
-			[
-				"check-d0-verify-1",
-				"check-d0-fix-1",
-				"check-d0-verify-2",
-				"check-d0-fix-2",
-				"check-d0-verify-3",
-			],
-		],
-	] as const)(
-		"maps %i fix round(s) to %i verify round(s)",
-		(maxFixRounds, verifyRounds, tasks) => {
-			const document = compileStages(plan(), { maxFixRounds });
-			const verify = document.deliverables[0]?.stages[1];
-			expect(verify).toMatchObject({
-				fixRounds: maxFixRounds,
-				verifyRounds,
-				tasks,
-			});
-		},
-	);
-
-	it("defaults `policy.maxFixRounds` to one fix round, and honours 2", () => {
-		// The effort column that used to decide this is gone: the plan's own knob
-		// is the only one, and its default is the old `standard` column's 1.
-		expect(compileStages(plan()).deliverables[0]?.stages[1]).toMatchObject({
-			fixRounds: 1,
-			verifyRounds: 2,
-		});
-		// `maxFixRounds: 2` is the plan vocabulary's maximum and compiles to the
-		// component's cap of 3 VERIFY rounds: a fix is never left unchecked.
-		const document = compileStages(plan(), { maxFixRounds: 2 });
-		expect(document.deliverables[0]?.stages[1]).toMatchObject({
-			key: "check-d0",
-			fixRounds: 2,
-			verifyRounds: MAX_VERIFY_ROUNDS,
-			tasks: [
-				"check-d0-verify-1",
-				"check-d0-fix-1",
-				"check-d0-verify-2",
-				"check-d0-fix-2",
-				"check-d0-verify-3",
-			],
-		});
+	it("names no stage with a suffix a reader would take for the deliverable id", () => {
+		// The defect this replaced: `check-d0-verify-1` narrated as deliverable
+		// `d0-verify-1`. Every key is `<stage id>-<deliverable id>`, exactly.
+		const document = compileStages(
+			plan({ deliverables: 2, lensesPerDeliverable: ["a"] }),
+		);
+		for (const deliverable of document.deliverables) {
+			for (const stage of deliverable.stages) {
+				expect(stage.key).toBe(`${stage.id}-${deliverable.id}`);
+			}
+		}
 	});
 
 	it.each([
@@ -1032,16 +1027,14 @@ describe("plan-to-ship: the compiler", () => {
 		["every-deliverable", ["approve-d0", "approve-d1", "ship"]],
 	] as const)("compiles the gate policy %s", (gates, expected) => {
 		const document = compileStages(plan({ deliverables: 3 }), { gates });
-		// Three deliverables, and still exactly the gates the policy names.
 		expect(document.gates).toEqual(expected);
-		// A per-deliverable gate is a stage of the deliverable it follows; the
-		// ship gate is a run-level gate over every handoff.
-		const perDeliverable = document.deliverables.map((deliverable) =>
-			deliverable.stages
-				.filter((stage) => stage.use === "gate")
-				.map((stage) => stage.key),
-		);
-		expect(perDeliverable).toEqual(
+		expect(
+			document.deliverables.map((deliverable) =>
+				deliverable.stages
+					.filter((stage) => stage.use === "gate")
+					.map((stage) => stage.key),
+			),
+		).toEqual(
 			gates === "every-deliverable"
 				? [["approve-d0"], ["approve-d1"], []]
 				: [[], [], []],
@@ -1051,18 +1044,35 @@ describe("plan-to-ship: the compiler", () => {
 	it.each(["approve-plan", "approve-plan+ship"] as const)(
 		"refuses the removed gate policy %s by name",
 		(gates) => {
-			// The start of the run IS the approval, so the up-front gate is gone
-			// and its two policies are refused rather than silently remapped.
 			expect(() => compileStages(plan(), { gates })).toThrow(
 				`plan-to-ship: \`policy.gates\` is "${gates}", which was removed because the start of the run IS the approval — the plan-mode exit's yes, or a deliberate \`/plan run\` — so ask for "ship", one decision after all the work and before publication, or "every-deliverable", which adds one after each deliverable.`,
 			);
-			// The plan-facing document comes out of the same compilation, so it
-			// refuses the same value rather than showing a gate that is gone.
 			expect(() => compileStageDocument(plan(), { gates })).toThrow(
 				"which was removed because the start of the run IS the approval",
 			);
 		},
 	);
+
+	it("refuses the removed `policy.maxFixRounds` by name, whatever it carries", () => {
+		for (const maxFixRounds of [0, 1, 2]) {
+			expect(() =>
+				compileStages(plan(), { maxFixRounds } as unknown as PolicyInput),
+			).toThrow(
+				"plan-to-ship: `policy.maxFixRounds` was removed with the fixer: the implementer is resumed once with the check report and the review instead, so set `policy.resumes` to 1 (the default) or 0.",
+			);
+		}
+	});
+
+	it("defaults `policy.resumes` to 1", () => {
+		expect(
+			compileStages(plan()).deliverables[0]?.stages.map((stage) => stage.key),
+		).toContain("resume-d0");
+		expect(
+			compileStages(plan(), { resumes: 0 }).deliverables[0]?.stages.map(
+				(stage) => stage.key,
+			),
+		).toEqual(["implement-d0", "check-d0", "review-d0", "normalize-d0"]);
+	});
 
 	it("seeds review lenses from `deliverables[].reviews` and resolves tier and diversity from the policy", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: ["a", "b"] }), {
@@ -1074,7 +1084,6 @@ describe("plan-to-ship: the compiler", () => {
 				{ id: "b", tier: "heavy", diverse: true },
 			],
 		});
-		// A lens that says it for itself outranks the policy.
 		const pinned = compileStages(
 			plan({ lensesPerDeliverable: ["a"], tier: "light", diverse: false }),
 			{ reviewDefault: { tier: "heavy", diverse: true } },
@@ -1084,11 +1093,6 @@ describe("plan-to-ship: the compiler", () => {
 		});
 	});
 
-	// Plan schema v5 moved review routing off the task and deleted authored
-	// stages. There is no migration from v3 or v4, so each key is admitted by
-	// the input schema ONLY so the compiler can refuse it by name: refused by
-	// TypeBox a person would read "unexpected property" and could not act on
-	// it. The schema/compiler split is asserted in "the input contract".
 	it.each([
 		[
 			"a task carrying plan schema v4's `review`",
@@ -1102,34 +1106,16 @@ describe("plan-to-ship: the compiler", () => {
 		],
 		[
 			"a deliverable that authors `stages`",
-			() =>
-				withStages(plan(), [
-					{ use: "implement", id: "build" },
-					{ use: "verify-and-fix", id: "green" },
-				]),
+			() => withStages(plan(), [{ use: "implement", id: "build" }]),
 			'deliverable "d0" declares `stages`: plan schema v8 does not author stages; the compiler derives them from `reviews` and `policy`, so drop the block and store the plan at `schemaVersion: 8`.',
 		],
 	])(
 		"refuses %s by name, and compiles the same plan without it",
 		(_name, document, message) => {
 			expect(() => compileStages(document())).toThrow(message);
-			// The refusal is the compiler's, not the schema's, and it is the ONLY
-			// thing wrong with this plan: the same document without the key compiles.
 			expect(() => compileStages(plan())).not.toThrow();
 		},
 	);
-
-	it("names the key even when its value is the empty object the model wrote", () => {
-		// The seat model answered "remove `review` from work tasks" with
-		// `review: {lens: ""}`. A value-shaped refusal would have missed it; the
-		// compiler refuses the KEY, whatever it carries.
-		expect(() => compileStages(withTaskKey(plan(), "review", {}))).toThrow(
-			"a task is work only",
-		);
-		expect(() => compileStages(withStages(plan(), []))).toThrow(
-			"plan schema v8 does not author stages",
-		);
-	});
 
 	it("de-duplicates repeated lens ids by declaration ordinal", () => {
 		const document = compileStages(
@@ -1139,11 +1125,6 @@ describe("plan-to-ship: the compiler", () => {
 			"review-d0/risk",
 			"review-d0/risk-2",
 			"review-d0/risk-3",
-		]);
-		// The synthesis is its own stage, so the fan-out's task list is the
-		// lenses and nothing else.
-		expect(document.deliverables[0]?.stages[3]?.tasks).toEqual([
-			"synthesis-d0",
 		]);
 	});
 
@@ -1187,19 +1168,10 @@ describe("plan-to-ship: the compiler", () => {
 });
 
 describe("plan-to-ship: the start is the approval", () => {
-	// A run exists because a person said yes to the plan it carries:
-	// pi-maestro's plan-mode exit agrees the description, shows the compiled
-	// document, has it blind-reviewed and asks "Start the run?" before calling
-	// `startBuiltin`, and `/plan run` is that same yes said deliberately. So
-	// there is no gate before the work, and no approve-plan task at all.
 	it("declares no approve task and makes the first task ready at once", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const run = await service.run("plan-to-ship", input());
-
-		// The first task the run declares is runnable at once: nothing waits on a
-		// person between `run-created` and the first work task, so no scan of the
-		// run ever sees a pending checkpoint before that task exists.
 		const created = await bounded(
 			(async () => {
 				for (;;) {
@@ -1213,20 +1185,12 @@ describe("plan-to-ship: the start is the approval", () => {
 			"the first task",
 		);
 		expect(taskPaths(created)[0]).toBe("refine");
-		const refine = taskByKey(created, "refine");
-		expect(refine.dependsOn ?? []).toEqual([]);
-		expect(["ready", "running", "completed"]).toContain(refine.status);
-
-		// The FIRST park is the ship gate, so every deliverable ran without a
-		// second person-facing decision.
+		expect(taskByKey(created, "refine").dependsOn ?? []).toEqual([]);
 		const ship = await park(service, run.runId, "ship");
 		expect(taskPaths(ship)).not.toContain("approve-plan");
-		expect(taskByKey(ship, "implement-d0").status).toBe("completed");
-
 		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
 		expect(finished.status).toBe("completed");
-		// The only checkpoint the default policy declares, over the whole run.
 		expect(
 			(finished.tasks ?? [])
 				.filter((task) => task.kind === "checkpoint")
@@ -1236,49 +1200,74 @@ describe("plan-to-ship: the start is the approval", () => {
 	});
 });
 
-describe("plan-to-ship: the stage walk", () => {
-	async function walkToShip(options: PlanOptions = {}) {
-		const delegated = scripted();
-		const service = await serviceFor(delegated);
-		const receipt = await service.run("plan-to-ship", input(options));
-		const ship = await park(service, receipt.runId, "ship");
-		return { delegated, service, runId: receipt.runId, ship };
-	}
+/** Runs to the ship gate, with the script and the plan options given. */
+async function runToShip(
+	options: PlanOptions = {},
+	script: Parameters<typeof scripted>[0] = {},
+) {
+	const delegated = scripted(script);
+	const service = await serviceFor(delegated);
+	const receipt = await service.run("plan-to-ship", input(options));
+	const ship = await park(service, receipt.runId, "ship");
+	return { delegated, service, runId: receipt.runId, ship };
+}
 
-	it("lowers the derived stage list to the compiled keys, in order", async () => {
-		const { ship } = await walkToShip();
-		// Exactly `compileStages`' own task list, plus the run-level ship gate.
+/** The ship gate's `reviews-<d>` input, as the record it must be. */
+function recordOf(ship: WorkflowServiceRunView, deliverable = "d0") {
+	const record = taskByKey(ship, "ship").checkpoint?.inputs?.[
+		`reviews-${deliverable}`
+	];
+	expect(Value.Check(ReviewsRecordSchema, record)).toBe(true);
+	return record as Static<typeof ReviewsRecordSchema>;
+}
+
+/** The pi-subagent child behind one workflow task, by its journalled receipt. */
+async function childOf(
+	service: WorkflowService,
+	runId: string,
+	key: string,
+): Promise<{ runId: string; attemptId: string }> {
+	const events = await journal(service, runId);
+	const view = await service.status(runId);
+	const taskId = taskByKey(view, key).id;
+	const created = events.find(
+		(event) =>
+			event.type === "task-execution-created" &&
+			(event.data.execution as { taskId: string }).taskId === taskId,
+	);
+	if (!created) throw new Error(`no execution for ${key}`);
+	const executionId = (created.data.execution as { id: string }).id;
+	const receipt = events.find(
+		(event) =>
+			event.type === "task-execution-launch-receipted" &&
+			event.data.executionId === executionId,
+	);
+	if (!receipt) throw new Error(`no receipt for ${key}`);
+	return {
+		runId: receipt.data.subagentRunId as string,
+		attemptId: receipt.data.subagentAttemptId as string,
+	};
+}
+
+describe("plan-to-ship: the review loop, one deliverable", () => {
+	it("walks implement, check beside the lenses, resume, recheck and the record, in that order", async () => {
+		const { ship } = await runToShip();
 		expect(taskPaths(ship)).toEqual([
 			"refine",
 			"implement-d0",
-			"check-d0-verify-1",
+			"check-d0",
 			"review-d0/correctness",
-			"synthesis-d0",
-			"fix-d0",
-			"ship",
-		]);
-	});
-
-	it("declares every deliverable's implementer up front when no gate can stop the walk", async () => {
-		const { ship } = await walkToShip({
-			deliverables: 2,
-			lensesPerDeliverable: [],
-		});
-		expect(taskPaths(ship)).toEqual([
-			"refine",
-			"implement-d0",
-			"implement-d1",
-			"check-d0-verify-1",
-			"check-d1-verify-1",
+			"resume-d0",
+			"recheck-d0",
+			"reviews-d0",
 			"ship",
 		]);
 	});
 
 	it("launches the implementer with W1's limits and the cache instruction", async () => {
-		const { delegated } = await walkToShip();
-		const [implement] = delegated.requestsFor("implementer");
+		const { delegated } = await runToShip();
+		const [implement] = delegated.requestsGoal("Implement deliverable");
 		if (!implement) throw new Error("no implementer request");
-
 		expect(implement.workspace).toEqual({
 			mode: "worktree",
 			cwd: expect.any(String),
@@ -1292,282 +1281,35 @@ describe("plan-to-ship: the stage walk", () => {
 		expect(implement.limits.cumulativeRuntimeMs).toBeGreaterThanOrEqual(
 			W1.cumulativeRuntimeMs,
 		);
-		expect(implement.tools).toContain("bash");
-
 		const instructions = implement.task.instructions.join("\n");
-		// W1: a cache inside the worktree lands in the handoff and breaches its bound.
-		expect(instructions).toContain(CACHE_MARKER);
-		expect(instructions).toMatch(/npm ci/);
+		expect(instructions).toContain("npm_config_cache=/tmp/npm-cache");
 		expect(instructions).toMatch(/checkRan/);
-		expect(instructions).toMatch(/checkTail/);
-		// The check may never be the reason a handoff is missing.
 		expect(instructions).toMatch(/never a reason to leave the tree unchanged/i);
 	});
 
-	it("verifies the implementer's own patch at the session model", async () => {
-		const { delegated } = await walkToShip();
+	it("verifies at the session model and never tells an agent to apply a ref", async () => {
+		const { delegated } = await runToShip();
 		const [verify] = delegated.requestsGoal("Verify deliverable");
-		if (!verify) throw new Error("no verifier request");
-		expect(verify.agent).toBe("implementer");
-		// A verifier runs the install and the check, which write to the tree, so
-		// it runs in a worktree — with the `verify` row's model and the write grant.
-		expect(verify.workspace.mode).toBe("worktree");
-		// The check INHERITS: the resolved session model, never the literal.
-		expect(verify.model).toEqual(SESSION_MODEL);
-		expect(verify.limits.workspaceWriteBytes).toBeGreaterThanOrEqual(
-			W1.workspaceWriteBytes,
-		);
-		// The host checked the workspace out at the hand-off; the guest has no
-		// git, so no task is ever told to apply a ref itself.
-		const instructions = verify.task.instructions.join("\n");
+		expect(verify?.agent).toBe("implementer");
+		expect(verify?.workspace.mode).toBe("worktree");
+		expect(verify?.model).toEqual(SESSION_MODEL);
+		const instructions = verify?.task.instructions.join("\n") ?? "";
 		expect(instructions).toMatch(/already contains the change under test/);
-		expect(instructions).toMatch(/for identity only/);
+		expect(instructions).toMatch(/You are verifying, not fixing/);
 		for (const request of delegated.requests) {
 			expect(request.task.instructions.join("\n")).not.toMatch(
 				/apply (that|the) (ref|patch|handoff)/i,
 			);
 		}
-	});
-
-	it("fixes what a failing check reported and reviews the fixer's patch", async () => {
-		const delegated = scripted({ check: "fail-then-pass" });
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
-
-		// The check spent the ONE fix round `policy.maxFixRounds` defaults to, so
-		// the review's fixer has none left and is not declared: total fix rounds per
-		// deliverable never exceed `policy.maxFixRounds`.
-		expect(taskPaths(ship)).toEqual([
-			"refine",
-			"implement-d0",
-			"check-d0-verify-1",
-			"check-d0-fix-1",
-			"check-d0-verify-2",
-			"review-d0/correctness",
-			"synthesis-d0",
-			"ship",
-		]);
-		const [fix] = delegated.requestsGoal("Fix what the check reported");
-		expect(fix?.model).toEqual(SESSION_MODEL);
-		// The reviewer judges the FIXER's patch, not the implementer's.
-		const fixChild = delegated.childFor("Fix what the check reported");
-		const [review] = delegated.requestsFor("reviewer");
-		expect((review?.task.context ?? []).join("\n")).toContain(
-			commitFor(fixChild.attemptId),
-		);
-		const status = await service.status(run.runId);
-		expect(taskByKey(status, "check-d0-fix-1").handoff).toMatchObject({
-			handoffCommit: commitFor(fixChild.attemptId),
-		});
-		await decide(service, ship, "ship", { ship: true });
-		const finished = await bounded(service.wait(run.runId), "wait");
-		expect(finished.output).toMatchObject({
-			deliverables: [
-				{ id: "d0", checkRan: true, checkPassed: true, verifyRounds: 2 },
-			],
-		});
-	});
-
-	it("starts every consumer of a hand-off at that hand-off, and nothing else", async () => {
-		// One fix round for the check, one for the review: every task that reads
-		// a patch runs in a workspace the host checked out at that patch's commit.
-		const delegated = scripted({ check: "fail-then-pass" });
-		const service = await serviceFor(delegated);
-		const run = await service.run(
-			"plan-to-ship",
-			input({ policy: { maxFixRounds: 2 } }),
-		);
-		const ship = await park(service, run.runId, "ship");
-		expect(taskPaths(ship)).toContain("fix-d0");
-
-		const startOf = (goal: string, index = 0) =>
-			delegated.requestsGoal(goal)[index]?.workspace;
-		const commitOf = (goal: string, index = 0) => {
-			const child = [...delegated.children.values()].filter((entry) =>
-				entry.request.task.goal.startsWith(goal),
-			)[index];
-			if (!child) throw new Error(`no child for ${goal}`);
-			return commitFor(child.attemptId);
-		};
-		const implemented = commitOf("Implement deliverable");
-		const fixed = commitOf("Fix what the check reported");
-		// verify-1 and fix-1 start at the implementer's hand-off; verify-2, the
-		// lens, and the review fixer at the check fixer's.
-		expect(startOf("Verify deliverable", 0)).toMatchObject({
-			mode: "worktree",
-			startAt: implemented,
-		});
-		expect(startOf("Fix what the check reported")).toMatchObject({
-			mode: "worktree",
-			startAt: implemented,
-		});
-		expect(startOf("Verify deliverable", 1)).toMatchObject({
-			startAt: fixed,
-		});
-		expect(startOf("Review deliverable")).toMatchObject({
-			mode: "read-only",
-			startAt: fixed,
-		});
-		expect(startOf("Address the review findings")).toMatchObject({
-			mode: "worktree",
-			startAt: fixed,
-		});
-		// Producers, the synthesis and the refiner read no hand-off.
-		for (const goal of [
-			"Refine the authored plan",
-			"Implement deliverable",
-			"Normalize the review findings",
-		]) {
-			expect(startOf(goal)).toBeDefined();
-			expect(startOf(goal)).not.toHaveProperty("startAt");
-		}
-		// The persisted reference never reaches pi-subagent.
-		for (const request of delegated.requests) {
-			expect(request.workspace).not.toHaveProperty("startAtInput");
+		for (const { message } of delegated.resumes) {
+			expect(message).not.toMatch(/apply (that|the) (ref|patch|handoff)/i);
 		}
 	});
 
-	it("stops the loop on a check that did not run and says the change is unverified", async () => {
-		const delegated = scripted({ check: "not-run" });
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
-		// `checkRan: false` escalates to a human; it never declares a fixer.
-		expect(taskPaths(ship)).not.toContain("check-d0-fix-1");
-		// The review's fixer still runs - the findings are real, and it has the
-		// whole fix-round pool - and it reports the check passing after its edits.
-		// That is the fixer's OWN word, and it is not the separate verification a
-		// check that never ran is missing, so the deliverable stays unverified.
-		expect(taskPaths(ship)).toContain("fix-d0");
-		expect(
-			taskByKey(ship, "ship").checkpoint?.inputs?.["fix-d0"],
-		).toMatchObject({ checkPassed: true });
-		await decide(service, ship, "ship", { ship: false });
-		const finished = await bounded(service.wait(run.runId), "wait");
-		expect(finished.output).toMatchObject({
-			deliverables: [{ id: "d0", checkRan: false, checkPassed: false }],
-		});
-	});
-
-	it("normalizes every lens's findings and fixes the blocking ones", async () => {
-		const delegated = scripted();
-		const service = await serviceFor(delegated);
-		const run = await service.run(
-			"plan-to-ship",
-			input({ lensesPerDeliverable: ["a", "b"] }),
-		);
-		const ship = await park(service, run.runId, "ship");
-
-		// The synthesis is a fan-in over the lenses that reported, and both of
-		// them are its inputs by lens key. `inputs` is an inspection-only field.
-		const inspected = await service.inspect(run.runId, {
-			include: ["run", "tasks"],
-		});
-		const synthesis = (inspected.tasks ?? []).find(
-			(task) => task.key === "synthesis-d0",
-		);
-		expect(Object.keys(synthesis?.inputs ?? {}).sort()).toEqual(["a", "b"]);
-		const [normalize] = delegated.requestsGoal("Normalize the review findings");
-		expect(normalize?.agent).toBe("reviewer");
-		expect(normalize?.workspace.mode).toBe("read-only");
-		// The synthesis is a REVIEWER: the standard reviewer tier, not the
-		// session's model.
-		expect(normalize?.model).toEqual(tierModel("standard"));
-		expect(normalize?.task.instructions.join("\n")).toMatch(
-			/de-duplicated|ONE list/,
-		);
-
-		// The fixer reads the normalized list and the patch, in a worktree, at the
-		// `fix` envelope, and it is told to answer every finding by id.
-		const [fix] = delegated.requestsGoal("Address the review findings");
-		expect(fix?.agent).toBe("implementer");
-		expect(fix?.workspace.mode).toBe("worktree");
-		expect(fix?.model).toEqual(SESSION_MODEL);
-		const instructions = fix?.task.instructions.join("\n") ?? "";
-		expect(instructions).toContain("Address EVERY blocking and major finding");
-		// Only the blocking finding of the scripted synthesis is actionable; the
-		// minor one is the fixer's to judge.
-		expect(instructions).toContain("1 of them");
-		expect(instructions).toMatch(/a note is REQUIRED/);
-		// No re-review: nothing reads the fixer's patch again.
-		expect(
-			taskPaths(ship).filter((path) => path.startsWith("review-d0/")).length,
-		).toBe(2);
-		expect(taskPaths(ship)).toEqual([
-			"refine",
-			"implement-d0",
-			"check-d0-verify-1",
-			"review-d0/a",
-			"review-d0/b",
-			"synthesis-d0",
-			"fix-d0",
-			"ship",
-		]);
-		// The patch that ships is the FIXER's, not the implementer's.
-		const fixChild = delegated.childFor("Address the review findings");
-		const status = await service.status(run.runId);
-		expect(taskByKey(status, "fix-d0").handoff).toMatchObject({
-			handoffCommit: commitFor(fixChild.attemptId),
-		});
-		await decide(service, ship, "ship", { ship: true });
-		const finished = await bounded(service.wait(run.runId), "wait");
-		expect(finished.output).toMatchObject({
-			shipped: true,
-			receipt: {
-				refs: [
-					`refs/pi-subagent/handoffs/${fixChild.runId}/${fixChild.attemptId}`,
-				],
-			},
-		});
-	});
-
-	it("skips the fixer, and says why, when nothing is blocking or major", async () => {
-		const delegated = scripted({ minorOnly: true });
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
-		expect(taskPaths(ship)).not.toContain("fix-d0");
-		expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
-			"Fixes: 0 of 1 deliverable(s) ran a fixer",
-		);
-		await decide(service, ship, "ship", { ship: true });
-		const finished = await bounded(service.wait(run.runId), "wait");
-		// The reason is recorded in the journal, not only in the prompt.
-		const logs = await service.logs(run.runId, { limit: 500 });
-		expect(
-			logs.entries.some((entry) =>
-				entry.message.includes(
-					'no fixer for deliverable "d0": the synthesis reported no blocking or major finding',
-				),
-			),
-		).toBe(true);
-		expect(finished.status).toBe("completed");
-	});
-
-	it("skips the fixer, and says why, when the check spent the whole fix budget", async () => {
-		const delegated = scripted({ check: "fail-then-pass" });
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
-		expect(taskPaths(ship)).not.toContain("fix-d0");
-		const logs = await service.logs(run.runId, { limit: 500 });
-		expect(
-			logs.entries.some((entry) =>
-				entry.message.includes(
-					'no fixer for deliverable "d0": no fix round remains in the shared budget (1 of 1 fix round(s) spent on the check)',
-				),
-			),
-		).toBe(true);
-		await decide(service, ship, "ship", { ship: true });
-		await bounded(service.wait(run.runId), "wait");
-	});
-
-	it("imports the handoff and hands its descriptor to the reviewer", async () => {
-		const { delegated, service, runId, ship } = await walkToShip();
-		const child = delegated.childFor("Implement deliverable");
+	it("imports the hand-off and hands its descriptor, never its bytes, to every lens", async () => {
+		const { delegated, service, runId } = await runToShip();
+		const child = await childOf(service, runId, "implement-d0");
 		const patch = patchFor(commitFor(child.attemptId));
-
 		const status = await service.status(runId);
 		expect(taskByKey(status, "implement-d0").handoff).toMatchObject({
 			subagentRunId: child.runId,
@@ -1578,175 +1320,648 @@ describe("plan-to-ship: the stage walk", () => {
 			sha256: sha256(patch),
 			bytes: patch.byteLength,
 		});
-
-		// The reviewer receives the handoff as a descriptor input, never bytes.
 		const [review] = delegated.requestsFor("reviewer");
 		const projected = (review?.task.context ?? []).join("\n");
 		expect(projected).toContain('"content":"descriptor"');
 		expect(projected).toContain(commitFor(child.attemptId));
 		expect(projected).not.toContain("From: Agent");
-		expect(review?.workspace.mode).toBe("read-only");
-
-		// The ship gate shows the summaries, the normalized findings and the fix
-		// report, keyed by deliverable id rather than by an ordinal nobody can
-		// look up.
-		const gate = taskByKey(ship, "ship").checkpoint;
-		expect(Object.keys(gate?.inputs ?? {}).sort()).toEqual([
-			"findings-d0",
-			"fix-d0",
-			"plan",
-			"summary-d0",
-		]);
-		expect(gate?.inputs).toMatchObject({
-			"summary-d0": { checkRan: true, checkPassed: true, files: ["a.txt"] },
-			"findings-d0": {
-				findings: [
-					{
-						id: "missing-test",
-						severity: "blocking",
-						lens: "correctness",
-						where: "/deliverables/0",
-						summary: "Missing a test.",
-						suggestion: "Add one next to the change.",
-					},
-					{ id: "naming", severity: "minor" },
-				],
-				verdict: "One lens asked for a test; nothing else is blocking.",
-			},
-			"fix-d0": {
-				findings: [{ id: "missing-test", outcome: "addressed" }],
-				checkPassed: true,
-			},
-		});
-		expect(gate?.prompt).toContain("1 blocking finding(s)");
-		expect(gate?.prompt).toContain("nothing re-reviewed a fixed patch");
 	});
 
-	it("records a receipt naming the handoff ref, its digest, and the plan digest", async () => {
-		const { delegated, service, runId, ship } = await walkToShip();
-		// The patch that ships is the last worktree task's: the fixer that
-		// answered the review findings.
-		const child = delegated.childFor("Address the review findings");
-		await decide(service, ship, "ship", { ship: true, note: "cherry-picked" });
-		const finished = await bounded(service.wait(runId), "wait");
+	it("runs the check and the lenses in parallel: both are declared before either is awaited", async () => {
+		const { service, runId, ship } = await runToShip({
+			lensesPerDeliverable: ["a", "b"],
+		});
+		const events = await journal(service, runId);
+		const idOf = (key: string) => taskByKey(ship, key).id;
+		const declared = (key: string) =>
+			events.findIndex(
+				(event) =>
+					event.type === "task-declared" &&
+					(event.data.task as { id: string }).id === idOf(key),
+			);
+		const firstBarrierOver = (key: string) =>
+			events.findIndex(
+				(event) =>
+					event.type === "barrier-reached" &&
+					(event.data.taskIds as string[]).includes(idOf(key)),
+			);
+		const barrier = Math.min(
+			firstBarrierOver("check-d0"),
+			firstBarrierOver("review-d0/a"),
+		);
+		for (const key of ["check-d0", "review-d0/a", "review-d0/b"]) {
+			expect(declared(key)).toBeGreaterThan(-1);
+			expect(declared(key)).toBeLessThan(barrier);
+		}
+	});
 
-		const ref = `refs/pi-subagent/handoffs/${child.runId}/${child.attemptId}`;
-		expect(finished.status).toBe("completed");
+	it("starts the check and every lens at H1, resumes the implementer's own run, and rechecks H2", async () => {
+		const { delegated, service, runId } = await runToShip();
+		const implementer = await childOf(service, runId, "implement-d0");
+		const h1 = commitFor(implementer.attemptId);
+		const [check, recheck] = delegated.requestsGoal("Verify deliverable");
+		expect(check?.workspace).toMatchObject({ mode: "worktree", startAt: h1 });
+		expect(delegated.requestsGoal("Review deliverable")[0]?.workspace).toEqual({
+			mode: "read-only",
+			cwd: expect.any(String),
+			startAt: h1,
+		});
+		// The resume is NOT a launch: no preflight, one `resume` of the
+		// implementer's run, at its hand-off, with one message.
+		expect(delegated.requestsGoal("Answer the check")).toHaveLength(0);
+		expect(delegated.resume).toHaveBeenCalledOnce();
+		expect(delegated.resume.mock.calls[0]?.[0]).toBe(implementer.runId);
+		expect(delegated.resume.mock.calls[0]?.[1]).toMatchObject({
+			continueFromHandoff: true,
+		});
+		const resumed = await childOf(service, runId, "resume-d0");
+		expect(resumed.runId).toBe(implementer.runId);
+		expect(resumed.attemptId).not.toBe(implementer.attemptId);
+		expect(recheck?.workspace).toMatchObject({
+			mode: "worktree",
+			startAt: commitFor(resumed.attemptId),
+		});
+		for (const goal of ["Refine the authored plan", "Implement deliverable"]) {
+			expect(delegated.requestsGoal(goal)[0]?.workspace).not.toHaveProperty(
+				"startAt",
+			);
+		}
+		for (const request of delegated.requests) {
+			expect(request.workspace).not.toHaveProperty("startAtInput");
+			expect(request).not.toHaveProperty("continueFrom");
+		}
+	});
+
+	it("hands the resumed implementer the check report and claims, locations and evidence only, by file and line", async () => {
+		const { delegated } = await runToShip(
+			{ lensesPerDeliverable: ["correctness", "security"] },
+			{
+				findings: {
+					correctness: [
+						lensFinding("src/b.ts", 9, "B nine.", "high", "Rename it."),
+						lensFinding("src/a.ts", 40, "A forty.", "low"),
+					],
+					security: [lensFinding("src/a.ts", 2, "A two.", "medium")],
+				},
+			},
+		);
+		const message = delegated.resumes[0]?.message ?? "";
+		expect(message).toContain("Check report:\n{");
+		expect(message).toContain('"summary":"The check passed."');
+		expect(shownIds(message)).toHaveLength(3);
+		const claims = [...message.matchAll(/"claim":"([^"]+)"/g)].map(
+			(match) => match[1],
+		);
+		expect(claims).toEqual(["A two.", "A forty.", "B nine."]);
+		for (const withheld of [
+			'"severity"',
+			'"lens"',
+			'"model"',
+			'"agreement"',
+			'"suggestion"',
+			"Rename it.",
+			"correctness",
+			"security",
+			"gpt-5.6",
+		]) {
+			expect(message).not.toContain(withheld);
+		}
+		expect(message).toContain('"evidence":"Seen at src/a.ts:2."');
+	});
+
+	it("commits the harness's record with attribution, agreement and dispositions", async () => {
+		const { ship, service, runId } = await runToShip();
+		const lens = await childOf(service, runId, "review-d0/correctness");
+		const implementer = await childOf(service, runId, "implement-d0");
+		const record = recordOf(ship);
+		expect(record).toEqual({
+			deliverable: "d0",
+			handoffCommit: commitFor(implementer.attemptId),
+			reviewers: [
+				{
+					reviewerKey: expect.stringMatching(/^[0-9a-f]{64}$/),
+					lens: "correctness",
+					model: MODEL_PROVIDER_ID,
+					thinking: "medium",
+					attemptId: lens.attemptId,
+					status: "reported",
+					findings: 1,
+				},
+			],
+			clusters: [
+				{
+					id: "c1",
+					claim: "Missing a test.",
+					location: { file: "a.txt", line: 1 },
+					severity: "high",
+					reportedBy: [
+						{
+							lens: "correctness",
+							model: MODEL_PROVIDER_ID,
+							thinking: "medium",
+							attemptId: lens.attemptId,
+							findingIndex: 0,
+						},
+					],
+					agreement: { count: 1, of: 1 },
+					suggestions: ["Add one next to the change."],
+					raw: [{ reviewerIndex: 0, findingIndex: 0 }],
+					disposition: { kind: "fixed", reasoning: "Added the test." },
+				},
+			],
+			// One reviewer: nothing for a model to merge, so none was asked.
+			normalizer: { mode: "deterministic" },
+		});
+		expect(taskPaths(ship)).not.toContain("normalize-d0");
+	});
+
+	it("shows the gate counts, the record and the last check, and ships the resumed hand-off", async () => {
+		const { ship, service, runId } = await runToShip(
+			{},
+			{
+				check: "fail-then-pass",
+			},
+		);
+		const gate = taskByKey(ship, "ship").checkpoint;
+		expect(Object.keys(gate?.inputs ?? {}).sort()).toEqual([
+			"check-d0",
+			"plan",
+			"reviews-d0",
+			"summary-d0",
+		]);
+		// The last check is the recheck of H2, and the summary is the resumed
+		// implementer's.
+		expect(gate?.inputs?.["check-d0"]).toMatchObject({
+			checkRan: true,
+			checkPassed: true,
+		});
+		expect(gate?.inputs?.["summary-d0"]).toMatchObject({
+			summary: "Answered the check and the review",
+		});
+		expect(gate?.prompt).toContain(
+			"1 handoff patch(es); the last repository check ran for 1 of 1 and passed for 1.",
+		);
+		expect(gate?.prompt).toContain(
+			"Reviews: 1 of 1 reviewer(s) reported; 1 cluster(s), 0 raised by two or more reviewers.",
+		);
+		expect(gate?.prompt).toContain(
+			"Resumes: 1 of 1 deliverable(s) resumed the implementer; 1 fixed, 0 declined, 0 out of scope, 0 unanswered.",
+		);
+		// The FIRST check ran and failed; the resume saw it.
+		const first = taskByKey(ship, "check-d0");
+		expect(first.status).toBe("completed");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		const resumed = await childOf(service, runId, "resume-d0");
+		const ref = `refs/pi-subagent/handoffs/${resumed.runId}/${resumed.attemptId}`;
 		expect(finished.output).toMatchObject({
-			approved: true,
 			shipped: true,
 			deliverables: [
 				{
 					id: "d0",
 					checkRan: true,
 					checkPassed: true,
-					verifyRounds: 1,
-					handoff: { sha256: sha256(patchFor(commitFor(child.attemptId))) },
+					resumed: true,
+					handoff: { handoffCommit: commitFor(resumed.attemptId) },
 				},
 			],
-			reviews: [
-				{
-					deliverable: "d0",
-					lens: "correctness",
-					verdict: "request-changes",
-					blocking: true,
-				},
-			],
-			findings: [{ id: "missing-test", severity: "blocking", kind: "gap" }],
 			receipt: { planDigest: PLAN_DIGEST, refs: [ref] },
 		});
-		// The required finalizer ran after the output was committed, and could
-		// not have changed it.
-		const record = taskByKey(finished, "receipt");
-		expect(record).toMatchObject({ role: "finalizer", status: "completed" });
-		const [recording] = delegated
-			.requestsFor("planner")
-			.filter((request) =>
-				request.task.goal.startsWith("Record the plan-to-ship receipt"),
-			);
-		expect(recording?.task.context.join("\n")).toContain(ref);
+		const output = finished.output as { reviews: unknown[] };
+		expect(output.reviews).toHaveLength(1);
+		expect(Value.Check(ReviewsRecordSchema, output.reviews[0])).toBe(true);
 	});
 
-	it("completes with shipped: false and no refs when the ship gate says no", async () => {
-		const { service, runId, ship } = await walkToShip();
-		await decide(service, ship, "ship", {
-			ship: false,
-			note: "patch is wrong",
+	it("records a receipt with the counts, and the record as a finalizer input", async () => {
+		const { delegated, service, runId, ship } = await runToShip();
+		await decide(service, ship, "ship", { ship: true, note: "cherry-picked" });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(taskByKey(finished, "receipt")).toMatchObject({
+			role: "finalizer",
+			status: "completed",
 		});
+		const [recording] = delegated.requestsGoal(
+			"Record the plan-to-ship receipt",
+		);
+		const context = JSON.parse(recording?.task.context[0] ?? "{}");
+		expect(context.deliverables[0]).toMatchObject({
+			id: "d0",
+			resumed: true,
+			reviews: {
+				reviewers: 1,
+				reported: 1,
+				clusters: 1,
+				agreed: 0,
+				fixed: 1,
+				declined: 0,
+				outOfScope: 0,
+				unanswered: 0,
+			},
+		});
+		const projected = recording?.task.context.join("\n") ?? "";
+		expect(projected).toContain('"reviews-d0"');
+	});
+});
+
+describe("plan-to-ship: the review loop, two deliverables", () => {
+	it("runs the whole loop for each deliverable, in plan order", async () => {
+		const { ship } = await runToShip({ deliverables: 2 });
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"implement-d0",
+			"implement-d1",
+			"check-d0",
+			"review-d0/correctness",
+			"resume-d0",
+			"recheck-d0",
+			"reviews-d0",
+			"check-d1",
+			"review-d1/correctness",
+			"resume-d1",
+			"recheck-d1",
+			"reviews-d1",
+			"ship",
+		]);
+		const gate = taskByKey(ship, "ship").checkpoint;
+		expect(Object.keys(gate?.inputs ?? {}).sort()).toEqual([
+			"check-d0",
+			"check-d1",
+			"plan",
+			"reviews-d0",
+			"reviews-d1",
+			"summary-d0",
+			"summary-d1",
+		]);
+		expect(recordOf(ship, "d1").deliverable).toBe("d1");
+	});
+});
+
+describe("plan-to-ship: normalizing across lenses", () => {
+	const SAME_PLACE = {
+		a: [lensFinding("src/x.ts", 10, "Input is never validated.", "medium")],
+		b: [
+			lensFinding(
+				"src/x.ts",
+				30,
+				"Unchecked input reaches the parser.",
+				"high",
+			),
+		],
+	};
+
+	it("asks the normalize model only to merge, and records what it merged", async () => {
+		const { delegated, ship } = await runToShip(
+			{ lensesPerDeliverable: ["a", "b"] },
+			{ findings: SAME_PLACE, merges: (ids) => ({ merges: [ids] }) },
+		);
+		expect(taskPaths(ship)).toContain("normalize-d0");
+		const [normalize] = delegated.requestsGoal("Find the clusters");
+		expect(normalize?.agent).toBe("reviewer");
+		expect(normalize?.workspace).toEqual({
+			mode: "read-only",
+			cwd: expect.any(String),
+		});
+		expect(normalize?.tools).toEqual([]);
+		expect(normalize?.model).toEqual(envelope("normalize").model);
+		expect(normalize?.task.instructions.join("\n")).toContain(
+			"You may only merge.",
+		);
+		const record = recordOf(ship);
+		expect(record.normalizer).toEqual({
+			mode: "model",
+			model: `${envelope("normalize").model.provider}/${envelope("normalize").model.id}`,
+			promptDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+		});
+		expect(record.clusters).toHaveLength(1);
+		expect(record.clusters[0]).toMatchObject({
+			id: "c1",
+			// The first reporter's claim, verbatim; the severity the highest.
+			claim: "Input is never validated.",
+			severity: "high",
+			agreement: { count: 2, of: 2 },
+		});
+		expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
+			"1 cluster(s), 1 raised by two or more reviewers",
+		);
+	});
+
+	it.each([
+		["names a cluster it was not offered", { merges: [["c1", "c9"]] }],
+		["rewrites a claim", { merges: [["c1", "c2"]], claims: { c1: "x" } }],
+	])(
+		"ignores an answer that %s, and keeps the deterministic clusters",
+		async (_label, answer) => {
+			// The scripted client hands the answer through; pi-subagent would have
+			// refused it against the task's schema, and the harness refuses it too.
+			const { ship, service, runId } = await runToShip(
+				{ lensesPerDeliverable: ["a", "b"] },
+				{ findings: SAME_PLACE, merges: () => answer },
+			);
+			const record = recordOf(ship);
+			expect(record.normalizer).toEqual({ mode: "deterministic" });
+			expect(record.clusters.map((cluster) => cluster.agreement)).toEqual([
+				{ count: 1, of: 2 },
+				{ count: 1, of: 2 },
+			]);
+			await decide(service, ship, "ship", { ship: true });
+			await bounded(service.wait(runId), "wait");
+		},
+	);
+
+	it("falls back to the deterministic clusters when the normalize call fails, and blocks nothing", async () => {
+		const { ship, service, runId } = await runToShip(
+			{ lensesPerDeliverable: ["a", "b"] },
+			{ findings: SAME_PLACE, failNormalize: true },
+		);
+		expect(taskByKey(ship, "normalize-d0").status).toBe("failed");
+		expect(taskByKey(ship, "resume-d0").status).toBe("completed");
+		expect(recordOf(ship).normalizer).toEqual({ mode: "deterministic" });
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(finished.status).toBe("completed-degraded");
+		const logs = await service.logs(runId, { limit: 500 });
+		expect(
+			logs.entries.some((entry) =>
+				entry.message.includes(
+					'the normalize call for "d0" did not complete; the deterministic clusters stand.',
+				),
+			),
+		).toBe(true);
+	});
+});
+
+describe("plan-to-ship: dispositions", () => {
+	it("never holds the run on a decline", async () => {
+		const { ship, service, runId } = await runToShip(
+			{},
+			{
+				dispositions: (ids) =>
+					ids.map((id) => ({
+						id,
+						kind: "declined",
+						reasoning: "The reviewer misread the contract.",
+					})),
+			},
+		);
+		expect(recordOf(ship).clusters[0]?.disposition).toEqual({
+			kind: "declined",
+			reasoning: "The reviewer misread the contract.",
+		});
+		expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
+			"0 fixed, 1 declined, 0 out of scope, 0 unanswered. A decline is the implementer's reasoned answer, not a failure.",
+		);
+		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(runId), "wait");
 		expect(finished.status).toBe("completed");
 		expect(finished.output).toMatchObject({
-			approved: true,
-			shipped: false,
-			receipt: { planDigest: PLAN_DIGEST, refs: [] },
+			shipped: true,
+			deliverables: [{ id: "d0", resumed: true }],
 		});
-		// Nothing was pushed, merged, or published; the patch simply stays where
-		// the runtime imported it.
+	});
+
+	it("refuses an answer that skips an item, and ships the first hand-off with nothing answered", async () => {
+		const { ship, service, runId } = await runToShip(
+			{ lensesPerDeliverable: ["a"] },
+			{
+				findings: {
+					a: [lensFinding("a.ts", 1, "One."), lensFinding("b.ts", 1, "Two.")],
+				},
+				dispositions: (ids) => [
+					{ id: ids[0], kind: "fixed", reasoning: "Done." },
+				],
+			},
+		);
+		// The child answered; the harness refused the answer, because it does
+		// not name every shown id exactly once.
+		expect(taskByKey(ship, "resume-d0").status).toBe("completed");
+		expect(taskPaths(ship)).not.toContain("recheck-d0");
+		const logs = await service.logs(runId, { limit: 500 });
 		expect(
-			(finished.output as { deliverables: unknown[] }).deliverables,
-		).toHaveLength(1);
+			logs.entries.some((entry) =>
+				entry.message.includes(
+					'the resume was refused: it leaves c2 unanswered for "d0"',
+				),
+			),
+		).toBe(true);
+		const record = recordOf(ship);
+		expect(record.clusters.map((cluster) => cluster.disposition)).toEqual([
+			undefined,
+			undefined,
+		]);
+		expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
+			"0 fixed, 0 declined, 0 out of scope, 2 unanswered",
+		);
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		const implementer = await childOf(service, runId, "implement-d0");
+		expect(finished.output).toMatchObject({
+			deliverables: [
+				{
+					id: "d0",
+					resumed: false,
+					handoff: { handoffCommit: commitFor(implementer.attemptId) },
+				},
+			],
+		});
+	});
+
+	it("keeps H1 and skips the recheck when the resume changed nothing", async () => {
+		const { ship, service, runId } = await runToShip(
+			{},
+			{
+				resumeChangesNothing: true,
+			},
+		);
+		expect(taskPaths(ship)).toContain("resume-d0");
+		expect(taskPaths(ship)).not.toContain("recheck-d0");
+		const implementer = await childOf(service, runId, "implement-d0");
+		// The continuation's hand-off is the run's latest export, which is still
+		// the implementer's: same commit, same attempt.
+		expect(taskByKey(ship, "resume-d0").handoff).toMatchObject({
+			handoffCommit: commitFor(implementer.attemptId),
+			subagentAttemptId: implementer.attemptId,
+		});
+		expect(recordOf(ship).clusters[0]?.disposition?.kind).toBe("fixed");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(finished.status).toBe("completed");
+		expect(
+			(finished.output as { receipt: { refs: string[] } }).receipt.refs,
+		).toEqual([
+			`refs/pi-subagent/handoffs/${implementer.runId}/${implementer.attemptId}`,
+		]);
+	});
+
+	it("fails the resume by name when pi-subagent will not resume, and ships H1", async () => {
+		const { ship, service, runId } = await runToShip(
+			{},
+			{
+				refuseResume: true,
+			},
+		);
+		const resume = taskByKey(ship, "resume-d0");
+		expect(resume.status).toBe("failed");
+		expect(resume.narration).toMatchObject({
+			taskKind: "resume",
+			deliverable: "d0",
+		});
+		expect(JSON.stringify(ship)).not.toContain("spent resumes");
+		const events = await journal(service, runId);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "task-execution-terminal" &&
+					(event.data.evidence as { message?: string }).message ===
+						"Subagent did not resume the producer's run at its hand-off.",
+			),
+		).toBe(true);
+		// The record still commits: nothing hangs off the failed resume.
+		expect(taskByKey(ship, "reviews-d0").status).toBe("completed");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(finished.status).toBe("completed-degraded");
+		expect(finished.output).toMatchObject({
+			deliverables: [{ id: "d0", resumed: false }],
+		});
+	});
+});
+
+describe("plan-to-ship: policy.resumes 0", () => {
+	it("sends the findings to the gate with no resume, no recheck and no dispositions", async () => {
+		const { ship, delegated, service, runId } = await runToShip({
+			policy: { resumes: 0 },
+		});
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"implement-d0",
+			"check-d0",
+			"review-d0/correctness",
+			"reviews-d0",
+			"ship",
+		]);
+		expect(delegated.resume).not.toHaveBeenCalled();
+		const record = recordOf(ship);
+		expect(record.clusters).toHaveLength(1);
+		expect(record.clusters[0]).not.toHaveProperty("disposition");
+		expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
+			"Resumes: none, because `policy.resumes` is 0; 1 cluster(s) are unanswered.",
+		);
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(finished.output).toMatchObject({
+			deliverables: [{ id: "d0", resumed: false }],
+		});
+	});
+});
+
+describe("plan-to-ship: when there is nothing to answer", () => {
+	it("skips the resume when no lens found anything and the check passed", async () => {
+		const { ship } = await runToShip({}, { findings: { correctness: [] } });
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"implement-d0",
+			"check-d0",
+			"review-d0/correctness",
+			"reviews-d0",
+			"ship",
+		]);
+	});
+
+	it("resumes on a failing check with no reviewer, and rechecks", async () => {
+		const { ship, delegated } = await runToShip(
+			{ lensesPerDeliverable: [] },
+			{ check: "fail-then-pass" },
+		);
+		expect(taskPaths(ship)).toEqual([
+			"refine",
+			"implement-d0",
+			"check-d0",
+			"resume-d0",
+			"recheck-d0",
+			"ship",
+		]);
+		expect(shownIds(delegated.resumes[0]?.message ?? "")).toEqual([]);
+		expect(
+			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}).sort(),
+		).toEqual(["check-d0", "plan", "summary-d0"]);
+	});
+
+	it("does not resume on a check that did not run, and says the change is unverified", async () => {
+		const { ship, service, runId } = await runToShip(
+			{ lensesPerDeliverable: [] },
+			{ check: "not-run" },
+		);
+		expect(taskPaths(ship)).not.toContain("resume-d0");
+		await decide(service, ship, "ship", { ship: false });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(finished.output).toMatchObject({
+			deliverables: [{ id: "d0", checkRan: false, checkPassed: false }],
+		});
 	});
 });
 
 describe("plan-to-ship: what a host needs to narrate", () => {
-	// pi-maestro observes a run it started and posts each task completion into
-	// the person's conversation, then gives the model a turn on the interesting
-	// ones. These are the fields it builds against.
-	it("names every settled task's stage, kind and deliverable on the observation", async () => {
-		const delegated = scripted();
+	it("names every settled task's stage, kind and deliverable, and the deliverable is the plan's id", async () => {
+		const delegated = scripted({
+			findings: {
+				a: [lensFinding("x.ts", 1, "One.")],
+				b: [lensFinding("y.ts", 1, "Two.")],
+			},
+		});
 		const service = await serviceFor(delegated);
 		const observed: WorkflowRunObservation[] = [];
 		const unsubscribe = service.subscribe((observation) => {
 			observed.push(observation);
 		});
-		const run = await service.run("plan-to-ship", input());
+		const run = await service.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["a", "b"] }),
+		);
 		const ship = await park(service, run.runId, "ship");
 		await decide(service, ship, "ship", { ship: true });
 		await bounded(service.wait(run.runId), "wait");
 		unsubscribe();
-
 		const settled = observed.flatMap((observation) =>
 			observation.task ? [observation.task] : [],
 		);
-		// One per task that reached a terminal status, in sequence order, and
-		// nothing else: an append that moved no task carries no `task`.
 		expect(
-			settled.map((task) => [
-				task.narration.stage,
-				task.narration.taskKind,
-				task.narration.deliverable,
-				task.status,
-			]),
-		).toEqual([
-			["refine", "refine", undefined, "completed"],
-			["implement-d0", "implement", "d0", "completed"],
-			["check-d0-verify-1", "check", "d0-verify-1", "completed"],
-			["review-d0/correctness", "review", "d0", "completed"],
-			["synthesis-d0", "synthesis", "d0", "completed"],
-			["fix-d0", "other", undefined, "completed"],
-			["ship", "gate", undefined, "completed"],
-			["receipt", "other", undefined, "completed"],
-		]);
+			settled
+				.map((task) => [
+					task.narration.stage,
+					task.narration.taskKind,
+					task.narration.deliverable,
+					task.status,
+				])
+				.sort(([left], [right]) => String(left).localeCompare(String(right))),
+		).toEqual(
+			[
+				["refine", "refine", undefined, "completed"],
+				["implement-d0", "implement", "d0", "completed"],
+				["check-d0", "check", "d0", "completed"],
+				["review-d0/a", "review", "d0", "completed"],
+				["review-d0/b", "review", "d0", "completed"],
+				["normalize-d0", "normalize", "d0", "completed"],
+				["resume-d0", "resume", "d0", "completed"],
+				["recheck-d0", "check", "d0", "completed"],
+				["reviews-d0", "other", undefined, "completed"],
+				["ship", "gate", undefined, "completed"],
+				["receipt", "other", undefined, "completed"],
+			].sort(([left], [right]) => String(left).localeCompare(String(right))),
+		);
 		for (const task of settled) {
-			expect(task.taskId).toMatch(/^task_[a-z0-9]+$/);
-			expect(task.outcome).toBe("completed");
-			// An observation reads no file, so it never carries a summary.
 			expect(task.narration.summary).toBeUndefined();
 			expect(task.narration.cause).toBeUndefined();
+			if (task.narration.deliverable !== undefined) {
+				expect(task.narration.deliverable).toBe("d0");
+			}
 		}
-		// Most appends settle no task, so the field is the filter a host uses.
-		expect(observed.length).toBeGreaterThan(settled.length);
 	});
 
 	it("carries each task's own summary on the inspection that reads output", async () => {
-		const delegated = scripted();
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
+		const { service, runId, ship } = await runToShip();
 		await decide(service, ship, "ship", { ship: true });
-		await bounded(service.wait(run.runId), "wait");
-
-		const inspected = await service.inspect(run.runId, {
+		await bounded(service.wait(runId), "wait");
+		const inspected = await service.inspect(runId, {
 			include: ["run", "tasks", "output"],
 		});
 		const narrated = new Map(
@@ -1755,126 +1970,64 @@ describe("plan-to-ship: what a host needs to narrate", () => {
 				task.narration,
 			]),
 		);
-		// The agent's own words where it reported them, and a bounded rendering
-		// of the structured result where it did not.
-		expect(narrated.get("implement-d0")).toMatchObject({
-			taskKind: "implement",
+		expect(narrated.get("implement-d0")?.summary).toBe("Edited a.txt");
+		expect(narrated.get("resume-d0")).toMatchObject({
+			taskKind: "resume",
 			deliverable: "d0",
-			summary: "Edited a.txt",
+			summary: "Answered the check and the review",
 		});
-		expect(narrated.get("review-d0/correctness")?.summary).toContain(
-			"request-changes",
-		);
-		expect(narrated.get("synthesis-d0")?.summary).toBe(
-			"One lens asked for a test; nothing else is blocking.",
-		);
-		// The fix report has no summary field of its own, so the rendering says
-		// its structure and its scale — the artifact is canonical JSON, so the
-		// field order is the sorted one.
-		expect(narrated.get("fix-d0")?.summary).toBe(
-			"{checkPassed: true, findings: [1 item(s)]}",
-		);
-		// Without `output` the narration is still there; the summary is not.
-		const lean = await service.inspect(run.runId, {
-			include: ["run", "tasks"],
+		expect(narrated.get("recheck-d0")).toMatchObject({
+			taskKind: "check",
+			deliverable: "d0",
+			summary: "The check passed.",
 		});
-		const implement = (lean.tasks ?? []).find(
-			(task) => task.narration?.stage === "implement-d0",
-		);
-		expect(implement?.narration).toMatchObject({ taskKind: "implement" });
-		expect(implement?.narration?.summary).toBeUndefined();
 	});
 
-	it("says why a task failed, in a sanitized sentence, on both surfaces", async () => {
-		const delegated = scripted({ failReview: true });
-		const service = await serviceFor(delegated);
-		const observed: WorkflowRunObservation[] = [];
-		const unsubscribe = service.subscribe((observation) => {
-			observed.push(observation);
+	it("says why a lens failed, in a sanitized sentence", async () => {
+		const { ship } = await runToShip({}, { failReview: true });
+		const review = taskByKey(ship, "review-d0/correctness");
+		expect(review.narration).toMatchObject({
+			taskKind: "review",
+			deliverable: "d0",
+			cause:
+				"The delegated run failed: model-output (origin model, retry never).",
 		});
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
-		await decide(service, ship, "ship", { ship: true });
-		await bounded(service.wait(run.runId), "wait");
-		unsubscribe();
-
-		const failed = observed
-			.flatMap((observation) => (observation.task ? [observation.task] : []))
-			.filter((task) => task.status === "failed");
-		expect(failed.map((task) => task.narration.stage)).toEqual([
-			"review-d0/correctness",
-		]);
-		// Composed from the journalled codes; the reviewer's own words ("reviewer
-		// produced nothing") never travel, because a view carries no child prose.
-		const cause =
-			"The delegated run failed: model-output (origin model, retry never).";
-		expect(failed[0]).toMatchObject({
-			outcome: "failed",
-			narration: { taskKind: "review", deliverable: "d0", cause },
-		});
-		// The inspection says the same thing, with no artifact read needed.
-		const inspected = await service.inspect(run.runId, {
-			include: ["run", "tasks"],
-		});
-		const review = (inspected.tasks ?? []).find(
-			(task) => task.narration?.stage === "review-d0/correctness",
-		);
-		expect(review?.narration?.cause).toBe(cause);
-		expect(JSON.stringify(inspected)).not.toContain(
-			"reviewer produced nothing",
-		);
+		expect(JSON.stringify(ship)).not.toContain("reviewer produced nothing");
 	});
 });
 
 describe("plan-to-ship: the gate policies", () => {
 	it("asks one decision — the ship gate — when the policy is the default", async () => {
-		const delegated = scripted();
-		const service = await serviceFor(delegated);
-		const run = await service.run(
-			"plan-to-ship",
-			input({ deliverables: 2, lensesPerDeliverable: [] }),
-		);
-		// `ship` is the default, so every deliverable is done before the one
-		// person-facing decision, and both summaries are in front of it.
-		const ship = await park(service, run.runId, "ship");
+		const { ship, service, runId } = await runToShip({
+			deliverables: 2,
+			lensesPerDeliverable: [],
+		});
 		expect(
 			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}),
-		).toEqual(["plan", "summary-d0", "summary-d1"]);
-		// The refined plan is one of them, so the refiner's `blockers` are read
-		// by the person who decides rather than by nobody.
+		).toEqual(
+			["plan", "summary-d0", "check-d0", "summary-d1", "check-d1"].sort(),
+		);
 		expect(taskByKey(ship, "ship").checkpoint?.inputs).toMatchObject({
 			plan: { summary: "Refined.", blockers: [] },
 		});
 		await decide(service, ship, "ship", { ship: true });
-		const finished = await bounded(service.wait(run.runId), "wait");
-
+		const finished = await bounded(service.wait(runId), "wait");
 		expect(finished.status).toBe("completed");
 		expect(taskPaths(finished)).toEqual([
 			"refine",
 			"implement-d0",
 			"implement-d1",
-			"check-d0-verify-1",
-			"check-d1-verify-1",
+			"check-d0",
+			"check-d1",
 			"ship",
 			"receipt",
 		]);
-		// The ship decision is the durable one a receipt is checked against.
-		expect(finished.output).toMatchObject({
-			approved: true,
-			shipped: true,
-			deliverables: [
-				{ id: "d0", handoff: { mediaType: PATCH_MEDIA_TYPE } },
-				{ id: "d1", handoff: { mediaType: PATCH_MEDIA_TYPE } },
-			],
-		});
 		expect(
 			(finished.output as { receipt: { refs: string[] } }).receipt.refs,
 		).toHaveLength(2);
 	});
 
 	it("completes with no gate at all when the policy is none, and carries the ship inputs as output", async () => {
-		// `policy.gates: "none"` is `auto`: the yes that started the run is the
-		// only approval, so nothing parks and the HOST publishes on completion.
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const run = await service.run(
@@ -1886,32 +2039,11 @@ describe("plan-to-ship: the gate policies", () => {
 			}),
 		);
 		const finished = await bounded(service.wait(run.runId), "wait");
-
 		expect(finished.status).toBe("completed");
-		// NO CHECKPOINT ANYWHERE: not a decided one, not an expired one.
 		expect(
 			(finished.tasks ?? []).filter((task) => task.kind === "checkpoint"),
 		).toEqual([]);
-		expect(finished.parked ?? false).toBe(false);
-		expect(taskPaths(finished)).toEqual([
-			"refine",
-			"implement-d0",
-			"implement-d1",
-			"check-d0-verify-1",
-			"review-d0/a",
-			"synthesis-d0",
-			"fix-d0",
-			"check-d1-verify-1",
-			"review-d1/a",
-			"synthesis-d1",
-			"fix-d1",
-			"receipt",
-		]);
-		// The SAME receipt a `ship: true` decision commits, so a publication
-		// reader needs no new field: `receipt.planDigest` and one entry per
-		// handoff.
 		const output = finished.output as {
-			approved: boolean;
 			shipped: boolean;
 			receipt: { planDigest: string; refs: string[]; note: string };
 			shipSummary?: {
@@ -1919,52 +2051,37 @@ describe("plan-to-ship: the gate policies", () => {
 				deliverables: readonly {
 					id: string;
 					summary: { summary: string };
-					findings?: { verdict: string };
-					fix?: { checkPassed: boolean };
+					reviews?: unknown;
+					check: { checkPassed: boolean };
 				}[];
 			};
 		};
-		expect(output.approved).toBe(true);
 		expect(output.shipped).toBe(true);
-		expect(output.receipt.planDigest).toBe(PLAN_DIGEST);
 		expect(output.receipt.refs).toHaveLength(2);
 		expect(output.receipt.note).toContain(
 			"no ship gate; the host publishes on completion",
 		);
-		// And the ship gate's own inputs, as data, so the host can render the
-		// same summary before it publishes.
 		expect(output.shipSummary?.plan.summary).toBe("Refined.");
-		expect(output.shipSummary?.deliverables.map((entry) => entry.id)).toEqual([
-			"d0",
-			"d1",
-		]);
 		for (const entry of output.shipSummary?.deliverables ?? []) {
-			expect(entry.summary.summary).toEqual(expect.any(String));
-			expect(entry.findings?.verdict).toEqual(expect.any(String));
-			expect(entry.fix?.checkPassed).toBe(true);
+			expect(entry.summary.summary).toBe("Answered the check and the review");
+			expect(Value.Check(ReviewsRecordSchema, entry.reviews)).toBe(true);
+			expect(entry.check.checkPassed).toBe(true);
 		}
-		// The lowering says the same thing: no gate key at all.
 		expect(
 			compileStages(plan({ deliverables: 2 }), { gates: "none" }).gates,
 		).toEqual([]);
 	});
 
-	it("carries no shipSummary under ship or every-deliverable", async () => {
-		// A person read the same values at the gate, and `inspect` still carries
-		// them as task artifacts, so the output does not repeat them.
-		const delegated = scripted();
-		const service = await serviceFor(delegated);
-		const run = await service.run(
-			"plan-to-ship",
-			input({ lensesPerDeliverable: [] }),
-		);
-		const ship = await park(service, run.runId, "ship");
+	it("carries no shipSummary under ship", async () => {
+		const { ship, service, runId } = await runToShip({
+			lensesPerDeliverable: [],
+		});
 		await decide(service, ship, "ship", { ship: true });
-		const finished = await bounded(service.wait(run.runId), "wait");
+		const finished = await bounded(service.wait(runId), "wait");
 		expect(finished.output).not.toHaveProperty("shipSummary");
 	});
 
-	it("gates after every deliverable but the last, whose gate is the ship gate", async () => {
+	it("gates after every deliverable but the last, walking strictly in order", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const run = await service.run(
@@ -1976,26 +2093,26 @@ describe("plan-to-ship: the gate policies", () => {
 			}),
 		);
 		const first = await park(service, run.runId, "approve-d0");
-		// A per-deliverable gate is walked strictly in order: the second
-		// deliverable is not implemented until a person allowed the first.
 		expect(taskPaths(first)).toEqual([
 			"refine",
 			"implement-d0",
-			"check-d0-verify-1",
+			"check-d0",
 			"approve-d0",
 		]);
+		expect(taskByKey(first, "approve-d0").checkpoint?.prompt).toContain(
+			"The last check ran and passed.",
+		);
 		await decide(service, first, "approve-d0", { proceed: true });
 		const ship = await park(service, run.runId, "ship");
 		await decide(service, ship, "ship", { ship: true });
 		const finished = await bounded(service.wait(run.runId), "wait");
-		expect(finished.status).toBe("completed");
 		expect(taskPaths(finished)).toEqual([
 			"refine",
 			"implement-d0",
-			"check-d0-verify-1",
+			"check-d0",
 			"approve-d0",
 			"implement-d1",
-			"check-d1-verify-1",
+			"check-d1",
 			"ship",
 			"receipt",
 		]);
@@ -2018,15 +2135,9 @@ describe("plan-to-ship: the gate policies", () => {
 			note: "wrong direction",
 		});
 		const finished = await bounded(service.wait(run.runId), "wait");
-
 		expect(finished.status).toBe("completed");
 		expect(taskPaths(finished)).not.toContain("implement-d1");
 		expect(taskPaths(finished)).not.toContain("ship");
-		expect(finished.output).toMatchObject({
-			approved: true,
-			shipped: false,
-			deliverables: [{ id: "d0" }],
-		});
 		expect(
 			(finished.output as { receipt: { note: string } }).receipt.note,
 		).toContain("stopped at gate approve-d0");
@@ -2035,13 +2146,7 @@ describe("plan-to-ship: the gate policies", () => {
 
 describe("plan-to-ship: replay", () => {
 	it("re-declares the identical prefix on every drive, including after a restart", async () => {
-		// Every decision re-executes the definition from the top and re-declares
-		// every task of every epoch already crossed; a prefix that did not match
-		// fails materialization with "barrier does not match the persisted ordered
-		// epoch". This run crosses four gates, so the prefix is re-derived four
-		// times — the last of them from a service that never saw the earlier ones.
 		const delegated = scripted({ check: "fail-then-pass" });
-		const service = await serviceFor(delegated);
 		const base = path.resolve(".pi", "test-plan-to-ship", randomUUID());
 		const cwd = path.join(base, "project");
 		await mkdir(cwd, { recursive: true });
@@ -2067,8 +2172,6 @@ describe("plan-to-ship: replay", () => {
 		await decide(first, gateOne, "approve-d0", { proceed: true });
 		const ship = await park(first, run.runId, "ship");
 		expect(taskPaths(ship).slice(0, prefix.length)).toEqual(prefix);
-
-		// A restart: a second service over the same store finishes the run.
 		await first.shutdown();
 		services.splice(services.indexOf(first), 1);
 		const second = await createWorkflowService(options);
@@ -2078,115 +2181,66 @@ describe("plan-to-ship: replay", () => {
 		await decide(second, reopened, "ship", { ship: true });
 		const finished = await bounded(second.wait(run.runId), "wait");
 		expect(finished.status).toBe("completed");
-		expect(taskPaths(finished).slice(0, prefix.length)).toEqual(prefix);
 		expect(taskPaths(finished)).toEqual([
 			"refine",
 			"implement-d0",
-			"check-d0-verify-1",
-			"check-d0-fix-1",
-			"check-d0-verify-2",
+			"check-d0",
 			"review-d0/correctness",
-			"synthesis-d0",
+			"resume-d0",
+			"recheck-d0",
+			"reviews-d0",
 			"approve-d0",
 			"implement-d1",
-			"check-d1-verify-1",
-			"check-d1-fix-1",
-			"check-d1-verify-2",
+			"check-d1",
 			"review-d1/correctness",
-			"synthesis-d1",
+			"resume-d1",
+			"recheck-d1",
+			"reviews-d1",
 			"ship",
 			"receipt",
 		]);
-		expect(service).toBeDefined();
 	});
 });
 
 describe("plan-to-ship: a reviewer that dies", () => {
-	// The spec wants an optional reviewer to degrade the run rather than kill an
-	// approved implementation, and `reviewFanOut` declares them `optional` and
-	// reads `ctx.settled` for exactly that. The runtime blocks every task
-	// declared after a barrier that closed over a failed one, though, so the
-	// cost is recorded here rather than claimed away; see the definition's
-	// header and `deep-review`'s.
-	it("still asks the ship gate when every lens died, and names no review there", async () => {
-		const delegated = scripted({ failReview: true });
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const ship = await park(service, run.runId, "ship");
-
-		// No lens reported, so `synthesis: "optional"` declared no reducer and the
-		// gate names only what exists. A dead reviewer subtracts coverage; it does
-		// not park the gate it was meant to inform.
-		expect(
-			Object.keys(taskByKey(ship, "ship").checkpoint?.inputs ?? {}),
-		).toEqual(["plan", "summary-d0"]);
+	it("still asks the ship gate when every lens died, and the record says so", async () => {
+		const { ship, service, runId } = await runToShip({}, { failReview: true });
+		const record = recordOf(ship);
+		expect(record.reviewers).toEqual([
+			expect.objectContaining({
+				lens: "correctness",
+				status: "failed",
+				findings: 0,
+			}),
+		]);
+		expect(record.clusters).toEqual([]);
+		// Nothing to answer: no finding, and the check passed.
+		expect(taskPaths(ship)).not.toContain("resume-d0");
 		await decide(service, ship, "ship", { ship: true });
-		const finished = await bounded(service.wait(run.runId), "wait");
-
-		// Degraded, not failed: the implementation was approved and its handoff is
-		// imported and shipped; what is missing is the review, and the output says
-		// so by reporting no verdicts.
+		const finished = await bounded(service.wait(runId), "wait");
 		expect(finished.status).toBe("completed-degraded");
-		expect(taskByKey(finished, "implement-d0")).toMatchObject({
-			status: "completed",
-			handoff: { mediaType: PATCH_MEDIA_TYPE },
-		});
-		expect(taskByKey(finished, "review-d0/correctness").status).toBe("failed");
-		expect(finished.output).toMatchObject({
-			shipped: true,
-			reviews: [],
-			findings: [],
-		});
+		expect(finished.output).toMatchObject({ shipped: true });
 	});
 
-	it("records what a half-dead fan-out costs the synthesis declared after it", async () => {
-		// The honest half, and what it costs now that the reducer is REQUIRED: a
-		// barrier's control edge covers every task it closed over, so the reducer
-		// declared after `ctx.settled` is blocked when one lens failed - even
-		// though its `inputs` name only the lens that reported. A blocked required
-		// task ends the run. This is the price of running review, synthesis and
-		// fix without a person between them: the alternative is the ship gate the
-		// owner saw, reporting "0 of 1 deliverable(s) ran a fixer" and saying
-		// nothing about why.
-		const delegated = scripted({ failLens: "b" });
-		const service = await serviceFor(delegated);
-		const run = await service.run(
-			"plan-to-ship",
-			input({ lensesPerDeliverable: ["a", "b"] }),
+	it("subtracts a dead lens's coverage and blocks nothing after it", async () => {
+		const { ship, service, runId } = await runToShip(
+			{ lensesPerDeliverable: ["a", "b"] },
+			{ failLens: "b" },
 		);
-		const finished = await bounded(service.wait(run.runId), "wait");
-		expect(finished.status).toBe("failed");
-		expect(taskByKey(finished, "review-d0/a").status).toBe("completed");
-		expect(taskByKey(finished, "review-d0/b").status).toBe("failed");
-		expect(taskByKey(finished, "synthesis-d0").status).toBe("blocked");
-		// Nobody was asked to ship what nobody reviewed to the end.
-		expect(finished.parked ?? false).toBe(false);
-		expect(taskPaths(finished)).not.toContain("fix-d0");
-	});
-
-	it("fails the run when the synthesis cannot run, rather than parking at ship", async () => {
-		// The defect this replaced: every lens reported, the reducer over them
-		// failed, and the deliverable walked on to the ship gate with no
-		// normalized findings and no fixer - "0 of 1 deliverable(s) ran a fixer"
-		// as the only trace. A deliverable with reviews runs review, synthesis and
-		// fix; a synthesis that cannot run is a failed deliverable.
-		const delegated = scripted({ failSynthesis: true });
-		const service = await serviceFor(delegated);
-		const run = await service.run("plan-to-ship", input());
-		const finished = await bounded(service.wait(run.runId), "wait");
-
-		expect(finished.status).toBe("failed");
-		expect(taskByKey(finished, "review-d0/correctness").status).toBe(
-			"completed",
+		expect(taskByKey(ship, "review-d0/b").status).toBe("failed");
+		// One lens reported, so no model was asked to merge anything.
+		expect(taskPaths(ship)).not.toContain("normalize-d0");
+		expect(taskByKey(ship, "resume-d0").status).toBe("completed");
+		const record = recordOf(ship);
+		expect(record.reviewers.map((entry) => entry.status)).toEqual([
+			"reported",
+			"failed",
+		]);
+		expect(record.clusters[0]?.agreement).toEqual({ count: 1, of: 1 });
+		await decide(service, ship, "ship", { ship: true });
+		expect((await bounded(service.wait(runId), "wait")).status).toBe(
+			"completed-degraded",
 		);
-		expect(taskByKey(finished, "synthesis-d0")).toMatchObject({
-			status: "failed",
-			disposition: "required",
-		});
-		// The run ends at the synthesis barrier: no fixer, no gate, no output.
-		expect(taskPaths(finished)).not.toContain("fix-d0");
-		expect(finished.parked ?? false).toBe(false);
-		expect(finished.output).toBeUndefined();
 	});
 });
 
@@ -2221,8 +2275,13 @@ describe("plan-to-ship: models per role", () => {
 			expect(request.model).toEqual(SESSION_MODEL);
 		}
 
-		// A REVIEW keeps its tier, and the receipt recorder stays pinned.
-		expect(delegated.requestsFor("reviewer")).toHaveLength(3); // two lenses + synthesis
+		// The check and the recheck inherit too; the resume reruns the
+		// implementer's own plan, so its model is the implementer's.
+		for (const verify of delegated.requestsGoal("Verify deliverable")) {
+			expect(verify.model).toEqual(SESSION_MODEL);
+		}
+		// A REVIEW keeps its tier, and the normalize call is pinned.
+		expect(delegated.requestsFor("reviewer").length).toBeGreaterThanOrEqual(2);
 		for (const review of delegated.requestsFor("reviewer")) {
 			expect(review.model).not.toEqual(SESSION_MODEL);
 		}
@@ -2296,10 +2355,8 @@ describe("plan-to-ship: models per role", () => {
 			// The lens's own tier decides the thinking level.
 			thinking: "high",
 		});
-		// An untiered lens takes the standard reviewer tier.
-		expect(
-			delegated.requestsGoal("Normalize the review findings")[0]?.model,
-		).toEqual(tierModel("standard"));
+		// A lens with no tier takes the standard reviewer tier.
+		expect(tierModel("standard").thinking).toBe("medium");
 	});
 });
 
@@ -2310,6 +2367,8 @@ describe("plan-to-ship: the input contract", () => {
 			input(),
 			input({ policy: { gates: "ship" } }),
 			input({ policy: { gates: "none" } }),
+			input({ policy: { resumes: 0 } }),
+			input({ policy: { resumes: 1 } }),
 			input({ lensesPerDeliverable: [] }),
 			{ ...input(), plan: { ...plan(), body: "Why this plan exists." } },
 			input({
@@ -2356,6 +2415,11 @@ describe("plan-to-ship: the input contract", () => {
 			() => ({ ...plan(), policy: { gates: "approve-plan+ship" as const } }),
 			"which was removed because the start of the run IS the approval",
 		],
+		[
+			"policy.maxFixRounds",
+			() => ({ ...plan(), policy: { maxFixRounds: 1 as unknown as never } }),
+			"`policy.maxFixRounds` was removed with the fixer",
+		],
 	])(
 		"admits %s at validate, so the refusal is the compiler's",
 		async (_key, document, message) => {
@@ -2378,6 +2442,7 @@ describe("plan-to-ship: the input contract", () => {
 			{ ...input(), effort: "standrd" },
 			{ ...input(), extra: true },
 			{ ...input(), plan: { ...plan(), policy: { gates: "sometimes" } } },
+			{ ...input(), plan: { ...plan(), policy: { resumes: 2 } } },
 			// A deliverable is work, or it is nothing: `tasks` is required and
 			// non-empty, and `reviews` is a closed list of lens entries.
 			{
@@ -2483,13 +2548,19 @@ describe("plan-to-ship: the agent templates", () => {
 	});
 
 	it("covers every request a run makes", async () => {
-		const delegated = scripted({ check: "fail" });
+		// The widest run: two lenses (so the normalize call runs), a failing
+		// check (so the resume runs), and a recheck.
+		const delegated = scripted({
+			check: "fail",
+			findings: {
+				a: [lensFinding("x.ts", 1, "One.")],
+				b: [lensFinding("y.ts", 1, "Two.")],
+			},
+		});
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
-			// The widest run the plan vocabulary admits: the fix-round cap, so
-			// every verifier and every fixer the loop can declare is exercised.
-			input({ lensesPerDeliverable: ["a", "b"], policy: { maxFixRounds: 2 } }),
+			input({ lensesPerDeliverable: ["a", "b"] }),
 		);
 		const ship = await park(service, run.runId, "ship");
 		await decide(service, ship, "ship", { ship: true });
@@ -2498,13 +2569,9 @@ describe("plan-to-ship: the agent templates", () => {
 		const agents = await discoverAgents([
 			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
 		]);
-		// The cap `policy.maxFixRounds: 2` buys: three verifiers and two fixers.
-		expect(delegated.requestsGoal("Verify deliverable")).toHaveLength(
-			MAX_VERIFY_ROUNDS,
-		);
-		expect(delegated.requestsGoal("Fix what the check reported")).toHaveLength(
-			MAX_VERIFY_ROUNDS - 1,
-		);
+		// The check and the recheck, and the normalize call.
+		expect(delegated.requestsGoal("Verify deliverable")).toHaveLength(2);
+		expect(delegated.requestsGoal("Find the clusters")).toHaveLength(1);
 		expect(delegated.requests.length).toBeGreaterThan(0);
 		for (const request of delegated.requests) {
 			const agent = agents.get(request.agent);
@@ -2562,7 +2629,7 @@ describe("plan-to-ship: a verifier that times out", () => {
 		expect(inspected.run.taskCounts.failed).toBe(1);
 		const cause =
 			"The delegated run failed: timeout (origin service, retry manual).";
-		expect(taskByKey(finished, "check-d0-verify-1")).toMatchObject({
+		expect(taskByKey(finished, "check-d0")).toMatchObject({
 			status: "failed",
 			outcome: "failed",
 			narration: { taskKind: "check", cause },
@@ -2577,7 +2644,7 @@ describe("plan-to-ship: a verifier that times out", () => {
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line) as JournalLine);
-		const verifier = taskByKey(finished, "check-d0-verify-1").id;
+		const verifier = taskByKey(finished, "check-d0").id;
 		const taskFailed = events.findIndex(
 			(event) =>
 				event.type === "task-status-changed" &&
@@ -2591,7 +2658,7 @@ describe("plan-to-ship: a verifier that times out", () => {
 		expect(taskFailed).toBeGreaterThan(-1);
 		expect(runFailed).toBeGreaterThan(taskFailed);
 		expect(events[runFailed]?.data.reason).toBe(
-			`A required workflow task did not complete: check-d0-verify-1. ${cause}`,
+			`A required workflow task did not complete: check-d0. ${cause}`,
 		);
 		// The settlement records the retained worktree, and the release is what
 		// proves its cleanup.

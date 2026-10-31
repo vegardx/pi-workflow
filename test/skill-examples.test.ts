@@ -345,9 +345,9 @@ const PATTERN_MODULES = [
 	"gate.ts",
 	"index.ts",
 	"review-fan-out.ts",
-	"review-fix.ts",
+	"review-lenses.ts",
 	"review-record.ts",
-	"verify-and-fix.ts",
+	"verify.ts",
 ] as const;
 
 /** `SKILL.md` § "…", with the doc comment's line prefixes folded away. */

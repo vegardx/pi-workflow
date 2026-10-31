@@ -32,7 +32,7 @@ import { WorkflowComponentError } from "./errors.js";
  * `budgetShare` is the same task's reservation, so summing the shares of the
  * declared graph gives the `meta.budget` the run needs
  * (`workflowBudgetFor`) and comparing them to a declared budget is the
- * over-allocation check `forEach` and `verifyAndFix` make at declaration
+ * over-allocation check `forEach` and `verifyHandoff` make at declaration
  * (`assertBudgetAdmits`).
  *
  * DELETE WHEN ROUTING LANDS. `MODEL_PROVIDER`/`MODEL_ID`/`DIVERSE_MODEL_ID`
@@ -46,15 +46,17 @@ import { WorkflowComponentError } from "./errors.js";
  */
 
 /**
- * The stages the library declares. `implement` and `fix` write in a worktree;
- * every other stage is read-only and writes nothing.
+ * The stages the library declares. `implement` writes in a worktree — and so
+ * does the resume that continues an implementer, which reruns the
+ * implementer's own plan and therefore its row — and every other stage is
+ * read-only and writes nothing.
  */
 export const ENVELOPE_STAGES = Object.freeze([
 	"refine",
 	"implement",
 	"verify",
-	"fix",
 	"review",
+	"normalize",
 	"synthesis",
 	"record",
 ] as const);
@@ -191,9 +193,12 @@ function worktree(
  * THE TABLE. One row per stage, and these are the numbers the effort dial's
  * `standard` column measured:
  *
- * | refine | implement | verify | fix    | review | synthesis | record |
- * | ------ | --------- | ------ | ------ | ------ | --------- | ------ |
- * | medium | medium    | low    | medium | medium | medium    | low    |
+ * | refine | implement | verify | review | normalize | synthesis | record |
+ * | ------ | --------- | ------ | ------ | --------- | --------- | ------ |
+ * | medium | medium    | low    | medium | low       | medium    | low    |
+ *
+ * `normalize` is the merge-only model call over a review's clusters: it
+ * returns ids, never prose, so it gets the record's small row.
  *
  * The thinking level applies to a stage that names no model of its own and does
  * not inherit; a stage that inherits takes the session's level instead, and a
@@ -206,8 +211,8 @@ const STAGE_TABLE: Readonly<Record<StageName, StageShape>> = {
 	refine: readOnly("medium", 900_000, 1_000_000, 4, 262_144),
 	implement: worktree("medium", 2_400_000, 1_800_000, 2_000_000, 12),
 	verify: readOnly("low", 900_000, 600_000, 2),
-	fix: worktree("medium", 2_400_000, 1_800_000, 2_000_000, 12),
 	review: readOnly("medium", 900_000, 1_000_000, 3),
+	normalize: readOnly("low", 300_000, 200_000, 1),
 	synthesis: readOnly("medium", 600_000, 600_000, 2),
 	record: readOnly("low", 300_000, 200_000, 1),
 };

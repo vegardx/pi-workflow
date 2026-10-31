@@ -41,17 +41,17 @@ export const COMPILED_ID_PATTERN = "^[a-z0-9][a-z0-9-]{0,63}$";
 /** What a compiled document may contain. See the vocabulary note above. */
 export const COMPILED_STAGE_KINDS = Object.freeze([
 	"implement",
-	"verify-and-fix",
+	"check",
 	"review-fan-out",
-	"synthesis",
-	"fix",
+	"normalize",
+	"resume",
 	"gate",
 ] as const);
 export type CompiledStageKind = (typeof COMPILED_STAGE_KINDS)[number];
 
 /** `plan-to-ship`'s own deliverable bound, repeated as the document's. */
 export const MAX_COMPILED_DELIVERABLES = 16;
-/** implement, check, review, synthesis, fix, a gate - and room to spare. */
+/** implement, check, review, normalize, resume, recheck - and room to spare. */
 export const MAX_COMPILED_STAGES = 8;
 /** `reviewFanOut`'s bound, so a compiled fan-out cannot describe an illegal one. */
 export const MAX_COMPILED_LENSES = 16;
@@ -59,9 +59,9 @@ export const MAX_COMPILED_LENSES = 16;
 const CompiledStageIdSchema = Type.String({ pattern: COMPILED_ID_PATTERN });
 
 /**
- * The three small closed vocabularies that sit at the BOTTOM of this
+ * The small closed vocabulary that sits at the BOTTOM of this
  * document's deepest path - `deliverables -> stages -> <union> -> lenses ->
- * lens -> tier` - written as pattern-constrained strings rather than as unions
+ * lens -> tier` - written as a pattern-constrained string rather than as a union
  * of literals.
  *
  * The reason is a hard runtime bound, not taste. A workflow schema document
@@ -81,12 +81,6 @@ export const CompiledReviewTierSchema = Type.Unsafe<CompiledReviewTier>({
 	pattern: "^(light|standard|heavy)$",
 });
 
-export type CompiledSynthesis = "required" | "optional" | "none";
-export const CompiledSynthesisSchema = Type.Unsafe<CompiledSynthesis>({
-	type: "string",
-	pattern: "^(required|optional|none)$",
-});
-
 /** The deliverable's own work: one worktree, one handoff. Exactly one. */
 export const CompiledImplementStageSchema = Type.Object(
 	{
@@ -103,19 +97,15 @@ export const CompiledImplementStageSchema = Type.Object(
 );
 
 /**
- * The bounded verify-then-fix loop.
- *
- * `maxRounds` counts **VERIFY rounds**, which is `verifyAndFix`'s own unit and
- * not the plan's: a plan's `maxRounds` / `policy.maxFixRounds` counts FIX
- * rounds (0-2), and the compiler maps it to `maxRounds = maxFixRounds + 1`
- * (0-3) so a fix is never left unchecked. The compiled document records what
- * the component was actually asked for.
+ * The repository's own check over the deliverable's hand-off, verify only.
+ * `id` is `check` for the check of the implementer's hand-off and `recheck`
+ * for the check of what a resumed implementer handed back, which runs only
+ * when the resume changed something.
  */
-export const CompiledVerifyAndFixStageSchema = Type.Object(
+export const CompiledCheckStageSchema = Type.Object(
 	{
-		use: Type.Literal("verify-and-fix"),
+		use: Type.Literal("check"),
 		id: CompiledStageIdSchema,
-		maxRounds: Type.Integer({ minimum: 0, maximum: 3 }),
 	},
 	{ additionalProperties: false },
 );
@@ -141,7 +131,6 @@ export const CompiledReviewFanOutStageSchema = Type.Object(
 		lenses: Type.Array(CompiledLensSchema, {
 			maxItems: MAX_COMPILED_LENSES,
 		}),
-		synthesis: Type.Optional(CompiledSynthesisSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -159,49 +148,38 @@ export const CompiledGateStageSchema = Type.Object(
 );
 
 /**
- * The normalization of a review fan-out's findings into ONE de-duplicated
- * list, as its own stage.
- *
- * It is separate from `review-fan-out`'s own `synthesis` field on purpose.
- * That field says whether the fan-out declares a PROSE reducer of its own; a
- * `synthesis` stage says the deliverable declares a STRUCTURED one, whose
- * output a `fix` stage is handed. A deliverable that compiles a `fix` stage
- * therefore always compiles a `synthesis` stage before it, and its
- * `review-fan-out` stage carries `synthesis: "none"`.
+ * The harness's merge of the lenses' findings: deterministic clustering, then
+ * — only when more than one lens reported — a merge-only model call over the
+ * remaining clusters. It judges nothing; the record it produces is the
+ * `reviews-<deliverable>` artifact.
  */
-export const CompiledSynthesisStageSchema = Type.Object(
+export const CompiledNormalizeStageSchema = Type.Object(
 	{
-		use: Type.Literal("synthesis"),
+		use: Type.Literal("normalize"),
 		id: CompiledStageIdSchema,
 	},
 	{ additionalProperties: false },
 );
 
 /**
- * The fixer that reads the normalized findings, addresses the blocking and
- * major ones, and re-runs the check. There is no re-review after it.
- *
- * `maxRounds` counts FIX rounds, and it is the deliverable's WHOLE pool - the
- * same pool the `verify-and-fix` stage draws from, so a compiled document
- * shows the bound rather than implying a second budget. How much of it is left
- * when this stage is reached is a run-time fact and is not part of a compiled
- * document.
+ * The implementer, resumed in its own session at its own hand-off with the
+ * check report and the de-biased view of the findings, answering each item
+ * `fixed | declined | out-of-scope`. Present only under `policy.resumes: 1`.
  */
-export const CompiledFixStageSchema = Type.Object(
+export const CompiledResumeStageSchema = Type.Object(
 	{
-		use: Type.Literal("fix"),
+		use: Type.Literal("resume"),
 		id: CompiledStageIdSchema,
-		maxRounds: Type.Integer({ minimum: 0, maximum: 2 }),
 	},
 	{ additionalProperties: false },
 );
 
 export const CompiledStageSchema = Type.Union([
 	CompiledImplementStageSchema,
-	CompiledVerifyAndFixStageSchema,
+	CompiledCheckStageSchema,
 	CompiledReviewFanOutStageSchema,
-	CompiledSynthesisStageSchema,
-	CompiledFixStageSchema,
+	CompiledNormalizeStageSchema,
+	CompiledResumeStageSchema,
 	CompiledGateStageSchema,
 ]);
 export type CompiledStage = Static<typeof CompiledStageSchema>;
