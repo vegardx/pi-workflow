@@ -145,9 +145,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 24 and rejects revision 23", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(24);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(24);
+	it("publishes revision 25 and rejects revision 24", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(25);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(25);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -166,7 +166,7 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 24,
+			contractRevision: 25,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -186,7 +186,7 @@ describe("workflow contracts", () => {
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 24,
+			contractRevision: 25,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -215,8 +215,8 @@ describe("workflow contracts", () => {
 		).toBe(false);
 		// The persisted-state claim in docs/compatibility.md and
 		// docs/acceptance.md: every earlier revision is refused, not just 22,
-		// and no migration turns one into a revision-24 record.
-		for (let revision = 1; revision <= 23; revision += 1) {
+		// and no migration turns one into a revision-25 record.
+		for (let revision = 1; revision <= 24; revision += 1) {
 			expect(
 				Value.Check(WorkflowJournalEventSchema, {
 					...event,

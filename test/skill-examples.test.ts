@@ -101,7 +101,7 @@ describe("workflow authoring skill", () => {
 		expect(skill).toContain("references/examples.md");
 		const unavailable = skill
 			.match(
-				/Not available in revision 24:([\s\S]*?)\. Do not author against/,
+				/Not available in revision 25:([\s\S]*?)\. Do not author against/,
 			)?.[1]
 			?.replace(/\s+/g, " ");
 		if (!unavailable) throw new Error("no unavailable-API statement");
@@ -316,7 +316,7 @@ describe("workflow authoring skill", () => {
 		await expect(
 			discoverWorkflows({ ...project, projectTrusted: true }),
 		).rejects.toThrow(
-			"workflow import node:fs is not identity-bound by contract revision 24",
+			"workflow import node:fs is not identity-bound by contract revision 25",
 		);
 	});
 });

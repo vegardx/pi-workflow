@@ -724,7 +724,7 @@ describe("finalizers", () => {
 				role: "finalizer",
 				disposition: "required",
 			});
-			expect(events.every((event) => event.contractRevision === 24)).toBe(true);
+			expect(events.every((event) => event.contractRevision === 25)).toBe(true);
 
 			const finalBarrier = indexOfEvent(
 				events,
