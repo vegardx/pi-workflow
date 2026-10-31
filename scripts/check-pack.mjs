@@ -401,6 +401,7 @@ if (
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 10 ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceStartAt !== true ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.resumeAtHandoff !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.delegationCeiling !== true ||
 	typeof ceilingProvider.registerDelegationCeilingProvider !== "function" ||
 	typeof ceilingProvider.resolveDelegationCeiling !== "function" ||

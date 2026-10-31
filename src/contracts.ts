@@ -673,6 +673,7 @@ const REQUIRED_SUBAGENT_CONTRACT: SubagentRuntimeContract = Object.freeze({
 		delegationCeiling: true,
 		sessionModelInherit: true,
 		workspaceStartAt: true,
+		resumeAtHandoff: true,
 	}),
 });
 

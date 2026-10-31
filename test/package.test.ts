@@ -88,7 +88,7 @@ describe("package contract", () => {
 			[...Object.keys(packageJson.peerDependencies ?? {})].sort(),
 		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
-			"0.17.0",
+			"0.18.0",
 		);
 		expect(packageJson.peerDependencies?.typebox).toBe(">=1.3.14 <2");
 		expect(packageJson.exports).toEqual({
@@ -386,7 +386,7 @@ describe("compatibility matrix 1.0", () => {
 			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); 2.0.0 raised it from 18 to 19`,
 		);
 		expect(doc).toContain(
-			"| Required `@vegardx/pi-subagent` | `0.17.0` (exact; raised from `0.16.0` by the hand-off start; contract revision 10) |",
+			"| Required `@vegardx/pi-subagent` | `0.18.0` (exact; raised from `0.17.0` by the resume at hand-off; contract revision unchanged at 10) |",
 		);
 		expect(doc).toContain(
 			`| Required pi-subagent contract revision | ${WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision} |`,
@@ -395,6 +395,7 @@ describe("compatibility matrix 1.0", () => {
 		expect(doc).toContain("| `delegationCeiling` | `true` |");
 		expect(doc).toContain("| `sessionModelInherit` | `true` |");
 		expect(doc).toContain("| `workspaceStartAt` | `true` |");
+		expect(doc).toContain("| `resumeAtHandoff` | `true` |");
 		expect(doc).toContain("| `workspaceBudgetRefusal` | `true` |");
 		expect(doc).toContain("[`docs/qualification.md`](qualification.md)");
 		// F1: the builtin root is part of the packaged surface.

@@ -809,6 +809,9 @@ describe("workflow contracts", () => {
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.workspaceStartAt,
 		).toBe(true);
 		expect(
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.resumeAtHandoff,
+		).toBe(true);
+		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.sessionModelInherit,
 		).toBe(true);
 		expect(
@@ -834,6 +837,7 @@ describe("workflow contracts", () => {
 			"workspaceBudgetRefusal",
 			"sessionModelInherit",
 			"workspaceStartAt",
+			"resumeAtHandoff",
 		] as const) {
 			expect(
 				isCompatibleSubagentContract({
