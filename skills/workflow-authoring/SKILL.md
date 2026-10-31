@@ -5,7 +5,7 @@ description: Use when creating, modifying, validating, or debugging a pi-workflo
 
 # Authoring pi-workflow definitions
 
-This skill covers `@vegardx/pi-workflow` 2.0.0, contract revision 21. Every
+This skill covers `@vegardx/pi-workflow` 3.0.0, contract revision 22. Every
 rule below is taken from the runtime source (`src/registry.ts`, `src/definition.ts`,
 `src/materializer.ts`, `src/static-runtime.ts`, `src/contracts.ts`,
 `src/support.ts`, `src/service.ts`, `src/dynamic/*`, and the pi-subagent
@@ -13,7 +13,7 @@ launch contracts). Quoted strings are the exact messages the runtime throws.
 Worked examples that load through the real definition loader and through the
 dynamic manifest VM are in [references/examples.md](references/examples.md).
 
-Not available in revision 21: `ctx.artifact`, fork context, a Pi tool for
+Not available in revision 22: `ctx.artifact`, fork context, a Pi tool for
 handoff export, a model-callable checkpoint decide tool (there is none by design: a model must
 never decide a checkpoint; only a human decides, through `/workflow decide`),
 and a model-callable dynamic-source approve, reject, or proposals tool (none
@@ -172,19 +172,20 @@ builtin defines, and the later file becomes a problem entry instead
 
 ## Imports
 
-Static imports are limited to `@vegardx/pi-workflow`, `typebox`, and the
-module specifiers of support tasks the embedder registered. Anything else
+Static imports are limited to `@vegardx/pi-workflow`,
+`@vegardx/pi-workflow/components`, `typebox`, and the module specifiers of
+support tasks the embedder registered. Anything else
 fails before evaluation: "workflow import <specifier> is not identity-bound by
-contract revision 21". Relative imports of helper files are therefore
+contract revision 22". Relative imports of helper files are therefore
 rejected. `import()`, `require()`, and `import x = require()` fail with
-"dynamic workflow imports are not supported by contract revision 21",
+"dynamic workflow imports are not supported by contract revision 22",
 "dynamic imports and CommonJS require are not supported by contract revision
-18", and "TypeScript import assignment is not supported by contract revision
-18". Import-like text inside strings and comments is fine. The
+22", and "TypeScript import assignment is not supported by contract revision
+22". Import-like text inside strings and comments is fine. The
 `@vegardx/pi-workflow/runtime` subpath is not importable from a definition and
 is not part of the authoring API; definitions import from
-`@vegardx/pi-workflow` only, and the gate refuses the subpath with
-"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 21".
+`@vegardx/pi-workflow` and `@vegardx/pi-workflow/components` only, and the gate refuses the subpath with
+"workflow import @vegardx/pi-workflow/runtime is not identity-bound by contract revision 22".
 The loader resolves imports from the definition file's location, so
 `@vegardx/pi-workflow` and `typebox` must be resolvable there.
 

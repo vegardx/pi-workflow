@@ -101,7 +101,7 @@ describe("workflow authoring skill", () => {
 		expect(skill).toContain("references/examples.md");
 		const unavailable = skill
 			.match(
-				/Not available in revision 21:([\s\S]*?)\. Do not author against/,
+				/Not available in revision 22:([\s\S]*?)\. Do not author against/,
 			)?.[1]
 			?.replace(/\s+/g, " ");
 		if (!unavailable) throw new Error("no unavailable-API statement");
