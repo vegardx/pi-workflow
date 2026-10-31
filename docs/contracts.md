@@ -93,9 +93,9 @@ them, which is why the release that carries it is 2.0.0 and not 1.2.0. The
 rule covers where state is kept as well as what is in it: revision 20 both
 refuses revision-19 records and reads a different root, so the release that
 carries it is 3.0.0 and not 2.1.0. Revision 21 refuses revision-20 records in
-turn, for the run record's new `ceiling`, and travels in the same unreleased
+turn, for the run record's new `ceiling`, and travels in the same
 3.0.0. Revision 22 refuses revision-21 records in turn, for the run record's new
-`sessionModel`, and travels in the same unreleased 3.0.0. Runs journaled by
+`sessionModel`, and travels in the same 3.0.0. Runs journaled by
 revision 22 are readable by every 3.x release under the same rule.
 
 **1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
@@ -116,7 +116,7 @@ optional `memoryBytes`, which is lowered unchanged to pi-subagent and enters
 agent task identity. No export was removed, renamed, or retyped, no returned
 union widened, and no tool name, parameter, or output schema changed.
 
-**3.0.0 (unreleased).** `WORKFLOW_CONTRACT_REVISION` becomes 20 and run state
+**3.0.0.** `WORKFLOW_CONTRACT_REVISION` becomes 20 and run state
 moves out of the project: runs, leases, prune trash, and dynamic proposals are
 keyed under `<agentDir>/workflow/<projectKey>` instead of
 `<cwd>/.pi/workflow` ([persistence](persistence.md#where-state-lives)).
