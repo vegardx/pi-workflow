@@ -237,6 +237,16 @@ function scripted(
 	options: {
 		readonly failLenses?: readonly string[];
 		/**
+		 * Lenses whose attempt never got a VM slot: pi-subagent 0.20.0 settles
+		 * them `failed` with code `capacity` and, because no model session
+		 * existed, zero usage that is complete.
+		 */
+		readonly capacityLenses?: readonly string[];
+		/** pi-subagent 0.19.0's shape of that refusal: usage not complete. */
+		readonly capacityUsageIncomplete?: boolean;
+		/** The host's VM slots the binding reports. */
+		readonly maxSlots?: number;
+		/**
 		 * Resolve each request's agent the way pi-subagent does on a host that
 		 * discovers none of its own: from the roots the request carried, or the
 		 * refusal the service raises.
@@ -248,6 +258,8 @@ function scripted(
 	const pending = new Map<string, Child>();
 	const children = new Map<string, Child>();
 	const statuses = new Map<string, "completed" | "failed">();
+	/** The newest attempt of each child: a retry mints a fresh one. */
+	const attempts = new Map<string, string>();
 	const requests: SubagentRequest[] = [];
 	const resolvedAgents: DiscoveredAgent[] = [];
 	let preflights = 0;
@@ -348,33 +360,56 @@ function scripted(
 	const wait = vi.fn(async (runId: string) => {
 		const child = childOf(runId);
 		const lens = lensOf(child.request);
+		const refused =
+			lens !== undefined && (options.capacityLenses ?? []).includes(lens);
 		const failed =
-			lens !== undefined && (options.failLenses ?? []).includes(lens);
+			refused ||
+			(lens !== undefined && (options.failLenses ?? []).includes(lens));
 		const result = {
 			runId,
 			status: failed ? ("failed" as const) : ("completed" as const),
 			...(failed ? {} : { structuredOutput: outputFor(child.request) }),
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: 0,
-			},
-			usageComplete: true,
-			runtimeMs: 10,
-			...(failed
+			usage: refused
+				? {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: 0,
+					}
+				: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: 0,
+					},
+			usageComplete: !(refused && options.capacityUsageIncomplete === true),
+			runtimeMs: refused ? 0 : 10,
+			...(refused
 				? {
 						failure: {
-							code: "model-output",
-							origin: "model",
-							retry: "never",
-							message: "reviewer produced nothing",
-							guidance: "Do not retry; report it.",
+							code: "capacity",
+							origin: "service",
+							retry: "backoff",
+							retryAfterMs: 30_000,
+							message: "VM capacity exhausted: 4 slots busy for 600 s",
+							guidance: "Wait for running attempts to finish, then retry.",
 						},
 					}
-				: {}),
+				: failed
+					? {
+							failure: {
+								code: "model-output",
+								origin: "model",
+								retry: "never",
+								message: "reviewer produced nothing",
+								guidance: "Do not retry; report it.",
+							},
+						}
+					: {}),
 			sandboxCleanup: "proved" as const,
 			workspaceCleanup: "not-needed" as const,
 			truncated: false,
@@ -390,9 +425,18 @@ function scripted(
 		};
 	});
 
+	// A capacity refusal is retry `backoff`, and the lenses retry once on
+	// backoff, so the refused lens is attempted again; this host refuses it
+	// again.
+	const retry = vi.fn(async (runId: string) => {
+		const attemptId = `${attempts.get(runId) ?? childOf(runId).attemptId}r`;
+		attempts.set(runId, attemptId);
+		return { runId, attemptId, status: "active" as const };
+	});
+
 	const release = vi.fn(async (runId: string) => ({
 		runId,
-		attemptId: childOf(runId).attemptId,
+		attemptId: attempts.get(runId) ?? childOf(runId).attemptId,
 		status: statuses.get(runId) ?? ("completed" as const),
 	}));
 
@@ -401,6 +445,7 @@ function scripted(
 		preflight,
 		launch,
 		wait,
+		retry,
 		release,
 	} as unknown as SubagentClient;
 
@@ -412,12 +457,13 @@ function scripted(
 					workflowRunId: runId,
 					ownerId,
 					client,
-					maxSlots: 16,
+					maxSlots: options.maxSlots ?? 16,
 				} satisfies WorkflowSubagentBinding;
 			}),
 		} as WorkflowSubagentProvider,
 		requests,
 		resolvedAgents,
+		retry,
 		/** Every lens request, in declaration order. */
 		lensRequests(): SubagentRequest[] {
 			return requests.filter((request) => lensOf(request) !== undefined);
@@ -487,15 +533,27 @@ function taskPaths(view: WorkflowServiceRunView): string[] {
 }
 
 async function runDeepReview(
-	options: Parameters<typeof input>[0] & {
-		readonly failLenses?: readonly string[];
-	} = {},
+	options: Parameters<typeof input>[0] &
+		Pick<
+			NonNullable<Parameters<typeof scripted>[0]>,
+			"failLenses" | "capacityLenses" | "capacityUsageIncomplete" | "maxSlots"
+		> = {},
 ) {
-	const delegated = scripted(
-		options.failLenses ? { failLenses: options.failLenses } : {},
-	);
+	const {
+		failLenses,
+		capacityLenses,
+		capacityUsageIncomplete,
+		maxSlots,
+		...reviewInput
+	} = options;
+	const delegated = scripted({
+		...(failLenses ? { failLenses } : {}),
+		...(capacityLenses ? { capacityLenses } : {}),
+		...(capacityUsageIncomplete ? { capacityUsageIncomplete } : {}),
+		...(maxSlots ? { maxSlots } : {}),
+	});
 	const service = await serviceFor(delegated);
-	const receipt = await service.run("deep-review", input(options));
+	const receipt = await service.run("deep-review", input(reviewInput));
 	const finished = await bounded(service.wait(receipt.runId), "deep-review");
 	return { delegated, service, runId: receipt.runId, finished };
 }
@@ -674,6 +732,49 @@ describe("deep-review: a lens that dies", () => {
 		});
 		expect(output.synthesis).toBeUndefined();
 		expect(delegated.synthesisRequest()).toBeUndefined();
+	});
+});
+
+describe("deep-review: a lens the host had no VM slot for", () => {
+	// The incident: deep-review and deep-research nested side by side on a
+	// four-slot host, eight-wide each. The attempts past the fourth were refused
+	// and both child runs failed on incomplete usage evidence instead of losing
+	// a lens. pi-subagent 0.20.0 types the refusal `capacity` and reports the
+	// usage of an attempt that never started as complete and zero.
+	const lenses = [{ id: "correctness" }, { id: "contracts" }, { id: "risk" }];
+
+	it("degrades coverage when the refusal's usage is complete and zero", async () => {
+		const { delegated, finished } = await runDeepReview({
+			lenses,
+			capacityLenses: ["risk"],
+			maxSlots: 4,
+		});
+
+		expect(finished.status).toBe("completed-degraded");
+		expect(taskByPath(finished, "review/risk")).toMatchObject({
+			disposition: "optional",
+			status: "failed",
+		});
+		const output = finished.output as {
+			coverage: { lens: string; reported: boolean }[];
+		};
+		expect(output.coverage).toContainEqual({ lens: "risk", reported: false });
+		// `capacity` is retry `backoff`: the lens's backoff retry is spent on it,
+		// exactly as on any other backoff-class failure, before the lens is lost.
+		expect(delegated.retry).toHaveBeenCalledTimes(1);
+	});
+
+	it("still fails the run on the revision-11 shape, where that usage was incomplete", async () => {
+		const { finished } = await runDeepReview({
+			lenses,
+			capacityLenses: ["risk"],
+			capacityUsageIncomplete: true,
+			maxSlots: 4,
+		});
+
+		// Incomplete usage is a budget refusal, not a lost lens: this is what
+		// the incident's runs did, and why the fix had to come from pi-subagent.
+		expect(finished.status).toBe("failed");
 	});
 });
 
