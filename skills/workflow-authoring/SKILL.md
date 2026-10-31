@@ -137,15 +137,18 @@ The shipped builtin that writes is `plan-to-ship`, and it is a **compiler**:
 required `receipt` finalizer. A plan authors no stages: the compiler derives
 them from the deliverable's `reviews` list and the plan's `policy`, and each
 lowers onto the component library — `implement` to one worktree agent
-(`implement-<deliverable>`, `handoff: "required"`), `verify-and-fix` to
-`verifyAndFix`'s bounded `-verify-<n>`/`-fix-<n>` rounds, `review-fan-out` to
-`reviewFanOut` (omitted when `reviews` is empty), and every gate to `gate`.
+(`implement-<deliverable>`, `handoff: "required"`), `check` to `verifyHandoff`
+(`check-<d>`, and `recheck-<d>` after a resume that changed something),
+`review-fan-out` to `reviewLenses` beside the check, `normalize` to
+`clusterFindings` plus a merge-only model call, `resume` to the implementer
+continued in its own session (`continueFrom`), the record to the builtin
+`reviewsRecordTask`, and every gate to `gate`.
 `policy.gates` decides which gates exist and nothing else does — including
 `"none"`, which declares no gate at all and leaves the host to publish on
 completion. It takes a pi-maestro plan by value with its sha256 digest and
 nothing else, and returns a receipt naming each durable handoff ref plus the
 approved digest; it never pushes, merges, or applies anything. Read it as the worked example of compiling a document into a graph:
-checkpoints, worktree handoffs, a bounded loop, fan-out and finalizers in one
+checkpoints, worktree handoffs, a continuation, fan-out and finalizers in one
 definition, with `compileStageDocument` and `compileStages` showing the whole
 graph as data — the plan's view and the runtime's — before a task is declared.
 It names the
@@ -461,8 +464,18 @@ checks the workspace out there (a worktree attempt starts at it; a read-only
 attempt is mounted at it); a producer that captured no handoff fails the
 consumer before preflight with "Workflow task workspace start input carries no
 hand-off commit.". A worktree consumer's own handoff is still one commit on the
-repository baseline. `verifyAndFix`, `fixFindings` and `reviewFanOut` set it
+repository baseline. `verifyHandoff`, `reviewLenses` and `reviewFanOut` set it
 for you.
+
+A task CONTINUES another task's child run with `continueFrom: "<input>"`,
+naming one of its handoff inputs: pi-subagent resumes the producer's session
+in a worktree at the run's latest hand-off and sends the task's rendered goal,
+context and instructions as one user message (at most 64 KiB,
+`continuationMessageFits`). The child reruns the producer's plan, so declare
+the producer's agent, model, tools, skills, context scopes, workspace, memory
+and limits, and no retry or resume policy; the output schema may only narrow
+the producer's. The continuation's hand-off is the run's latest export — the
+producer's, unchanged, when the continuation changed nothing.
 
 - `handoff: "required"` (the default): a completed child that captured no
   changes is released and then fails at stage `handoff-import` with
@@ -812,8 +825,9 @@ such a follow-on task optional and a lost lens degrades the run
 ## Patterns
 
 Five shapes — a gate, a stage envelope, a fan-out, a review fan-out, a
-bounded loop — cover nearly every definition in this package, and a sixth
-entry below is the vocabulary a review reports in. Each is first a rule about
+verifier — cover nearly every definition in this package, and two entries below
+are the vocabularies a review reports in: findings a verdict is merged from,
+and lens findings a harness clusters for an implementer to answer. Each is first a rule about
 keys, barriers, and budgets, and only then a function.
 `@vegardx/pi-workflow/components` ships the executable form, and after
 materialization a component is indistinguishable from the hand-written
@@ -825,9 +839,9 @@ component that cannot express your graph is never a reason to bend the graph
 
 ```ts
 import {
-	DIVERSE_MODEL_ID, envelope, forEach, gate, GATE_TIMEOUT_MS,
-	mergeReviewReports, MODEL_PROVIDER, reviewFanOut, tierModel, verifyAndFix,
-	workflowBudgetFor,
+	clusterFindings, DIVERSE_MODEL_ID, envelope, forEach, gate, GATE_TIMEOUT_MS,
+	implementerView, mergeReviewReports, MODEL_PROVIDER, reviewFanOut,
+	reviewLenses, tierModel, verifyHandoff, workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 ```
 
@@ -1054,141 +1068,39 @@ implementer sees `{items: [{id, claim, location, evidence}]}` ordered by
 file then line: severity, lens, model, agreement and suggestion are withheld
 so it answers the finding, not its reporter.
 
-### A bounded loop with a barrier per round
+### Verify a hand-off, never fix it
 
 | | |
 | --- | --- |
-| Intent | Run the repository's own check against a worktree patch, hand a failing check back to a fixer, and stop at a cap — with the last word always a check nobody skipped. |
-| Lowers to | per round: one `ctx.agent` verifier, one `await ctx.result` barrier, then one `ctx.agent` fixer in a worktree with `handoff: "required"`. No generic `loopUntil` — that component stays deferred. |
-| Keying | `<key>-verify-<n>` and `<key>-fix-<n>`, `n` from 1: a pure function of the caller's key and the round ordinal, and of nothing else. The keys are flat because no `ctx` member opens a namespace that admits a barrier between its members. |
-| Replay laws | Law 3 with the round ordinal: every limit comes from `envelope("verify" \| "fix")` and the model is the caller's one `model` option, never the barrier value the loop just read. |
-| Refuses | `maxRounds` outside 0..3; a missing or blank `check.command`; an `implementation` that is not a worktree handle (a read-only task produces no handoff); a `model` that is neither an exact `{provider, id, thinking}` nor `"inherit"`; a fixer that is not a worktree task; a request that declares `model`, `limits`, `outputSchema`, or the fixer's `handoff` — all component-owned; an input name the loop already wires; a worst case that does not fit `budget`. |
-| Budget | `projectVerifyAndFixBudget(maxRounds)` — every verifier plus every fixer the cap allows. |
-| Hand-write when | the loop is not verify-then-fix: a research loop, a negotiation, anything whose next round is a different kind of task. Keep the cap and the per-round keys. |
+| Intent | Run the repository's own check against a worktree hand-off and report it honestly — and do nothing else. |
+| Lowers to | one `ctx.agent` verifier at the hand-off (`workspace.startAtInput`), and NO barrier: the caller awaits it when it wants the answer, so a check can run beside the review lenses. |
+| Keying | the caller's literal key. A second check of the same subject takes a second key (`check-<d>`, `recheck-<d>`), never a `-2` suffix. |
+| Replay laws | law 3: the limits are `envelope("verify")` (plus the write grant in a worktree) and the model is the caller's one `model` option. |
+| Refuses | a key that is not a task key; a missing or blank `check.command`; a subject that is not a worktree handle; a `model` that is neither exact nor `"inherit"`; a request that declares `model`, `limits` or `outputSchema`, names the input the component wires, or starts its workspace elsewhere; a verifier the run budget cannot admit. |
+| Budget | one `envelope("verify")` share. |
+| Hand-write when | the check is not the repository's own command, or the verifier must read something besides the hand-off. |
 
-`maxRounds` bounds the **verify** rounds, so at most `maxRounds - 1` fixers
-follow and the component never returns a fix nobody checked. `0` declares
-nothing — the implementer's own patch stands, which is *unverified*, not
-*failed*, and the gate downstream must say so. `1` is `verify-1` alone: a
-failing check is evidence at the gate, not a fix round. `3` is
-`verify-1, fix-1, verify-2, fix-2, verify-3`. A compiler that speaks in fix
-rounds maps `maxRounds = fixRounds + 1`.
-
-**The cap is 3, and it is measured rather than assumed.**
-[`docs/research.md`](../../docs/research.md), "Replay cost of a bounded loop",
-with `test/replay-cost.test.ts` behind it, finds that replay cost grows
-**quadratically** in the barriers a source has already crossed
-(`replay ≈ 122 µs × barriers × journal events`), because every drive
-re-executes the definition from the top and re-declares every task of every
-epoch already crossed. On a four-deliverable plan a worst-case resume is
-2.6 s at one fix round, 4.4 s at two, and 6.5 s at three — still under a
-quarter of the runtime's projection bound — while at six rounds it is 15.6 s
-and a single plan spends a third of that bound on fix rounds nobody reviewed.
-**Three verify rounds is the highest comfortable cap**; an unbounded
-`loopUntil` is not affordable at all, which is why it stays deferred and this
-loop is unrolled at declaration.
-
-`checkRan: false` is the other rule the measurement does not cover but the
-pattern must: a check killed before it completed is *unverified*, not
-*broken*. Fixing code nobody proved was broken is how a loop burns a budget
-on a machine problem, so the loop stops, declares no fixer, and hands the
-decision to a person. It never counts as green.
+`checkRan: false` is *unverified*, not *broken*: an install killed in a one-CPU
+VM never counts as green, and it is nothing to fix. There is no fixer and no
+round: the agent that wrote the change is resumed with the report and answers
+it in its own session (`ctx.agent` with `continueFrom`, see
+[Worktree tasks and handoffs](#worktree-tasks-and-handoffs)), and a second
+`verifyHandoff` checks what it handed back — only when it handed back
+something new.
 
 ```ts
-// Hand-written
-let patch = implement;
-for (let round = 1; round <= maxRounds; round += 1) {
-	const verifier = ctx.agent(`check-verify-${round}` as TaskKey, {
-		...verifyRequest(round), outputSchema: CheckReportSchema,
-		model: "inherit",
-		limits: envelope("verify").limits,
-		inputs: { patch: patch.handoff },
-	});
-	const report = await ctx.result(verifier); // the barrier
-	if (!report.checkRan || report.checkPassed || round === maxRounds) break;
-	patch = ctx.agent(`check-fix-${round}` as TaskKey, {
-		...fixRequest(round), handoff: "required",
-		model: "inherit",
-		limits: envelope("fix").limits,
-		inputs: { patch: patch.handoff, check: verifier.output },
-	}) as WorktreeTaskHandle<unknown>;
-}
-
-// With the component
-const loop = await verifyAndFix(ctx, "check", {
-	implementation: implement,
+const check = verifyHandoff(ctx, "check-d0" as TaskKey, {
+	handoff: implement,
 	check: { command: "npm run check", install: "npm ci" },
-	model: "inherit",        // one model for every verifier and every fixer
-	maxRounds: 2,            // verify rounds, 0..3; one fix round follows
-	verify: (round, previous) => verifyRequest(round, previous),
-	agent: (round, previous) => fixRequest(round, previous),
+	model: "inherit",
+	request: verifyRequest,                    // prose, tools, workspace
 	budget: BUDGET,
 });
-// loop.passed, loop.checkRan, loop.lastTail, loop.handoff, loop.rounds
-```
-
-The dependency between rounds is a **data** dependency, never a bare `after`:
-a verifier names the current patch's handoff handle in its `inputs`, and a
-fixer names that handoff plus the failing verifier's report. The component
-sets each one's `workspace.startAtInput` to that input, so the host checks the
-workspace out at the hand-off commit and the change under test is already in
-the tree; the descriptor — baseline, commit, digest, size, and the durable
-ref — is the patch's identity for the report, never something to apply. Do
-not tell an agent to apply a ref: the guest has no git
-([Worktree tasks and handoffs](#worktree-tasks-and-handoffs)).
-
-### Normalize a fan-out's findings, then fix them
-
-| | |
-| --- | --- |
-| Intent | Turn a review fan-out's findings into ONE de-duplicated, machine-readable list, hand it to the implementer that wrote the code, and let a person read both the list and the answer to it — without re-running the reviewers. |
-| Lowers to | `ctx.fanIn(<key>, reportingReviewers, …)` for the synthesis (`optional`), one `await ctx.settled`, then at most one `ctx.agent` fixer in a worktree with `handoff: "required"`. |
-| Keying | both keys are the caller's literal, one per subject: `synthesis-<subject>` and `fix-<subject>`. The synthesis's inputs are named by lens key. |
-| Replay laws | law 2: the findings the fixer is declared on come from a value a barrier already returned, which is what makes "declare a fixer only when something is worth fixing" legal. Law 3: `envelope("synthesis" \| "fix")` for the limits, and a model the caller names. |
-| Refuses | a `synthesize` or `agent` that is missing or returns a non-declaration; a declaration naming `outputSchema`, `model`, `limits`, the fixer's `handoff`, or an input the component wires; a fixer that is not a worktree task; a negative `remainingRounds`; a budget the run cannot admit. |
-| Budget | one `envelope("synthesis")` share plus, at most, one `envelope("fix")` share — and the fix share comes out of the SAME pool `verifyAndFix` spends from, so a subject that bounds its fix rounds declares no extra budget for it. |
-| Hand-write when | the findings go to a person and nobody fixes them: then `reviewFanOut`'s own prose synthesis is the right shape and this pair is two tasks you do not need. |
-
-`reviewFanOut`'s own synthesis returns PROSE, because it explains a verdict a
-deterministic rail already computed. That is the wrong shape when an **agent**
-reads it next: prose cannot be addressed one finding at a time and cannot be
-reported back against. So ask the fan-out for `synthesis: "none"` and declare
-the normalization as its own stage with its own pinned schema —
-`{findings: [{id, severity, lens, where, summary, suggestion?}], verdict}` —
-and let the fixer answer it field for field:
-`{findings: [{id, outcome: addressed | disputed | out-of-scope, note}], checkPassed}`,
-where `disputed` requires a note **in the schema**, not in the prose.
-
-**One pool, two spenders.** A subject's fix rounds are one budget.
-`verifyAndFix` spends what it needs making the check pass; `fixFindings` may
-spend only what is left, and spends one when it runs. At zero it declares
-nothing and returns the reason, so a gate can show why nothing was fixed
-instead of implying nothing was wrong.
-
-**No re-review.** Nothing re-runs the lenses over a fixed patch. The fix report
-is the evidence, beside the findings it answers, in front of the person at the
-gate. A second fan-out would double the most expensive stage to re-confirm what
-the check already re-ran.
-
-```ts
-const fanOut = await reviewFanOut(ctx, "review-d0" as TaskKey, lenses, {
-	subject, review, synthesis: "none",            // no prose reducer
-});
-const reducer = synthesizeFindings(ctx, "synthesis-d0" as TaskKey, {
-	reviews: fanOut.reviews, model: tierModel("standard"), budget: BUDGET,
-	synthesize: (brief) => normalizeRequest(brief),
-});
-if (reducer) {
-	const [settled] = await ctx.settled([reducer]);   // the barrier
-	if (settled?.status === "fulfilled") {
-		const attempt = fixFindings(ctx, "fix-d0" as TaskKey, {
-			implementation: loop.handoff, findings: settled.value.findings,
-			synthesis: reducer.output, model: "inherit", remainingRounds, budget: BUDGET,
-			agent: (actionable) => fixRequest(actionable),
-		});
-		if (!attempt.fix) ctx.log(`no fixer: ${attempt.skipped}`);
-	}
-}
+const reviewed = await reviewLenses(ctx, "review-d0" as TaskKey, lenses, {
+	subject: { handoff: implement.handoff, summary: implement.output },
+	review: (lens) => lensRequest(lens),
+});                                            // the check ran beside them
+const report = await ctx.result(check);
 ```
 
 ## Builtin workflows

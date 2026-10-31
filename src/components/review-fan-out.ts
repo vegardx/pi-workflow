@@ -168,7 +168,7 @@ export interface ReviewOutcome {
 	readonly failure?: SettledTaskFailure;
 	/**
 	 * The reviewer's own handle, for a caller that declares a second reducer of
-	 * its own over the fan-out (`synthesizeFindings`). It is present for every
+	 * its own over the fan-out. It is present for every
 	 * DECLARED lens, reporting or not; the same rule applies to it as to every
 	 * other handle here - only a lens whose `reported` is true may be named in
 	 * a downstream task's `inputs`.

@@ -71,8 +71,8 @@ describe("the stage table", () => {
 			"refine",
 			"implement",
 			"verify",
-			"fix",
 			"review",
+			"normalize",
 			"synthesis",
 			"record",
 		]);
@@ -112,16 +112,18 @@ describe("the stage table", () => {
 			refine: "medium",
 			implement: "medium",
 			verify: "low",
-			fix: "medium",
 			review: "medium",
+			normalize: "low",
 			synthesis: "medium",
 			record: "low",
 		});
 	});
 
-	it("gives only the writing stages a worktree write allowance", () => {
+	it("gives only the writing stage a worktree write allowance", () => {
+		// The resume continues an implementer and reruns its row, so
+		// `implement` is the one row that writes.
 		for (const stage of ENVELOPE_STAGES) {
-			const writes = stage === "implement" || stage === "fix";
+			const writes = stage === "implement";
 			expect(envelope(stage).limits.workspaceWriteBytes).toBe(
 				writes ? WORKSPACE_WRITE_BYTES : 0,
 			);
@@ -135,7 +137,7 @@ describe("the stage table", () => {
 	});
 
 	it("clears the W1 floors on every worktree row", () => {
-		for (const stage of ["implement", "fix"] as const) {
+		for (const stage of ["implement"] as const) {
 			const row = envelope(stage);
 			expect(row.limits.attemptTimeoutMs).toBeGreaterThanOrEqual(1_500_000);
 			expect(row.limits.cumulativeRuntimeMs).toBeGreaterThanOrEqual(1_800_000);
@@ -177,7 +179,7 @@ describe("the stage table", () => {
 
 	it("refuses a stage the table does not cover", () => {
 		expect(() => envelope("publish" as StageName)).toThrow(
-			'unknown envelope stage "publish"; the table covers refine, implement, verify, fix, review, synthesis, record.',
+			'unknown envelope stage "publish"; the table covers refine, implement, verify, review, normalize, synthesis, record.',
 		);
 		let caught: unknown;
 		try {

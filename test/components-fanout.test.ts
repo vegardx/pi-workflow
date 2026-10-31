@@ -24,6 +24,11 @@ import {
 	resolveReviewKeys,
 	reviewFanOut,
 } from "../src/components/review-fan-out.js";
+import { reviewLenses } from "../src/components/review-lenses.js";
+import {
+	LensReportSchema,
+	promptDigest,
+} from "../src/components/review-record.js";
 import type {
 	AgentTaskAuthoringRequest,
 	SettledTaskResult,
@@ -957,5 +962,129 @@ describe("component purity", () => {
 			"contracts-2",
 		]);
 		expect(Object.isFrozen(result)).toBe(true);
+	});
+});
+
+describe("reviewLenses", () => {
+	const LENS_MODEL = {
+		provider: "github-copilot",
+		id: "gpt-5.6-sol",
+		thinking: "medium",
+	} as const;
+	const PINNED = {
+		provider: "github-copilot",
+		id: "gpt-5.6-luna",
+		thinking: "high",
+	} as const;
+
+	function lensRequest(goal: string) {
+		return readOnlyRequest(goal);
+	}
+
+	it("declares one optional read-only lens per id at the hand-off, reporting the lens schema", async () => {
+		const h = harness([
+			{
+				status: "fulfilled",
+				value: {
+					findings: [
+						{
+							claim: "Null is not handled.",
+							location: { file: "src/a.ts", line: 3 },
+							evidence: "a.ts:3 dereferences without a guard.",
+							severity: "high",
+						},
+					],
+				},
+				attempt: { subagentRunId: "run_a", subagentAttemptId: "attempt_a" },
+			},
+			{
+				...rejected("reviewer produced nothing"),
+				attempt: { subagentRunId: "run_b", subagentAttemptId: "attempt_b" },
+			},
+		]);
+		const implement = h.ctx.agent("implement", worktreeRequest());
+		const result = await reviewLenses(
+			h.ctx,
+			"review-d0",
+			[{ id: "correctness" }, { id: "security", model: PINNED }],
+			{
+				subject: { handoff: implement.handoff, summary: implement.output },
+				model: LENS_MODEL,
+				review: (lens) => lensRequest(`Review through ${lens.lens.id}.`),
+			},
+		);
+		const declared = h
+			.finish([implement])
+			.flatMap((event) =>
+				event.type === "task-declared" ? [event.data.task] : [],
+			)
+			.filter((task) => task.namespace[0] === "review-d0");
+		expect(declared.map((task) => task.spec.key)).toEqual([
+			"correctness",
+			"security",
+		]);
+		for (const task of declared) {
+			if (task.spec.kind !== "agent") throw new Error("not an agent");
+			expect(task.spec.disposition).toBe("optional");
+			expect(task.spec.request.workspace).toEqual({
+				mode: "read-only",
+				cwd: "/repo",
+				startAtInput: "handoff",
+			});
+			expect(task.spec.request.outputSchema).toEqual(
+				JSON.parse(JSON.stringify(LensReportSchema)),
+			);
+		}
+		expect(result.reviewers).toEqual([
+			{
+				lens: "correctness",
+				model: LENS_MODEL,
+				promptSha256: promptDigest(
+					lensRequest("Review through correctness.").task,
+				),
+				attemptId: "attempt_a",
+				report: {
+					findings: [
+						{
+							claim: "Null is not handled.",
+							location: { file: "src/a.ts", line: 3 },
+							evidence: "a.ts:3 dereferences without a guard.",
+							severity: "high",
+						},
+					],
+				},
+			},
+			{
+				lens: "security",
+				model: PINNED,
+				promptSha256: promptDigest(
+					lensRequest("Review through security.").task,
+				),
+				attemptId: "attempt_b",
+			},
+		]);
+	});
+
+	it("refuses a lens with no exact model to attribute its findings to", async () => {
+		const h = harness();
+		const implement = h.ctx.agent("implement", worktreeRequest());
+		await expect(
+			reviewLenses(h.ctx, "review-d0", [{ id: "correctness" }], {
+				subject: { handoff: implement.handoff },
+				review: (lens) => lensRequest(`Review through ${lens.lens.id}.`),
+			}),
+		).rejects.toThrow(/resolves to no exact model/);
+	});
+
+	it("refuses a subject that does not carry exactly one hand-off", async () => {
+		const h = harness();
+		const implement = h.ctx.agent("implement", worktreeRequest());
+		await expect(
+			reviewLenses(h.ctx, "review-d0", [{ id: "correctness" }], {
+				subject: { summary: implement.output },
+				model: LENS_MODEL,
+				review: (lens) => lensRequest(`Review through ${lens.lens.id}.`),
+			}),
+		).rejects.toThrow(/carries 0 hand-offs/);
 	});
 });
