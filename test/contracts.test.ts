@@ -256,8 +256,8 @@ describe("workflow contracts", () => {
 		// Optional: the field may be absent entirely.
 		expect(Value.Check(AgentTaskRequestSchema, base)).toBe(true);
 		for (const memoryBytes of [
-			64 * 1024 * 1024,
-			512 * 1024 * 1024,
+			1024 * 1024 * 1024,
+			1024 * 1024 * 1024 + 64 * 1024 * 1024,
 			4 * 1024 * 1024 * 1024,
 		]) {
 			expect(
@@ -268,6 +268,10 @@ describe("workflow contracts", () => {
 			0,
 			-(64 * 1024 * 1024),
 			32 * 1024 * 1024,
+			// pi-subagent revision 11: a guest below 1 GiB never booted.
+			64 * 1024 * 1024,
+			512 * 1024 * 1024,
+			1024 * 1024 * 1024 - 64 * 1024 * 1024,
 			100 * 1024 * 1024,
 			4 * 1024 * 1024 * 1024 + 64 * 1024 * 1024,
 			"512MiB",
@@ -801,9 +805,9 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 	});
 
-	it("requires pi-subagent revision 10 with the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
+	it("requires pi-subagent revision 11 with the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(
-			10,
+			11,
 		);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.workspaceStartAt,
@@ -829,6 +833,13 @@ describe("workflow contracts", () => {
 			isCompatibleSubagentContract({
 				...SUBAGENT_RUNTIME_CONTRACT,
 				contractRevision: 6,
+			}),
+		).toBe(false);
+		// Revision 10 admitted a 64 MiB guest that never booted.
+		expect(
+			isCompatibleSubagentContract({
+				...SUBAGENT_RUNTIME_CONTRACT,
+				contractRevision: 10,
 			}),
 		).toBe(false);
 		for (const feature of [

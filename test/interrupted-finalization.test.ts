@@ -4,6 +4,7 @@ import path from "node:path";
 import {
 	type AgentLaunchPlan,
 	canonicalSha256,
+	DEFAULT_MEMORY_BYTES,
 	type RunReceipt,
 	type RunResult,
 	SUBAGENT_RUNTIME_CONTRACT,
@@ -274,7 +275,7 @@ function childProvider(outcomes: readonly ChildOutcome[]) {
 				mountPolicySha256: "a".repeat(64),
 				networkPolicySha256: "a".repeat(64),
 				capacityPolicySha256: "a".repeat(64),
-				memoryBytes: request.memoryBytes ?? 536_870_912,
+				memoryBytes: request.memoryBytes ?? DEFAULT_MEMORY_BYTES,
 				guestDiskBytes: 1024,
 				workspaceWriteBytes: 0,
 			},
