@@ -6,6 +6,36 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 6.0.0
+
+Major release: pi-subagent 0.19.0 (contract revision 11) is required. A guest
+below 1 GiB never booted, so pi-subagent's `MemoryBytesSchema` now spans 1 GiB
+to 4 GiB in 64 MiB steps. That schema is part of `AgentTaskRequestSchema`, so a
+revision-24 agent task spec may no longer validate: `WORKFLOW_CONTRACT_REVISION`
+becomes 25, and a release that cannot read the previous revision's runs is a
+major. A host pinning `>=5.0.0 <6` moves to `>=6.0.0 <7`.
+
+### Breaking
+
+- **Revision 25 refuses revision-24 state.** Journals, snapshots, run records,
+  decision records and dynamic proposals written by 5.0.0 are not read; there
+  is no migration. The dynamic host API digest rotates.
+- **`@vegardx/pi-subagent` `0.19.0` (exact) is required**, up from `0.18.0`,
+  at contract revision 11 with an unchanged feature set. Revision 10 is
+  refused.
+- **`memoryBytes` below 1 GiB is refused.** `AgentTaskRequestSchema` and
+  `AgentTaskAuthoringRequest.memoryBytes` accept a multiple of 64 MiB from
+  1 GiB to 4 GiB. The materializer's refusal reads "agent memoryBytes must be
+  a multiple of 64 MiB from 1 GiB to 4 GiB", built from pi-subagent's
+  `MIN_MEMORY_BYTES`, `MAX_MEMORY_BYTES` and `MEMORY_GRANULARITY_BYTES`.
+  The builtin workflows already ask for 2 GiB (worktree stages) or name
+  nothing.
+
+### Changed
+
+- pi-subagent no longer charges guest boot time to `attemptTimeoutMs`; a boot
+  that hangs fails as `sandbox-launch`, which the workflow already classifies.
+
 ## 5.0.0
 
 Major release: the review loop of `plan-to-ship` is redesigned around a

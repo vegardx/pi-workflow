@@ -201,6 +201,16 @@ review record; `plan-to-ship`'s output replaces `findings[]` and the old
 `reviews[]` with one `ReviewsRecordSchema` record per reviewed deliverable. The
 dynamic host API digest rotates.
 
+**6.0.0.** `WORKFLOW_CONTRACT_REVISION` becomes 25, which refuses revision-24
+runs and so makes this a major. The required pi-subagent is `0.19.0`,
+contract revision 11, with an unchanged feature set. Its `MemoryBytesSchema`,
+which `AgentTaskRequestSchema` embeds, raises the floor from 64 MiB to 1 GiB
+because a smaller guest never booted: an accepted input narrows, and a
+revision-24 agent task spec carrying a smaller grant would no longer validate.
+The materializer's refusal changes with it to "agent memoryBytes must be a
+multiple of 64 MiB from 1 GiB to 4 GiB", stated from pi-subagent's constants.
+No export, tool or other message changed. The dynamic host API digest rotates.
+
 ## Static definition
 
 A saved workflow uses a `.workflow.ts`, `.workflow.mts`, `.workflow.js`, or
