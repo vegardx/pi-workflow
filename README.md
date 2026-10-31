@@ -12,9 +12,9 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 4.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 23 with
+views. Version 5.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 24 with
 the feature flags `checkpoints: true` and `dynamicWorkflows: true` alongside
-the earlier flags, and it requires pi-subagent 0.17.0, contract revision 10
+the earlier flags, and it requires pi-subagent 0.18.0, contract revision 10
 (`handoffExport: true`, `vmMemoryCeiling: true`,
 `workspaceBudgetRefusal: true` among its required features). The
 human-only `/workflow decide` and `/workflow approve|reject` commands are part
@@ -84,7 +84,10 @@ reason: contract revision 20 cannot read revision-19 persisted runs, and it
 reads them from a different place (see
 [Where state lives](#where-state-lives)); it also requires Pi 1.4. 4.0.0 is
 a major for the same reason: contract revision 23, for the agent workspace's
-`startAtInput`, cannot read revision-22 runs.
+`startAtInput`, cannot read revision-22 runs. 5.0.0 is a major for the same
+reason — contract revision 24, for the agent request's `continueFrom`, cannot
+read revision-23 runs — and because the component library and `plan-to-ship`'s
+output change shape with the review loop.
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:
@@ -239,7 +242,7 @@ await workflows.stop(runId);                  // cancel; handoffs survive
 that names no awaiting checkpoint — or more than one. To render what a person is
 deciding on, ask `inspect` for the new `"checkpoints"` section: it carries every
 checkpoint task's verified input values at `tasks[].checkpoint.inputs`, lease-free
-— the ship gate's own `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>`.
+— the ship gate's own `plan`, `summary-<d>`, `reviews-<d>` and `check-<d>`.
 
 Failures that are not a `WorkflowServiceError` are flattened to one fixed
 message, so a consumer never sees an internal error string or a stack.
@@ -286,8 +289,8 @@ runtime cannot tell those two apart.
 
 A host that shows a run to a person needs more than a status: pi-maestro posts
 each task completion into the conversation and then gives the model a turn on
-the interesting ones — a synthesis result, a fix report, a failure, the ship
-gate. Two methods carry that, and between them they are the whole surface.
+the interesting ones — a normalized review, the resumed implementer's answer, a
+failure, the ship gate. Two methods carry that, and between them they are the whole surface.
 
 `observe` fires once per durable append. The append that moved a task to a
 terminal status — and only that one — carries `task`:
@@ -322,8 +325,9 @@ Everything in `narration` is **derived** — from the task key, the journalled
 outcome, and (for the summary) the committed result artifact. No definition
 authors it, nothing about it is persisted, and it moves no contract revision.
 The kind vocabulary is the stage-key convention `plan-to-ship` documents: a
-leading `implement`, `check`, `review`, `synthesis`, `fix` or `refine` segment
-names the kind and the rest of that segment names the deliverable, a checkpoint
+leading `implement`, `check`, `recheck` (a `check`), `review`, `normalize`,
+`resume`, `synthesis` or `refine` segment names the kind and the rest of that
+segment names the deliverable — nothing follows the deliverable id — a checkpoint
 is `gate` whatever it is called, and anything else is `other` — which is the
 honest answer for a project definition that names its tasks its own way, not a
 failure.
@@ -680,7 +684,7 @@ provider's `startBuiltin` instead of sending the model a turn to call
 run either way; only `run-created`'s `origin` differs.
 
 It declares `meta.needs = { workspace: "worktree", sessionModel: true }`, because
-every implementer and fixer it runs writes in one and its implementation roles
+every implementer and check it runs writes in one and its implementation roles
 inherit the host session's model. A host whose delegation ceiling allows
 `read-only` cannot start it at all — *"plan-to-ship needs a worktree workspace;
 the host ceiling allows read-only."* — and neither can a host with no session
@@ -693,9 +697,10 @@ model a run inherits](#the-session-model-a-run-inherits)).
 | role | model |
 | --- | --- |
 | `refine` (`planner`) | `inherit` |
-| `implement`, `check`'s verifiers and fixers, `fix` (`implementer`) | `inherit` |
+| `implement`, `check`, `recheck` (`implementer`) | `inherit` |
+| `resume` | the implementer's own: pi-subagent reruns its launch plan |
 | `review-<d>/<lens>` (`reviewer`) | the lens's tier — `light`/`standard`/`heavy` — or the exact `reviews[].model` the plan pinned, at that tier's thinking level |
-| `synthesis-<d>` (`reviewer`) | the standard reviewer tier |
+| `normalize-<d>` (`reviewer`) | pinned (`envelope("normalize")`); it returns cluster ids, never prose |
 | the `receipt` finalizer (`planner`) | pinned; recording what the run committed is not a thinking task |
 
 The work inherits because the person who chose a model for the conversation that
@@ -705,49 +710,49 @@ Limits, budget shares and the 2 GiB worktree memory grant are one fixed row per
 stage in `envelope`, and every gate waits the same 24 hours.
 
 **The stage walk.** A plan schema v8 document **authors no stages**. The
-compiler derives them, the same list for every deliverable: `implement`, the
-`check` with `policy.maxFixRounds` (0..2, default 1),
-and — only when the deliverable's `reviews` list is non-empty — a
-`review-fan-out` over those lenses, a `synthesis` that normalizes what they
-found, and a `fix` that acts on it. Each stage lowers through one component, and
-the stage id is the compiled key's prefix:
+compiler derives them, the same list for every deliverable:
 
-| stage | component | task keys |
+| stage | lowers to | task keys |
 | --- | --- | --- |
-| `implement` | `ctx.agent` | `implement-<deliverable>` |
-| `check` | `verifyAndFix` | `check-<deliverable>-verify-<n>`, `-fix-<n>` |
-| `review-fan-out` | `reviewFanOut` | `review-<deliverable>/<lens>` |
-| `synthesis` | `synthesizeFindings` | `synthesis-<deliverable>` |
-| `fix` | `fixFindings` | `fix-<deliverable>` |
-| `gate` | `gate` | `approve-<deliverable>`, `ship` |
+| `implement` | `ctx.agent` | `implement-<d>` (hand-off H1) |
+| `check` | `verifyHandoff` at H1 | `check-<d>` |
+| `review-fan-out` | `reviewLenses` at H1, beside the check | `review-<d>/<lens>` |
+| `normalize` | `clusterFindings`, then a merge-only call when more than one lens reported | `normalize-<d>`, then the record `reviews-<d>` |
+| `resume` | the implementer continued in its own session (`continueFrom`) | `resume-<d>` (hand-off H2, or H1 unchanged) |
+| `check` (`recheck`) | `verifyHandoff` at H2, only when H2 is new | `recheck-<d>` |
+| `gate` | `gate` | `approve-<d>`, `ship` |
 
-The plan counts **fix** rounds and the component counts **verify** rounds, so
-the compiler maps `maxRounds = fixRounds + 1`: a fix is never left unchecked,
-and `maxFixRounds: 2` is three verifiers and two fixers. A verifier applies the
-handoff in its own worktree and runs the repository's check; `checkRan: false`
-is unverified rather than broken, so it stops the loop and goes to a person
-instead of starting a fix round.
+`review-fan-out` and `normalize` are compiled only when the deliverable's
+`reviews` list is non-empty; `resume` and `recheck` only under
+`policy.resumes: 1` (the default; `0` sends the findings to the gate
+unanswered). A check verifies and never fixes; `checkRan: false` is unverified,
+not broken, and is not by itself a reason to resume.
 
-**Review findings are fixed inside the deliverable.** The fan-out declares no
-prose reducer of its own (`synthesis: "none"`). Instead `synthesis-<deliverable>`
-is a structured-output task over the lenses that reported: one de-duplicated
-list of `{id, severity, lens, where, summary, suggestion?}` plus a
-one-paragraph `verdict`. `fix-<deliverable>` hands that list and the patch back
-to the implementer, which addresses **every blocking and major finding** (minor
-at its discretion), re-runs the check, and answers each finding
-`addressed | disputed | out-of-scope` — a `disputed` finding without a note is
-refused by the schema. **There is no re-review:** the fix report is the
-evidence, and it is in front of the person at the gate beside the findings it
-answers.
+**The review loop.** Every lens reports
+`{findings: [{claim, location: {file, line?}, evidence, severity: high | medium |
+low, suggestion?}]}`. The harness **merges without judging**: findings of one
+lens at one place (same file, lines within ±2) are one cluster; whether two
+lenses saw the same thing is a question only the normalize call may answer, and
+only by merging — an answer that names an unknown or repeated cluster, or
+carries anything but `merges`, is ignored whole. The implementer is then resumed
+in the session that wrote the change, at its own hand-off, with the check report
+and `{items: [{id, claim, location, evidence}]}` ordered by file and line —
+severity, lens, model, agreement and suggestion are withheld, so it answers the
+finding rather than its reporter. It answers every item `fixed`, `declined` or
+`out-of-scope` with its reasoning; an answer that skips or repeats an item is
+refused, which leaves H1 standing. What it changed is rechecked. The resume runs
+only when there is something to answer: a cluster, or a check that ran and
+failed.
 
-The fix rounds are **one pool per deliverable**. `policy.maxFixRounds` bounds
-the whole deliverable, not one stage: the check spends what it needs and the
-fix stage may spend only what is left, so a deliverable never runs more than
-`maxFixRounds` fixers. When nothing is blocking or major, when the pool is
-spent, or when the synthesis did not run, no fixer is declared and the reason is
-logged to the journal and shown at the gate. A fixer's own word that the check
-passed never turns a `checkRan: false` deliverable into a verified one; the
-claim is shown, the verdict is not changed.
+The builtin `pi-workflow/reviews-record` support task commits the harness's
+record as `reviews-<d>`: the reviewers (`reviewerKey`, lens, model, thinking,
+attempt, status, count), the clusters (claim, location, highest severity,
+`reportedBy` with attribution stamped from the launch and the journal,
+`agreement: {count, of}`, suggestions, raw indices, and the disposition), and
+the normalizer (`deterministic` or `model`, with its model and prompt digest).
+**A decline never holds the run**: the gate shows the counts — reviewers that
+reported, clusters, clusters two or more reviewers raised, dispositions by
+kind, and the last check — and the record carries the reasoning.
 
 **What the plan schema deleted is refused by name.** There is no migration, so
 each deleted key parses — a TypeBox "unexpected property" is not something a
@@ -776,8 +781,8 @@ Under `none` the run commits the *same* receipt a `ship: true` decision commits 
 `receipt.planDigest`, `receipt.refs`, and one `deliverables[]` entry per handoff —
 so a publication reader needs no new field, only `receipt`. What the ship gate
 would have shown a person becomes `output.shipSummary`: the refined plan, and per
-deliverable the implementation summary, the normalized findings and the fix
-report — the gate's own `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>`
+deliverable the implementer's latest report, the review record and the last
+check — the gate's own `plan`, `summary-<d>`, `reviews-<d>` and `check-<d>`
 inputs. The host renders that before it publishes.
 
 `output.approved` is **always true**, under every gate policy: the start of the
@@ -977,91 +982,41 @@ from, and the one package subpath besides the root that the definition import
 gate accepts. It exports `gate` (a checkpoint plus the branch it decides),
 `envelope` (one fixed row per stage: the thinking level a role that names no
 model of its own runs at, its limits, and its budget share), `forEach` and
-`reviewFanOut` (bounded fan-out and its
-deterministic fan-in), `verifyAndFix`, and the `synthesizeFindings` +
-`fixFindings` pair that turns a fan-out's findings into a fixed patch. It also carries the two shapes the
-builtins share rather than copy: the `Finding` every reviewer reports, and
-`CompiledStageDocumentSchema` — the compiled stage document `plan-to-ship`
+`reviewFanOut` (bounded fan-out and its deterministic fan-in), `verifyHandoff`,
+`reviewLenses`, and the review record's pure functions. It also carries the
+shapes the builtins share rather than copy: the `Finding` a document reviewer
+reports, the lens finding a code reviewer reports, the `reviews-<d>` record,
+and `CompiledStageDocumentSchema` — the compiled stage document `plan-to-ship`
 produces and every reader of a compiled plan consumes, so no definition has to
 import another.
 
-### `verifyAndFix`
+### `verifyHandoff`
 
-A bounded verify-then-fix loop over one implementer's worktree handoff,
-**unrolled at declaration** into named tasks — `<key>-verify-<n>` and
-`<key>-fix-<n>`, a pure function of the caller's key and the round ordinal:
+One verifier that runs the repository's own check at a worktree hand-off and
+reports `{summary, checkCommand, checkRan, checkPassed, checkTail}` honestly.
+It **declares and returns** the handle and crosses no barrier, so a caller can
+run the check beside something else and await it later. It verifies and never
+fixes: the agent that wrote the change answers the report, and a second
+`verifyHandoff` under another key checks what it handed back. `checkRan: false`
+is **unverified**, not **broken**. The caller owns the prose, the tools, the
+workspace and the agent name; the component owns the output schema, the model,
+the limits (`envelope("verify")`, plus the write grant in a worktree), the
+`patch` input and the workspace start, and refuses a request that declares any
+of them.
 
-```text
-round 1   ctx.agent(`<key>-verify-1`, …)    the check, reported honestly
-          await ctx.result(verify-1)         barrier
-          ctx.agent(`<key>-fix-1`, …)        worktree, handoff "required"
-round 2   ctx.agent(`<key>-verify-2`, …)
-```
+### `reviewLenses` and the review record
 
-`maxRounds` bounds the **verify** rounds, so at most `maxRounds - 1` fix rounds
-follow and the component never returns a fix nobody checked: `0` declares
-nothing (the implementer's own patch, unverified), `1` is one check whose
-failure is evidence at the caller's gate, `2` is verify, fix, verify. The cap
-is 2, and it is a cap on replay rather than on ambition: every round awaits a
-barrier, a resume re-executes the definition from the top and re-declares every
-epoch already crossed, so the replay work of a resume grows with the number of
-barriers the source has crossed. That is the cost a generic `loopUntil` cannot
-bound, which is why this component is unrolled and that one is deferred.
-
-Every verifier and every fixer runs at the one `model` the caller declared — an
-exact `{provider, id, thinking}`, or `"inherit"`. There is no effort ladder and
-no rung of escalation: a fixer is a retry of an implementer that already failed
-its own check, and what it needs is the implementer's model rather than a
-different one, so `plan-to-ship` hands the loop the same `"inherit"` its
-implementers run at. `limits` still come from the stage table, which is what
-genuinely differs between running a command and editing a worktree.
-
-`checkRan: false` — the check never completed, because an install or a build
-was killed inside the agent's own VM — stops the loop rather than starting a
-fix round: that is **unverified**, not **broken**, and fixing code nobody
-proved was broken is how a loop burns a budget on a machine problem. The
-component returns `{ passed: false, checkRan: false }` for the caller's gate to
-put in front of a person.
-
-The caller owns the prose, the tools, the workspace, and the agent name; the
-component owns the keys, a verifier's output schema, both roles' models and
-limits, the fixer's `handoff: "required"`, and the input wiring that makes the
-rounds depend on each other. A request that declares one of the component's own
-fields is refused rather than overwritten. Rounds depend on each other through
-**data**, never a bare `after`: `verify-<n>` names the current patch's handoff
-handle, and `fix-<n>` names that handoff plus the failing verifier's report.
-
-### `synthesizeFindings` and `fixFindings`
-
-The other half of a review: normalize what the lenses found, then act on it.
-
-```text
-ctx.fanIn(`synthesis-<d>`, reportingReviewers, …)   structured, "optional"
-await ctx.settled([synthesis])                       barrier
-ctx.agent(`fix-<d>`, …)                              worktree, handoff "required"
-```
-
-`reviewFanOut`'s own synthesis returns prose, because it explains a verdict a
-deterministic rail already computed. That is the wrong shape when an **agent**
-reads it next, so a caller asks the fan-out for `synthesis: "none"` and declares
-`synthesizeFindings` instead. It reports
-`{findings: [{id, severity, lens, where, summary, suggestion?}], verdict}` —
-one de-duplicated list plus one paragraph — and returns `undefined` when no lens
-reported, because a reducer over an empty fan-in is a task nobody can complete.
-It is `disposition: "optional"` for the same reason a reviewer is: a barrier's
-control edge covers every task it closed over, so a half-dead fan-out must
-degrade the run rather than fail it.
-
-`fixFindings` declares **at most one** fixer, in a worktree, with
-`handoff: "required"`, and hands it the patch's descriptor plus the normalized
-list. It reports
-`{findings: [{id, outcome: addressed | disputed | out-of-scope, note}], checkPassed}`,
-and `disputed` requires a note **in the schema** — a two-branch union, so a
-dispute nobody can read is refused by structured output rather than noticed at a
-gate. No fixer is declared, and `skipped` carries the reason, when no finding is
-`blocking` or `major` or when `remainingRounds` is 0: the fix rounds are one
-pool shared with `verifyAndFix`, so that zero is how a subject's total fixers
-stay inside its budget. Nothing re-reviews the fixed patch.
+`reviewLenses` declares one optional read-only lens per id at the subject's one
+hand-off, each reporting `LensReportSchema`, settles them, and returns one
+`ReviewerInput` per lens — its exact model, its prompt digest, the attempt the
+journal says settled it, and its report when it reported. `clusterFindings`
+joins one lens's findings at one place; `normalizeCandidates` and
+`applyModelMerges` let a model merge across lenses and nothing else;
+`implementerView` strips everything but claim, location and evidence and orders
+by file and line; `checkResumeReport` requires every shown item answered
+exactly once; `withDispositions`, `reviewerEntries` and `reviewCounts` build and
+count the `ReviewsRecordSchema` record the builtin `reviewsRecordTask` commits.
+All of them are pure functions over barrier values.
 
 ## Model roles
 

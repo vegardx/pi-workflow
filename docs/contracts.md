@@ -6,7 +6,7 @@ nested run executor, artifact store, and static source runtime (exported from
 `@vegardx/pi-workflow/runtime`) implement the current subset; later
 interfaces remain design contracts. Version 1.0.0 freezes the public surfaces
 listed under [Public API and stability](#public-api-and-stability). The
-runtime contract is revision 23 and declares the feature flags `supportTaskExecution: true`,
+runtime contract is revision 24 and declares the feature flags `supportTaskExecution: true`,
 `nestedWorkflows: true`, `nestedArtifactInputs: true`, `retryAttempts: true`,
 `resumeAttempts: true`, `executionGenerations: true`,
 `transactionalInvalidation: true`, `finalizers: true`,
@@ -97,8 +97,10 @@ turn, for the run record's new `ceiling`, and travels in the same
 3.0.0. Revision 22 refuses revision-21 records in turn, for the run record's new
 `sessionModel`, and travels in the same 3.0.0. Revision 23 refuses revision-22
 records in turn, for the agent workspace's `startAtInput`, so the release that
-carries it is 4.0.0 and not 3.1.0. Runs journaled by revision 23 are readable
-by every 4.x release under the same rule.
+carries it is 4.0.0 and not 3.1.0. Revision 24 refuses revision-23 records in
+turn, for the agent request's `continueFrom` and the execution's continue
+intent, so the release that carries it is 5.0.0. Runs journaled by revision 24
+are readable by every 5.x release under the same rule.
 
 **1.1.0.** Additive only: `WorkflowServiceOptions` gains the optional
 `registeredRoots`, and the package ships its own `workflows/` directory, which
@@ -179,6 +181,22 @@ released instead of being refused, and a required task that fails the run
 names itself and its cause in the run's `-> failed` reason, after the
 unchanged prefix "A required workflow task did not complete". The revision is
 an input to `hostApiSha256`, so the dynamic host API digest rotates.
+
+**5.0.0.** `WORKFLOW_CONTRACT_REVISION` becomes 24, which refuses revision-23
+runs and so makes this a major: `AgentTaskRequestSchema` gains the optional
+`continueFrom` — a task that continues another task's child run through
+pi-subagent's resume at hand-off — and the execution projection gains the
+`task-execution-continue-intended` event, its `continue-intended` phase and
+`continueIntent` (see [Worktree tasks and handoffs](#worktree-tasks-and-handoffs)).
+`ctx.settled` results carry the settling `attempt`. Every service registers the
+builtin support task `pi-workflow/reviews-record`, and the root exports
+`reviewsRecordTask` and `REVIEWS_RECORD_SUPPORT_NAME`. The required pi-subagent
+is `0.18.0`, contract revision 10 with `resumeAtHandoff: true`. The component
+library is unfrozen and changes shape: `verifyAndFix`, `fixFindings` and
+`synthesizeFindings` are removed for `verifyHandoff`, `reviewLenses` and the
+review record; `plan-to-ship`'s output replaces `findings[]` and the old
+`reviews[]` with one `ReviewsRecordSchema` record per reviewed deliverable. The
+dynamic host API digest rotates.
 
 ## Static definition
 
@@ -326,10 +344,15 @@ definitions load under `project` scope with the usual trust gate.
 The shipped builtin that writes is `plan-to-ship` (`plan -> stages -> ship`),
 a compiler over the plan's `deliverables` and `policy`: `refine` (read-only
 agent) -> per deliverable, in plan order, `implement` (one worktree agent
-`implement-<deliverable>` with `handoff: "required"`), `verify-and-fix` (the
-bounded `-verify-<n>`/`-fix-<n>` loop), `review-fan-out` (optional read-only
-reviewers keyed by lens id, each fed a handoff descriptor) and the gate
-`policy.gates` bought -> `ship` (checkpoint, `headless: "block"`, declared
+`implement-<deliverable>` with `handoff: "required"`), `check` (one verify-only
+`check-<deliverable>` at the hand-off, beside the lenses), `review-fan-out`
+(optional read-only reviewers keyed by lens id, each at the hand-off),
+`normalize` (deterministic clustering, then a merge-only `normalize-<d>` call
+when more than one lens reported), `resume` (the implementer continued in its
+own session through `continueFrom`, answering each finding), `recheck` (only
+when the resume changed the hand-off), the `reviews-<d>` record (the builtin
+`pi-workflow/reviews-record` support task) and the gate `policy.gates` bought
+-> `ship` (checkpoint, `headless: "block"`, declared
 unless `policy.gates` is `none`) -> `receipt` (required finalizer). There is no
 gate before the work: the start of the run is the approval, so the first task is
 ready the moment the run is created. A
@@ -1307,10 +1330,9 @@ captured none, fails the consumer at stage `preflight` before any preflight
 call, with "Workflow task workspace start hand-off could not be verified." or
 "Workflow task workspace start input carries no hand-off commit.". A launch
 plan whose `workspace.startAt` differs from the request is refused like any
-other plan mismatch ("workspace start"). `verifyAndFix` starts verify-n and
-fix-n at `patch`, `fixFindings` its fixer at its patch input, and
-`reviewFanOut` every lens at the subject's one handoff input (a subject with
-two is refused).
+other plan mismatch ("workspace start"). `verifyHandoff` starts its verifier
+at `patch`, and `reviewFanOut` and `reviewLenses` every lens at the subject's
+one handoff input (a subject with two is refused).
 
 A task CONTINUES another task's child run through `request.continueFrom`
 (revision 24): the name of one of its own handoff `inputs`, refused at
@@ -2431,7 +2453,7 @@ and `workflow_stop` are unchanged operator tools.
 | `decide(runId, taskKey, options)` | `WorkflowService.decide` for the checkpoint `taskKey` names - a key as narration shows it (`ship`, `approve-<d>`, or `<namespace>/<key>`), or a task id. Same validation and same refusals, and the decision record carries `source: "service-provider"` beside its `decidedBy` | "Workflow checkpoint `<taskKey>` is not awaiting a decision on this run.", "Workflow checkpoint `<taskKey>` names more than one awaiting checkpoint; use its task id.", then every refusal `decide` already raises |
 | `resume(runId, {taskId})` | `WorkflowService.resume` for that one task: re-attempt a failed or interrupted task without invalidating its dependents | "Workflow task is not resumable on this run." for an empty `taskId`, then the runtime's own |
 | `stop(runId)` | `WorkflowService.stop` with the fixed reason "Stopped from the host's own dialog." Every handoff already captured survives | the runtime's own |
-| `inspect(runId, {include: [..., "checkpoints"]})` | adds every checkpoint task's verified input values at `tasks[].checkpoint.inputs` - the artifact-backed shape, read lease-free - so a host renders the ship gate's `plan`, `summary-<d>`, `findings-<d>` and `fix-<d>` before it answers. Implies `"tasks"`; a checkpoint whose inputs cannot be verified is left without them rather than failing the inspection | - |
+| `inspect(runId, {include: [..., "checkpoints"]})` | adds every checkpoint task's verified input values at `tasks[].checkpoint.inputs` - the artifact-backed shape, read lease-free - so a host renders the ship gate's `plan`, `summary-<d>`, `reviews-<d>` and `check-<d>` before it answers. Implies `"tasks"`; a checkpoint whose inputs cannot be verified is left without them rather than failing the inspection | - |
 
 `CheckpointDecisionSourceSchema` gains `"service-provider"` for it. That is a
 persisted field VALUE in `WorkflowDecisionRecord` and in

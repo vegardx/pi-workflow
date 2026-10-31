@@ -6,6 +6,75 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 5.0.0
+
+Major release: the review loop of `plan-to-ship` is redesigned around a
+resumed implementer. Reviewers report standard findings, the harness clusters
+them without judging, and the agent that wrote the change answers each one in
+its own session; the separate fixer and the model synthesis are gone.
+`WORKFLOW_CONTRACT_REVISION` becomes 24 for the persisted continuation, and a
+release that cannot read the previous revision's runs is a major. A host
+pinning `>=4.0.0 <5` moves to `>=5.0.0 <6`.
+
+### Breaking
+
+- **Revision 24 refuses revision-23 state.** Journals, snapshots, run records,
+  decision records and dynamic proposals written by 4.0.0 are not read; there
+  is no migration. The dynamic host API digest rotates.
+- **`@vegardx/pi-subagent` `0.18.0` (exact) is required**, up from `0.17.0`,
+  at contract revision 10 with `resumeAtHandoff: true`.
+- **`plan-to-ship`'s output changes shape.** `findings[]` and the per-lens
+  `reviews[]` are replaced by `reviews[]`: one `ReviewsRecordSchema` record per
+  reviewed deliverable. `deliverables[].verifyRounds` becomes `resumed`.
+  `shipSummary.deliverables[]` carries `summary`, `reviews?` and `check`. The
+  ship gate's inputs are `plan`, `summary-<d>`, `reviews-<d>` and `check-<d>`.
+- **`policy.maxFixRounds` is refused by name**; `policy.resumes` (0 or 1,
+  default 1) replaces it.
+- **The component library changes shape** (it is unfrozen): `verifyAndFix`,
+  `fixFindings`, `synthesizeFindings`, their schemas and the `fix` envelope row
+  are removed. The compiled stage document's kinds are `implement`, `check`,
+  `review-fan-out`, `normalize`, `resume` and `gate`.
+- **Narration**: the `fix` kind is gone; `normalize` and `resume` are new, and
+  `recheck-<d>` narrates as `check`.
+
+### Added
+
+- **Continuations (`continueFrom`).** An agent task may continue the child
+  run of a task whose hand-off it takes as input: the launcher persists a
+  continue intent and calls pi-subagent's resume at hand-off with the task's
+  rendered message instead of launching. The continuation shares its
+  producer's run, and its hand-off is the run's latest export — the
+  producer's, unchanged, when it changed nothing.
+- **`ctx.settled` attribution**: each result carries the `attempt` (subagent
+  run and attempt) the journal says settled it.
+- **The `pi-workflow/reviews-record` builtin support task** (`reviewsRecordTask`
+  at the root), registered by every service, commits a review record a
+  definition computed as an artifact.
+- **Components**: `verifyHandoff` (verify only, no barrier), `reviewLenses`,
+  `LensReportSchema`, `ReviewsRecordSchema`, `ImplementerViewSchema`,
+  `ResumeReportSchema`, `clusterFindings`, `normalizeCandidates`,
+  `applyModelMerges`, `implementerView`, `checkResumeReport`,
+  `withDispositions`, `reviewCounts`, and the `normalize` envelope row.
+- **`plan-to-ship`'s review loop**: the check runs beside the lenses at H1; a
+  merge-only `normalize-<d>` call runs only when more than one lens reported
+  (an answer that drops, invents or rewrites is ignored whole); `resume-<d>`
+  hands the implementer the check report and claims, locations and evidence
+  only, and it answers every item `fixed`, `declined` or `out-of-scope`;
+  `recheck-<d>` checks what it changed; `reviews-<d>` records attribution,
+  agreement and dispositions. A decline never holds the run.
+
+### Fixed
+
+- **A check narrates its deliverable.** The verify task narrated
+  `deliverable: "d0-verify-1"`; a stage that runs twice now takes a second
+  stage id (`recheck`) instead of a suffix.
+
+### Known
+
+- Whether pi-subagent resumes a run whose worktree the workflow already
+  released, and how it reports a resumed attempt's usage, is exercised only by
+  the fake-client suite; a host run is pending.
+
 ## 4.0.0
 
 Major release: a consumer of a hand-off now runs ON it, and a failed required

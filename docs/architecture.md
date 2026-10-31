@@ -147,7 +147,10 @@ descriptor to the author and to downstream tasks, and as bytes through the
 service's `exportHandoff`; it never applies, pushes, or merges a handoff and
 never reads a subagent worktree path or branch. A consumer that names a handoff
 input as `workspace.startAtInput` runs in a workspace pi-subagent checked out at
-that hand-off's commit.
+that hand-off's commit. A task that names one as `continueFrom` is not launched
+at all: after persisting its intent, the launcher asks pi-subagent to resume the
+producer's own run at its latest hand-off with the task's rendered message, and
+the task settles as that run's next attempt.
 
 Resume reconstructs state from the append-only journal and re-executes the
 workflow function from its entry point. Matching task, result, phase, and log

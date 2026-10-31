@@ -24,6 +24,7 @@ sentence each:
 | key | refused because |
 | --- | --- |
 | `policy.effort` | *plan schema v8 removed `policy.effort`; models are set per role and budgets are fixed* |
+| `policy.maxFixRounds` | *`policy.maxFixRounds` was removed with the fixer: the implementer is resumed once with the check report and the review instead, so set `policy.resumes` to 1 (the default) or 0.* |
 | `tasks[].review` | v4's review block: *plan schema v8 moved review routing to `deliverables[].reviews`; a task is work only* |
 | `tasks[].by` | v3's name for the same block, same destination |
 | `deliverables[].stages` | *plan schema v8 does not author stages; the compiler derives them from `reviews` and `policy`* |
@@ -99,7 +100,7 @@ fixed, so the only dials a plan still sets are these:
 | --- | --- | --- |
 | `gates` | `ship` \| `every-deliverable` \| `none` | `ship` |
 | `reviewDefault` | `{tier?, diverse?}` | `{tier: "standard", diverse: false}` |
-| `maxFixRounds` | 0 \| 1 \| 2 | `1` |
+| `resumes` | 0 \| 1 | `1` |
 | `publish` | `{mode: none\|branch\|pr, base?}` | `{mode: "none"}` |
 
 `gates` decides what happens at the **end** of the run, and it is what the mode a
@@ -111,8 +112,10 @@ person left plan mode in chooses:
 | `every-deliverable` | a gate after each deliverable but the last, then `ship` | `ask` |
 | `none` | **no gate at all**: the run completes and the HOST publishes on completion, on the authority of the yes that started it. The output carries the same `receipt`, plus `shipSummary` — what the ship gate would have shown | `auto` |
 
-`maxFixRounds` bounds the FIX rounds of a whole deliverable, not of one stage:
-the `check` spends what it needs and the `fix` stage may spend only what is left.
+`resumes: 1` resumes the implementer once, in its own session, with the check
+report and the review, to answer every finding `fixed`, `declined` or
+`out-of-scope`; `0` sends the findings to the gate unanswered. `maxFixRounds`
+was removed with the fixer: it parses and is refused by name.
 
 `publish.base` must be a valid Git ref name. `mode: "pr"` needs `gh` at
 **readiness** time, not at validation time. The host attaches `policy` from
@@ -125,11 +128,18 @@ Not part of the plan. This is what `plan-to-ship` produces from every
 deliverable, in order, and what the compiled stage document shows:
 
 1. `{use: "implement", id: "implement"}`
-2. `{use: "verify-and-fix", id: "verify", maxRounds: <policy.maxFixRounds + 1>}`
-   — the plan counts FIX rounds, a compiled document counts VERIFY rounds
-3. `{use: "review-fan-out", id: "review", synthesis: "optional", lenses: […]}` —
-   one lens per `reviews[]` entry, with `tier`/`diverse` falling back to
-   `policy.reviewDefault`. **Omitted entirely when `reviews` is empty.**
+2. `{use: "check", id: "check"}` — the project's check over the hand-off, verify only
+3. `{use: "review-fan-out", id: "review", lenses: […]}` — one lens per
+   `reviews[]` entry, with `tier`/`diverse` falling back to
+   `policy.reviewDefault`
+4. `{use: "normalize", id: "normalize"}` — the harness's clustering, and a
+   merge-only model call when more than one lens reported
+5. `{use: "resume", id: "resume"}` — the implementer answering the check and
+   the review
+6. `{use: "check", id: "recheck"}` — the check of what the resume changed
+
+Stages 3 and 4 are **omitted when `reviews` is empty**; stages 5 and 6 under
+`policy.resumes: 0`.
 
 Gates are *not* stages: a per-deliverable gate and `ship` come from
 `policy.gates`, applied by the compiler, and a compiled deliverable never
