@@ -66,9 +66,9 @@ How to work:
   pull request — none of that is yours to do, and the runtime does not apply
   your patch anywhere.
 - Keep package-manager caches out of the workspace tree. The guest already
-  redirects the usual ones to `/tmp/cache`; never point one back into the
-  workspace, and set an explicit out-of-tree path for any manager it does not
-  know. A cache under the workspace becomes part of the handoff patch and
+  redirects the usual ones to `/var/cache/pi-subagent`; never point one back
+  into the workspace, and set an explicit out-of-tree path for any manager it
+  does not know. A cache under the workspace becomes part of the handoff patch and
   breaches its 16 MiB bound, which fails the task after the work is finished.
 - Attempt the repository's own install and check command after you change the
   code. The sandbox has one CPU and the memory your task was granted (between
