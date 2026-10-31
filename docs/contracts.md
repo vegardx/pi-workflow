@@ -459,8 +459,14 @@ required task fails the run.
 ### Registry and identity
 
 Implementations are supplied as `createWorkflowService({ supportTasks })`
-registrations produced by `helper.registration(execute, { exportName? })`. The service validates
-each registration, rejects duplicate names, and freezes the map. An
+registrations produced by `helper.registration(execute, { exportName? })`,
+after the package's own `BUILTIN_SUPPORT_TASKS`, which every service registers
+first. There is one builtin, `pi-workflow/reviews-record` (`reviewsRecordTask`,
+revision 1, no `exportName`): its parameters are a `ReviewsRecordSchema`
+record and it returns them unchanged, so a value a definition computed on its
+deterministic rail becomes an artifact a gate, a task and a receipt can read.
+A host registration that takes a builtin's name is a duplicate. The service
+validates each registration, rejects duplicate names, and freezes the map. An
 `exportName` must match `^[A-Za-z_$][A-Za-z0-9_$]{0,127}$` and may not be
 `default` ("Support task export name is invalid."); two registrations with
 the same `moduleSpecifier` and `exportName` are refused ("Duplicate support

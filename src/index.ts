@@ -260,6 +260,10 @@ export {
 	type WorkflowRootScope,
 } from "./registry.js";
 export {
+	REVIEWS_RECORD_SUPPORT_NAME,
+	reviewsRecordTask,
+} from "./review-record-support.js";
+export {
 	IMPLEMENTED_WORKFLOW_RUN_ACTIONS,
 	isTerminalWorkflowRunStatus,
 	WORKFLOW_RUN_ACTIONS,

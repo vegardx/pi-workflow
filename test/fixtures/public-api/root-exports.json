@@ -83,6 +83,7 @@
 	"NestedWorkflowTaskSpecSchema",
 	"NestedWorkflowTerminalEvidenceSchema",
 	"NestedWorkflowUsageSchema",
+	"REVIEWS_RECORD_SUPPORT_NAME",
 	"ReplayPolicySchema",
 	"Sha256Schema",
 	"SourceApprovalDecisionBindingSchema",
@@ -199,6 +200,7 @@
 	"narrationSummary",
 	"needsFitCeiling",
 	"resolveWorkflowNeeds",
+	"reviewsRecordTask",
 	"sessionModelRefusalMessage",
 	"taskNarration",
 	"workflowToolText"
