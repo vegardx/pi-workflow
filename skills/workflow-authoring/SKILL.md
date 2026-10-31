@@ -420,7 +420,7 @@ request fails with "invalid agent task request".
 | `preloadSkills` | 0..64 unique skill names. |
 | `contextScopes` | Unique subset of `"global"`, `"project"`. |
 | `workspace` | `{ mode: "read-only", cwd }` or `{ mode: "worktree", cwd }`, `cwd` 1..4096 characters; use `ctx.cwd`. A worktree runs the child in an isolated pi-subagent worktree and produces a handoff. |
-| `memoryBytes` | Optional guest VM memory grant: a positive multiple of 64 MiB, at most 4 GiB. Omitted takes the agent definition's own ceiling; a value above that ceiling is refused at preflight ("memory request exceeds agent ceiling"). A malformed value fails with "agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB". Part of task identity; lowered unchanged to pi-subagent. |
+| `memoryBytes` | Optional guest VM memory grant: a multiple of 64 MiB from 1 GiB to 4 GiB (pi-subagent's floor; a smaller guest never booted). Omitted takes the agent definition's own ceiling; a value above that ceiling is refused at preflight ("memory request exceeds agent ceiling"). A malformed value fails with "agent memoryBytes must be a multiple of 64 MiB from 1 GiB to 4 GiB". Part of task identity; lowered unchanged to pi-subagent. |
 | `handoff` | Worktree tasks only: `"required"` (default when omitted) or `"optional"`. On a read-only request: "handoff policy requires a worktree workspace". Part of task identity; never sent to pi-subagent. |
 | `outputSchema` | JSON Schema for the structured result; the child must satisfy it. |
 | `limits.cumulativeRuntimeMs` | 1_000..3_600_000 across all attempts. |

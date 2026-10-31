@@ -1044,9 +1044,14 @@ required finalizer succeeds while an optional task or advisory finalizer failed.
 An optional task or advisory finalizer left `blocked` by a failed dependency
 counts as settled for completion and degrades the run the same way.
 
-`memoryBytes` (revision 19) is the guest VM memory grant: a positive integer
-multiple of 64 MiB, at most 4 GiB, validated against pi-subagent's
-`MemoryBytesSchema` and lowered unchanged. It is a request to narrow, never to
+`memoryBytes` (revision 19) is the guest VM memory grant: an integer
+multiple of 64 MiB from 1 GiB to 4 GiB, validated against pi-subagent's
+`MemoryBytesSchema` and lowered unchanged. The 1 GiB floor is pi-subagent
+revision 11's (revision 25 here); revision 10 admitted 64 MiB, which never
+booted. A malformed value fails materialization with
+"agent memoryBytes must be a multiple of 64 MiB from 1 GiB to 4 GiB", the
+bounds stated from pi-subagent's `MIN_MEMORY_BYTES`, `MAX_MEMORY_BYTES` and
+`MEMORY_GRANULARITY_BYTES`. It is a request to narrow, never to
 widen: the agent definition declares the ceiling, an omitted request takes that
 ceiling, and pi-subagent refuses a request above it at preflight with
 `memory request exceeds agent ceiling`. The workflow cannot read agent

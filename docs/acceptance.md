@@ -458,9 +458,10 @@ An in-memory-only successful drive does not satisfy the first slice.
 Revision 19 must prove:
 
 - `AgentTaskRequestSchema` accepts an optional `memoryBytes` and rejects a
-  value that is not a positive integer multiple of 64 MiB or that exceeds
-  4 GiB; the materializer refuses the same values with
-  "agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB";
+  value that is not an integer multiple of 64 MiB, that is below 1 GiB
+  (pi-subagent revision 11's floor, from revision 25), or that exceeds 4 GiB;
+  the materializer refuses the same values with
+  "agent memoryBytes must be a multiple of 64 MiB from 1 GiB to 4 GiB";
 - an authored `memoryBytes` reaches pi-subagent unchanged in the lowered
   request, an omitted one is absent from it, and it participates in agent task
   identity like every other request field;

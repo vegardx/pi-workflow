@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { MemoryBytesSchema } from "@vegardx/pi-subagent";
+import {
+	MAX_MEMORY_BYTES,
+	MEMORY_GRANULARITY_BYTES,
+	MemoryBytesSchema,
+	MIN_MEMORY_BYTES,
+} from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
 import type { FormatsPlugin } from "ajv-formats";
 import * as addFormatsModule from "ajv-formats";
@@ -84,6 +89,17 @@ const MAX_MATERIALIZED_TASKS = 256;
 const MAX_MATERIALIZATION_EPOCHS = 4096;
 const MAX_WORKFLOW_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
 const MAX_CHECKPOINT_PROMPT_LENGTH = 4096;
+
+function binaryBytes(bytes: number): string {
+	const mib = 1024 * 1024;
+	return bytes % (1024 * mib) === 0
+		? `${bytes / (1024 * mib)} GiB`
+		: `${bytes / mib} MiB`;
+}
+
+// Stated from pi-subagent's own bounds: restating them here let the floor
+// drift from 64 MiB to 1 GiB without this message noticing.
+const MEMORY_BYTES_MESSAGE = `agent memoryBytes must be a multiple of ${binaryBytes(MEMORY_GRANULARITY_BYTES)} from ${binaryBytes(MIN_MEMORY_BYTES)} to ${binaryBytes(MAX_MEMORY_BYTES)}`;
 
 function canonicalValue(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(canonicalValue);
@@ -754,9 +770,7 @@ export class WorkflowTaskMaterializer {
 			request.memoryBytes !== undefined &&
 			!Value.Check(MemoryBytesSchema, request.memoryBytes)
 		) {
-			throw new WorkflowMaterializationError(
-				"agent memoryBytes must be a positive multiple of 64 MiB and at most 4 GiB",
-			);
+			throw new WorkflowMaterializationError(MEMORY_BYTES_MESSAGE);
 		}
 		if (!Value.Check(AgentTaskRequestSchema, agentRequest)) {
 			throw new WorkflowMaterializationError("invalid agent task request");
