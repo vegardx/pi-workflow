@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: vegardx/pi-subagent
-          ref: 51e438e57bf25b7bb5d5b17f17db9a5ab2e52321
+          ref: e137f338cf32a84cbb22ee0428d24285fc8b5c36
           path: pi-subagent
       - uses: actions/setup-node@v7
         with:
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: vegardx/pi-subagent
-          ref: 51e438e57bf25b7bb5d5b17f17db9a5ab2e52321
+          ref: e137f338cf32a84cbb22ee0428d24285fc8b5c36
           path: pi-subagent
       - uses: actions/setup-node@v7
         with:
