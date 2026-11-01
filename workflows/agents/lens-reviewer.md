@@ -1,15 +1,7 @@
 ---
 name: lens-reviewer
-model: { provider: placeholder, id: same-family, thinking: medium }
 allowedModels:
-  - placeholder/same-family:minimal
-  - placeholder/same-family:low
-  - placeholder/same-family:medium
-  - placeholder/same-family:high
-  - placeholder/other-family:minimal
-  - placeholder/other-family:low
-  - placeholder/other-family:medium
-  - placeholder/other-family:high
+  - host
 tools: [read, grep, find, ls]
 preloadSkills: []
 contextScopes: [project]
@@ -36,20 +28,22 @@ workflow task may ask for less, never for more. It covers the review and
 synthesis rows of the component library's stage table at every review tier —
 `light` and `normal` — so no tier has to be trimmed to fit. Every task asks
 the host's router for a `code-review` model, and a `diverse` lens for another
-family, so `allowedModels` must cover both families. It does NOT list
+family, so the host must admit both families. It does NOT list
 `inherit`: nothing in `deep-review` inherits the host session's model, because
 a review's value is a fixed point of view rather than whatever model the
 session is on.
 
-The `placeholder/...` routes in `model` and `allowedModels` admit no real
-model, on purpose. pi-subagent's model fence is EXACT: a request admits only a
-listed `provider/id:thinking` route (or `inherit`, for a direct delegation
-that asks to inherit), it requires a default `model`, and it has no wildcard.
-pi-workflow always sends the RESOLVED exact model — what the host's router
-answered for a `modelRole`, or the session model for `inherit` — so a copy of
-this template must list the routes your router and your sessions actually
-resolve to, at the thinking levels they answer with, or the task fails
-preflight with "model exceeds ceiling: <model>".
+`allowedModels` lists `host`, which hands the model fence to the host.
+pi-workflow always sends the RESOLVED exact model the host's router answered
+for the task's `modelRole`, and pi-subagent's preflight asks the host's
+model-admission provider whether it stands behind that model at that thinking
+level. A host that registers no provider (`registerModelAdmissionProvider` from
+`@vegardx/pi-subagent/model-admission-provider`) fails every task here at
+preflight with "model exceeds ceiling: <model> (template admits host, no host
+model admission provider answered)"; a host that declines the model fails it
+with "model exceeds ceiling: <model> (template admits host, host does not admit
+it)". There is no default `model`: every request names one, and pi-subagent
+refuses a request that does not.
 
 `deep-review` declares two kinds of task against this one definition, because
 both are the same authority — read, judge, report:

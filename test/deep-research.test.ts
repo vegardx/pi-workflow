@@ -7,6 +7,8 @@ import {
 	canonicalSha256,
 	DEFAULT_MEMORY_BYTES,
 	discoverAgents,
+	type ExactModelRequest,
+	MODEL_DEFAULT_REFUSAL,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentRequest,
@@ -27,8 +29,8 @@ import type {
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
 import {
+	admittedBy,
 	OTHER_FAMILY_ID,
-	ROUTING_TABLE,
 	routedModel,
 	SAME_FAMILY_ID,
 	testModelRouting,
@@ -83,9 +85,15 @@ const QUESTION = "How does the component library keep replay deterministic?";
  * `SubagentRequest`; pi-workflow never sends it, and nothing in `deep-research`
  * inherits at all.
  */
-function exactModel(request: SubagentRequest) {
-	expect(request.model).not.toBe("inherit");
-	return request.model === "inherit" ? undefined : request.model;
+function exactModel(request: SubagentRequest): ExactModelRequest {
+	const model = request.model;
+	if (model === "inherit") {
+		throw new Error("a request names inherit; pi-workflow resolves it first");
+	}
+	// The shipped templates name no default model, so pi-subagent refuses a
+	// request against them that names none.
+	if (model === undefined) throw new Error(MODEL_DEFAULT_REFUSAL);
+	return model;
 }
 
 function pathSource(id: string): Source {
@@ -276,11 +284,7 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 			agentScope: "global" as const,
 			task: structuredClone(request.task),
 			contextMode: request.contextMode,
-			model: exactModel(request) ?? {
-				provider: "test",
-				id: "model",
-				thinking: "low" as const,
-			},
+			model: exactModel(request),
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -316,8 +320,9 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 			},
 			outputSchema: structuredClone(request.outputSchema),
 			limits: structuredClone(request.limits),
-			modelSource: request.model === undefined ? "template" : "request",
-			modelAdmission: "exact" as const,
+			modelSource: "request" as const,
+			// The templates admit `host` and list no exact route.
+			modelAdmission: "host" as const,
 		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
 		const identitySha256 = canonicalSha256(plan);
 		return {
@@ -1027,15 +1032,10 @@ describe("deep-research: the agent template", () => {
 		expect(researcher.tools).toEqual(["read", "grep", "find", "ls"]);
 		// A researcher never writes.
 		expect(researcher.limitCeiling.workspaceWriteBytes).toBe(0);
-		// Both families of the test router: a cross-check runs on the one the
-		// threads did not. The shipped routes are placeholders (pi-subagent's
-		// fence is exact), so this asserts the template and the test table
-		// agree, nothing more.
-		for (const row of [ROUTING_TABLE, ROUTING_TABLE.otherFamily]) {
-			expect(researcher.allowedModels).toContain(
-				`${row?.provider}/${row?.id}:medium`,
-			);
-		}
+		// The host admits the model, whichever family a cross-check asks for;
+		// nothing in `deep-research` inherits, and no default model is named.
+		expect(researcher.allowedModels).toEqual(["host"]);
+		expect(researcher.defaultModel).toBeUndefined();
 	});
 
 	it("covers every request the definition makes", async () => {
@@ -1060,13 +1060,9 @@ describe("deep-research: the agent template", () => {
 				expect(agent.contextScopes).toContain(scope);
 			}
 			expect(agent.workspaceModes).toContain(request.workspace.mode);
-			// The template lists exact models only, and nothing here inherits.
-			const model = exactModel(request);
-			if (model) {
-				expect(agent.allowedModels).toContain(
-					`${model.provider}/${model.id}:${model.thinking}`,
-				);
-			}
+			// Every request names the exact model the router answered, and the
+			// template hands that model to the host.
+			expect(admittedBy(agent, exactModel(request))).toBe("host");
 			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
 				request.limits.cumulativeRuntimeMs,
 			);

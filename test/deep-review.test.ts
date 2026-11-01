@@ -8,6 +8,8 @@ import {
 	DEFAULT_MEMORY_BYTES,
 	type DiscoveredAgent,
 	discoverAgents,
+	type ExactModelRequest,
+	MODEL_DEFAULT_REFUSAL,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentRequest,
@@ -25,8 +27,8 @@ import type {
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
 import {
+	admittedBy,
 	OTHER_FAMILY_ID,
-	ROUTING_TABLE,
 	routedModel,
 	SAME_FAMILY_ID,
 	testModelRouting,
@@ -106,9 +108,15 @@ function input(
  * `SubagentRequest`; pi-workflow never sends it, and nothing in `deep-review`
  * inherits at all.
  */
-function exactModel(request: SubagentRequest) {
-	expect(request.model).not.toBe("inherit");
-	return request.model === "inherit" ? undefined : request.model;
+function exactModel(request: SubagentRequest): ExactModelRequest {
+	const model = request.model;
+	if (model === "inherit") {
+		throw new Error("a request names inherit; pi-workflow resolves it first");
+	}
+	// The shipped templates name no default model, so pi-subagent refuses a
+	// request against them that names none.
+	if (model === undefined) throw new Error(MODEL_DEFAULT_REFUSAL);
+	return model;
 }
 
 /** The lens a goal names: `Review "<subject>" through the "<lens>" lens.` */
@@ -294,13 +302,10 @@ function scripted(
 			contextMode: request.contextMode,
 			// Nothing in `deep-review` inherits, so a request never carries the
 			// literal; asserting it here keeps that true.
-			model: exactModel(request) ?? {
-				provider: "test",
-				id: "model",
-				thinking: "low" as const,
-			},
-			modelSource: request.model === undefined ? "template" : "request",
-			modelAdmission: "exact" as const,
+			model: exactModel(request),
+			modelSource: "request" as const,
+			// The templates admit `host` and list no exact route.
+			modelAdmission: "host" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -966,16 +971,10 @@ describe("deep-review: the agent template", () => {
 		expect(reviewer.tools).toEqual(["read", "grep", "find", "ls"]);
 		// A reviewer never writes, at any tier.
 		expect(reviewer.limitCeiling.workspaceWriteBytes).toBe(0);
-		// Both families of the test router: a lens may ask for another family.
-		// The shipped routes are placeholders (pi-subagent's fence is exact), so
-		// this asserts the template and the test table agree, nothing more.
-		for (const row of [ROUTING_TABLE, ROUTING_TABLE.otherFamily]) {
-			for (const thinking of ["low", "medium"]) {
-				expect(reviewer.allowedModels).toContain(
-					`${row?.provider}/${row?.id}:${thinking}`,
-				);
-			}
-		}
+		// The host admits the model, whichever family a lens asks for; nothing
+		// in `deep-review` inherits, and no default model is named.
+		expect(reviewer.allowedModels).toEqual(["host"]);
+		expect(reviewer.defaultModel).toBeUndefined();
 	});
 
 	it("covers every request the definition makes at every tier", async () => {
@@ -1001,15 +1000,9 @@ describe("deep-review: the agent template", () => {
 				expect(agent.tools).toContain(tool);
 			}
 			expect(agent.workspaceModes).toContain(request.workspace.mode);
-			// Never the literal: the template admits exact models only, and
-			// nothing in `deep-review` inherits.
-			expect(request.model).not.toBe("inherit");
-			const model = request.model === "inherit" ? undefined : request.model;
-			if (model) {
-				expect(agent.allowedModels).toContain(
-					`${model.provider}/${model.id}:${model.thinking}`,
-				);
-			}
+			// Every request names the exact model the router answered, never
+			// the literal, and the template hands that model to the host.
+			expect(admittedBy(agent, exactModel(request))).toBe("host");
 			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
 				request.limits.cumulativeRuntimeMs,
 			);
