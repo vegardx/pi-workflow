@@ -36,6 +36,7 @@ import {
 	type NestedWorkflowRequest,
 	type PipelineStage,
 	type SettledTaskAttempt,
+	type SettledTaskModel,
 	type SettledTaskResult,
 	type TaskHandle,
 	validateJsonSchemaDocument,
@@ -335,6 +336,31 @@ function settledAttempt(
 		return undefined;
 	}
 	return Object.freeze({ subagentRunId, subagentAttemptId });
+}
+
+/**
+ * The model an agent task was materialized with, plus the router's evidence,
+ * from the journal; nothing for a task that is not an agent or named no model.
+ */
+function settledModel(
+	task: WorkflowTaskProjection | undefined,
+): SettledTaskModel | undefined {
+	const materialized = task?.task;
+	if (materialized?.spec.kind !== "agent") return undefined;
+	const model = materialized.spec.request.model;
+	if (model === undefined) return undefined;
+	const evidence =
+		"modelResolution" in materialized
+			? materialized.modelResolution
+			: undefined;
+	return Object.freeze({
+		provider: model.provider,
+		id: model.id,
+		thinking: model.thinking,
+		...(evidence?.alias === undefined ? {} : { alias: evidence.alias }),
+		...(evidence?.tier === undefined ? {} : { tier: evidence.tier }),
+		...(evidence?.family === undefined ? {} : { family: evidence.family }),
+	});
 }
 
 /** The runtime decides worktree handling from the materialized spec only. */
@@ -1526,11 +1552,13 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 									? current.executions[projected.currentExecutionId]
 									: undefined,
 							);
+							const model = settledModel(projected);
 							if (projected?.status === "completed") {
 								return Object.freeze({
 									status: "fulfilled" as const,
 									value: await loadTaskResult(task.ref.taskId),
 									...(attempt ? { attempt } : {}),
+									...(model ? { model } : {}),
 								});
 							}
 							if (!projected) throw new Error("settled task disappeared");
@@ -1565,6 +1593,7 @@ export function createStaticWorkflowRuntime<TInput, TOutput>(
 								outcome: projected.status,
 								...(failure ? { failure: Object.freeze(failure) } : {}),
 								...(attempt ? { attempt } : {}),
+								...(model ? { model } : {}),
 							});
 						}),
 					) as Promise<{

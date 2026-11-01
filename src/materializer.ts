@@ -29,6 +29,7 @@ import {
 	type MaterializedSupportTask,
 	MaterializedSupportTaskSchema,
 	type MaterializedWorkflowTask,
+	type ModelResolutionEvidence,
 	type NestedWorkflowTaskRequest,
 	NestedWorkflowTaskRequestSchema,
 	type NestedWorkflowTaskSpec,
@@ -291,7 +292,10 @@ export class WorkflowTaskMaterializer {
 	 */
 	private readonly persistedModelByKey = new Map<
 		string,
-		NonNullable<AgentTaskRequest["model"]>
+		{
+			readonly model: NonNullable<AgentTaskRequest["model"]>;
+			readonly evidence?: ModelResolutionEvidence;
+		}
 	>();
 	private readonly seen = new Map<string, MaterializedWorkflowTask>();
 	private projectedState: WorkflowStateProjection;
@@ -350,9 +354,16 @@ export class WorkflowTaskMaterializer {
 		for (const projection of previousTasks) {
 			const spec = projection.task.spec;
 			if (spec.kind !== "agent" || spec.request.model === undefined) continue;
+			const evidence =
+				"modelResolution" in projection.task
+					? projection.task.modelResolution
+					: undefined;
 			this.persistedModelByKey.set(
 				taskNamespaceKey(projection.task.namespace, spec.key),
-				spec.request.model,
+				{
+					model: spec.request.model,
+					...(evidence === undefined ? {} : { evidence }),
+				},
 			);
 		}
 		this.expectedTasks = previousTasks
@@ -609,15 +620,18 @@ export class WorkflowTaskMaterializer {
 			readonly model?: ModelAuthoringRequest;
 			readonly modelRole?: ModelRoleRequest;
 		},
-	): AgentTaskRequest["model"] {
+	): {
+		readonly model: AgentTaskRequest["model"];
+		readonly evidence?: ModelResolutionEvidence;
+	} {
 		if (request.modelRole === undefined) {
-			if (!isInheritModel(request.model)) return request.model;
+			if (!isInheritModel(request.model)) return { model: request.model };
 			if (this.sessionModel === undefined) {
 				throw new WorkflowMaterializationError(
 					MODEL_INHERIT_UNAVAILABLE_MESSAGE,
 				);
 			}
-			return Object.freeze({ ...this.sessionModel });
+			return { model: Object.freeze({ ...this.sessionModel }) };
 		}
 		if (request.model !== undefined) {
 			throw new WorkflowMaterializationError(MODEL_ROLE_EXCLUSIVE_MESSAGE);
@@ -627,9 +641,10 @@ export class WorkflowTaskMaterializer {
 			taskNamespaceKey(namespace, key),
 		);
 		if (persisted !== undefined) {
-			if (this.modelRouting?.authorized?.(persisted) === false) {
+			const stored = persisted.model;
+			if (this.modelRouting?.authorized?.(stored) === false) {
 				throw new WorkflowMaterializationError(
-					`model ${persisted.provider}/${persisted.id} stored for role ${JSON.stringify(role.persona)} is no longer authorized`,
+					`model ${stored.provider}/${stored.id} stored for role ${JSON.stringify(role.persona)} is no longer authorized`,
 				);
 			}
 			return persisted;
@@ -650,7 +665,15 @@ export class WorkflowTaskMaterializer {
 				`model role ${JSON.stringify(role.persona)} did not resolve to a model; declare an exact model.`,
 			);
 		}
-		return exactModelRequest(resolution);
+		const evidence: ModelResolutionEvidence = {
+			...(resolution.alias === undefined ? {} : { alias: resolution.alias }),
+			...(resolution.tier === undefined ? {} : { tier: resolution.tier }),
+			...(resolution.family === undefined ? {} : { family: resolution.family }),
+		};
+		return {
+			model: exactModelRequest(resolution),
+			...(Object.keys(evidence).length === 0 ? {} : { evidence }),
+		};
 	}
 
 	/** Ordinary tasks may only depend on ordinary tasks; finalizers may depend on either role. */
@@ -726,7 +749,11 @@ export class WorkflowTaskMaterializer {
 		// Before the request is assembled: a `modelRole` becomes an exact model
 		// here, so nothing downstream — validation, the spec, the identity hash —
 		// can tell a routed declaration from a hand-written one.
-		const model = this.resolveAgentModel(namespace, key, request);
+		const { model, evidence: modelResolution } = this.resolveAgentModel(
+			namespace,
+			key,
+			request,
+		);
 		const agentRequest: AgentTaskRequest = {
 			agent: request.agent,
 			task: request.task,
@@ -855,6 +882,7 @@ export class WorkflowTaskMaterializer {
 			runId: this.runId,
 			namespace,
 			spec,
+			...(modelResolution === undefined ? {} : { modelResolution }),
 			definitionIdentitySha256: this.definitionIdentitySha256,
 			...position,
 		}) as MaterializedAgentTask;
