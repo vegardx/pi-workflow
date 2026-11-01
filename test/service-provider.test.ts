@@ -52,6 +52,7 @@ import type {
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
 import { WORKFLOW_TOOL_DECLARATIONS } from "../src/tools.js";
+import { testModelRouting } from "./fixtures/routing.js";
 
 // W1-PROVIDER (spec 2.4, D2, D3): the seam pi-maestro acquires the runtime
 // through. Every expectation below is the spec's, not the implementation's:
@@ -159,6 +160,7 @@ async function realService(
 		// `plan-to-ship` inherits the host session's model, so a service that
 		// starts it needs a provider; the seam is what these tests are about.
 		sessionModel: () => SESSION_MODEL,
+		modelRouting: testModelRouting,
 	});
 	services.push(service);
 	storeRoots.set(service, storeRoot);

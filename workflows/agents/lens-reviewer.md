@@ -1,13 +1,15 @@
 ---
 name: lens-reviewer
-model: { provider: github-copilot, id: gpt-5.6-sol, thinking: medium }
+model: { provider: placeholder, id: same-family, thinking: medium }
 allowedModels:
-  - github-copilot/gpt-5.6-sol:low
-  - github-copilot/gpt-5.6-sol:medium
-  - github-copilot/gpt-5.6-sol:high
-  - github-copilot/gpt-5.6-luna:low
-  - github-copilot/gpt-5.6-luna:medium
-  - github-copilot/gpt-5.6-luna:high
+  - placeholder/same-family:minimal
+  - placeholder/same-family:low
+  - placeholder/same-family:medium
+  - placeholder/same-family:high
+  - placeholder/other-family:minimal
+  - placeholder/other-family:low
+  - placeholder/other-family:medium
+  - placeholder/other-family:high
 tools: [read, grep, find, ls]
 preloadSkills: []
 contextScopes: [project]
@@ -32,12 +34,22 @@ before running the `deep-review` workflow; see the pi-workflow README,
 "Builtin workflows". The frontmatter above is an authority **ceiling**: a
 workflow task may ask for less, never for more. It covers the review and
 synthesis rows of the component library's stage table at every review tier —
-`light` and `normal` — so no tier has to be trimmed to fit.
-`allowedModels` lists both model families on purpose: a lens may ask for a
-reviewer from a family other than the default one, and a model outside this
-list fails preflight with "model exceeds ceiling". It does NOT list `inherit`:
-nothing in `deep-review` inherits the host session's model, because a review's
-value is a fixed point of view rather than whatever model the session is on.
+`light` and `normal` — so no tier has to be trimmed to fit. Every task asks
+the host's router for a `code-review` model, and a `diverse` lens for another
+family, so `allowedModels` must cover both families. It does NOT list
+`inherit`: nothing in `deep-review` inherits the host session's model, because
+a review's value is a fixed point of view rather than whatever model the
+session is on.
+
+The `placeholder/...` routes in `model` and `allowedModels` admit no real
+model, on purpose. pi-subagent's model fence is EXACT: a request admits only a
+listed `provider/id:thinking` route (or `inherit`, for a direct delegation
+that asks to inherit), it requires a default `model`, and it has no wildcard.
+pi-workflow always sends the RESOLVED exact model — what the host's router
+answered for a `modelRole`, or the session model for `inherit` — so a copy of
+this template must list the routes your router and your sessions actually
+resolve to, at the thinking levels they answer with, or the task fails
+preflight with "model exceeds ceiling: <model>".
 
 `deep-review` declares two kinds of task against this one definition, because
 both are the same authority — read, judge, report:

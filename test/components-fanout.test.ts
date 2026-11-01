@@ -28,6 +28,7 @@ import { reviewLenses } from "../src/components/review-lenses.js";
 import {
 	LensReportSchema,
 	promptDigest,
+	reviewerEntries,
 } from "../src/components/review-record.js";
 import type {
 	AgentTaskAuthoringRequest,
@@ -37,6 +38,10 @@ import type {
 } from "../src/definition.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
+import {
+	type StaticModelRoutingTable,
+	staticModelRouting,
+} from "../src/runtime/model-routing.js";
 
 // W0-COMP-B acceptance. Every expectation below is the plan-loop spec
 // (sections 2.2, 2.3 and 5) or the replay laws of
@@ -53,10 +58,25 @@ const MODEL: ExactModelRequest = {
 	id: "gpt-5.6-sol",
 	thinking: "medium",
 };
-const DIVERSE_MODEL: ExactModelRequest = {
-	provider: "github-copilot",
-	id: "gpt-5.6-luna",
-	thinking: "medium",
+
+const ROUTING_TABLE: StaticModelRoutingTable = {
+	provider: "test-provider",
+	id: "routed-model",
+	alias: "routed",
+	family: "alpha",
+	otherFamily: {
+		provider: "test-provider",
+		id: "other-model",
+		alias: "other",
+		family: "beta",
+	},
+	thinking: {
+		fast: "minimal",
+		light: "low",
+		normal: "medium",
+		frontier: "high",
+	},
+	defaultThinking: "medium",
 };
 
 const WorkSchema = Type.Object(
@@ -134,6 +154,8 @@ function harness(settled: readonly Outcome[] = []): Harness {
 		runId: RUN_ID,
 		definitionIdentitySha256: DEFINITION_IDENTITY,
 		inputSha256: INPUT_DIGEST,
+		// Routed lenses need a router to materialize; exact ones never ask it.
+		modelRouting: staticModelRouting(ROUTING_TABLE),
 	});
 	const logs: string[] = [];
 	const events: WorkflowEventInput[] = [];
@@ -466,16 +488,12 @@ describe("reviewFanOut", () => {
 		options: {
 			lenses?: readonly ReviewLens[];
 			synthesis?: "required" | "optional" | "none";
-			diversity?: boolean;
 			synthesize?: boolean;
 		} = {},
 	) {
 		return reviewFanOut(h.ctx, "review", options.lenses ?? lenses, {
 			subject,
 			model: MODEL,
-			...(options.diversity === false
-				? {}
-				: { diversity: { model: DIVERSE_MODEL } }),
 			synthesis: options.synthesis ?? "optional",
 			...(options.synthesize === false
 				? {}
@@ -640,7 +658,7 @@ describe("reviewFanOut", () => {
 		).rejects.toThrow(/subject carries 2 handoffs \("a", "b"\)/u);
 	});
 
-	it("resolves diversity by pin, then seam, then the caller's default", async () => {
+	it("resolves a lens by pin, then the caller's role narrowed by the lens", async () => {
 		const h = harness();
 		const result = await reviewFanOut(
 			h.ctx,
@@ -648,36 +666,39 @@ describe("reviewFanOut", () => {
 			[
 				{ id: "plain" },
 				{ id: "diverse", diverse: true },
+				{ id: "light", tier: "light" },
 				{
 					id: "pinned",
 					diverse: true,
+					tier: "light",
 					model: { provider: "anthropic", id: "opus", thinking: "high" },
 				},
 			],
 			{
 				subject,
-				model: MODEL,
-				diversity: { model: DIVERSE_MODEL },
+				modelRole: { persona: "code-review", tier: "normal" },
 				synthesis: "none",
 				review: () => review("Review it."),
 			},
 		);
-		expect(result.lenses.map((lens) => lens.model?.id)).toEqual([
-			MODEL.id,
-			DIVERSE_MODEL.id,
-			"opus",
+		expect(
+			result.lenses.map((lens) => ({
+				model: lens.model?.id,
+				modelRole: lens.modelRole,
+			})),
+		).toEqual([
+			{ modelRole: { persona: "code-review", tier: "normal" } },
+			{
+				modelRole: { persona: "code-review", tier: "normal", family: "other" },
+			},
+			{ modelRole: { persona: "code-review", tier: "light" } },
+			{ model: "opus" },
 		]);
-		expect(result.lenses.map((lens) => lens.diverseStandIn)).toEqual([
-			false,
-			true,
-			false,
-		]);
-		// Exactly one disclosure, and it says the answer is a stand-in.
-		expect(h.logs).toHaveLength(1);
-		expect(h.logs[0]).toMatch(/stand-in; model routing is not installed yet/u);
+		// Nothing is disclosed as a stand-in any more: the router picks.
+		expect(h.logs).toHaveLength(0);
 	});
 
-	it("refuses a diverse lens with no routing seam", async () => {
+	it("refuses a diverse lens with no model role", async () => {
 		const h = harness();
 		await expect(
 			reviewFanOut(h.ctx, "review", [{ id: "diverse", diverse: true }], {
@@ -687,7 +708,36 @@ describe("reviewFanOut", () => {
 				review: () => review("Review it."),
 			}),
 		).rejects.toThrow(
-			'reviewFanOut("review") lens "diverse" asks for another model family, but no diverse model is configured; pin an exact `model` on the lens or pass `diversity`.',
+			'reviewFanOut("review") lens "diverse" asks for another model family, but no model role is configured; pin an exact `model` on the lens or pass `modelRole`.',
+		);
+	});
+
+	it("refuses a tiered lens it cannot honour", async () => {
+		const h = harness();
+		await expect(
+			reviewFanOut(h.ctx, "review", [{ id: "cheap", tier: "light" }], {
+				subject,
+				model: MODEL,
+				synthesis: "none",
+				review: () => review("Review it."),
+			}),
+		).rejects.toThrow(
+			'reviewFanOut("review") lens "cheap" names tier "light", but no model role is configured to honour it; pin an exact `model` on the lens or pass `modelRole`.',
+		);
+	});
+
+	it("refuses an exact default and a role at once", async () => {
+		const h = harness();
+		await expect(
+			reviewFanOut(h.ctx, "review", [{ id: "plain" }], {
+				subject,
+				model: MODEL,
+				modelRole: { persona: "code-review" },
+				synthesis: "none",
+				review: () => review("Review it."),
+			}),
+		).rejects.toThrow(
+			'reviewFanOut("review") got both `model` and `modelRole`; they are mutually exclusive.',
 		);
 	});
 
@@ -1073,7 +1123,61 @@ describe("reviewLenses", () => {
 				subject: { handoff: implement.handoff },
 				review: (lens) => lensRequest(`Review through ${lens.lens.id}.`),
 			}),
-		).rejects.toThrow(/resolves to no exact model/);
+		).rejects.toThrow(/resolves to no model/);
+	});
+
+	it("stamps a routed lens with the model and evidence the journal settled", async () => {
+		const routed = {
+			provider: "test-provider",
+			id: "other-model",
+			thinking: "low",
+			alias: "other",
+			tier: "light",
+			family: "beta",
+		} as const;
+		const h = harness([
+			{
+				status: "fulfilled",
+				value: { findings: [] },
+				attempt: { subagentRunId: "run_a", subagentAttemptId: "attempt_a" },
+				model: routed,
+			},
+		]);
+		const implement = h.ctx.agent("implement", worktreeRequest());
+		const result = await reviewLenses(
+			h.ctx,
+			"review-d0",
+			[{ id: "security", tier: "light", diverse: true }],
+			{
+				subject: { handoff: implement.handoff },
+				modelRole: { persona: "code-review", tier: "normal" },
+				review: (lens) => lensRequest(`Review through ${lens.lens.id}.`),
+			},
+		);
+		const [declared] = h
+			.finish([implement])
+			.flatMap((event) =>
+				event.type === "task-declared" ? [event.data.task] : [],
+			)
+			.filter((task) => task.namespace[0] === "review-d0");
+		// The lens asked the router, narrowed by its own tier and diversity.
+		expect(declared).toMatchObject({
+			spec: { request: { model: { id: "other-model", thinking: "low" } } },
+			modelResolution: { alias: "other", tier: "light", family: "beta" },
+		});
+		expect(result.lenses[0]?.modelRole).toEqual({
+			persona: "code-review",
+			tier: "light",
+			family: "other",
+		});
+		expect(result.reviewers[0]?.model).toEqual(routed);
+		expect(reviewerEntries(result.reviewers)[0]).toMatchObject({
+			model: "test-provider/other-model",
+			thinking: "low",
+			alias: "other",
+			tier: "light",
+			family: "beta",
+		});
 	});
 
 	it("refuses a subject that does not carry exactly one hand-off", async () => {

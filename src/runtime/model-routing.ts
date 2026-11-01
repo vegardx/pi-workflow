@@ -22,7 +22,7 @@ import type { ExactModelRequest } from "@vegardx/pi-subagent";
  * **No port installed is not a default.** With no `modelRouting`, a `modelRole`
  * declaration fails materialization with
  * {@link MODEL_ROUTING_MISSING_MESSAGE} — the runtime never guesses a model.
- * {@link staticModelRouting} is the one-line stand-in a test or an embedder
+ * {@link staticModelRouting} is the one-line test double a test or an embedder
  * installs when it wants routing without a router.
  */
 
@@ -218,17 +218,24 @@ export function isModelResolution(value: unknown): value is ModelResolution {
 }
 
 /**
- * One row per tier plus one default: the whole table a stand-in router needs.
- * This is the shape `src/components/envelope.ts`'s `MODEL_PROVIDER`,
- * `MODEL_ID`, `DIVERSE_MODEL_ID` and `THINKING_BY_TIER` constants already have.
- * The constants stay where they are — a table with two homes is a table that
- * will disagree with itself — and a caller passes them in.
+ * One row per tier plus one default: the whole table a test double needs. It
+ * is the only tier-to-thinking table in the package, and it exists because a
+ * test has to stand in for a router; nothing the package ships reads one.
  */
+/** One model row of a static table, with the evidence a router would give. */
+export interface StaticModelRow extends ExactModel {
+	readonly alias?: string;
+	readonly family?: string;
+}
+
 export interface StaticModelRoutingTable {
 	readonly provider: string;
 	readonly id: string;
+	/** The default row's alias and family, reported as evidence when present. */
+	readonly alias?: string;
+	readonly family?: string;
 	/** What `family: "other"` resolves to; absent means the request cannot be met. */
-	readonly otherFamily?: ExactModel;
+	readonly otherFamily?: StaticModelRow;
 	/** The thinking level per tier. */
 	readonly thinking: Readonly<Record<ModelRoleTier, ModelRoleThinkingLevel>>;
 	/** The thinking level for a request that names no tier. */
@@ -244,7 +251,7 @@ export interface StaticModelRoutingTable {
 /**
  * A port over one constant table: a `modelRole` resolves to the same exact
  * model every time, so a run routed through it replays identically on any host.
- * It is a stand-in, not routing — every resolution reports
+ * It is a test double, not routing — every resolution reports
  * `source: "static"` and a `fallbackReason` saying so, because a table that
  * answers every tier with one model is exactly the thing a reader must not
  * mistake for a tier walk.
@@ -264,10 +271,15 @@ export function staticModelRouting(
 					`static model routing has no row for persona ${JSON.stringify(role.persona)}; it answers ${[...allowed].join(", ")}`,
 				);
 			}
-			const exact =
+			const exact: StaticModelRow | undefined =
 				role.family === "other"
 					? table.otherFamily
-					: { provider: table.provider, id: table.id };
+					: {
+							provider: table.provider,
+							id: table.id,
+							...(table.alias === undefined ? {} : { alias: table.alias }),
+							...(table.family === undefined ? {} : { family: table.family }),
+						};
 			if (!exact) {
 				throw new ModelRoutingError(
 					'static model routing has no other-family row; declare an exact model or install a router that can answer family: "other"',
@@ -282,6 +294,8 @@ export function staticModelRouting(
 				source: "static" as const,
 				persona: role.persona,
 				...(role.tier ? { tier: role.tier } : {}),
+				...(exact.alias === undefined ? {} : { alias: exact.alias }),
+				...(exact.family === undefined ? {} : { family: exact.family }),
 				fallbackReason: reason,
 			});
 		},

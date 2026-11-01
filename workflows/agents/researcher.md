@@ -1,13 +1,15 @@
 ---
 name: researcher
-model: { provider: github-copilot, id: gpt-5.6-sol, thinking: medium }
+model: { provider: placeholder, id: same-family, thinking: medium }
 allowedModels:
-  - github-copilot/gpt-5.6-sol:low
-  - github-copilot/gpt-5.6-sol:medium
-  - github-copilot/gpt-5.6-sol:high
-  - github-copilot/gpt-5.6-luna:low
-  - github-copilot/gpt-5.6-luna:medium
-  - github-copilot/gpt-5.6-luna:high
+  - placeholder/same-family:minimal
+  - placeholder/same-family:low
+  - placeholder/same-family:medium
+  - placeholder/same-family:high
+  - placeholder/other-family:minimal
+  - placeholder/other-family:low
+  - placeholder/other-family:medium
+  - placeholder/other-family:high
 tools: [read, grep, find, ls]
 preloadSkills: []
 contextScopes: [project]
@@ -33,13 +35,23 @@ before running the `deep-research` workflow; see the pi-workflow README,
 "Builtin workflows". The frontmatter above is an authority **ceiling**: a
 workflow task may ask for less, never for more. It covers the research,
 cross-check and synthesis rows of the component library's stage table, which is
-one row per stage and no longer a column per depth. `allowedModels` lists both
-model families on purpose: a cross-check runs on the family the research threads
-did not, because a checker that shares everything with the claimant agrees with
-it for free. A model outside this list fails preflight with "model exceeds
-ceiling". It does NOT list `inherit`: nothing in `deep-research` inherits the
+one row per stage and no longer a column per depth. Every task asks the host's
+router for a `normal` `codebase-research` model, and a cross-check asks for
+another family (`family: "other"`), because a checker that shares everything
+with the claimant agrees with it for free — so `allowedModels` must cover both
+families. It does NOT list `inherit`: nothing in `deep-research` inherits the
 host session's model, so the same question asked from any session gets the same
 threads, checked the same way.
+
+The `placeholder/...` routes in `model` and `allowedModels` admit no real
+model, on purpose. pi-subagent's model fence is EXACT: a request admits only a
+listed `provider/id:thinking` route (or `inherit`, for a direct delegation
+that asks to inherit), it requires a default `model`, and it has no wildcard.
+pi-workflow always sends the RESOLVED exact model — what the host's router
+answered for a `modelRole`, or the session model for `inherit` — so a copy of
+this template must list the routes your router and your sessions actually
+resolve to, at the thinking levels they answer with, or the task fails
+preflight with "model exceeds ceiling: <model>".
 
 `deep-research` declares three kinds of task against this one definition,
 because all three are the same authority — read, judge, report:

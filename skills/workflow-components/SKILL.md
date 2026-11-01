@@ -60,7 +60,7 @@ runs them **merges without judging**:
 | Field | Values |
 | --- | --- |
 | `LensReportSchema.findings[]` | `{claim (≤1024), location: {file (≤512), line?}, evidence (≤4096), severity: high\|medium\|low, suggestion? (≤2048)}`, ≤64 |
-| `ReviewsRecordSchema` | `{deliverable, handoffCommit, reviewers: [{reviewerKey, lens, model, thinking?, attemptId?, status, findings}], clusters: [{id, claim, location, severity, reportedBy, agreement: {count, of}, suggestions, raw, disposition?}], normalizer: {mode, model?, promptDigest?}}` |
+| `ReviewsRecordSchema` | `{deliverable, handoffCommit, reviewers: [{reviewerKey, lens, model, thinking?, alias?, tier?, family?, attemptId?, status, findings}], clusters: [{id, claim, location, severity, reportedBy, agreement: {count, of}, suggestions, raw, disposition?}], normalizer: {mode, model?, alias?, tier?, family?, promptDigest?}}` |
 | a disposition | `{kind: fixed\|declined\|out-of-scope, reasoning (≤2048)}` |
 
 Deferred, on purpose: `sequence` (`ctx.pipeline` is one line), `branch`,
@@ -68,8 +68,8 @@ Deferred, on purpose: `sequence` (`ctx.pipeline` is one line), `branch`,
 
 ## The stage envelope
 
-**There is no effort dial.** `envelope(stage)` → `{stage, thinking, model,
-limits, budgetShare}`, one fixed row per stage — the numbers the removed dial's
+**There is no effort dial.** `envelope(stage)` → `{stage, thinking, limits,
+budgetShare}`, one fixed row per stage — the numbers the removed dial's
 `standard` column measured. Stages: `refine`, `implement`, `verify`, `fix`,
 `review`, `synthesis`, `record`. `implement` and `fix` write in a worktree; every
 other stage is read-only with `workspaceWriteBytes: 0`.
@@ -78,12 +78,15 @@ other stage is read-only with `workspaceWriteBytes: 0`.
 | --- | --- | --- | --- | --- | --- | --- |
 | medium | medium | low | medium | medium | medium | low |
 
-The `thinking` column applies to a role that names no model of its own. A model
-is set PER ROLE instead: an exact `{provider, id, thinking}`, or `"inherit"` —
-the host session's own model and thinking level, which pi-workflow resolves once
-at run start and records on the run. `tierModel(tier, diverse?)` is a review's
-own dial (`fast`→minimal, `light`→low, `normal`→medium, `frontier`→high); an exact
-`provider/model` pin outranks it. `GATE_TIMEOUT_MS` is one number, 24 hours, and
+The table names no model. A model is set PER ROLE: an exact
+`{provider, id, thinking}`, `"inherit"` — the host session's own model and
+thinking level, which pi-workflow resolves once at run start and records on the
+run — or `modelRole: { persona, tier, family? }`, which the host's router
+resolves (tiers `fast | light | normal | frontier`; an authored review names
+`light` or `normal`, and `reviewTierRefusal` names why the other two are
+refused). There is no tier-to-thinking table: the router decides the thinking
+level. The `thinking` column applies only to an exact pin that carries none of
+its own, such as a plan's `provider/model` lens pin. `GATE_TIMEOUT_MS` is one number, 24 hours, and
 `WORKTREE_MEMORY_BYTES` is 2 GiB for every worktree stage.
 `workflowBudgetFor(shares)` is the `meta.budget` a graph of those shares needs;
 the scheduler admits a task only while `settled + reserved + candidate ≤

@@ -17,7 +17,6 @@ import {
 	reviewFanOut,
 	reviewTierRefusal,
 	type ThinkingLevel,
-	tierModel,
 	workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 import { type Static, Type } from "typebox";
@@ -42,13 +41,11 @@ import { type Static, Type } from "typebox";
  * NOTHING HERE INHERITS THE SESSION MODEL, and that is a decision rather than an
  * omission. `plan-to-ship`'s implementation roles declare `model: "inherit"`
  * because the work belongs to the session that planned it. A review does not:
- * its whole value is a fixed point of view a caller can reason about, and
- * pi-workflow sends the RESOLVED exact model in every request, so an inherited
- * model outside the `lens-reviewer` template's `allowedModels` would fail
- * preflight with "model exceeds ceiling" on a host whose session happened to be
- * on another family. `deep-review` therefore runs on any host, including one
- * with no session model at all, which is what makes it safe to run from plan
- * mode.
+ * its whole value is a fixed point of view a caller can reason about, so every
+ * lens and the reducer ask the host's router for a `code-review` model
+ * (`needs.modelRouting`). `deep-review` therefore runs on a host with no
+ * session model at all, which is what makes it safe to run from plan mode; a
+ * host with no router is refused at start, by name.
  *
  * The stage graph:
  *
@@ -242,34 +239,28 @@ function pinnedModel(model: string, thinking: ThinkingLevel) {
 	};
 }
 
+/** Every lens and the reducer ask the router for this, at the normal tier. */
+const REVIEW_ROLE = Object.freeze({
+	persona: "code-review",
+	tier: "normal" as const,
+});
+
 /**
  * The input lens vocabulary (`model` as a string, `tier` as an intent) mapped
- * onto the component's.
- *
- * A TIER is the one dial a review still has, exactly as `plan-to-ship` resolves
- * `reviews[].tier`. A tiered lens is PINNED here rather than left to the
- * component's diversity seam: the seam carries one exact model and cannot vary
- * its thinking level per lens. An untiered lens keeps the seam, so `diverse`
- * still resolves through the fan-out's diversity model and still logs that the
- * answer is a stand-in. DELETE WHEN ROUTING LANDS: `tier` and `family: "other"`
- * become two fields of one `modelRole` request and this function disappears.
+ * onto the component's. The component turns `tier` and `diverse` into the
+ * lens's `modelRole`; an exact `provider/model` pin outranks both and takes the
+ * review stage's thinking level, because a pin names no thinking of its own.
  */
 function componentLens(lens: Lens): ReviewLens {
-	const thinking = lens.tier
-		? tierModel(lens.tier).thinking
-		: tierModel("normal").thinking;
-	const pin = lens.model
-		? pinnedModel(lens.model, thinking)
-		: lens.tier
-			? tierModel(lens.tier, lens.diverse === true)
-			: undefined;
 	return {
 		id: lens.id,
 		...(lens.tier ? { tier: lens.tier } : {}),
 		...(lens.diverse === true ? { diverse: true } : {}),
 		...(lens.skill ? { skill: lens.skill } : {}),
 		...(lens.brief ? { brief: lens.brief } : {}),
-		...(pin ? { model: pin } : {}),
+		...(lens.model
+			? { model: pinnedModel(lens.model, envelope("review").thinking) }
+			: {}),
 	};
 }
 
@@ -332,7 +323,8 @@ export default defineWorkflow({
 		// What this definition needs of the host, in pi-subagent's own
 		// vocabulary, so a host can refuse a start above its delegation ceiling
 		// before a run exists.
-		needs: { workspace: "read-only" },
+		// `modelRouting` because every lens and the reducer declare `modelRole`.
+		needs: { workspace: "read-only", modelRouting: true },
 	},
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
@@ -361,10 +353,9 @@ export default defineWorkflow({
 			lenses.map((lens) => componentLens(lens)),
 			{
 				subject: { title: subject.title },
-				// The lens that pins neither a model nor a tier takes the normal
-				// reviewer tier; a `diverse` one takes the stand-in below.
-				model: tierModel("normal"),
-				diversity: { model: tierModel("normal", true) },
+				// A lens that names no tier asks for the normal tier; a `diverse`
+				// one asks the router for another family.
+				modelRole: REVIEW_ROLE,
 				synthesis,
 				...(ctx.input.maxFindings === undefined
 					? {}
@@ -419,7 +410,7 @@ export default defineWorkflow({
 					contextMode: "fresh",
 					// The reducer is a reviewer too: normal tier, not the session's
 					// model. See this file's header for why nothing here inherits.
-					model: tierModel("normal"),
+					modelRole: REVIEW_ROLE,
 					// Optional, and for the reason in this file's header: a
 					// barrier's control edge covers EVERY task it closed over, so a
 					// dead lens blocks the reducer declared after it. Optional turns

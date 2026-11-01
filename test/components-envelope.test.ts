@@ -7,17 +7,12 @@ import { describe, expect, it } from "vitest";
 import {
 	assertBudgetAdmits,
 	budgetAdmits,
-	DIVERSE_MODEL_ID,
 	ENVELOPE_STAGES,
 	ENVELOPE_TIERS,
 	envelope,
 	GATE_TIMEOUT_MS,
-	MODEL_ID,
-	MODEL_PROVIDER,
 	type StageName,
 	sumBudgetShares,
-	THINKING_BY_TIER,
-	tierModel,
 	WORKSPACE_WRITE_BYTES,
 	WORKTREE_MEMORY_BYTES,
 	workflowBudgetFor,
@@ -28,6 +23,12 @@ import { WorkflowTaskMaterializer } from "../src/materializer.js";
 import { MODEL_ROLE_TIERS } from "../src/runtime/model-routing.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
+/** An exact model the test declares; the table names none. */
+const PINNED_MODEL = {
+	provider: "test-provider",
+	id: "test-model",
+	thinking: "medium",
+} as const;
 const inputSha256 = "b".repeat(64);
 const runId = "workflow_components";
 
@@ -87,8 +88,14 @@ describe("the stage table", () => {
 			expect(Object.isFrozen(first.limits)).toBe(true);
 			expect(first.stage).toBe(stage);
 			expect(Value.Check(RunLimitsSchema, first.limits)).toBe(true);
-			expect(Value.Check(ExactModelRequestSchema, first.model)).toBe(true);
-			expect(first.model.thinking).toBe(first.thinking);
+			// No model: a role names its own, and a tier is the router's.
+			expect(first).not.toHaveProperty("model");
+			expect(
+				Value.Check(
+					ExactModelRequestSchema.properties.thinking,
+					first.thinking,
+				),
+			).toBe(true);
 			expect(first.budgetShare).toEqual({
 				cost: first.limits.cost,
 				totalTokens: first.limits.totalTokens,
@@ -145,15 +152,7 @@ describe("the stage table", () => {
 		}
 	});
 
-	it("pins the stand-in routing, the tiers and the one gate timeout", () => {
-		// DELETE WHEN ROUTING LANDS: these three literals are the stand-in for
-		// host routing, and the tier map is the one dial a review still has.
-		expect(envelope("review").model).toEqual({
-			provider: MODEL_PROVIDER,
-			id: MODEL_ID,
-			thinking: "medium",
-		});
-		expect(DIVERSE_MODEL_ID).not.toBe(MODEL_ID);
+	it("pins the tiers and the one gate timeout", () => {
 		expect([...ENVELOPE_TIERS]).toEqual([
 			"fast",
 			"light",
@@ -162,25 +161,6 @@ describe("the stage table", () => {
 		]);
 		// The envelope writes the list out; this is what fails if it drifts.
 		expect([...ENVELOPE_TIERS]).toEqual([...MODEL_ROLE_TIERS]);
-		expect(THINKING_BY_TIER).toEqual({
-			fast: "minimal",
-			light: "low",
-			normal: "medium",
-			frontier: "high",
-		});
-		for (const tier of ENVELOPE_TIERS) {
-			expect(tierModel(tier)).toEqual({
-				provider: MODEL_PROVIDER,
-				id: MODEL_ID,
-				thinking: THINKING_BY_TIER[tier],
-			});
-			expect(tierModel(tier, true)).toEqual({
-				provider: MODEL_PROVIDER,
-				id: DIVERSE_MODEL_ID,
-				thinking: THINKING_BY_TIER[tier],
-			});
-			expect(Object.isFrozen(tierModel(tier))).toBe(true);
-		}
 		// One number: a decision a person has to take does not get shorter
 		// because the work was cheaper. It is the old `standard` timeout.
 		expect(GATE_TIMEOUT_MS).toBe(86_400_000);
@@ -212,7 +192,7 @@ describe("envelope lowering", () => {
 				instructions: ["Report findings."],
 			},
 			contextMode: "fresh",
-			model: row.model,
+			model: PINNED_MODEL,
 			tools: ["read", "grep", "find", "ls"],
 			preloadSkills: [],
 			contextScopes: ["project"],
@@ -230,11 +210,10 @@ describe("envelope lowering", () => {
 				instructions: ["Report findings."],
 			},
 			contextMode: "fresh",
-			// The hand-written equivalent, literal for literal: this is the
-			// table's pin as well as the lowering's.
+			// The hand-written equivalent, literal for literal.
 			model: {
-				provider: "github-copilot",
-				id: "gpt-5.6-sol",
+				provider: "test-provider",
+				id: "test-model",
 				thinking: "medium",
 			},
 			tools: ["read", "grep", "find", "ls"],
@@ -273,7 +252,7 @@ describe("envelope lowering", () => {
 					instructions: ["Work in the worktree."],
 				},
 				contextMode: "fresh",
-				model: row.model,
+				model: PINNED_MODEL,
 				tools: ["read", "write", "bash"],
 				preloadSkills: [],
 				contextScopes: ["project"],

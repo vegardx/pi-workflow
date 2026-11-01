@@ -13,12 +13,7 @@ import {
 } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	DIVERSE_MODEL_ID,
-	envelope,
-	MODEL_ID,
-	tierModel,
-} from "../src/components/index.js";
+import { envelope } from "../src/components/index.js";
 import type { WorkflowDefinition } from "../src/definition.js";
 import { discoverWorkflows } from "../src/registry.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
@@ -31,6 +26,13 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
+import {
+	OTHER_FAMILY_ID,
+	ROUTING_TABLE,
+	routedModel,
+	SAME_FAMILY_ID,
+	testModelRouting,
+} from "./fixtures/routing.js";
 
 // W3-RESEARCH acceptance: the builtin `deep-research` definition driven through
 // the real service with a scripted subagent, and the agent template it names
@@ -444,6 +446,7 @@ async function serviceFor(delegated: Scripted): Promise<WorkflowService> {
 		// The builtin root needs no project trust.
 		projectTrusted: () => false,
 		subagents: delegated.provider,
+		modelRouting: testModelRouting,
 		registeredRoots: [
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
@@ -916,24 +919,26 @@ describe("deep-research: models per role", () => {
 		const check = envelope("verify");
 		const reduce = envelope("synthesis");
 		for (const request of delegated.researchRequests()) {
-			// A researcher is a reviewer-shaped role: the standard reviewer tier.
-			expect(exactModel(request)).toEqual(tierModel("normal"));
+			// A researcher is a reviewer-shaped role: the normal tier, routed.
+			expect(exactModel(request)).toEqual(routedModel("normal"));
 			expect(request.limits).toEqual(research.limits);
 		}
 		for (const request of delegated.crossCheckRequests()) {
 			// The OTHER family, for the same reason the checker is another
 			// thread: a checker that shares everything with the claimant
 			// agrees with it for free.
-			expect(exactModel(request)).toEqual(tierModel("normal", true));
-			expect(exactModel(request)?.id).toBe(DIVERSE_MODEL_ID);
+			expect(exactModel(request)).toEqual(routedModel("normal", "other"));
+			expect(exactModel(request)?.id).toBe(OTHER_FAMILY_ID);
 			expect(request.limits).toEqual(check.limits);
 		}
 		// The reducer keeps the tier too: nothing here inherits the session
 		// model, so the same question asked from any session gets the same
 		// threads, checked the same way.
 		const reducer = delegated.synthesisRequest();
-		expect(exactModel(reducer as SubagentRequest)).toEqual(tierModel("normal"));
-		expect(exactModel(reducer as SubagentRequest)?.id).toBe(MODEL_ID);
+		expect(exactModel(reducer as SubagentRequest)).toEqual(
+			routedModel("normal"),
+		);
+		expect(exactModel(reducer as SubagentRequest)?.id).toBe(SAME_FAMILY_ID);
 		expect(reducer?.limits).toEqual(reduce.limits);
 		for (const request of delegated.requests) {
 			expect(request.model).not.toBe("inherit");
@@ -1021,13 +1026,14 @@ describe("deep-research: the agent template", () => {
 		expect(researcher.tools).toEqual(["read", "grep", "find", "ls"]);
 		// A researcher never writes.
 		expect(researcher.limitCeiling.workspaceWriteBytes).toBe(0);
-		// Both families: a cross-check runs on the one the threads did not.
-		for (const id of [MODEL_ID, DIVERSE_MODEL_ID]) {
-			for (const thinking of ["low", "medium", "high"]) {
-				expect(researcher.allowedModels).toContain(
-					`github-copilot/${id}:${thinking}`,
-				);
-			}
+		// Both families of the test router: a cross-check runs on the one the
+		// threads did not. The shipped routes are placeholders (pi-subagent's
+		// fence is exact), so this asserts the template and the test table
+		// agree, nothing more.
+		for (const row of [ROUTING_TABLE, ROUTING_TABLE.otherFamily]) {
+			expect(researcher.allowedModels).toContain(
+				`${row?.provider}/${row?.id}:medium`,
+			);
 		}
 	});
 

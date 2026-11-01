@@ -25,7 +25,11 @@ import { WorkflowTaskMaterializer } from "../src/materializer.js";
 const RUN_ID = "workflow_components";
 const DEFINITION_IDENTITY = "a".repeat(64);
 const INPUT_DIGEST = "b".repeat(64);
-const MODEL = envelope("implement").model;
+const MODEL = {
+	provider: "test-provider",
+	id: "test-model",
+	thinking: envelope("implement").thinking,
+} as const;
 const SESSION_MODEL = {
 	provider: "anthropic",
 	id: "claude-session",

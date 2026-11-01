@@ -4,8 +4,8 @@ import type { ModelRoleTier } from "../runtime/model-routing.js";
 import { WorkflowComponentError } from "./errors.js";
 
 /**
- * `envelope` — one fixed row per stage: the thinking level, limits and budget
- * share a stage that does not inherit the session model runs at.
+ * `envelope` — one fixed row per stage: the limits and budget share a stage
+ * runs under, and the thinking level an exact pin with none of its own takes.
  *
  * Pattern: `skills/workflow-authoring/SKILL.md` § "An envelope: one row per stage, and a model per role".
  * The rules it encodes live under "Budgets and admission" (the
@@ -17,10 +17,13 @@ import { WorkflowComponentError } from "./errors.js";
  * THERE IS NO EFFORT DIAL. A workflow used to read `cheap | standard | deep`
  * from its input and every model, limit and budget share was a lookup on that
  * column. The dial is gone: the numbers here are what its `standard` column
- * measured, and a role that wants a different model says so per role — an exact
- * `{provider, id, thinking}`, or `model: "inherit"` for the host session's own
+ * measured, and a role says which model it wants per role — an exact
+ * `{provider, id, thinking}`, `model: "inherit"` for the host session's own
  * model and thinking level, which pi-workflow resolves once at run start and
- * records on the run (`WorkflowRunRecord.sessionModel`).
+ * records on the run (`WorkflowRunRecord.sessionModel`), or a `modelRole`
+ * naming a persona and a tier, which the host's router resolves. There is no
+ * tier-to-thinking table here or anywhere: the router decides the thinking
+ * level of the model it picks.
  *
  * Replay law 3: every thinking level, limit and budget share is a table lookup
  * keyed by `stage` alone - never by a clock, an environment variable, a
@@ -29,21 +32,12 @@ import { WorkflowComponentError } from "./errors.js";
  * the run record's own frozen value rather than to whatever the host would
  * answer now.
  *
- * What it lowers to: `limits` and `model` go on an agent request verbatim, and
+ * What it lowers to: `limits` go on an agent request verbatim, and
  * `budgetShare` is the same task's reservation, so summing the shares of the
  * declared graph gives the `meta.budget` the run needs
  * (`workflowBudgetFor`) and comparing them to a declared budget is the
  * over-allocation check `forEach` and `verifyHandoff` make at declaration
  * (`assertBudgetAdmits`).
- *
- * DELETE WHEN ROUTING LANDS. `MODEL_PROVIDER`/`MODEL_ID`/`DIVERSE_MODEL_ID`
- * are the stand-in for host routing: today a task names one exact
- * `{provider, id, thinking}`, so "a frontier reviewer from another family" has to
- * be written as a second literal model. When `modelRole` and the routing port
- * land (spec 2.5), `Envelope.model` becomes a `modelRole` request, `tier`
- * replaces the thinking column, and `DIVERSE_MODEL_ID` becomes
- * `family: "other"`. The table's shape - one row per stage - does not change,
- * which is the point of keeping it in one place.
  */
 
 /**
@@ -82,38 +76,6 @@ export const ENVELOPE_TIERS = Object.freeze([
 	"frontier",
 ] as const satisfies readonly ModelRoleTier[]);
 
-/** DELETE WHEN ROUTING LANDS: the host's routing decides these three. */
-export const MODEL_PROVIDER = "github-copilot";
-export const MODEL_ID = "gpt-5.6-sol";
-/** The "different family" stand-in a diverse reviewer resolves to. */
-export const DIVERSE_MODEL_ID = "gpt-5.6-luna";
-
-/** What a review tier means as a thinking level; DELETE WHEN ROUTING LANDS. */
-export const THINKING_BY_TIER: Readonly<Record<EnvelopeTier, ThinkingLevel>> =
-	Object.freeze({
-		fast: "minimal",
-		light: "low",
-		normal: "medium",
-		frontier: "high",
-	});
-
-/**
- * The exact model a review tier resolves to, in one place: the stand-in
- * provider and id, with the tier's thinking level, and the other-family id
- * when the lens asked not to mark its own homework.
- * DELETE WHEN ROUTING LANDS: this becomes `modelRole: { tier, family }`.
- */
-export function tierModel(
-	tier: EnvelopeTier,
-	diverse = false,
-): ExactModelRequest {
-	return Object.freeze({
-		provider: MODEL_PROVIDER,
-		id: diverse ? DIVERSE_MODEL_ID : MODEL_ID,
-		thinking: THINKING_BY_TIER[tier],
-	});
-}
-
 /**
  * W1 measured a real `npm ci` plus build in the guest: anything smaller fails
  * the install rather than the task, which reads as a model failure and is not
@@ -145,9 +107,12 @@ export interface BudgetShare {
 /** One row of the table: everything a stage's declaration needs. */
 export interface Envelope {
 	readonly stage: StageName;
+	/**
+	 * The thinking level of an exact pin that carries none of its own — a
+	 * plan's `provider/model` lens pin. A routed role's thinking is the
+	 * router's, and an inheriting role's is the session's.
+	 */
 	readonly thinking: ThinkingLevel;
-	/** DELETE WHEN ROUTING LANDS: becomes a `modelRole` request. */
-	readonly model: ExactModelRequest;
 	readonly limits: RunLimits;
 	readonly budgetShare: BudgetShare;
 }
@@ -209,9 +174,9 @@ function worktree(
  * `normalize` is the merge-only model call over a review's clusters: it
  * returns ids, never prose, so it gets the record's small row.
  *
- * The thinking level applies to a stage that names no model of its own and does
- * not inherit; a stage that inherits takes the session's level instead, and a
- * review takes its tier's.
+ * The thinking level applies only to an exact pin with none of its own; a
+ * stage that inherits takes the session's level, and a routed stage takes the
+ * level its router answered with.
  *
  * W1 floors for a worktree stage: >= 2 GiB of workspace writes, >= 1_500_000 ms
  * per attempt, >= 1_800_000 ms cumulative. Every worktree row clears them.
@@ -240,11 +205,6 @@ function buildEnvelope(stage: StageName, shape: StageShape): Envelope {
 	return Object.freeze({
 		stage,
 		thinking: shape.thinking,
-		model: Object.freeze({
-			provider: MODEL_PROVIDER,
-			id: MODEL_ID,
-			thinking: shape.thinking,
-		}),
 		limits,
 		budgetShare: Object.freeze({
 			cost: limits.cost,
@@ -269,7 +229,7 @@ function isStageName(value: unknown): value is StageName {
 }
 
 /**
- * The thinking level, model, limits and budget share of one stage. Pure: the
+ * The thinking level, limits and budget share of one stage. Pure: the
  * same stage always returns the same frozen value, and nothing else is read.
  */
 export function envelope(stage: StageName): Envelope {
