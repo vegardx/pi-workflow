@@ -2,16 +2,17 @@
 	"schema": "pi-workflow-compatibility",
 	"piWorkflow": {
 		"package": "@vegardx/pi-workflow",
-		"version": "7.0.0",
-		"contractRevision": 26,
+		"version": "8.0.0",
+		"contractRevision": 27,
 		"features": {
 			"checkpoints": true,
 			"dynamicWorkflows": true,
 			"serviceProviderStart": true,
-			"serviceProviderDecide": true
+			"serviceProviderDecide": true,
+			"modelRoutingProvider": true
 		},
 		"api": {
-			"version": "7.0.0",
+			"version": "8.0.0",
 			"frozenSurfaces": ["authoring", "service", "contract", "extension"],
 			"entryPoints": {
 				".": "frozen",

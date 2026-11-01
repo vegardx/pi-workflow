@@ -412,8 +412,8 @@ describe("startBuiltin under an explicit ceiling", () => {
 
 describe("the contract revision", () => {
 	it("is 24, and the run record carries an optional ceiling and session model", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(26);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(26);
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(27);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(27);
 		// The persisted field the revision moved for.
 		expect(Object.keys(WorkflowRunRecordSchema.properties)).toContain(
 			"ceiling",

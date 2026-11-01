@@ -468,10 +468,10 @@ describe("package entry points", () => {
 			"../compatibility.json",
 		);
 		const api = compatibility.piWorkflow.api;
-		// 7.0.0: revision 26 refuses revision-25 persisted state, which the
-		// stability policy makes a major; the subagent binding gains the
-		// required `maxSlots`.
-		expect(api.version).toBe("7.0.0");
+		// 8.0.0: revision 27 refuses revision-26 persisted state, which the
+		// stability policy makes a major; the tier vocabulary, the routing
+		// provider option and the review record change shape with it.
+		expect(api.version).toBe("8.0.0");
 		expect(majorOf(api.version)).toBe(majorOf(packageJson.version));
 		expect(api.frozenSurfaces).toEqual([
 			"authoring",
