@@ -424,9 +424,9 @@ describe("the contract revision", () => {
 		);
 	});
 
-	it("requires pi-subagent revision 12 with the delegation ceiling", () => {
+	it("requires pi-subagent revision 13 with the delegation ceiling", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(
-			12,
+			13,
 		);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.delegationCeiling,

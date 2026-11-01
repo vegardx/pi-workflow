@@ -447,6 +447,7 @@ function scripted(
 			// Revision 9: where the launch's model came from. pi-workflow always
 			// states one, so a plan it produced is never `"inherited"`.
 			modelSource: request.model === undefined ? "template" : "request",
+			modelAdmission: "exact" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],

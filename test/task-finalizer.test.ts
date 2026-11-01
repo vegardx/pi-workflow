@@ -93,7 +93,7 @@ function worktreeRecord(
 ): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 12,
+		contractRevision: 13,
 		runId: "run_finalizer",
 		attemptId: "attempt_finalizer",
 		repositoryRoot: "/private/repo",

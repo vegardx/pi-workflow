@@ -317,6 +317,7 @@ function scripted(options: { readonly failThreads?: readonly string[] } = {}) {
 			outputSchema: structuredClone(request.outputSchema),
 			limits: structuredClone(request.limits),
 			modelSource: request.model === undefined ? "template" : "request",
+			modelAdmission: "exact" as const,
 		} satisfies Omit<AgentLaunchPlan, "identitySha256">;
 		const identitySha256 = canonicalSha256(plan);
 		return {

@@ -300,6 +300,7 @@ function scripted(
 				thinking: "low" as const,
 			},
 			modelSource: request.model === undefined ? "template" : "request",
+			modelAdmission: "exact" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],

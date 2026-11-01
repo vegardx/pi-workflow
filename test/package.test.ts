@@ -88,7 +88,7 @@ describe("package contract", () => {
 			[...Object.keys(packageJson.peerDependencies ?? {})].sort(),
 		);
 		expect(packageJson.peerDependencies?.["@vegardx/pi-subagent"]).toBe(
-			"0.20.0",
+			"0.21.0",
 		);
 		expect(packageJson.peerDependencies?.typebox).toBe(">=1.3.14 <2");
 		expect(packageJson.exports).toEqual({
@@ -389,7 +389,7 @@ describe("compatibility matrix 1.0", () => {
 			`| \`WORKFLOW_CONTRACT_REVISION\` | ${WORKFLOW_CONTRACT_REVISION} | \`src/contracts-core.ts\` (re-exported by \`src/contracts.ts\`); 2.0.0 raised it from 18 to 19`,
 		);
 		expect(doc).toContain(
-			"| Required `@vegardx/pi-subagent` | `0.20.0` (exact; raised from `0.19.0` because 0.20.0 waits for a free VM slot, types a refusal as `capacity`, reports the host's `capacity.maxSlots`, and moves to contract revision 12) |",
+			"| Required `@vegardx/pi-subagent` | `0.21.0` (exact; raised from `0.20.0` because 0.21.0 adds the `host` entry to an agent definition's `allowedModels` and the model-admission provider (`@vegardx/pi-subagent/model-admission-provider`) that the routed builtin templates depend on, lets such a definition omit its default `model`, and moves to contract revision 13) |",
 		);
 		expect(doc).toContain(
 			`| Required pi-subagent contract revision | ${WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision} |`,
@@ -397,6 +397,7 @@ describe("compatibility matrix 1.0", () => {
 		expect(doc).toContain("| `vmMemoryCeiling` | `true` |");
 		expect(doc).toContain("| `delegationCeiling` | `true` |");
 		expect(doc).toContain("| `sessionModelInherit` | `true` |");
+		expect(doc).toContain("| `hostModelAdmission` | `true` |");
 		expect(doc).toContain("| `workspaceStartAt` | `true` |");
 		expect(doc).toContain("| `resumeAtHandoff` | `true` |");
 		expect(doc).toContain("| `workspaceBudgetRefusal` | `true` |");
