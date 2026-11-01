@@ -75,6 +75,7 @@
 	"MaterializedNestedWorkflowTaskSchema",
 	"MaterializedSupportTaskSchema",
 	"MaterializedWorkflowTaskSchema",
+	"ModelResolutionEvidenceSchema",
 	"ModelRoutingProviderError",
 	"NARRATED_TASK_KINDS",
 	"NestedWorkflowInputArtifactSchema",

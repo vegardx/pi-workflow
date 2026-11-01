@@ -1,6 +1,7 @@
 import type {
 	ContextScope,
 	DelegatedTask,
+	ExactModelRequest,
 	RunLimits,
 } from "@vegardx/pi-subagent";
 import { Ajv } from "ajv";
@@ -29,7 +30,10 @@ import {
 	type WorkflowTaskId,
 	type WorkflowTaskStatus,
 } from "./contracts-core.js";
-import type { ModelRoleRequest } from "./runtime/model-routing.js";
+import type {
+	ModelRoleRequest,
+	ModelRoleTier,
+} from "./runtime/model-routing.js";
 import type { ModelAuthoringRequest } from "./session-model.js";
 import type { SupportTaskDescriptor } from "./support.js";
 
@@ -471,8 +475,29 @@ export type SettledTaskAttempt = Readonly<{
 	subagentAttemptId: string;
 }>;
 
+/**
+ * The exact model an agent task was materialized with, read from the journal,
+ * and - when a router chose it - what the router said about it. It is what a
+ * definition stamps as model attribution: a `modelRole` declaration does not
+ * know its model until the materializer resolved it, and the persisted
+ * resolution is the only answer a replay reproduces.
+ */
+export type SettledTaskModel = Readonly<{
+	provider: string;
+	id: string;
+	thinking: ExactModelRequest["thinking"];
+	alias?: string;
+	tier?: ModelRoleTier;
+	family?: string;
+}>;
+
 export type SettledTaskResult<T> =
-	| Readonly<{ status: "fulfilled"; value: T; attempt?: SettledTaskAttempt }>
+	| Readonly<{
+			status: "fulfilled";
+			value: T;
+			attempt?: SettledTaskAttempt;
+			model?: SettledTaskModel;
+	  }>
 	| Readonly<{
 			status: "rejected";
 			taskId: WorkflowTaskId;
@@ -482,6 +507,7 @@ export type SettledTaskResult<T> =
 			>;
 			failure?: SettledTaskFailure;
 			attempt?: SettledTaskAttempt;
+			model?: SettledTaskModel;
 	  }>;
 
 export interface FanOutOptions<

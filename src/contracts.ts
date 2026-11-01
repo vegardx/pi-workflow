@@ -52,6 +52,11 @@ import {
 	WorkflowRunStatusSchema,
 	WorkflowTaskIdSchema,
 } from "./contracts-core.js";
+import {
+	MAX_MODEL_EVIDENCE_LENGTH,
+	MODEL_ROLE_TIERS,
+	type ModelRoleTier,
+} from "./runtime/model-routing.js";
 
 export * from "./contracts-core.js";
 
@@ -247,6 +252,34 @@ export const CheckpointTaskSpecSchema = Type.Object(
 );
 export type CheckpointTaskSpec = Static<typeof CheckpointTaskSpecSchema>;
 
+const ModelEvidenceTextSchema = Type.String({
+	minLength: 1,
+	maxLength: MAX_MODEL_EVIDENCE_LENGTH,
+});
+
+/**
+ * What a router said about the model it chose beyond the model itself: the
+ * logical alias, the tier and the diversity family. Persisted beside the spec,
+ * never inside it, so it is evidence a replay re-uses verbatim (the router is
+ * not asked again) and no identity hash ever sees it.
+ */
+export const ModelResolutionEvidenceSchema = Type.Object(
+	{
+		alias: Type.Optional(ModelEvidenceTextSchema),
+		tier: Type.Optional(
+			Type.Unsafe<ModelRoleTier>({
+				type: "string",
+				enum: [...MODEL_ROLE_TIERS],
+			}),
+		),
+		family: Type.Optional(ModelEvidenceTextSchema),
+	},
+	{ additionalProperties: false },
+);
+export type ModelResolutionEvidence = Static<
+	typeof ModelResolutionEvidenceSchema
+>;
+
 export const MaterializedAgentTaskSchema = Type.Object(
 	{
 		id: WorkflowTaskIdSchema,
@@ -255,6 +288,11 @@ export const MaterializedAgentTaskSchema = Type.Object(
 			maxItems: MAX_TASK_NAMESPACE_DEPTH,
 		}),
 		spec: AgentTaskSpecSchema,
+		/**
+		 * Present only on a task whose `modelRole` resolved with an alias, tier
+		 * or family; outside `spec`, so task identity is unchanged.
+		 */
+		modelResolution: Type.Optional(ModelResolutionEvidenceSchema),
 		definitionIdentitySha256: Sha256Schema,
 		materializationSequence: Type.Integer({ minimum: 1 }),
 		materializationEpoch: Type.Integer({ minimum: 1 }),

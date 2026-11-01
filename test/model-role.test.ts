@@ -429,6 +429,92 @@ describe("replay", () => {
 	});
 });
 
+describe("resolution evidence", () => {
+	const EVIDENT: ModelRoutingPort = {
+		resolve: () => ({
+			provider: "test-provider",
+			id: "routed-model",
+			thinking: "medium",
+			source: "tier",
+			persona: "code-review",
+			tier: "normal",
+			family: "alpha",
+			alias: "routed",
+		}),
+	};
+
+	/** The one declared task, whole, out of a committed epoch. */
+	function declaredTask(events: readonly WorkflowEventInput[]) {
+		const declaration = events.find((event) => event.type === "task-declared");
+		if (declaration?.type !== "task-declared") {
+			throw new Error("no task was declared");
+		}
+		return declaration.data.task;
+	}
+
+	it("persists alias, tier and family beside the spec, outside identity", () => {
+		const routed = declaredTask(
+			commitOne(EVIDENT, request({ modelRole: FRONTIER_ROLE })),
+		);
+		expect(routed).toMatchObject({
+			modelResolution: { alias: "routed", tier: "normal", family: "alpha" },
+		});
+		// The spec is the hand-written exact model's, byte for byte.
+		const exact = declaredTask(
+			commitOne(
+				undefined,
+				request({
+					model: {
+						provider: "test-provider",
+						id: "routed-model",
+						thinking: "medium",
+					},
+				}),
+			),
+		);
+		expect(routed.spec).toEqual(exact.spec);
+		expect(exact).not.toHaveProperty("modelResolution");
+	});
+
+	it("records only what the router said", () => {
+		// The static table names a tier and nothing else.
+		const routed = declaredTask(
+			commitOne(
+				staticModelRouting(TABLE),
+				request({ modelRole: FRONTIER_ROLE }),
+			),
+		);
+		expect(routed).toMatchObject({ modelResolution: { tier: "frontier" } });
+		expect((routed as { modelResolution?: object }).modelResolution).toEqual({
+			tier: "frontier",
+		});
+	});
+
+	it("re-uses the persisted evidence on replay instead of asking again", () => {
+		const previousState = project(
+			commitOne(EVIDENT, request({ modelRole: FRONTIER_ROLE })),
+		);
+		const rerouting: ModelRoutingPort = {
+			resolve: () => ({
+				provider: "elsewhere",
+				id: "other",
+				thinking: "low",
+				source: "tier",
+				alias: "other-alias",
+			}),
+		};
+		const runtime = materializer({ modelRouting: rerouting, previousState });
+		const handle = runtime.agent("work", request({ modelRole: FRONTIER_ROLE }));
+		const persisted = Object.values(previousState.tasks)[0];
+		// Adoption compares the whole materialized task, evidence included, so
+		// a replay that re-rolled the evidence would have thrown here.
+		expect(handle.ref.taskId).toBe(persisted?.task.id);
+		expect(persisted?.task).toMatchObject({
+			modelResolution: { alias: "routed", tier: "normal", family: "alpha" },
+		});
+	});
+});
+
 describe("thinking mapping", () => {
 	it("maps max onto pi-subagent's xhigh and passes everything else through", () => {
 		// pi-maestro's ladder has seven rungs; pi-subagent's has six.

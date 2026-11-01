@@ -56,7 +56,11 @@ const RESOLVED: ExactModelRequest = {
  * in the definition's own try/catch, which is how a materialization refusal
  * becomes observable as output instead of a run that merely failed.
  */
-async function roleWorkflowFixture(guarded = false, declaresNeeds = false) {
+async function roleWorkflowFixture(
+	guarded = false,
+	declaresNeeds = false,
+	settles = false,
+) {
 	const base = path.resolve(".pi", "test-model-role", randomUUID());
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
@@ -74,9 +78,11 @@ async function roleWorkflowFixture(guarded = false, declaresNeeds = false) {
       outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
       limits: { cumulativeRuntimeMs: 300000, attemptTimeoutMs: 300000, totalTokens: 1000000, cost: 10, outputBytes: 1024, workspaceWriteBytes: 0, retries: 0, resumes: 0 }
     })`;
-	const body = guarded
-		? `try { return ${declaration}; } catch (error) { return { answer: error.message }; }`
-		: `return ${declaration};`;
+	const body = settles
+		? `const [settled] = await ctx.settled([${declaration}]); return { answer: JSON.stringify(settled.model) };`
+		: guarded
+			? `try { return ${declaration}; } catch (error) { return { answer: error.message }; }`
+			: `return ${declaration};`;
 	await writeFile(
 		path.join(cwd, "workflows", "role.workflow.ts"),
 		`export default {
@@ -84,7 +90,7 @@ async function roleWorkflowFixture(guarded = false, declaresNeeds = false) {
   meta: { name: "role", description: "Model role workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4${declaresNeeds ? ', needs: { workspace: "read-only", modelRouting: true }' : ""} },
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
-  run(ctx) {
+  async run(ctx) {
     ${body}
   }
 };\n`,
@@ -390,6 +396,30 @@ describe("the model routing service option", () => {
 				sessionModel: false,
 				modelRouting: true,
 				declared: true,
+			});
+		} finally {
+			await service.shutdown();
+		}
+	});
+
+	it("hands the definition the routed model and the router's evidence at the barrier", async () => {
+		const fixture = await roleWorkflowFixture(false, true, true);
+		const subagents = roleProvider();
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: subagents.provider,
+			modelRouting: () => staticModelRouting(TABLE),
+		});
+		try {
+			const receipt = await service.run("role", {});
+			const finished = await service.wait(receipt.runId);
+			expect(finished.status).toBe("completed");
+			const answer = (finished as { output?: { answer?: string } }).output
+				?.answer;
+			expect(JSON.parse(answer ?? "null")).toEqual({
+				...RESOLVED,
+				tier: "frontier",
 			});
 		} finally {
 			await service.shutdown();
