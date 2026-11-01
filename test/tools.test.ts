@@ -1107,6 +1107,7 @@ describe("workflow tool declarations", () => {
 				needs: {
 					workspace: "worktree" as const,
 					sessionModel: false,
+					modelRouting: false,
 					declared: true,
 				},
 			}));

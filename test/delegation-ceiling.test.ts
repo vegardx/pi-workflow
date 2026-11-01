@@ -154,16 +154,19 @@ describe("what a definition needs", () => {
 		expect(byName.get("plan-to-ship")).toEqual({
 			workspace: "worktree",
 			sessionModel: true,
+			modelRouting: false,
 			declared: true,
 		});
 		expect(byName.get("deep-review")).toEqual({
 			workspace: "read-only",
 			sessionModel: false,
+			modelRouting: false,
 			declared: true,
 		});
 		expect(byName.get("deep-research")).toEqual({
 			workspace: "read-only",
 			sessionModel: false,
+			modelRouting: false,
 			declared: true,
 		});
 		await expect(service.validate("plan-to-ship")).resolves.toMatchObject({
@@ -182,12 +185,14 @@ describe("what a definition needs", () => {
 		expect(validated.workflow.needs).toEqual({
 			workspace: "worktree",
 			sessionModel: false,
+			modelRouting: false,
 			declared: false,
 		});
 		expect(DEFAULT_WORKFLOW_NEEDS).toEqual({ workspace: "worktree" });
 		expect(resolveWorkflowNeeds({})).toEqual({
 			workspace: "worktree",
 			sessionModel: false,
+			modelRouting: false,
 			declared: false,
 		});
 		// And `workflow_validate` says so in the line a person reads.

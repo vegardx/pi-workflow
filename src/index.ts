@@ -284,6 +284,7 @@ export {
 	type ModelRoleThinkingLevel,
 	type ModelRoleTier,
 	type ModelRoutingPort,
+	modelRoutingRefusalMessage,
 } from "./runtime/model-routing.js";
 export {
 	CEILING_INVALID_MESSAGE,

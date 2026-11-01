@@ -257,6 +257,12 @@ export const WorkflowDefinitionSummarySchema = Type.Object(
 				 * host with none is refused at start.
 				 */
 				sessionModel: Type.Boolean(),
+				/**
+				 * True when some role of the definition declares `modelRole`, so
+				 * the run needs the host's model router and a host with none is
+				 * refused at start.
+				 */
+				modelRouting: Type.Boolean(),
 				declared: Type.Boolean(),
 			},
 			{ additionalProperties: false },
@@ -343,16 +349,19 @@ function needsLine(workflow: {
 	readonly needs: {
 		readonly workspace: string;
 		readonly sessionModel: boolean;
+		readonly modelRouting: boolean;
 		readonly declared: boolean;
 	};
 }): string {
 	const assumed = workflow.needs.declared
 		? ""
 		: " (assumed: the definition declares no needs)";
-	const inherits = workflow.needs.sessionModel
-		? " and the host's session model"
-		: "";
-	return `${workflow.name} v${workflow.version}; needs a ${workflow.needs.workspace} workspace${inherits}${assumed}`;
+	const hostNeeds = [
+		...(workflow.needs.sessionModel ? ["the host's session model"] : []),
+		...(workflow.needs.modelRouting ? ["the host's model router"] : []),
+	];
+	const extra = hostNeeds.length > 0 ? ` and ${hostNeeds.join(" and ")}` : "";
+	return `${workflow.name} v${workflow.version}; needs a ${workflow.needs.workspace} workspace${extra}${assumed}`;
 }
 
 /**

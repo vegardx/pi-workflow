@@ -56,7 +56,7 @@ const RESOLVED: ExactModelRequest = {
  * in the definition's own try/catch, which is how a materialization refusal
  * becomes observable as output instead of a run that merely failed.
  */
-async function roleWorkflowFixture(guarded = false) {
+async function roleWorkflowFixture(guarded = false, declaresNeeds = false) {
 	const base = path.resolve(".pi", "test-model-role", randomUUID());
 	const cwd = path.join(base, "project");
 	const agentDir = path.join(base, "agent");
@@ -81,7 +81,7 @@ async function roleWorkflowFixture(guarded = false) {
 		path.join(cwd, "workflows", "role.workflow.ts"),
 		`export default {
   schema: "pi-workflow-definition",
-  meta: { name: "role", description: "Model role workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4 },
+  meta: { name: "role", description: "Model role workflow", version: 1, budget: { cost: 1000, childRuntimeMs: 3600000 }, timeoutMs: 3600000, concurrency: 4${declaresNeeds ? ', needs: { workspace: "read-only", modelRouting: true }' : ""} },
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
   run(ctx) {
@@ -236,7 +236,7 @@ function roleProvider() {
 			maxSlots: 16,
 		} satisfies WorkflowSubagentBinding;
 	});
-	return { provider: { bind } as WorkflowSubagentProvider, models };
+	return { provider: { bind } as WorkflowSubagentProvider, models, preflight };
 }
 
 async function runRecord(storeRoot: string, runId: string) {
@@ -253,7 +253,7 @@ describe("the model routing service option", () => {
 			...fixture,
 			projectTrusted: () => true,
 			subagents: subagents.provider,
-			modelRouting: staticModelRouting(TABLE),
+			modelRouting: () => staticModelRouting(TABLE),
 		});
 		try {
 			const receipt = await service.run("role", {});
@@ -291,6 +291,106 @@ describe("the model routing service option", () => {
 			expect(
 				await runRecord(fixture.storeRoot, receipt.runId),
 			).not.toHaveProperty("modelRouting");
+		} finally {
+			await service.shutdown();
+		}
+	});
+
+	it("refuses the start by name when the definition needs a router and the host has none", async () => {
+		const fixture = await roleWorkflowFixture(false, true);
+		const subagents = roleProvider();
+		let asked = 0;
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: subagents.provider,
+			// A provider that answers nothing: a host with no router registered.
+			modelRouting: () => {
+				asked += 1;
+				return undefined;
+			},
+		});
+		try {
+			await expect(service.run("role", {})).rejects.toThrow(
+				"role resolves models through routing, and this host has none.",
+			);
+			await expect(service.run("role", {})).rejects.toMatchObject({
+				code: "validation",
+			});
+			// Refused BEFORE the run exists: nothing durable, nothing delegated.
+			await expect(service.listRuns()).resolves.toMatchObject({ runs: [] });
+			expect(subagents.preflight).not.toHaveBeenCalled();
+			expect(subagents.models).toEqual([]);
+			expect(asked).toBe(2);
+		} finally {
+			await service.shutdown();
+		}
+	});
+
+	it("refuses the same start when no provider is installed at all", async () => {
+		const fixture = await roleWorkflowFixture(false, true);
+		const subagents = roleProvider();
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: subagents.provider,
+		});
+		try {
+			await expect(service.run("role", {})).rejects.toThrow(
+				"role resolves models through routing, and this host has none.",
+			);
+			await expect(service.listRuns()).resolves.toMatchObject({ runs: [] });
+			expect(subagents.preflight).not.toHaveBeenCalled();
+		} finally {
+			await service.shutdown();
+		}
+	});
+
+	it("reads the provider per run, so a router registered later is used", async () => {
+		const fixture = await roleWorkflowFixture(false, true);
+		const subagents = roleProvider();
+		let installed: ReturnType<typeof staticModelRouting> | undefined;
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: subagents.provider,
+			modelRouting: () => installed,
+		});
+		try {
+			await expect(service.run("role", {})).rejects.toThrow(
+				"resolves models through routing",
+			);
+			installed = staticModelRouting(TABLE);
+			const receipt = await service.run("role", {});
+			await expect(service.wait(receipt.runId)).resolves.toMatchObject({
+				status: "completed",
+			});
+			expect(subagents.models).toEqual([RESOLVED]);
+			expect(await runRecord(fixture.storeRoot, receipt.runId)).toMatchObject({
+				modelRouting: { router: "static-table" },
+			});
+		} finally {
+			await service.shutdown();
+		}
+	});
+
+	it("reports the need on the definition summary", async () => {
+		const fixture = await roleWorkflowFixture(false, true);
+		const service = await createWorkflowService({
+			...fixture,
+			projectTrusted: () => true,
+			subagents: roleProvider().provider,
+		});
+		try {
+			const {
+				workflows: [summary],
+			} = await service.list();
+			expect(summary?.needs).toEqual({
+				workspace: "read-only",
+				sessionModel: false,
+				modelRouting: true,
+				declared: true,
+			});
 		} finally {
 			await service.shutdown();
 		}

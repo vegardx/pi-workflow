@@ -188,7 +188,10 @@ import {
 	WorkflowRunRecordError,
 	WorkflowRunRecordStore,
 } from "./run-record.js";
-import type { ModelRoutingPort } from "./runtime/model-routing.js";
+import {
+	type ModelRoutingPort,
+	modelRoutingRefusalMessage,
+} from "./runtime/model-routing.js";
 import {
 	createWorkflowSequentialScheduler,
 	WorkflowSchedulerError,
@@ -276,6 +279,8 @@ export type WorkflowDefinitionSummary = {
 		readonly workspace: WorkflowNeeds["workspace"];
 		/** True when some role inherits the host's session model. */
 		readonly sessionModel: boolean;
+		/** True when some role routes its model through the host's router. */
+		readonly modelRouting: boolean;
 		readonly declared: boolean;
 	};
 };
@@ -620,13 +625,17 @@ export interface WorkflowServiceOptions {
 	 */
 	readonly supportTasks?: readonly SupportTaskRegistration[];
 	/**
-	 * The host's router; a `modelRole` declaration resolves through it before
-	 * hashing; without a router such a declaration fails materialization with
-	 * "No model routing is installed; declare an exact model."
-	 * `staticModelRouting(table)` from the runtime entry is the constant-table
-	 * stand-in.
+	 * The host's router provider, read at each run start (where a definition
+	 * that declares `needs.modelRouting` on a host with none is refused,
+	 * {@link modelRoutingRefusalMessage}) and again whenever a run's runtime is
+	 * composed, because a port is live code and cannot be frozen on the record.
+	 * A `modelRole` declaration resolves through the answer before hashing;
+	 * with none it fails materialization with "No model routing is installed;
+	 * declare an exact model." The shipped extension installs
+	 * `() => resolveModelRouting(pi.events)`; `staticModelRouting(table)` from
+	 * the runtime entry is the constant-table test double.
 	 */
-	readonly modelRouting?: ModelRoutingPort;
+	readonly modelRouting?: () => ModelRoutingPort | undefined;
 	/**
 	 * The host's delegation ceiling provider, read once per `workflow_run`
 	 * through {@link WorkflowService.hostDelegationCeiling}. The shipped
@@ -1230,6 +1239,28 @@ export async function createWorkflowService(
 		});
 	}
 
+	/**
+	 * The host's router at this start, or `undefined` when it has none. A
+	 * definition that declares `needs.modelRouting` on a host with none is
+	 * refused BEFORE anything durable exists, by name, exactly like one that
+	 * inherits a session model the host does not have.
+	 */
+	function assertModelRouting(
+		workflow: DiscoveredWorkflow,
+	): ModelRoutingPort | undefined {
+		const routing = options.modelRouting?.();
+		if (
+			routing === undefined &&
+			resolveWorkflowNeeds(workflow.definition.meta).modelRouting
+		) {
+			throw new WorkflowServiceError(
+				"validation",
+				modelRoutingRefusalMessage(workflow.definition.meta.name),
+			);
+		}
+		return routing;
+	}
+
 	/** D10: dynamic source is untrusted orchestration input in a trusted process. */
 	function assertDynamicTrusted(): void {
 		if (!options.projectTrusted()) {
@@ -1593,6 +1624,10 @@ export async function createWorkflowService(
 			if (scheduler.stopSignal.aborted) onStop();
 			else
 				scheduler.stopSignal.addEventListener("abort", onStop, { once: true });
+			// Read again for every drive: a resumed run on a host that lost its
+			// router still replays, because persisted resolutions are re-used and
+			// only a NEW routed declaration needs a port.
+			const modelRouting = options.modelRouting?.();
 			const runtime = createStaticWorkflowRuntime({
 				definition: workflow.definition,
 				definitionIdentitySha256: workflow.identity.identitySha256,
@@ -1604,9 +1639,7 @@ export async function createWorkflowService(
 				signal: controller.signal,
 				...(origin === undefined ? {} : { origin }),
 				...(concurrencyClamp === undefined ? {} : { concurrencyClamp }),
-				...(options.modelRouting === undefined
-					? {}
-					: { modelRouting: options.modelRouting }),
+				...(modelRouting === undefined ? {} : { modelRouting }),
 				// From the RECORD, not from the host: a resume of a run that
 				// inherited a model still declares that model, whatever the host's
 				// session is using now.
@@ -2237,6 +2270,7 @@ export async function createWorkflowService(
 			const parent = owned.get(request.parent.runId)?.record;
 			const parentCeiling = parent?.ceiling;
 			const parentSessionModel = parent?.sessionModel;
+			const childRouting = options.modelRouting?.();
 			const binding = await options.subagents.bind(request.childRunId);
 			let lease: WorkflowRunLease;
 			try {
@@ -2330,8 +2364,8 @@ export async function createWorkflowService(
 						],
 						inputArtifacts: structuredClone(request.inputArtifacts),
 					},
-					...(options.modelRouting?.id
-						? { modelRouting: { router: options.modelRouting.id } }
+					...(childRouting?.id
+						? { modelRouting: { router: childRouting.id } }
 						: {}),
 					// A nested run inherits its parent's ceiling. It is the same
 					// delegation seen one level down, so a child that escaped the bound
@@ -2596,6 +2630,8 @@ export async function createWorkflowService(
 				// Also before the run exists, and for the same reason: a definition
 				// that inherits the session model cannot run on a host that has none.
 				const sessionModel = assertSessionModel(workflow);
+				// And the router, for the same reason and in the same place.
+				const routing = assertModelRouting(workflow);
 				const id = runId();
 				const binding = await options.subagents.bind(id);
 				const slots = slotBoundConcurrency(
@@ -2653,9 +2689,7 @@ export async function createWorkflowService(
 						cwd,
 						input: JSON.parse(JSON.stringify(input)) as unknown,
 						createdAt: createdAt.toISOString(),
-						...(options.modelRouting?.id
-							? { modelRouting: { router: options.modelRouting.id } }
-							: {}),
+						...(routing?.id ? { modelRouting: { router: routing.id } } : {}),
 						// Recorded at creation and never changed: a run keeps the
 						// ceiling it started with.
 						...(ceiling === undefined ? {} : { ceiling }),

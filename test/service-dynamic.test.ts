@@ -987,6 +987,7 @@ describe("decideSource", () => {
 					needs: {
 						workspace: "worktree",
 						sessionModel: false,
+						modelRouting: false,
 						declared: false,
 					},
 				},

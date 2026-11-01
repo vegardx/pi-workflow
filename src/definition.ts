@@ -109,6 +109,18 @@ export const WorkflowNeedsSchema = Type.Object(
 		 * ({@link MODEL_INHERIT_UNAVAILABLE_MESSAGE}).
 		 */
 		sessionModel: Type.Optional(Type.Boolean()),
+		/**
+		 * True when some role of this definition declares `modelRole` and the run
+		 * therefore needs the host's model router.
+		 *
+		 * The third axis, for the same reason as the second: a host with no router
+		 * cannot run this definition at all, and that refusal belongs at the
+		 * start ({@link modelRoutingRefusalMessage}) rather than on the first
+		 * routed task. Absent or false means no role routes; a definition that
+		 * routes without declaring it fails materialization with
+		 * {@link MODEL_ROUTING_MISSING_MESSAGE} instead.
+		 */
+		modelRouting: Type.Optional(Type.Boolean()),
 	},
 	{ additionalProperties: false },
 );
@@ -128,17 +140,20 @@ export function resolveWorkflowNeeds(meta: {
 }): {
 	readonly workspace: WorkflowNeeds["workspace"];
 	readonly sessionModel: boolean;
+	readonly modelRouting: boolean;
 	readonly declared: boolean;
 } {
 	return meta.needs
 		? Object.freeze({
 				workspace: meta.needs.workspace,
 				sessionModel: meta.needs.sessionModel === true,
+				modelRouting: meta.needs.modelRouting === true,
 				declared: true,
 			})
 		: Object.freeze({
 				workspace: DEFAULT_WORKFLOW_NEEDS.workspace,
 				sessionModel: false,
+				modelRouting: false,
 				declared: false,
 			});
 }
