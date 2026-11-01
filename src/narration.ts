@@ -28,7 +28,7 @@
  * `<stage id>-<deliverable id>`, and a fan-out member is
  * `<stage id>-<deliverable id>/<member>`. A leading segment this module knows
  * (`implement`, `check`, `recheck`, `review`, `normalize`, `resume`,
- * `synthesis`, `refine`) names the kind
+ * `adjudicate`, `synthesis`, `refine`) names the kind
  * and the rest of that segment names the deliverable; a checkpoint is `gate`
  * whatever it is called; anything else is `other`, which is an honest answer
  * and not a failure. A project definition that names its tasks differently gets
@@ -53,6 +53,7 @@ export const NARRATED_TASK_KINDS = Object.freeze([
 	"review",
 	"normalize",
 	"resume",
+	"adjudicate",
 	"synthesis",
 	"gate",
 	"refine",
@@ -75,6 +76,7 @@ const KIND_BY_STAGE_ID: Readonly<Record<string, NarratedTaskKind>> =
 		review: "review",
 		normalize: "normalize",
 		resume: "resume",
+		adjudicate: "adjudicate",
 		synthesis: "synthesis",
 		refine: "refine",
 	});

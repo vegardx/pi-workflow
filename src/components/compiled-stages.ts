@@ -49,13 +49,14 @@ export const COMPILED_STAGE_KINDS = Object.freeze([
 	"review-fan-out",
 	"normalize",
 	"resume",
+	"adjudicate",
 	"gate",
 ] as const);
 export type CompiledStageKind = (typeof COMPILED_STAGE_KINDS)[number];
 
 /** `plan-to-ship`'s own deliverable bound, repeated as the document's. */
 export const MAX_COMPILED_DELIVERABLES = 16;
-/** implement, check, review, normalize, resume, recheck - and room to spare. */
+/** implement, check, review, normalize, resume, recheck, adjudicate - and one spare. */
 export const MAX_COMPILED_STAGES = 8;
 /** `reviewFanOut`'s bound, so a compiled fan-out cannot describe an illegal one. */
 export const MAX_COMPILED_LENSES = 16;
@@ -178,12 +179,27 @@ export const CompiledResumeStageSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * One read-only judge over the clusters the resumed implementer contested
+ * (`declined` or `out-of-scope`), ruling `upheld | overruled | undecidable` on
+ * each. It returns nothing to the implementer and never holds the run. Present
+ * only with reviews and under `policy.resumes: 1`.
+ */
+export const CompiledAdjudicateStageSchema = Type.Object(
+	{
+		use: Type.Literal("adjudicate"),
+		id: CompiledStageIdSchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const CompiledStageSchema = Type.Union([
 	CompiledImplementStageSchema,
 	CompiledCheckStageSchema,
 	CompiledReviewFanOutStageSchema,
 	CompiledNormalizeStageSchema,
 	CompiledResumeStageSchema,
+	CompiledAdjudicateStageSchema,
 	CompiledGateStageSchema,
 ]);
 export type CompiledStage = Static<typeof CompiledStageSchema>;

@@ -2,9 +2,15 @@ import type { ExactModelRequest } from "@vegardx/pi-subagent";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+	AdjudicatorViewSchema,
+	adjudicationSchema,
+	adjudicatorView,
 	applyModelMerges,
+	CONTESTED_SPEC_RATIO,
 	checkDispositions,
+	checkVerdicts,
 	clusterFindings,
+	contestedClusters,
 	ImplementerViewSchema,
 	implementerView,
 	type LensFinding,
@@ -19,6 +25,8 @@ import {
 	reviewCounts,
 	reviewerEntries,
 	reviewerKey,
+	specLikelyAtFault,
+	withAdjudications,
 	withDispositions,
 } from "../src/components/index.js";
 
@@ -473,7 +481,241 @@ describe("the record", () => {
 			declined: 1,
 			outOfScope: 0,
 			unanswered: 0,
+			// The decline is contested, and nobody has ruled on it yet.
+			contested: 1,
+			upheld: 0,
+			overruled: 0,
+			undecidable: 0,
 		});
 		expect(reviewCounts(record).unanswered).toBe(2);
+	});
+});
+
+describe("adjudication", () => {
+	const reviewers = [
+		reviewer("a", [
+			finding("a.ts", 1, "One.", { severity: "high", suggestion: "Fix." }),
+			finding("b.ts", 1, "Two."),
+			finding("c.ts", 1, "Three."),
+			finding("d.ts", 1, "Four."),
+		]),
+	];
+	const base: ReviewsRecord = {
+		deliverable: "d0",
+		handoffCommit: "a".repeat(40),
+		reviewers: [...reviewerEntries(reviewers)],
+		clusters: [...clusterFindings(reviewers)],
+		normalizer: { mode: "deterministic" },
+	};
+	const answered = withDispositions(base, [
+		{ id: "c1", kind: "fixed", reasoning: "Fixed it." },
+		{ id: "c2", kind: "declined", reasoning: "Intended." },
+		{ id: "c3", kind: "out-of-scope", reasoning: "Other work." },
+	]);
+	const JUDGE = {
+		provider: "test-provider",
+		id: "judge",
+		thinking: "high",
+		alias: "judge",
+		tier: "frontier",
+		family: "other-family",
+	} as const;
+
+	it("contests only declined and out-of-scope clusters", () => {
+		// c1 was fixed and c4 was never answered: neither is contested.
+		expect(contestedClusters(answered.clusters).map((c) => c.id)).toEqual([
+			"c2",
+			"c3",
+		]);
+	});
+
+	it("treats a cluster every fast lens reported as a lead, not a claim", () => {
+		const lead = answered.clusters.map((cluster) =>
+			cluster.id === "c2"
+				? {
+						...cluster,
+						reportedBy: cluster.reportedBy.map((entry) => ({
+							...entry,
+							tier: "fast" as const,
+						})),
+					}
+				: cluster,
+		);
+		expect(contestedClusters(lead).map((c) => c.id)).toEqual(["c3"]);
+	});
+
+	it("shows the adjudicator the claim and the answer, and withholds who said it", () => {
+		const view = adjudicatorView(answered.clusters, reviewers);
+		expect(Value.Check(AdjudicatorViewSchema, view)).toBe(true);
+		expect(view.items).toEqual([
+			{
+				id: "c2",
+				claim: "Two.",
+				location: { file: "b.ts", line: 1 },
+				evidence: "evidence for Two.",
+				disposition: { kind: "declined", reasoning: "Intended." },
+			},
+			{
+				id: "c3",
+				claim: "Three.",
+				location: { file: "c.ts", line: 1 },
+				evidence: "evidence for Three.",
+				disposition: { kind: "out-of-scope", reasoning: "Other work." },
+			},
+		]);
+		const text = JSON.stringify(view);
+		for (const withheld of ["severity", "lens", "model", "Fix.", "agreement"]) {
+			expect(text).not.toContain(withheld);
+		}
+	});
+
+	it.each([
+		[
+			"rules on every shown id exactly once",
+			{
+				verdicts: [
+					{ id: "c3", verdict: "overruled", reasoning: "Out of scope indeed." },
+					{ id: "c2", verdict: "upheld", reasoning: "Not intended." },
+				],
+			},
+			undefined,
+		],
+		[
+			"repeats an id",
+			{
+				verdicts: [
+					{ id: "c2", verdict: "upheld", reasoning: "a" },
+					{ id: "c2", verdict: "upheld", reasoning: "b" },
+				],
+			},
+			"it answers c2 more than once",
+		],
+		[
+			"leaves one out",
+			{ verdicts: [{ id: "c2", verdict: "upheld", reasoning: "a" }] },
+			"it leaves c3 unanswered",
+		],
+		[
+			"names an id it was not shown",
+			{
+				verdicts: [
+					{ id: "c2", verdict: "upheld", reasoning: "a" },
+					{ id: "c1", verdict: "upheld", reasoning: "b" },
+				],
+			},
+			'it answers "c1", which it was not shown',
+		],
+		[
+			"says something that is not a verdict",
+			{
+				verdicts: [
+					{ id: "c2", verdict: "maybe", reasoning: "a" },
+					{ id: "c3", verdict: "upheld", reasoning: "b" },
+				],
+			},
+			"its answer is not a list of verdicts over the items it was shown",
+		],
+		[
+			"carries anything but verdicts",
+			{
+				verdicts: [
+					{ id: "c2", verdict: "upheld", reasoning: "a" },
+					{ id: "c3", verdict: "upheld", reasoning: "b" },
+				],
+				severity: "high",
+			},
+			"its answer is not a list of verdicts over the items it was shown",
+		],
+	])("checks an answer that %s", (_name, answer, problem) => {
+		const view = adjudicatorView(answered.clusters, reviewers);
+		expect(checkVerdicts(view, answer)).toBe(problem);
+		// The task's own schema is the narrow one, over exactly the shown ids.
+		expect(
+			Value.Check(
+				adjudicationSchema(view.items.map((item) => item.id)),
+				answer,
+			),
+		).toBe(problem === undefined || problem === "it answers c2 more than once");
+	});
+
+	it("records each ruling and the adjudicator, and counts them", () => {
+		const ruled = withAdjudications(
+			answered,
+			{
+				verdicts: [
+					{ id: "c2", verdict: "upheld", reasoning: "Not intended." },
+					{ id: "c3", verdict: "undecidable", reasoning: "Cannot tell." },
+				],
+			},
+			{ model: JUDGE, promptDigest: PROMPT },
+		);
+		expect(Value.Check(ReviewsRecordSchema, ruled)).toBe(true);
+		expect(ruled.clusters[1]?.adjudication).toEqual({
+			verdict: "upheld",
+			reasoning: "Not intended.",
+			model: "test-provider/judge",
+			thinking: "high",
+			alias: "judge",
+			tier: "frontier",
+			family: "other-family",
+		});
+		expect(ruled.clusters[0]).not.toHaveProperty("adjudication");
+		expect(ruled.adjudicator).toEqual({
+			model: "test-provider/judge",
+			thinking: "high",
+			alias: "judge",
+			tier: "frontier",
+			family: "other-family",
+			promptDigest: PROMPT,
+		});
+		expect(reviewCounts(ruled)).toMatchObject({
+			clusters: 4,
+			contested: 2,
+			upheld: 1,
+			overruled: 0,
+			undecidable: 1,
+		});
+		// The ruling never touches what the reviewers' identity hashes.
+		expect(ruled.reviewers).toEqual(answered.reviewers);
+	});
+
+	it("names the spec as the likely problem at half the clusters and two or more", () => {
+		const counts = (contested: number, clusters: number) =>
+			({
+				...reviewCounts(answered),
+				contested,
+				clusters,
+			}) as ReturnType<typeof reviewCounts>;
+		expect(CONTESTED_SPEC_RATIO).toBe(0.5);
+		expect(specLikelyAtFault(counts(2, 4))).toBe(true);
+		expect(specLikelyAtFault(counts(2, 5))).toBe(false);
+		expect(specLikelyAtFault(counts(1, 2))).toBe(false);
+		expect(specLikelyAtFault(counts(3, 3))).toBe(true);
+		expect(specLikelyAtFault(reviewCounts(answered))).toBe(true);
+	});
+
+	it("carries the router's evidence on reviewers and reporters, outside the key", () => {
+		const routed = [
+			reviewer("a", [finding("a.ts", 1, "One.")], {
+				...SOL,
+				alias: "sol",
+				tier: "normal",
+				family: "same-family",
+			} as ExactModelRequest),
+		];
+		const [entry] = reviewerEntries(routed);
+		expect(entry).toMatchObject({
+			alias: "sol",
+			tier: "normal",
+			family: "same-family",
+		});
+		expect(entry?.reviewerKey).toBe(
+			reviewerKey({ lens: "a", promptSha256: PROMPT, model: SOL }),
+		);
+		expect(clusterFindings(routed)[0]?.reportedBy[0]).toMatchObject({
+			alias: "sol",
+			tier: "normal",
+			family: "same-family",
+		});
 	});
 });

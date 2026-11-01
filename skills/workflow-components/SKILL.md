@@ -131,6 +131,7 @@ deliverable's `reviews` list and the plan's `policy`.
 | `review-fan-out` | `id`, `lenses` (≤16 of `{id, tier?, diverse?, skill?, model?}`) |
 | `normalize` | `id` — the harness's clustering and the merge-only model call |
 | `resume` | `id` — the implementer answering the check and the review |
+| `adjudicate` | `id` — a judge ruling on what the implementer contested |
 | `gate` | `id`, `question`, `show?` |
 
 `dynamic` and `sub-workflow` cannot appear: the plan has no stage vocabulary to
@@ -138,7 +139,8 @@ name them with, and the second does not exist. Nor does a `gate`, in practice:
 `gates` alone says where a person is asked, so `plan-to-ship` derives
 `implement` and `check`, then — only when the deliverable's `reviews` list is
 non-empty — `review-fan-out` and `normalize`, then — under `policy.resumes: 1`
-— `resume` and the `recheck` `check`, and nothing else.
+— `resume` and the `recheck` `check`, then — with both — `adjudicate`, and
+nothing else.
 
 ## Builtin workflows assembled from the library
 
