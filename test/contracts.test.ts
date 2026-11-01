@@ -148,9 +148,9 @@ describe("workflow contracts", () => {
 		});
 	});
 
-	it("publishes revision 26 and rejects revision 25", () => {
-		expect(WORKFLOW_CONTRACT_REVISION).toBe(26);
-		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(26);
+	it("publishes revision 27 and rejects revision 26", () => {
+		expect(WORKFLOW_CONTRACT_REVISION).toBe(27);
+		expect(WORKFLOW_RUNTIME_CONTRACT.contractRevision).toBe(27);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.supportTaskExecution).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedWorkflows).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.nestedArtifactInputs).toBe(true);
@@ -167,9 +167,11 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.serviceProviderDecide).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows).toBe(true);
+		// Revision 27: the model-routing provider bus protocol.
+		expect(WORKFLOW_RUNTIME_CONTRACT.features.modelRoutingProvider).toBe(true);
 		const event = {
 			schema: "pi-workflow-event",
-			contractRevision: 26,
+			contractRevision: 27,
 			sequence: 1,
 			eventId: "event-1",
 			timestamp: "2026-09-01T00:00:00.000Z",
@@ -189,7 +191,7 @@ describe("workflow contracts", () => {
 		).toBe(false);
 		const snapshot = {
 			schema: "pi-workflow-snapshot",
-			contractRevision: 26,
+			contractRevision: 27,
 			runId: "workflow_abc123",
 			ownerId: "test",
 			leaseId: "lease-test",
@@ -218,8 +220,8 @@ describe("workflow contracts", () => {
 		).toBe(false);
 		// The persisted-state claim in docs/compatibility.md and
 		// docs/acceptance.md: every earlier revision is refused, not just 22,
-		// and no migration turns one into a revision-26 record.
-		for (let revision = 1; revision <= 25; revision += 1) {
+		// and no migration turns one into a revision-27 record.
+		for (let revision = 1; revision <= 26; revision += 1) {
 			expect(
 				Value.Check(WorkflowJournalEventSchema, {
 					...event,

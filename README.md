@@ -12,8 +12,9 @@ in a worker-thread VM against the same runtime only after a human has
 approved its exact digest), and an operator surface (`/workflow`, the
 `pi-workflow` widget, the `alt+w` inspector, and the
 `workflow_retry`/`workflow_resume` tools) that projects the service's read
-views. Version 7.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 26 with
-the feature flags `checkpoints: true` and `dynamicWorkflows: true` alongside
+views. Version 8.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 27 with
+the feature flags `checkpoints: true`, `dynamicWorkflows: true` and
+`modelRoutingProvider: true` alongside
 the earlier flags, and it requires pi-subagent 0.20.0, contract revision 12
 (`handoffExport: true`, `vmMemoryCeiling: true`,
 `workspaceBudgetRefusal: true`, `capacityWait: true` among its required
@@ -93,7 +94,11 @@ reason: contract revision 25, for the pi-subagent revision-11 handshake and its
 1 GiB guest memory floor, cannot read revision-24 runs. 7.0.0 is a major for
 the same reason: contract revision 26, for the pi-subagent revision-12
 handshake and its `capacity` failure code, cannot read revision-25 runs; the
-subagent binding also gains the required `maxSlots`.
+subagent binding also gains the required `maxSlots`. 8.0.0 is a major for the
+same reason — contract revision 27, for the persisted model-routing evidence on
+an agent task, cannot read revision-26 runs — and because the model tiers, the
+routing option, the removed stand-in models and the review record change
+shape.
 
 Import from the package root for anything that declares a shape or drives
 the two APIs:

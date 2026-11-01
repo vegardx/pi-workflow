@@ -695,6 +695,7 @@ export const WorkflowRuntimeContractSchema = Type.Object(
 				checkpoints: Type.Boolean(),
 				serviceProviderStart: Type.Boolean(),
 				serviceProviderDecide: Type.Boolean(),
+				modelRoutingProvider: Type.Boolean(),
 			},
 			{ additionalProperties: false },
 		),
@@ -770,6 +771,10 @@ export const WORKFLOW_RUNTIME_CONTRACT: WorkflowRuntimeContract = Object.freeze(
 			checkpoints: true,
 			serviceProviderStart: true,
 			serviceProviderDecide: true,
+			// Revision 27: the model-routing provider bus protocol, which the
+			// shipped extension reads per run and builtins need (`needs
+			// .modelRouting`).
+			modelRoutingProvider: true,
 		}),
 	},
 );

@@ -6,6 +6,95 @@ surfaces described in
 `WORKFLOW_CONTRACT_REVISION` is tracked independently in
 [docs/compatibility.md](docs/compatibility.md).
 
+## 8.0.0
+
+Major release: models are routed, not named. Every builtin role that does not
+inherit the session model asks the host's router for one through `modelRole`,
+the stand-in model constants are gone, and `plan-to-ship` gains an
+adjudication stage. A routed agent task persists the router's evidence beside
+its spec, so `WORKFLOW_CONTRACT_REVISION` becomes 27, and a release that cannot
+read the previous revision's runs is a major. A host pinning `>=7.0.0 <8` moves
+to `>=8.0.0 <9`.
+
+### Breaking
+
+- **Revision 27 refuses revision-26 state.** Journals, snapshots, run records,
+  decision records and dynamic proposals written by 7.0.0 are not read; there
+  is no migration. The dynamic host API digest rotates.
+- **The tier vocabulary is `fast | light | normal | frontier`** in
+  `MODEL_ROLE_TIERS`, `ENVELOPE_TIERS`, `ReviewTier` and the compiled document.
+  `light | standard | heavy` are refused like any unknown value; nothing maps
+  them. An authored review (a `plan-to-ship` `reviews[]` entry or
+  `policy.reviewDefault`, a `deep-review` lens) names `light` or `normal`:
+  `frontier` is refused by name ("frontier is never a review lens"), and so is
+  `fast` ("fast runs only as a standing sweep"). `reviewDefault.tier` defaults
+  to `normal`.
+- **The stand-in models are removed.** `MODEL_PROVIDER`, `MODEL_ID`,
+  `DIVERSE_MODEL_ID`, `THINKING_BY_TIER`, `tierModel`, `Envelope.model` and the
+  review fan-out's `diversity` seam (`ReviewDiversitySeam`,
+  `ResolvedReviewLens.diverseStandIn`) are gone, with every stand-in log line.
+  There is no tier-to-thinking table outside the `staticModelRouting` test
+  double: the router decides the thinking level.
+- **Routing is required by the builtins.** `plan-to-ship`, `deep-review` and
+  `deep-research` declare `needs.modelRouting: true` and are refused before a
+  run exists on a host with no router: "<name> resolves models through
+  routing, and this host has none." Review lenses ask for `{ persona:
+  "code-review", tier, family: "other" when diverse }` (an exact
+  `provider/model` pin still wins, at the review stage's thinking level), the
+  normalize call and the receipt for `{ persona: "codebase-research", tier:
+  "light" }`, `deep-review` for `code-review` at `normal`, and `deep-research`
+  for `codebase-research` at `normal`, its cross-checks for another family.
+- **`WorkflowServiceOptions.modelRouting` is a provider**, `() =>
+  ModelRoutingPort | undefined`, read at every run start and every drive.
+- **`reviewFanOut` and `reviewLenses` take `modelRole`** for a lens that pins
+  nothing, narrowed by the lens's `tier` and `diverse`; a diverse or tiered
+  lens with neither a pin nor a role is refused.
+- **The review record is revision 2** (`pi-workflow/reviews-record`): reviewers,
+  `reportedBy` entries and the normalizer carry the router's optional `alias`,
+  `tier` and `family`; clusters carry an optional `adjudication` and the record
+  an optional `adjudicator`; `ReviewCounts` gains `contested`, `upheld`,
+  `overruled` and `undecidable`.
+- **The compiled stage document admits `adjudicate`**, and `plan-to-ship`
+  derives it after `recheck` for every reviewed deliverable under
+  `policy.resumes: 1`. `plan-to-ship` is `meta.version` 7.
+- **The shipped agent templates fence placeholder routes.** pi-subagent's
+  fence is exact and the shipped templates win over a host's copies
+  (`agentRootsFirst`), so no stand-in route remains and no real model is
+  admitted until pi-subagent can fence a routed model.
+
+### Added
+
+- **The model-routing provider bus protocol**:
+  `registerModelRoutingProvider(events, port)` and
+  `resolveModelRouting(events)` on channel
+  `@vegardx/pi-workflow/model-routing-provider/request/v1`, failing closed
+  with `ModelRoutingProviderError` code `duplicate` or `invalid`; every
+  `resolve()` answer is checked and a bad one is a named `ModelRoutingError`.
+  The extension installs it per run, and the runtime contract advertises
+  `modelRoutingProvider: true`.
+- **`needs.modelRouting`**, reported by `workflow_list` and
+  `workflow_validate`, and `modelRoutingRefusalMessage`.
+- **Routing evidence on the journal**: a routed agent task persists
+  `modelResolution { alias?, tier?, family? }` outside identity, re-used on
+  replay, and `ctx.settled` hands a definition `model { provider, id,
+  thinking, alias?, tier?, family? }`.
+- **Adjudication in `plan-to-ship`**: `adjudicate-<d>`, one optional read-only
+  `frontier` judge of another family at the resumed hand-off, rules `upheld |
+  overruled | undecidable` on every cluster the implementer declined or called
+  out of scope, every id exactly once; a refused or failed ruling leaves the
+  clusters unadjudicated and is logged, never retried. The gates, the receipt
+  note and `shipSummary` count the rulings, and say the deliverable's spec is
+  the likely problem when at least two clusters and at least half of them
+  (`CONTESTED_SPEC_RATIO`) were contested. The `adjudicator` agent template
+  ships with it, the envelope gains the `adjudicate` row, and narration the
+  `adjudicate` kind.
+
+### Fixed
+
+- The README and the `agentRootsFor` comment said a host's agent definition
+  overrides a shipped template; under pi-subagent's `agentRootsFirst` the
+  shipped template wins, and both now say so.
+
 ## 7.0.0
 
 Major release: pi-subagent 0.20.0 (contract revision 12) is required. A full

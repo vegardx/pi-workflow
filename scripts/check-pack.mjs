@@ -236,13 +236,19 @@ try {
 	// is raised deliberately to 3072 KiB and this measurement keeps 144 KiB
 	// spare. The ENTRY bound stays at 208: 10 spare entries is still ample, and
 	// four slices in a row have added prose rather than files.
-	if (workflow.entryCount > 208 || workflow.unpackedSize > 3072 * 1024) {
+	// 8.0.0 (routing, tiers, adjudication): measured 209 entries and 3068 KiB
+	// unpacked - three entries over the 206 of 7.0.0 (dist/model-routing-
+	// provider.js and .d.ts, and workflows/agents/adjudicator.md) and 4 KiB
+	// under the old size bound, with the README, CHANGELOG, contracts and the
+	// skills carrying the routing and adjudication prose. Both bounds are
+	// raised deliberately: 216 entries (7 spare) and 3200 KiB (132 KiB spare).
+	if (workflow.entryCount > 216 || workflow.unpackedSize > 3200 * 1024) {
 		throw new Error(
 			`packed package exceeds release bounds: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked`,
 		);
 	}
 	process.stdout.write(
-		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 208 entries, 3072 KiB)\n`,
+		`packed ${workflow.filename}: ${workflow.entryCount} entries, ${Math.ceil(workflow.unpackedSize / 1024)} KiB unpacked (bounds 216 entries, 3200 KiB)\n`,
 	);
 	const rootExports = await readExportList(rootExportList);
 	const runtimeExports = await readExportList(runtimeExportList);
@@ -282,7 +288,7 @@ const ceilingProvider = await import("@vegardx/pi-subagent/ceiling-provider");
 const { readFile } = await import("node:fs/promises");
 // D4: the manifest is an exported entry, read through the exports map.
 const manifest = (await import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })).default;
-if (manifest?.name !== "@vegardx/pi-workflow" || manifest.version !== "7.0.0") throw new Error("packed ./package.json export did not return the 7.0.0 manifest");
+if (manifest?.name !== "@vegardx/pi-workflow" || manifest.version !== "8.0.0") throw new Error("packed ./package.json export did not return the 8.0.0 manifest");
 // Spec 2.4 items 2-4: both entry points export exactly the pinned lists, the
 // lists are disjoint, and deep dist/ paths are not reachable.
 const pinned = {
@@ -363,8 +369,11 @@ if (
 	!workflow.NestedWorkflowTaskSpecSchema ||
 	!workflow.NestedWorkflowTerminalEvidenceSchema ||
 	!workflow.NestedWorkflowInputArtifactsSchema ||
-	workflow.WORKFLOW_CONTRACT_REVISION !== 26 ||
+	workflow.WORKFLOW_CONTRACT_REVISION !== 27 ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.worktrees !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.features.modelRoutingProvider !== true ||
+	typeof workflow.registerModelRoutingProvider !== "function" ||
+	typeof workflow.resolveModelRouting !== "function" ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints !== true ||
 	workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows !== true ||
 	typeof runtime.createDynamicWorkflowDefinition !== "function" ||
@@ -469,8 +478,8 @@ if (
 if (
 	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
 	compatibility.piWorkflow.version !== manifest.version ||
-	compatibility.piWorkflow.version !== "7.0.0" ||
-	compatibility.piWorkflow.api?.version !== "7.0.0" ||
+	compatibility.piWorkflow.version !== "8.0.0" ||
+	compatibility.piWorkflow.api?.version !== "8.0.0" ||
 	JSON.stringify(compatibility.piWorkflow.api.frozenSurfaces) !== JSON.stringify(["authoring", "service", "contract", "extension"]) ||
 	JSON.stringify(compatibility.piWorkflow.api.entryPoints) !== JSON.stringify({ ".": "frozen", "./extension": "frozen", "./runtime": "unfrozen", "./components": "unfrozen", "./service-provider": "unfrozen" }) ||
 	compatibility.piWorkflow.api.exportList !== ${JSON.stringify(rootExportList)} ||
@@ -478,6 +487,7 @@ if (
 	compatibility.piWorkflow.contractRevision !== workflow.WORKFLOW_CONTRACT_REVISION ||
 	compatibility.piWorkflow.features?.checkpoints !== workflow.WORKFLOW_RUNTIME_CONTRACT.features.checkpoints ||
 	compatibility.piWorkflow.features?.dynamicWorkflows !== workflow.WORKFLOW_RUNTIME_CONTRACT.features.dynamicWorkflows ||
+	compatibility.piWorkflow.features?.modelRoutingProvider !== workflow.WORKFLOW_RUNTIME_CONTRACT.features.modelRoutingProvider ||
 	compatibility.transformer?.package !== "amaro" ||
 	compatibility.transformer?.version !== manifest.dependencies?.amaro ||
 	compatibility.piSubagent.contractRevision !== subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision ||
