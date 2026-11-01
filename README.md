@@ -15,12 +15,13 @@ approved its exact digest), and an operator surface (`/workflow`, the
 views. Version 8.0.0 on Pi `>=1.4.0 <2`; runtime contract revision 27 with
 the feature flags `checkpoints: true`, `dynamicWorkflows: true` and
 `modelRoutingProvider: true` alongside
-the earlier flags, and it requires pi-subagent 0.20.0, contract revision 12
+the earlier flags, and it requires pi-subagent 0.21.0, contract revision 13
 (`handoffExport: true`, `vmMemoryCeiling: true`,
-`workspaceBudgetRefusal: true`, `capacityWait: true` among its required
-features). A run's concurrency is clamped to the host's VM slots. The
-human-only `/workflow decide` and `/workflow approve|reject` commands are part
-of the operator surface; a Pi tool for handoff export remains unavailable.
+`workspaceBudgetRefusal: true`, `capacityWait: true`,
+`hostModelAdmission: true` among its required features). A run's concurrency
+is clamped to the host's VM slots. The human-only `/workflow decide` and
+`/workflow approve|reject` commands are part of the operator surface; a Pi tool
+for handoff export remains unavailable.
 
 ## Goal
 
@@ -444,9 +445,11 @@ Because the runtime sends the **resolved exact model**, pi-subagent's preflight
 checks it against the agent template's `allowedModels` as an ordinary request. An
 `inherit` entry in a template admits a *direct* delegation that asks to inherit,
 not a workflow task that already resolved one — so a template used by an
-inheriting role must also list the `provider/id:thinking` keys of the models you
-run sessions on, or the task fails preflight with `model exceeds ceiling:
-<model>`. The shipped `implementer` and `planner` templates say so.
+inheriting role must also admit the session's model, by its exact
+`provider/id:thinking` key or through `host`, or the task fails preflight with
+`model exceeds ceiling: <model>`. The shipped `implementer` and `planner`
+templates list `host`, so the host's model admission must cover the models it
+runs sessions on.
 
 `project(ref, input)` is the lease-free half of the seam: it runs the
 definition's `run(ctx)` against a context that declares nothing durable — no
@@ -881,18 +884,19 @@ the implementer is the only one with `edit`/`write`/`bash`, the only one
 allowed `workspaceModes: [worktree]`, and carries a 2 GiB
 `workspaceWriteBytes` ceiling so a real install and build fit.
 
-**Known limitation: the shipped model fences are placeholders.** pi-subagent's
-fence is exact — a request admits only a listed `provider/id:thinking` route,
-or `inherit` for a direct delegation that asks to inherit — it requires a
-default `model`, and it has no wildcard. pi-workflow always sends the RESOLVED
+**The host admits the model.** Every shipped template lists `host` in
+`allowedModels` and names no default `model`; `implementer` and `planner` also
+keep `inherit` for a direct delegation. pi-workflow always sends the RESOLVED
 exact model (the router's answer for a `modelRole`, the session model for
-`inherit`), so a routed or inherited task passes preflight only when the
-template lists that exact route. The shipped templates list
-`placeholder/same-family` and `placeholder/other-family` routes, which admit no
-real model, and because the shipped templates win over any copy, a builtin
-workflow cannot launch a task against a real model until pi-subagent can fence
-a routed model or the package ships real routes. A task outside the fence fails
-preflight with `model exceeds ceiling: <model>`.
+`inherit`), and pi-subagent's preflight asks the host's model-admission
+provider whether it stands behind that model at that thinking level. The host
+must register one with `registerModelAdmissionProvider` from
+`@vegardx/pi-subagent/model-admission-provider` and admit every model its
+router answers and every session model it runs on. On a host that registers
+none, every builtin task is refused by name at preflight with `model exceeds
+ceiling: <model> (template admits host, no host model admission provider
+answered)`; a model the host declines is refused with `model exceeds ceiling:
+<model> (template admits host, host does not admit it)`.
 
 ### `deep-review`
 
@@ -939,9 +943,9 @@ is safe to run while planning.
 
 One agent template, `lens-reviewer`, covers both the lens reviewers and the
 reducer. Its ceiling covers the component library's `review` and `synthesis`
-rows at every review tier, and its `allowedModels` must cover both model
-families, so a `diverse` lens has somewhere to route (the shipped routes are
-placeholders; see the limitation under `plan-to-ship`).
+rows at every review tier, and its `allowedModels` lists `host`, so a
+`diverse` lens runs on whichever family the router answers, provided the host
+admits it (see "The host admits the model" under `plan-to-ship`).
 
 **Nothing here inherits the session model,** and that is a decision rather than
 an omission. Every lens asks the host's router for a `code-review` model at its

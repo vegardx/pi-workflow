@@ -10,11 +10,12 @@ surfaces described in
 
 Major release: models are routed, not named. Every builtin role that does not
 inherit the session model asks the host's router for one through `modelRole`,
-the stand-in model constants are gone, and `plan-to-ship` gains an
-adjudication stage. A routed agent task persists the router's evidence beside
-its spec, so `WORKFLOW_CONTRACT_REVISION` becomes 27, and a release that cannot
-read the previous revision's runs is a major. A host pinning `>=7.0.0 <8` moves
-to `>=8.0.0 <9`.
+the host's model admission fences what the router answers, the stand-in model
+constants are gone, and `plan-to-ship` gains an adjudication stage. A routed
+agent task persists the router's evidence beside its spec, so
+`WORKFLOW_CONTRACT_REVISION` becomes 27, and a release that cannot read the
+previous revision's runs is a major. A host pinning `>=7.0.0 <8` moves to
+`>=8.0.0 <9`.
 
 ### Breaking
 
@@ -57,10 +58,17 @@ to `>=8.0.0 <9`.
 - **The compiled stage document admits `adjudicate`**, and `plan-to-ship`
   derives it after `recheck` for every reviewed deliverable under
   `policy.resumes: 1`. `plan-to-ship` is `meta.version` 7.
-- **The shipped agent templates fence placeholder routes.** pi-subagent's
-  fence is exact and the shipped templates win over a host's copies
-  (`agentRootsFirst`), so no stand-in route remains and no real model is
-  admitted until pi-subagent can fence a routed model.
+- **`@vegardx/pi-subagent` `0.21.0` (exact) is required**, up from `0.20.0`,
+  at contract revision 13 with the new required feature
+  `hostModelAdmission: true`. Revision 12 is refused.
+- **The shipped agent templates admit `host`.** Every template lists `host` in
+  `allowedModels` and names no default `model`; `implementer` and `planner`
+  keep `inherit`. A host must register pi-subagent's model-admission provider
+  (`registerModelAdmissionProvider` from
+  `@vegardx/pi-subagent/model-admission-provider`) and admit every model its
+  router answers and every session model it runs on, or every builtin task is
+  refused at preflight with "model exceeds ceiling: <model> (template admits
+  host, no host model admission provider answered)".
 
 ### Added
 

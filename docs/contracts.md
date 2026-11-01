@@ -232,6 +232,15 @@ features without its new host `capacity`. `run-created` gains the optional
 gains an optional third parameter. No other export, tool or message changed.
 The dynamic host API digest rotates.
 
+**8.0.0.** `WORKFLOW_CONTRACT_REVISION` becomes 27, which refuses revision-26
+runs and so makes this a major. The required pi-subagent is `0.21.0`,
+contract revision 13, with the new required feature `hostModelAdmission: true`:
+an agent definition's `allowedModels` may list `host`, which hands the fence to
+the host's model-admission provider, and its launch plan states
+`modelAdmission`. No schema pi-workflow persists embeds the launch plan, so the
+handshake does not move the revision on its own. The shipped templates admit
+`host` and name no default model.
+
 ## Static definition
 
 A saved workflow uses a `.workflow.ts`, `.workflow.mts`, `.workflow.js`, or
@@ -2358,7 +2367,9 @@ checks it against the agent definition's `allowedModels` as an ordinary request
 (`modelSource: "request"`). An `inherit` entry in a template admits a DIRECT
 delegation that asks to inherit, not a workflow task that already resolved one,
 so a template an inheriting role uses must also admit the exact
-`provider/id:thinking`.
+`provider/id:thinking`, either as an exact entry or through `host`, which asks
+the host's model-admission provider (`modelAdmission: "host"` on the launch
+plan). The shipped templates admit `host` and name no default model.
 
 **The run records it and forwards it.** `WorkflowRunRecordSchema.ceiling` is
 written at creation and never changed - a run keeps the ceiling it started with,
