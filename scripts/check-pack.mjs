@@ -87,6 +87,7 @@ try {
 		"workflows/agents/reviewer.md",
 		"workflows/agents/lens-reviewer.md",
 		"workflows/agents/researcher.md",
+		"workflows/agents/adjudicator.md",
 		"dist/attempts.d.ts",
 		"dist/attempts.js",
 		"dist/checkpoint-executor.d.ts",
@@ -543,7 +544,7 @@ try {
 const packedAgents = await subagent.discoverAgents([
 	{ scope: "package", directory: path.resolve("node_modules/@vegardx/pi-workflow/workflows/agents"), trusted: true },
 ]);
-for (const required of ["implementer", "lens-reviewer", "planner", "researcher", "reviewer"]) {
+for (const required of ["adjudicator", "implementer", "lens-reviewer", "planner", "researcher", "reviewer"]) {
 	const agent = packedAgents.get(required);
 	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
 	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {

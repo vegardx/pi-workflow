@@ -262,6 +262,8 @@ interface ScriptOptions {
 	readonly merges?: (ids: readonly string[]) => unknown;
 	/** The resumed implementer's dispositions, given the ids it was shown. */
 	readonly dispositions?: (ids: readonly string[]) => unknown[];
+	/** The adjudicator's answer, given the contested ids it was shown. */
+	readonly verdicts?: (ids: readonly string[]) => unknown;
 }
 
 /** The structured output a scripted child returns, keyed by what it was asked. */
@@ -318,6 +320,20 @@ function outputFor(
 	}
 	if (goal.startsWith("Record the plan-to-ship receipt")) {
 		return { recorded: true, refs: [] };
+	}
+	if (goal.startsWith("Adjudicate what the implementer")) {
+		const ids = [
+			...request.task.context.join("\n").matchAll(/"id":"(c[0-9]+)"/g),
+		].map((match) => match[1] as string);
+		return (
+			options.verdicts?.(ids) ?? {
+				verdicts: ids.map((id) => ({
+					id,
+					verdict: "upheld",
+					reasoning: "The claim holds in the tree.",
+				})),
+			}
+		);
 	}
 	throw new Error(`no scripted output for goal: ${goal}`);
 }
@@ -376,6 +392,8 @@ function scripted(
 		readonly failLens?: string;
 		/** The normalize call fails. */
 		readonly failNormalize?: boolean;
+		/** The adjudication fails. */
+		readonly failAdjudicate?: boolean;
 		/** pi-subagent refuses to resume the run. */
 		readonly refuseResume?: boolean;
 		/** The resumed attempt changes nothing, so the run keeps its hand-off. */
@@ -546,7 +564,10 @@ function scripted(
 				(options.failReview === true ||
 					(options.failLens !== undefined &&
 						goal.includes(`"${options.failLens}" lens`)))) ||
-			(options.failNormalize === true && goal.startsWith("Find the clusters"));
+			(options.failNormalize === true &&
+				goal.startsWith("Find the clusters")) ||
+			(options.failAdjudicate === true &&
+				goal.startsWith("Adjudicate what the implementer"));
 		const timedOut =
 			options.failVerify === true && goal.startsWith("Verify deliverable");
 		if (timedOut) {
@@ -870,6 +891,7 @@ const REVIEWED_STAGES = [
 	{ use: "normalize", id: "normalize" },
 	{ use: "resume", id: "resume" },
 	{ use: "check", id: "recheck" },
+	{ use: "adjudicate", id: "adjudicate" },
 ];
 
 describe("plan-to-ship: the compiled stage document", () => {
@@ -908,6 +930,7 @@ describe("plan-to-ship: the compiled stage document", () => {
 			{ use: "normalize", id: "normalize" },
 			{ use: "resume", id: "resume" },
 			{ use: "check", id: "recheck" },
+			{ use: "adjudicate", id: "adjudicate" },
 		]);
 	});
 
@@ -1009,6 +1032,12 @@ describe("plan-to-ship: the compiler", () => {
 						id: "recheck",
 						key: "recheck-d0",
 						tasks: ["recheck-d0"],
+					},
+					{
+						use: "adjudicate",
+						id: "adjudicate",
+						key: "adjudicate-d0",
+						tasks: ["adjudicate-d0"],
 					},
 				],
 			},
@@ -1583,7 +1612,7 @@ describe("plan-to-ship: the review loop, one deliverable", () => {
 			"1 handoff patch(es); the last repository check ran for 1 of 1 and passed for 1.",
 		);
 		expect(gate?.prompt).toContain(
-			"Reviews: 1 of 1 reviewer(s) reported; 1 cluster(s), 0 raised by two or more reviewers.",
+			"Reviews: 1 of 1 reviewer(s) reported; 1 cluster(s), 0 raised by two or more reviewers; 0 contested (0 upheld, 0 overruled, 0 undecidable).",
 		);
 		expect(gate?.prompt).toContain(
 			"Resumes: 1 of 1 deliverable(s) resumed the implementer; 1 fixed, 0 declined, 0 out of scope, 0 unanswered.",
@@ -1772,6 +1801,268 @@ describe("plan-to-ship: normalizing across lenses", () => {
 				),
 			),
 		).toBe(true);
+	});
+});
+
+describe("plan-to-ship: adjudication", () => {
+	/** Three clusters, answered fixed, declined and out of scope, in that order. */
+	const THREE = {
+		findings: {
+			a: [
+				lensFinding("a.ts", 1, "One."),
+				lensFinding("b.ts", 1, "Two."),
+				lensFinding("c.ts", 1, "Three."),
+			],
+		},
+		dispositions: (ids: readonly string[]) =>
+			ids.map((id, index) => ({
+				id,
+				kind: (["fixed", "declined", "out-of-scope"] as const)[index % 3],
+				reasoning: `Answer ${index}.`,
+			})),
+	};
+
+	it("rules on the declined and out-of-scope clusters only, at a frontier model of another family", async () => {
+		const { delegated, ship, service, runId } = await runToShip(
+			{ lensesPerDeliverable: ["a"] },
+			{
+				...THREE,
+				verdicts: (ids) => ({
+					verdicts: ids.map((id, index) => ({
+						id,
+						verdict: index === 0 ? "upheld" : "overruled",
+						reasoning: `Ruling on ${id}.`,
+					})),
+				}),
+			},
+		);
+		const [adjudicate] = delegated.requestsGoal(
+			"Adjudicate what the implementer",
+		);
+		expect(
+			delegated.requestsGoal("Adjudicate what the implementer"),
+		).toHaveLength(1);
+		expect(adjudicate?.agent).toBe("adjudicator");
+		expect(exactModel(adjudicate as SubagentRequest)).toEqual(
+			routedModel("frontier", "other"),
+		);
+		// Read-only, at the resumed hand-off.
+		expect(adjudicate?.workspace).toMatchObject({ mode: "read-only" });
+		const context = adjudicate?.task.context ?? [];
+		// The change first, then the contested items and nothing else.
+		expect(context[0]).toMatch(/^The change: the hand-off below/);
+		expect(shownIds(context.slice(1).join("\n"))).toEqual(["c2", "c3"]);
+		const items = context.slice(1).join("\n");
+		expect(items).toContain('"disposition":{"kind":"declined"');
+		expect(items).toContain('"disposition":{"kind":"out-of-scope"');
+		// The order is fixed: id, claim, location, evidence, then the answer.
+		expect(items).toContain(
+			'{"id":"c2","claim":"Two.","location":{"file":"b.ts","line":1},"evidence":"Seen at b.ts:1.","disposition":{"kind":"declined","reasoning":"Answer 1."}}',
+		);
+		for (const withheld of ['"severity"', '"lens"', '"model"', "same-family"]) {
+			expect(items).not.toContain(withheld);
+		}
+
+		const record = recordOf(ship);
+		expect(
+			record.clusters.map((cluster) => cluster.adjudication?.verdict),
+		).toEqual([undefined, "upheld", "overruled"]);
+		expect(record.clusters[1]?.adjudication).toMatchObject({
+			reasoning: "Ruling on c2.",
+			model: `placeholder/${OTHER_FAMILY_ID}`,
+			thinking: "high",
+			alias: "other",
+			tier: "frontier",
+			family: "other-family",
+		});
+		expect(record.adjudicator).toMatchObject({
+			model: `placeholder/${OTHER_FAMILY_ID}`,
+			thinking: "high",
+			tier: "frontier",
+			promptDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+		});
+		const prompt = taskByKey(ship, "ship").checkpoint?.prompt ?? "";
+		expect(prompt).toContain(
+			"; 2 contested (1 upheld, 1 overruled, 0 undecidable).",
+		);
+		// Two of three clusters contested: the spec is the likely problem.
+		expect(prompt).toContain(
+			'Deliverable "d0": 2 of 3 clusters were contested, so its spec is the likely problem, not its implementation.',
+		);
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		// No ruling holds the run.
+		expect(finished.status).toBe("completed");
+		const note = (finished.output as { receipt: { note: string } }).receipt
+			.note;
+		expect(note).toContain(
+			"3 review cluster(s), 1 declined, 2 contested, 1 upheld",
+		);
+		expect(note).toContain("its spec is the likely problem");
+	});
+
+	it("skips the stage with a log line when nothing was contested", async () => {
+		// One cluster, answered fixed.
+		const { ship, service, runId } = await runToShip();
+		expect(taskPaths(ship)).not.toContain("adjudicate-d0");
+		const logs = await service.logs(runId, { limit: 500 });
+		expect(
+			logs.entries.some((entry) =>
+				entry.message.includes(
+					'the implementer of "d0" contested nothing, so there is nothing to adjudicate',
+				),
+			),
+		).toBe(true);
+		expect(recordOf(ship)).not.toHaveProperty("adjudicator");
+		expect(taskByKey(ship, "ship").checkpoint?.prompt).not.toContain(
+			"spec is the likely problem",
+		);
+	});
+
+	it.each([
+		[
+			// Within the schema's count and ids, so only the harness can see it.
+			"repeats an id",
+			(ids: readonly string[]) => ({
+				verdicts: ids.map((id, index) => ({
+					id: ids[0] ?? id,
+					verdict: "upheld",
+					reasoning: `Twice ${index}.`,
+				})),
+			}),
+			"it answers c2 more than once",
+		],
+	])(
+		"refuses an answer that %s, logs it, and holds nothing",
+		async (_name, verdicts, problem) => {
+			const { delegated, ship, service, runId } = await runToShip(
+				{ lensesPerDeliverable: ["a"] },
+				{ ...THREE, verdicts },
+			);
+			// Refused whole, and never retried.
+			expect(
+				delegated.requestsGoal("Adjudicate what the implementer"),
+			).toHaveLength(1);
+			const logs = await service.logs(runId, { limit: 500 });
+			expect(
+				logs.entries.some((entry) =>
+					entry.message.includes(
+						`the adjudication of "d0" was refused: ${problem}; its contested clusters stay unadjudicated`,
+					),
+				),
+			).toBe(true);
+			const record = recordOf(ship);
+			expect(record.clusters.every((cluster) => !cluster.adjudication)).toBe(
+				true,
+			);
+			expect(record).not.toHaveProperty("adjudicator");
+			expect(taskByKey(ship, "ship").checkpoint?.prompt).toContain(
+				"; 2 contested (0 upheld, 0 overruled, 0 undecidable).",
+			);
+			await decide(service, ship, "ship", { ship: true });
+			expect((await bounded(service.wait(runId), "wait")).status).toMatch(
+				/^completed/,
+			);
+		},
+	);
+
+	// An answer outside the task's own schema - a missing or an invented id -
+	// never completes the task: pi-subagent refuses it against the schema, so
+	// the run sees a judge that failed. That is this case; `checkVerdicts`'s
+	// own wording for both is pinned in components-review-record.test.ts.
+	it("leaves the clusters unadjudicated when the judge fails, and still reaches the gate", async () => {
+		const { ship, service, runId } = await runToShip(
+			{ lensesPerDeliverable: ["a"] },
+			{ ...THREE, failAdjudicate: true },
+		);
+		expect(taskByKey(ship, "adjudicate-d0").status).toBe("failed");
+		const logs = await service.logs(runId, { limit: 500 });
+		expect(
+			logs.entries.some((entry) =>
+				entry.message.includes(
+					'the adjudication of "d0" was refused: it did not complete',
+				),
+			),
+		).toBe(true);
+		expect(recordOf(ship)).not.toHaveProperty("adjudicator");
+		await decide(service, ship, "ship", { ship: true });
+		const finished = await bounded(service.wait(runId), "wait");
+		expect(finished.status).toBe("completed-degraded");
+	});
+
+	it("says nothing about the spec under half, or with a single contested cluster", async () => {
+		const one = await runToShip(
+			{ lensesPerDeliverable: ["a"] },
+			{
+				findings: {
+					a: [lensFinding("a.ts", 1, "One."), lensFinding("b.ts", 1, "Two.")],
+				},
+				dispositions: (ids) =>
+					ids.map((id, index) => ({
+						id,
+						kind: index === 0 ? "fixed" : "declined",
+						reasoning: "Answered.",
+					})),
+			},
+		);
+		// One of two is half, but a single contested cluster is no pattern.
+		expect(taskByKey(one.ship, "ship").checkpoint?.prompt).toContain(
+			"; 1 contested (1 upheld, 0 overruled, 0 undecidable).",
+		);
+		expect(taskByKey(one.ship, "ship").checkpoint?.prompt).not.toContain(
+			"spec is the likely problem",
+		);
+	});
+
+	it("puts the counts and the spec sentence on the per-deliverable gate and the ship summary", async () => {
+		const gated = scripted(THREE);
+		const service = await serviceFor(gated);
+		const run = await service.run(
+			"plan-to-ship",
+			input({
+				deliverables: 2,
+				lensesPerDeliverable: ["a"],
+				policy: { gates: "every-deliverable" },
+			}),
+		);
+		const gateOne = await park(service, run.runId, "approve-d0");
+		const prompt = taskByKey(gateOne, "approve-d0").checkpoint?.prompt ?? "";
+		expect(prompt).toContain(
+			"; 2 contested (2 upheld, 0 overruled, 0 undecidable).",
+		);
+		expect(prompt).toContain(
+			'Deliverable "d0": 2 of 3 clusters were contested, so its spec is the likely problem, not its implementation.',
+		);
+
+		const auto = scripted(THREE);
+		const autoService = await serviceFor(auto);
+		const autoRun = await autoService.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["a"], policy: { gates: "none" } }),
+		);
+		const finished = await bounded(autoService.wait(autoRun.runId), "wait");
+		const summary = (
+			finished.output as {
+				shipSummary?: { deliverables: readonly { contested?: unknown }[] };
+			}
+		).shipSummary;
+		expect(summary?.deliverables[0]?.contested).toEqual({
+			contested: 2,
+			upheld: 2,
+			overruled: 0,
+			undecidable: 0,
+			note: 'Deliverable "d0": 2 of 3 clusters were contested, so its spec is the likely problem, not its implementation.',
+		});
+	});
+
+	it("is compiled only with reviews and a resume", () => {
+		const keys = (options: PlanOptions, policy?: PolicyInput) =>
+			compileStages(plan(options), policy).deliverables[0]?.stages.map(
+				(stage) => stage.key,
+			);
+		expect(keys({})).toContain("adjudicate-d0");
+		expect(keys({ lensesPerDeliverable: [] })).not.toContain("adjudicate-d0");
+		expect(keys({}, { resumes: 0 })).not.toContain("adjudicate-d0");
 	});
 });
 
@@ -2028,6 +2319,7 @@ describe("plan-to-ship: what a host needs to narrate", () => {
 				["normalize-d0", "normalize", "d0", "completed"],
 				["resume-d0", "resume", "d0", "completed"],
 				["recheck-d0", "check", "d0", "completed"],
+				["adjudicate-d0", "adjudicate", "d0", "completed"],
 				["reviews-d0", "other", undefined, "completed"],
 				["ship", "gate", undefined, "completed"],
 				["receipt", "other", undefined, "completed"],

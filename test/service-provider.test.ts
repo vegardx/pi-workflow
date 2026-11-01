@@ -18,6 +18,7 @@ import {
 } from "@vegardx/pi-subagent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { envelope } from "../src/components/index.js";
 import {
 	WORKFLOW_RUNTIME_CONTRACT,
 	type WorkflowRunId,
@@ -1432,10 +1433,12 @@ describe("project", () => {
 		expect(projection.totalTokens).toBeGreaterThan(0);
 		expect(projection.childRuntimeMs).toBeGreaterThan(0);
 		// plan-to-ship's budget is the worst case its input schema admits, with
-		// the cost clamped to the service's own ceiling.
+		// the cost clamped to the service's own ceiling: 16 deliverables, each
+		// now with an adjudication's 900_000 ms on top of the 342_000_000 before.
 		expect(projection.budget).toEqual({
 			cost: 1_000,
-			childRuntimeMs: 342_000_000,
+			childRuntimeMs:
+				342_000_000 + 16 * envelope("adjudicate").limits.cumulativeRuntimeMs,
 		});
 		expect(projection.fits).toBe(true);
 		expect(Object.isFrozen(projection)).toBe(true);

@@ -141,7 +141,9 @@ lowers onto the component library — `implement` to one worktree agent
 (`check-<d>`, and `recheck-<d>` after a resume that changed something),
 `review-fan-out` to `reviewLenses` beside the check, `normalize` to
 `clusterFindings` plus a merge-only model call, `resume` to the implementer
-continued in its own session (`continueFrom`), the record to the builtin
+continued in its own session (`continueFrom`), `adjudicate` to one read-only
+`frontier` judge over the contested clusters (`adjudicatorView`,
+`checkVerdicts`, `withAdjudications`), the record to the builtin
 `reviewsRecordTask`, and every gate to `gate`.
 `policy.gates` decides which gates exist and nothing else does — including
 `"none"`, which declares no gate at all and leaves the host to publish on
@@ -1053,10 +1055,10 @@ writes an essay into `what`.
 | | |
 | --- | --- |
 | Intent | Let every reviewer report standardized findings, merge them WITHOUT judging, and hand the implementer a de-biased view it answers item by item — so a person reads attribution, agreement and a disposition for every finding. |
-| Lowers to | nothing. `LensReportSchema`, `ReviewsRecordSchema`, `ImplementerViewSchema`, `clusterFindings`, `normalizeCandidates`, `applyModelMerges`, `implementerView`, `resumeReportSchema`, `checkDispositions` and `withDispositions` are pure functions over JSON values. |
+| Lowers to | nothing. `LensReportSchema`, `ReviewsRecordSchema`, `ImplementerViewSchema`, `clusterFindings`, `normalizeCandidates`, `applyModelMerges`, `implementerView`, `resumeReportSchema`, `checkDispositions`, `withDispositions`, and the adjudication half — `contestedClusters`, `adjudicatorView`, `adjudicationSchema`, `checkVerdicts`, `withAdjudications`, `specLikelyAtFault` — are pure functions over JSON values. |
 | Keying | cluster ids are `c1..cn` in location order (file, then line, a file-level finding first); a merged cluster keeps its first reporter's id. |
-| Replay laws | law 2: every input is a value a barrier already returned. Attribution — lens, model, thinking, attempt — is stamped from the launch the workflow declared, never from a model's words. |
-| Refuses | a reported finding with no attempt to attribute it to; a normalize answer that names an unknown or repeated cluster, a group of one, or anything besides `merges` (the deterministic clusters stand); dispositions that skip, repeat or invent an item. |
+| Replay laws | law 2: every input is a value a barrier already returned. Attribution — lens, model, thinking, the router's alias, tier and family, attempt — is stamped from the journal (`SettledTaskResult.attempt` and `.model`), never from a model's words. |
+| Refuses | a reported finding with no attempt to attribute it to; a normalize answer that names an unknown or repeated cluster, a group of one, or anything besides `merges` (the deterministic clusters stand); dispositions that skip, repeat or invent an item; verdicts that skip, repeat or invent a contested item, or carry anything but `verdicts`. |
 | Budget | none. |
 | Hand-write when | never for a review an implementer answers: a bespoke shape is an attribution nobody can audit. |
 
@@ -1068,7 +1070,11 @@ file-level); whether two lenses saw the same thing is a semantic question,
 and only a normalize model may answer it, and only by merging. The resumed
 implementer sees `{items: [{id, claim, location, evidence}]}` ordered by
 file then line: severity, lens, model, agreement and suggestion are withheld
-so it answers the finding, not its reporter.
+so it answers the finding, not its reporter. What it contested (`declined`,
+`out-of-scope`) can go to a judge: `adjudicatorView` shows the same items plus
+the implementer's disposition, and `checkVerdicts` enforces `upheld |
+overruled | undecidable` on every contested id exactly once. A cluster every
+reporter of which ran at the `fast` tier is a lead and is never contested.
 
 ### Verify a hand-off, never fix it
 
@@ -1121,15 +1127,16 @@ receipt. Per deliverable it walks `implement-<d>`, then `check-<d>` beside
 `review-<d>/…`, `normalize-<d>` when more than one lens reported,
 `resume-<d>` — the implementer, continued in its own session, answering every
 finding `fixed`, `declined` or `out-of-scope` — `recheck-<d>` when that changed
-the hand-off, and the record `reviews-<d>`, so what reaches the ship gate is a
+the hand-off, `adjudicate-<d>` — a judge of another family ruling on what it
+contested — and the record `reviews-<d>`, so what reaches the ship gate is a
 patch whose author answered every finding, with the reasoning beside it. `deep-research`'s threads read the
 project's own context files, and the independence it needs is between the
 THREADS, which `contextMode: "fresh"` delivers: each thread is its own
 conversation, so no thread can agree with another's reasoning by inheritance.
 All three name agents the package ships under
 `workflows/agents/*.md`, which the run carries to pi-subagent as the request's
-`agentRoots`; `<agentDir>/agents` or a trusted project's `.pi/agents` overrides
-a name it defines.
+`agentRoots`; under pi-subagent's `agentRootsFirst` a definition shipped there
+wins over `<agentDir>/agents` or a trusted project's `.pi/agents`.
 
 ## Dynamic workflows
 

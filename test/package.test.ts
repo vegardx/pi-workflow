@@ -142,7 +142,7 @@ describe("package contract", () => {
 		// W3: the agents plan-to-ship names travel in the same directory as
 		// templates. `files: ["workflows"]` ships them; discovery ignores them
 		// because they are not `*.workflow.*`.
-		for (const agent of ["planner", "implementer", "reviewer"]) {
+		for (const agent of ["planner", "implementer", "reviewer", "adjudicator"]) {
 			await expect(
 				access(new URL(`../workflows/agents/${agent}.md`, import.meta.url)),
 			).resolves.toBeUndefined();
