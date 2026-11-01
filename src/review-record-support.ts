@@ -16,7 +16,7 @@ import { defineSupportTask, type SupportTaskRegistration } from "./support.js";
  * implementation this package ships (`BUILTIN_SUPPORT_TASKS`).
  */
 export const REVIEWS_RECORD_SUPPORT_NAME = "pi-workflow/reviews-record";
-const REVISION = 1;
+const REVISION = 2;
 
 export const reviewsRecordTask = defineSupportTask({
 	name: REVIEWS_RECORD_SUPPORT_NAME,

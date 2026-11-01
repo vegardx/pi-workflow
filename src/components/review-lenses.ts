@@ -7,11 +7,13 @@ import type {
 	WorkspaceAuthoringRequest,
 } from "../definition.js";
 import { isHandoffHandle } from "../definition.js";
+import type { ModelRoleRequest } from "../runtime/model-routing.js";
 import { WorkflowComponentError } from "./errors.js";
 import {
 	MAX_REVIEW_LENSES,
 	type ResolvedReviewLens,
 	type ReviewLens,
+	resolveLensModel,
 	resolveReviewKeys,
 } from "./review-fan-out.js";
 import {
@@ -19,6 +21,7 @@ import {
 	LensReportSchema,
 	promptDigest,
 	type ReviewerInput,
+	type ReviewerModel,
 } from "./review-record.js";
 import { startAtHandoff } from "./workspace.js";
 
@@ -39,26 +42,33 @@ import { startAtHandoff } from "./workspace.js";
  * ```
  *
  * Keys are `reviewFanOut`'s: the lens id, `-2`, `-3`, … by declaration
- * ordinal. Every lens must resolve to an EXACT model — the lens's pin, else
- * the caller's — because the record names the model a finding came from and
- * the component will not write a model it cannot name. Attribution is stamped
- * from what was declared and from the journal (`SettledTaskResult.attempt`),
- * never from what a reviewer wrote. A lens that failed is a `ReviewerInput`
- * with no report: it subtracts coverage and blocks nothing.
+ * ordinal. Every lens must resolve to a model — its exact pin, else the
+ * caller's `modelRole` narrowed by the lens's tier and diversity, else the
+ * caller's exact `model` — because the record names the model a finding came
+ * from and the component will not write a model it cannot name. Attribution
+ * is stamped from the journal (`SettledTaskResult.attempt` and `.model`, which
+ * carries the router's alias, tier and family for a routed lens), never from
+ * what a reviewer wrote. A lens that failed is a `ReviewerInput` with no
+ * report: it subtracts coverage and blocks nothing.
  */
 
 /** The reviewer declaration a caller owns: prose, tools, workspace. */
 export type LensTaskRequest = Omit<
 	AgentTaskAuthoringRequest<typeof LensReportSchema, WorkspaceAuthoringRequest>,
-	"outputSchema" | "disposition" | "model"
+	"outputSchema" | "disposition" | "model" | "modelRole"
 >;
 
 export interface ReviewLensesOptions {
 	/** The hand-off and the artifacts every lens reads; exactly one hand-off. */
 	readonly subject: Readonly<Record<TaskKey, TaskInputHandle>>;
 	readonly review: (lens: ResolvedReviewLens) => LensTaskRequest;
-	/** The model of a lens that pins none. */
+	/** The exact model of a lens that pins none; exclusive with `modelRole`. */
 	readonly model?: ExactModelRequest;
+	/**
+	 * The routed request of a lens that pins none: the lens's `tier` replaces
+	 * the role's, and a `diverse` lens asks for `family: "other"`.
+	 */
+	readonly modelRole?: ModelRoleRequest;
 }
 
 export interface ReviewLensesResult {
@@ -103,18 +113,17 @@ export async function reviewLenses(
 	}
 	const keys = resolveReviewKeys(namespace, lenses);
 	const resolved: ResolvedReviewLens[] = lenses.map((lens, ordinal) => {
-		const model = lens.model ?? options.model;
-		if (model === undefined) {
+		const model = resolveLensModel("reviewLenses", namespace, lens, options);
+		if (model.model === undefined && model.modelRole === undefined) {
 			refuse(
-				`reviewLenses("${namespace}") lens ${JSON.stringify(lens.id)} resolves to no exact model; pin one on the lens or pass \`model\`, because the record names the model behind every finding.`,
+				`reviewLenses("${namespace}") lens ${JSON.stringify(lens.id)} resolves to no model; pin one on the lens or pass \`modelRole\` or \`model\`, because the record names the model behind every finding.`,
 			);
 		}
 		return Object.freeze({
 			lens,
 			ordinal,
 			key: keys[ordinal] as TaskKey,
-			model,
-			diverseStandIn: false,
+			...model,
 		});
 	});
 	const requests = resolved.map((entry) => {
@@ -144,7 +153,8 @@ export async function reviewLenses(
 				request.workspace,
 				handoff,
 			),
-			model: entry.model as ExactModelRequest,
+			...(entry.model === undefined ? {} : { model: entry.model }),
+			...(entry.modelRole === undefined ? {} : { modelRole: entry.modelRole }),
 			outputSchema: LensReportSchema,
 			disposition: "optional" as const,
 			inputs: { ...(request.inputs ?? {}), ...options.subject },
@@ -169,9 +179,17 @@ export async function reviewLenses(
 		const outcome = settled[index];
 		const request = requests[index];
 		const attemptId = outcome?.attempt?.subagentAttemptId;
+		// The journal's model, which a routed lens only learns there; a pin is
+		// the same model either way.
+		const model: ReviewerModel | undefined = outcome?.model ?? entry.model;
+		if (model === undefined) {
+			refuse(
+				`reviewLenses("${namespace}") lens ${JSON.stringify(entry.key)} settled without a model the record can name.`,
+			);
+		}
 		return Object.freeze({
 			lens: entry.key,
-			model: entry.model as ExactModelRequest,
+			model,
 			promptSha256: promptDigest(
 				request?.task ?? { goal: "", context: [], instructions: [] },
 			),

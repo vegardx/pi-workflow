@@ -1,10 +1,8 @@
 import { defineWorkflow } from "@vegardx/pi-workflow";
 import {
-	DIVERSE_MODEL_ID,
 	envelope,
 	FINDING_ID_PATTERN,
 	forEach,
-	tierModel,
 	workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 import { type Static, Type } from "typebox";
@@ -116,6 +114,12 @@ const THREAD_ID = "^[a-z][a-z0-9-]*$";
 
 /** The one agent this definition names; it must be installed. */
 const RESEARCHER_AGENT = "researcher";
+
+/** What every thread, cross-check and the reducer ask the router for. */
+const RESEARCH_ROLE = Object.freeze({
+	persona: "codebase-research",
+	tier: "normal" as const,
+});
 
 /** The fan-out namespaces, and therefore the prefix of every task key. */
 const RESEARCH_NAMESPACE = "research";
@@ -450,7 +454,9 @@ export default defineWorkflow({
 		// What this definition needs of the host, in pi-subagent's own
 		// vocabulary, so a host can refuse a start above its delegation ceiling
 		// before a run exists.
-		needs: { workspace: "read-only" },
+		// `modelRouting` because every thread, check and the reducer declare
+		// `modelRole`.
+		needs: { workspace: "read-only", modelRouting: true },
 	},
 	inputSchema: InputSchema,
 	outputSchema: OutputSchema,
@@ -493,10 +499,10 @@ export default defineWorkflow({
 					instructions: threadInstructions,
 				},
 				contextMode: "fresh",
-				// A researcher is a reviewer-shaped role: it keeps the normal
-				// reviewer tier rather than the session's model, so a question asked
-				// from a light session still gets threads worth cross-checking.
-				model: tierModel("normal"),
+				// A researcher is a reviewer-shaped role: it asks the router for the
+				// normal tier rather than taking the session's model, so a question
+				// asked from a light session still gets threads worth cross-checking.
+				modelRole: RESEARCH_ROLE,
 				outputSchema: ResearchReportSchema,
 				tools: ["read", "grep", "find", "ls"],
 				preloadSkills: [],
@@ -611,10 +617,8 @@ export default defineWorkflow({
 					contextMode: "fresh",
 					// The other model family, for the same reason the checker is
 					// another thread: a checker that shares everything with the
-					// claimant agrees with it for free. DELETE WHEN ROUTING LANDS:
-					// this becomes `modelRole: { family: "other" }` and the exact id
-					// stops being written here.
-					model: tierModel("normal", true),
+					// claimant agrees with it for free.
+					modelRole: { ...RESEARCH_ROLE, family: "other" },
 					outputSchema: CrossCheckReportSchema,
 					tools: ["read", "grep", "find", "ls"],
 					preloadSkills: [],
@@ -624,10 +628,6 @@ export default defineWorkflow({
 					retry: { attempts: 1, on: ["backoff"] },
 				}),
 			});
-			ctx.log(
-				`deep-research: cross-checking on the ${DIVERSE_MODEL_ID} family through a configured stand-in; model routing is not installed yet.`,
-			);
-
 			// The second barrier, and the same rule: a check that never ran is a
 			// missing row, not a failed run.
 			const checked = await ctx.settled(checkers);
@@ -736,13 +736,10 @@ export default defineWorkflow({
 					],
 				},
 				contextMode: "fresh",
-				// The reducer keeps the normal reviewer tier, like the threads it
-				// reduces. NOTHING HERE INHERITS THE SESSION MODEL: pi-workflow sends
-				// the resolved exact model in every request, so an inherited model
-				// outside the `researcher` template's `allowedModels` would fail
-				// preflight with "model exceeds ceiling"; a question asked from any
+				// The reducer asks for the normal tier, like the threads it reduces.
+				// NOTHING HERE INHERITS THE SESSION MODEL: a question asked from any
 				// session gets the same threads, checked the same way.
-				model: tierModel("normal"),
+				modelRole: RESEARCH_ROLE,
 				outputSchema: SynthesisSchema,
 				// Optional, and for the reason in this file's header: a barrier's
 				// control edge covers EVERY task it closed over, so a dead thread

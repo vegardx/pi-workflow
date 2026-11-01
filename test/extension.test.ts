@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	readdir,
+	readFile,
+	realpath,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,8 +24,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowRunId, WorkflowTaskId } from "../src/contracts.js";
 import { resolveWorkflowNeeds } from "../src/definition.js";
 import workflowExtension from "../src/extension.js";
+import { registerModelRoutingProvider } from "../src/model-routing-provider.js";
 import { workflowStateRoot } from "../src/persistence/state-root.js";
 import { discoverWorkflows } from "../src/registry.js";
+import { staticModelRouting } from "../src/runtime/model-routing.js";
 import type {
 	WorkflowRunSummary,
 	WorkflowServiceRunView,
@@ -899,6 +908,95 @@ export default defineWorkflow({
 			expect(confirm).toHaveBeenCalledTimes(2);
 		} finally {
 			await handlers.get("session_shutdown")?.({ reason: "quit" }, context);
+		}
+	});
+
+	it("reads the model router from the bus at every start", async () => {
+		const { api, tools, handlers } = capture({ subagents: true });
+		const tool = (name: string) => {
+			const found = tools.find((candidate) => candidate.name === name);
+			if (!found) throw new Error(`${name} missing`);
+			return found;
+		};
+		const signal = new AbortController().signal;
+		const cwd = await emptyProject();
+		await mkdir(path.join(cwd, "workflows"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "workflows", "routed.workflow.ts"),
+			`export default {
+  schema: "pi-workflow-definition",
+  meta: { name: "routed", description: "Routed fixture", version: 1, budget: { cost: 10, childRuntimeMs: 1000 }, timeoutMs: 600000, concurrency: 1, needs: { workspace: "read-only", modelRouting: true } },
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  run() { return { answer: "done" }; }
+};
+`,
+		);
+		const context = {
+			cwd,
+			mode: "print",
+			hasUI: false,
+			isProjectTrusted: () => true,
+			ui: { notify: vi.fn(), confirm: vi.fn(), setWidget: vi.fn() },
+		};
+		try {
+			// Nothing registered on the bus: the start is refused by name.
+			await expect(
+				tool("workflow_run").execute(
+					"call-1",
+					{ ref: "routed", input: {} },
+					signal,
+					undefined,
+					context as never,
+				),
+			).rejects.toThrow(
+				"routed resolves models through routing, and this host has none.",
+			);
+			// A router registered later is read at the next start.
+			registerModelRoutingProvider(
+				api.events,
+				staticModelRouting({
+					provider: "placeholder",
+					id: "same-family",
+					thinking: {
+						fast: "minimal",
+						light: "low",
+						normal: "medium",
+						frontier: "high",
+					},
+					defaultThinking: "medium",
+				}),
+			);
+			const started = await tool("workflow_run").execute(
+				"call-2",
+				{ ref: "routed", input: {} },
+				signal,
+				undefined,
+				context as never,
+			);
+			const { runId } = started.details as { runId: string };
+			const waited = await tool("workflow_wait").execute(
+				"call-3",
+				{ runId },
+				signal,
+				undefined,
+				context as never,
+			);
+			expect(waited.details).toMatchObject({ status: "completed" });
+			const record = JSON.parse(
+				await readFile(
+					path.join(
+						workflowStateRoot(cwd, agentDir),
+						"runs",
+						runId,
+						"service.json",
+					),
+					"utf8",
+				),
+			) as { modelRouting?: { router: string } };
+			expect(record.modelRouting).toEqual({ router: "static-table" });
+		} finally {
+			await handlers.get("session_shutdown")?.({}, context);
 		}
 	});
 

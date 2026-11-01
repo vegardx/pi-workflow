@@ -1,11 +1,12 @@
 ---
 name: planner
-model: { provider: github-copilot, id: gpt-5.6-sol, thinking: medium }
+model: { provider: placeholder, id: same-family, thinking: medium }
 allowedModels:
   - inherit
-  - github-copilot/gpt-5.6-sol:low
-  - github-copilot/gpt-5.6-sol:medium
-  - github-copilot/gpt-5.6-sol:high
+  - placeholder/same-family:minimal
+  - placeholder/same-family:low
+  - placeholder/same-family:medium
+  - placeholder/same-family:high
 tools: [read, grep, find, ls]
 preloadSkills: []
 contextScopes: [project]
@@ -35,9 +36,19 @@ workflow task may ask for less, never for more.
 admits a DIRECT delegation that asks to inherit, fenced at the host rather than
 here. A pi-workflow run does not use it: the runtime resolves `inherit` once at
 run start and sends the RESOLVED exact model in every request, so preflight
-checks that model against the exact entries above. Add the
-`provider/id:thinking` keys of the models you actually run sessions on, or the
-refiner fails preflight with "model exceeds ceiling: <model>".
+checks that model against the exact entries above. The receipt recorder runs
+on this definition too, at a `light` `codebase-research` model the host's
+router picks.
+
+The `placeholder/...` routes in `model` and `allowedModels` admit no real
+model, on purpose. pi-subagent's model fence is EXACT: a request admits only a
+listed `provider/id:thinking` route (or `inherit`, for a direct delegation
+that asks to inherit), it requires a default `model`, and it has no wildcard.
+pi-workflow always sends the RESOLVED exact model — what the host's router
+answered for a `modelRole`, or the session model for `inherit` — so a copy of
+this template must list the routes your router and your sessions actually
+resolve to, at the thinking levels they answer with, or the task fails
+preflight with "model exceeds ceiling: <model>".
 
 How to work:
 

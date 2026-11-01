@@ -13,13 +13,7 @@ import {
 	type SubagentRequest,
 } from "@vegardx/pi-subagent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	DIVERSE_MODEL_ID,
-	envelope,
-	MAX_REVIEW_LENSES,
-	MODEL_ID,
-	tierModel,
-} from "../src/components/index.js";
+import { envelope, MAX_REVIEW_LENSES } from "../src/components/index.js";
 import { discoverWorkflows } from "../src/registry.js";
 import { createWorkflowService, type WorkflowService } from "../src/service.js";
 import type {
@@ -30,6 +24,13 @@ import type {
 	WorkflowSubagentBinding,
 	WorkflowSubagentProvider,
 } from "../src/subagent-provider.js";
+import {
+	OTHER_FAMILY_ID,
+	ROUTING_TABLE,
+	routedModel,
+	SAME_FAMILY_ID,
+	testModelRouting,
+} from "./fixtures/routing.js";
 
 // W1-DEEPREVIEW acceptance: the builtin `deep-review` definition driven
 // through the real service with a scripted subagent, and the agent template it
@@ -493,6 +494,7 @@ async function serviceFor(delegated: Scripted): Promise<WorkflowService> {
 		// The builtin root needs no project trust.
 		projectTrusted: () => false,
 		subagents: delegated.provider,
+		modelRouting: testModelRouting,
 		registeredRoots: [
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
@@ -813,8 +815,8 @@ describe("deep-review: tiers and diversity", () => {
 				.lensRequests()
 				.map((request) => [lensOf(request), exactModel(request)]),
 		);
-		expect(byLens.get("correctness")?.id).toBe(MODEL_ID);
-		expect(byLens.get("risk")?.id).toBe(DIVERSE_MODEL_ID);
+		expect(byLens.get("correctness")?.id).toBe(SAME_FAMILY_ID);
+		expect(byLens.get("risk")?.id).toBe(OTHER_FAMILY_ID);
 		expect(byLens.get("risk")?.id).not.toBe(byLens.get("correctness")?.id);
 	});
 
@@ -823,7 +825,7 @@ describe("deep-review: tiers and diversity", () => {
 			lenses: [
 				{ id: "correctness" },
 				{ id: "contracts", tier: "light" },
-				{ id: "risk", model: "github-copilot/gpt-5.6-luna", tier: "light" },
+				{ id: "risk", model: "placeholder/other-family", tier: "light" },
 			],
 		});
 		const byLens = new Map(
@@ -832,12 +834,14 @@ describe("deep-review: tiers and diversity", () => {
 				.map((request) => [lensOf(request), exactModel(request)]),
 		);
 		// A lens that names no tier takes the normal reviewer tier.
-		expect(byLens.get("correctness")).toEqual(tierModel("normal"));
-		expect(byLens.get("contracts")?.thinking).toBe("low");
+		expect(byLens.get("correctness")).toEqual(routedModel("normal"));
+		expect(byLens.get("contracts")).toEqual(routedModel("light"));
+		// A pin outranks the tier and names no thinking of its own, so it takes
+		// the review stage's row.
 		expect(byLens.get("risk")).toEqual({
-			provider: "github-copilot",
-			id: "gpt-5.6-luna",
-			thinking: "low",
+			provider: "placeholder",
+			id: "other-family",
+			thinking: envelope("review").thinking,
 		});
 	});
 
@@ -849,12 +853,12 @@ describe("deep-review: tiers and diversity", () => {
 		const review = envelope("review");
 		const synthesis = envelope("synthesis");
 		const [lens] = delegated.lensRequests();
-		expect(exactModel(lens as SubagentRequest)).toEqual(tierModel("normal"));
+		expect(exactModel(lens as SubagentRequest)).toEqual(routedModel("normal"));
 		expect(lens?.limits).toEqual(review.limits);
-		// The reducer is a reviewer too: the standard tier, never the session's
+		// The reducer is a reviewer too: the normal tier, never the session's
 		// model. `deep-review` declares no `needs.sessionModel` at all.
 		expect(exactModel(delegated.synthesisRequest() as SubagentRequest)).toEqual(
-			tierModel("normal"),
+			routedModel("normal"),
 		);
 		expect(delegated.synthesisRequest()?.limits).toEqual(synthesis.limits);
 		// Read-only throughout: nothing here may write.
@@ -961,11 +965,13 @@ describe("deep-review: the agent template", () => {
 		expect(reviewer.tools).toEqual(["read", "grep", "find", "ls"]);
 		// A reviewer never writes, at any tier.
 		expect(reviewer.limitCeiling.workspaceWriteBytes).toBe(0);
-		// Both families: a lens may ask for one other than the default.
-		for (const id of [MODEL_ID, DIVERSE_MODEL_ID]) {
-			for (const thinking of ["low", "medium", "high"]) {
+		// Both families of the test router: a lens may ask for another family.
+		// The shipped routes are placeholders (pi-subagent's fence is exact), so
+		// this asserts the template and the test table agree, nothing more.
+		for (const row of [ROUTING_TABLE, ROUTING_TABLE.otherFamily]) {
+			for (const thinking of ["low", "medium"]) {
 				expect(reviewer.allowedModels).toContain(
-					`github-copilot/${id}:${thinking}`,
+					`${row?.provider}/${row?.id}:${thinking}`,
 				);
 			}
 		}
@@ -1031,6 +1037,7 @@ describe("deep-review: the templates a run carries", () => {
 			storeRoot: path.join(cwd, "state"),
 			projectTrusted: () => false,
 			subagents: delegated.provider,
+			modelRouting: testModelRouting,
 			registeredRoots: [
 				{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 			],

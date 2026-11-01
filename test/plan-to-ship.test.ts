@@ -16,12 +16,9 @@ import { Value } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CompiledStageDocumentSchema,
-	DIVERSE_MODEL_ID,
 	envelope,
 	MAX_REVIEW_LENSES,
-	MODEL_ID,
 	ReviewsRecordSchema,
-	tierModel,
 	WORKTREE_MEMORY_BYTES,
 } from "../src/components/index.js";
 import { WorkflowRunRecordStore } from "../src/run-record.js";
@@ -39,6 +36,11 @@ import {
 	compileStageDocument,
 	compileStages,
 } from "../workflows/plan-to-ship.workflow.js";
+import {
+	OTHER_FAMILY_ID,
+	routedModel,
+	testModelRouting,
+} from "./fixtures/routing.js";
 
 // W2-PTS acceptance: the builtin plan-to-ship definition, a COMPILER over
 // `plan.deliverables` and `plan.policy` that DERIVES every stage, driven
@@ -66,8 +68,8 @@ const W1 = {
  * without one, and every role that inherits carries THIS model exactly.
  */
 const SESSION_MODEL = {
-	provider: "github-copilot",
-	id: "gpt-5.6-sol",
+	provider: "placeholder",
+	id: "same-family",
 	thinking: "high",
 } as const;
 
@@ -746,6 +748,7 @@ async function serviceFor(delegated: Scripted): Promise<WorkflowService> {
 			{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
 		],
 		sessionModel: () => SESSION_MODEL,
+		modelRouting: testModelRouting,
 	});
 	storeRoots.set(service, path.join(cwd, "state"));
 	services.push(service);
@@ -837,7 +840,7 @@ function examplePlan(): PlanInput {
 }
 
 /** The exact model a lens with no tier and no pin runs at, as the record names it. */
-const MODEL_PROVIDER_ID = `${tierModel("normal").provider}/${tierModel("normal").id}`;
+const MODEL_PROVIDER_ID = `${routedModel("normal").provider}/${routedModel("normal").id}`;
 
 /** The run's journal, line by line. */
 async function journal(
@@ -1492,7 +1495,8 @@ describe("plan-to-ship: the review loop, one deliverable", () => {
 			"Rename it.",
 			"correctness",
 			"security",
-			"gpt-5.6",
+			"same-family",
+			"other-family",
 		]) {
 			expect(message).not.toContain(withheld);
 		}
@@ -1513,6 +1517,10 @@ describe("plan-to-ship: the review loop, one deliverable", () => {
 					lens: "correctness",
 					model: MODEL_PROVIDER_ID,
 					thinking: "medium",
+					// What the router said, carried from the journal.
+					alias: "same",
+					tier: "normal",
+					family: "same-family",
 					attemptId: lens.attemptId,
 					status: "reported",
 					findings: 1,
@@ -1529,6 +1537,9 @@ describe("plan-to-ship: the review loop, one deliverable", () => {
 							lens: "correctness",
 							model: MODEL_PROVIDER_ID,
 							thinking: "medium",
+							alias: "same",
+							tier: "normal",
+							family: "same-family",
 							attemptId: lens.attemptId,
 							findingIndex: 0,
 						},
@@ -1692,14 +1703,18 @@ describe("plan-to-ship: normalizing across lenses", () => {
 			cwd: expect.any(String),
 		});
 		expect(normalize?.tools).toEqual([]);
-		expect(normalize?.model).toEqual(envelope("normalize").model);
+		// A light `codebase-research` model, asked of the router.
+		expect(normalize?.model).toEqual(routedModel("light"));
 		expect(normalize?.task.instructions.join("\n")).toContain(
 			"You may only merge.",
 		);
 		const record = recordOf(ship);
 		expect(record.normalizer).toEqual({
 			mode: "model",
-			model: `${envelope("normalize").model.provider}/${envelope("normalize").model.id}`,
+			model: `${routedModel("light").provider}/${routedModel("light").id}`,
+			alias: "same",
+			tier: "light",
+			family: "same-family",
 			promptDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
 		});
 		expect(record.clusters).toHaveLength(1);
@@ -2227,6 +2242,7 @@ describe("plan-to-ship: replay", () => {
 			projectTrusted: () => false,
 			subagents: delegated.provider,
 			sessionModel: () => SESSION_MODEL,
+			modelRouting: testModelRouting,
 			registeredRoots: [
 				{ path: BUILTIN_ROOT, scope: "builtin" as const, source: "package" },
 			],
@@ -2395,19 +2411,73 @@ describe("plan-to-ship: models per role", () => {
 		expect(delegated.requests).toHaveLength(0);
 	});
 
-	it("resolves a diverse lens to the other-family stand-in and says so", async () => {
+	it("refuses the start by name when the host has no model router", async () => {
 		const delegated = scripted();
+		const base = path.resolve(".pi", "test-plan-to-ship", randomUUID());
+		const cwd = path.join(base, "project");
+		await mkdir(cwd, { recursive: true });
+		const service = await createWorkflowService({
+			cwd,
+			agentDir: path.join(base, "agent"),
+			storeRoot: path.join(cwd, "state"),
+			projectTrusted: () => false,
+			subagents: delegated.provider,
+			registeredRoots: [
+				{ path: BUILTIN_ROOT, scope: "builtin", source: "package" },
+			],
+			sessionModel: () => SESSION_MODEL,
+			// A provider that answers nothing: no router registered on the bus.
+			modelRouting: () => undefined,
+		});
+		services.push(service);
+		await expect(service.run("plan-to-ship", input())).rejects.toThrow(
+			"plan-to-ship resolves models through routing, and this host has none.",
+		);
+		await expect(service.run("plan-to-ship", input())).rejects.toMatchObject({
+			code: "validation",
+		});
+		// Refused BEFORE the run exists: nothing durable, nothing delegated.
+		await expect(service.listRuns()).resolves.toMatchObject({ runs: [] });
+		expect(delegated.requests).toHaveLength(0);
+	});
+
+	it("routes a diverse lens to another family and stamps the router's evidence", async () => {
+		const delegated = scripted({
+			findings: { a: [lensFinding("x.ts", 1, "One.")] },
+		});
 		const service = await serviceFor(delegated);
 		const run = await service.run(
 			"plan-to-ship",
-			input({ lensesPerDeliverable: ["a"], diverse: true }),
+			input({ lensesPerDeliverable: ["a"], diverse: true, tier: "light" }),
 		);
-		await park(service, run.runId, "ship");
+		const ship = await park(service, run.runId, "ship");
 		const [review] = delegated.requestsFor("reviewer");
-		expect(exactModel(review as SubagentRequest)?.id).toBe(DIVERSE_MODEL_ID);
+		expect(exactModel(review as SubagentRequest)).toEqual(
+			routedModel("light", "other"),
+		);
+		expect(exactModel(review as SubagentRequest)?.id).toBe(OTHER_FAMILY_ID);
+		const record = recordOf(ship);
+		expect(record.reviewers[0]).toMatchObject({
+			lens: "a",
+			model: `placeholder/${OTHER_FAMILY_ID}`,
+			thinking: "low",
+			alias: "other",
+			tier: "light",
+			family: "other-family",
+		});
+		expect(record.clusters[0]?.reportedBy[0]).toMatchObject({
+			alias: "other",
+			tier: "light",
+			family: "other-family",
+		});
+		// No stand-in disclosure survives: the router chose.
+		const lines = (await journal(service, run.runId))
+			.map((line) => JSON.stringify(line.data))
+			.join("\n");
+		expect(lines).not.toContain("stand-in");
 	});
 
-	it("honours a review's tier and its exact model pin", async () => {
+	it("honours a review's tier and lets an exact pin outrank it", async () => {
 		const delegated = scripted();
 		const service = await serviceFor(delegated);
 		const run = await service.run(
@@ -2415,18 +2485,27 @@ describe("plan-to-ship: models per role", () => {
 			input({
 				lensesPerDeliverable: ["security"],
 				tier: "light",
-				pinnedModel: "github-copilot/gpt-5.6-luna",
+				pinnedModel: "placeholder/other-family",
 			}),
 		);
 		await park(service, run.runId, "ship");
 		expect(delegated.requestsFor("reviewer")[0]?.model).toEqual({
-			provider: "github-copilot",
-			id: "gpt-5.6-luna",
-			// The lens's own tier decides the thinking level.
-			thinking: "low",
+			provider: "placeholder",
+			id: "other-family",
+			// A pin names no thinking, so it takes the review stage's row; a
+			// tier is a router's choice and a pin is not one.
+			thinking: envelope("review").thinking,
 		});
-		// A lens with no tier takes the standard reviewer tier.
-		expect(tierModel("normal").thinking).toBe("medium");
+		const tiered = scripted();
+		const routedService = await serviceFor(tiered);
+		const routedRun = await routedService.run(
+			"plan-to-ship",
+			input({ lensesPerDeliverable: ["security"], tier: "light" }),
+		);
+		await park(routedService, routedRun.runId, "ship");
+		expect(tiered.requestsFor("reviewer")[0]?.model).toEqual(
+			routedModel("light"),
+		);
 	});
 });
 
@@ -2445,7 +2524,7 @@ describe("plan-to-ship: the input contract", () => {
 				lensesPerDeliverable: ["contracts", "replay"],
 				tier: "light",
 				diverse: true,
-				pinnedModel: "github-copilot/gpt-5.6-sol",
+				pinnedModel: "placeholder/same-family",
 			}),
 		]) {
 			await expect(
@@ -2679,7 +2758,6 @@ describe("plan-to-ship: the agent templates", () => {
 				expect(value).toBeLessThanOrEqual(ceiling);
 			}
 		}
-		expect(MODEL_ID).toBeDefined();
 	});
 });
 

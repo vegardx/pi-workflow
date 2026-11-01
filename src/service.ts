@@ -47,6 +47,7 @@ import {
 	type FinalizeRequest,
 	type NestedWorkflowRequest,
 	resolveWorkflowNeeds,
+	type SettledTaskModel,
 	type TaskHandle,
 	validateJsonSchemaDocument,
 	type WorkflowBudget,
@@ -231,6 +232,7 @@ import {
 	WorkflowWaitOptionsSchema,
 } from "./service-views.js";
 import {
+	isInheritModel,
 	type SessionModel,
 	type SessionModelProvider,
 	sessionModelRefusalMessage,
@@ -1503,8 +1505,9 @@ export async function createWorkflowService(
 	 * definitions only, so the templates a definition names live beside them and
 	 * reach pi-subagent as the request's own agent roots instead of having to be
 	 * copied into a host's agent directory first. Project roots are included on
-	 * the same terms, and a project's own `.pi/agents` still wins: pi-subagent
-	 * consults a request root only for a name its own discovery does not define.
+	 * the same terms. Under pi-subagent's `agentRootsFirst` a request root
+	 * resolves BEFORE its own discovery, so a definition shipped here wins over
+	 * a host's or a project's definition of the same name.
 	 */
 	async function agentRootsFor(
 		workflow: DiscoveredWorkflow,
@@ -4352,6 +4355,18 @@ const PROJECTION_HANDOFF: WorkflowHandoffDescriptor = Object.freeze({
 });
 
 /**
+ * The model a dry run says an agent task settled with when the declaration did
+ * not name an exact one: a projection resolves no `inherit` and asks no router,
+ * so a routed or inheriting declaration settles with this placeholder, exactly
+ * as its result settles with a synthesized value.
+ */
+const PROJECTION_MODEL = Object.freeze({
+	provider: "projection",
+	id: "unresolved",
+	thinking: "off" as const,
+});
+
+/**
  * A deterministic value for a JSON Schema document, used only to unblock a
  * projected barrier. It never validates and never leaves this module: it
  * exists so `run(ctx)` can read `.checkRan` or `.findings` without throwing.
@@ -4454,6 +4469,7 @@ export async function projectWorkflowGraph(
 	let worktrees = 0;
 	let handoffs = 0;
 	const schemas = new Map<string, unknown>();
+	const models = new Map<string, SettledTaskModel>();
 
 	function nextTaskId(): string {
 		tasks += 1;
@@ -4498,6 +4514,12 @@ export async function projectWorkflowGraph(
 		const worktree = request.workspace?.mode === "worktree";
 		if (worktree) worktrees += 1;
 		if (worktree || request.handoff !== undefined) handoffs += 1;
+		models.set(
+			taskId,
+			request.model !== undefined && !isInheritModel(request.model)
+				? Object.freeze({ ...request.model })
+				: PROJECTION_MODEL,
+		);
 		return handleFor(taskId, request.outputSchema, worktree);
 	}
 
@@ -4571,10 +4593,14 @@ export async function projectWorkflowGraph(
 			Promise.all(handles.map(resolve)),
 		settled: async (handles: readonly TaskHandle<unknown>[]) =>
 			Promise.all(
-				handles.map(async (handle) => ({
-					status: "fulfilled" as const,
-					value: await resolve(handle),
-				})),
+				handles.map(async (handle) => {
+					const model = models.get(handle.ref.taskId);
+					return {
+						status: "fulfilled" as const,
+						value: await resolve(handle),
+						...(model === undefined ? {} : { model }),
+					};
+				}),
 			),
 		handoff: async (task: TaskHandle<unknown>) =>
 			task.handoff === undefined ? undefined : PROJECTION_HANDOFF,

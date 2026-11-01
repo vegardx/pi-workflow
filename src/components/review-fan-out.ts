@@ -10,7 +10,10 @@ import type {
 	WorkspaceAuthoringRequest,
 } from "../definition.js";
 import { isHandoffHandle } from "../definition.js";
-import type { ModelRoleTier } from "../runtime/model-routing.js";
+import type {
+	ModelRoleRequest,
+	ModelRoleTier,
+} from "../runtime/model-routing.js";
 import { WorkflowComponentError } from "./errors.js";
 import {
 	type Finding,
@@ -71,19 +74,17 @@ import { startAtHandoff } from "./workspace.js";
  * A caller that puts a review handle into a checkpoint's `inputs` must apply
  * the same rule: only a lens whose `reported` is true may be named there.
  *
- * ## Diversity
+ * ## Models, tiers and diversity
  *
- * `lens.diverse` asks for a reviewer of a different model family. The routing
- * port now exists (`ModelRoutingPort`, `runtime/model-routing.ts`), but this
- * component has not been moved onto it, so today that is still expressed as
- * the exact `model` the caller supplies through `diversity` — the stand-in the
- * library ships is `envelope.ts`'s `DIVERSE_MODEL_ID` — and the component
- * logs once that the answer is a stand-in. DELETE THE SEAM: `diversity`
- * becomes `modelRole: { family: "other" }` and the resolution moves behind
- * `ModelRoutingPort`, which a host installs as
- * `WorkflowServiceOptions.modelRouting`. A `diverse` lens with neither a pinned
- * `model` nor a configured seam is refused at declaration — the component
- * never silently reviews with the same model twice and calls it diverse.
+ * A lens reaches its model one of two ways. An exact `model` pin wins. Otherwise
+ * the caller's `modelRole` is the lens's request, with the lens's own `tier`
+ * in place of the role's and `family: "other"` when the lens is `diverse` — so
+ * the host's router (`WorkflowServiceOptions.modelRouting`) picks the model,
+ * and a diverse lens gets a reviewer of another family rather than marking its
+ * own homework. A `diverse` or tiered lens with neither a pin nor a
+ * `modelRole` is refused at declaration: the component never silently reviews
+ * with the same model twice and calls it diverse, and never drops a tier it
+ * cannot honour.
  */
 
 /** Both builtin review workflows bound their lens list at 16. */
@@ -127,18 +128,16 @@ export interface ReviewLens {
 	/** The lens's stable id; becomes its task key inside the namespace. */
 	readonly id: string;
 	/**
-	 * How much reviewer to spend. The component carries it to the `review`
-	 * factory, which resolves it through `tierModel` (`envelope`); it never picks
-	 * a model from a tier itself, because which models a tier means belongs to
-	 * the workflow. The routing port will read this field directly as
-	 * `modelRole.tier`.
+	 * How much reviewer to spend: the lens's `modelRole.tier`. The component
+	 * never picks a model from a tier itself — which models a tier means
+	 * belongs to the host's router.
 	 */
 	readonly tier?: ReviewTier;
-	/** Ask for a reviewer of another model family; see `diversity`. */
+	/** Ask for a reviewer of another model family: `family: "other"`. */
 	readonly diverse?: boolean;
 	/** A skill name for the reviewer; carried to the `review` factory. */
 	readonly skill?: string;
-	/** An exact pin. It outranks both `diverse` and the caller's default. */
+	/** An exact pin. It outranks `tier`, `diverse` and the caller's role. */
 	readonly model?: ExactModelRequest;
 	/** A one-line brief for this lens; carried to the `review` factory. */
 	readonly brief?: string;
@@ -150,10 +149,10 @@ export interface ResolvedReviewLens {
 	readonly ordinal: number;
 	/** `lens.id`, or `lens.id-2`, `lens.id-3`, … by declaration ordinal. */
 	readonly key: TaskKey;
-	/** The resolved model: the lens's pin, else the seam, else the default. */
+	/** The lens's exact pin, or the caller's exact default. */
 	readonly model?: ExactModelRequest;
-	/** True when `model` came from the diversity stand-in rather than routing. */
-	readonly diverseStandIn: boolean;
+	/** The routed request, when the lens pins nothing and a role was given. */
+	readonly modelRole?: ModelRoleRequest;
 }
 
 /** What is under review, and the handles that carry it to every lens. */
@@ -165,14 +164,6 @@ export interface ReviewSubject {
 	 * patch's identity and never its bytes.
 	 */
 	readonly inputs?: Readonly<Record<TaskKey, TaskInputHandle>>;
-}
-
-/** The seam the routing port replaces. */
-export interface ReviewDiversitySeam {
-	/** The "other family" model a `diverse` lens resolves to today. */
-	readonly model: ExactModelRequest;
-	/** Logged once with the stand-in disclosure; a default is used when absent. */
-	readonly note?: string;
 }
 
 /** The reviewer declaration a caller owns: prose, tools, limits. */
@@ -220,9 +211,16 @@ export interface ReviewFanOutOptions {
 	readonly subject: ReviewSubject;
 	/** The reviewer declaration for one lens. */
 	readonly review: (lens: ResolvedReviewLens) => ReviewTaskRequest;
-	/** The model of a lens that pins none and asks for no diversity. */
+	/**
+	 * The exact model of a lens that pins none. Mutually exclusive with
+	 * `modelRole`, and it cannot honour a lens's `tier` or `diverse`.
+	 */
 	readonly model?: ExactModelRequest;
-	readonly diversity?: ReviewDiversitySeam;
+	/**
+	 * The routed request of a lens that pins none; the lens's `tier` replaces
+	 * the role's, and a `diverse` lens asks for `family: "other"`.
+	 */
+	readonly modelRole?: ModelRoleRequest;
 	/** "optional" (default) declares a reducer only when a lens reported. */
 	readonly synthesis?: "required" | "optional" | "none";
 	readonly synthesize?: (
@@ -283,24 +281,85 @@ export function resolveReviewKeys(
 	);
 }
 
-function resolveModel(
+/**
+ * A lens's model: its exact pin, else the caller's role narrowed by the lens,
+ * else the caller's exact default. Shared with `reviewLenses`, so the two
+ * review components cannot disagree about which request a lens makes.
+ */
+export function resolveLensModel(
+	component: string,
 	namespace: string,
 	lens: ReviewLens,
-	options: ReviewFanOutOptions,
-): { model?: ExactModelRequest; diverseStandIn: boolean } {
-	if (lens.model) return { model: lens.model, diverseStandIn: false };
-	if (lens.diverse === true) {
-		if (!options.diversity) {
-			throw new WorkflowComponentError(
-				"reviewFanOut",
-				`reviewFanOut("${namespace}") lens ${JSON.stringify(lens.id)} asks for another model family, but no diverse model is configured; pin an exact \`model\` on the lens or pass \`diversity\`.`,
-			);
-		}
-		return { model: options.diversity.model, diverseStandIn: true };
+	defaults: {
+		readonly model?: ExactModelRequest;
+		readonly modelRole?: ModelRoleRequest;
+	},
+): {
+	readonly model?: ExactModelRequest;
+	readonly modelRole?: ModelRoleRequest;
+} {
+	if (defaults.model !== undefined && defaults.modelRole !== undefined) {
+		throw new WorkflowComponentError(
+			component,
+			`${component}("${namespace}") got both \`model\` and \`modelRole\`; they are mutually exclusive.`,
+		);
 	}
-	return options.model === undefined
-		? { diverseStandIn: false }
-		: { model: options.model, diverseStandIn: false };
+	if (lens.model) return { model: lens.model };
+	const role = defaults.modelRole;
+	if (role !== undefined) {
+		const family = lens.diverse === true ? ("other" as const) : role.family;
+		const tier = lens.tier ?? role.tier;
+		return {
+			modelRole: Object.freeze({
+				persona: role.persona,
+				...(tier === undefined ? {} : { tier }),
+				...(role.effort === undefined ? {} : { effort: role.effort }),
+				...(family === undefined ? {} : { family }),
+			}),
+		};
+	}
+	if (lens.diverse === true) {
+		throw new WorkflowComponentError(
+			component,
+			`${component}("${namespace}") lens ${JSON.stringify(lens.id)} asks for another model family, but no model role is configured; pin an exact \`model\` on the lens or pass \`modelRole\`.`,
+		);
+	}
+	if (lens.tier !== undefined) {
+		throw new WorkflowComponentError(
+			component,
+			`${component}("${namespace}") lens ${JSON.stringify(lens.id)} names tier ${JSON.stringify(lens.tier)}, but no model role is configured to honour it; pin an exact \`model\` on the lens or pass \`modelRole\`.`,
+		);
+	}
+	return defaults.model === undefined ? {} : { model: defaults.model };
+}
+
+/**
+ * A caller's declaration with the lens's model in force. When the lens resolved
+ * a model or a role, it replaces whatever model the declaration named, so the
+ * two never meet at materialization as an exclusive pair.
+ */
+export function withLensModel<T extends object>(
+	request: T,
+	resolved: {
+		readonly model?: ExactModelRequest;
+		readonly modelRole?: ModelRoleRequest;
+	},
+): T {
+	if (resolved.model === undefined && resolved.modelRole === undefined) {
+		return request;
+	}
+	const {
+		model: _model,
+		modelRole: _modelRole,
+		...rest
+	} = request as T & { model?: unknown; modelRole?: unknown };
+	return {
+		...rest,
+		...(resolved.model === undefined ? {} : { model: resolved.model }),
+		...(resolved.modelRole === undefined
+			? {}
+			: { modelRole: resolved.modelRole }),
+	} as T;
 }
 
 export async function reviewFanOut(
@@ -343,13 +402,12 @@ export async function reviewFanOut(
 
 	const keys = resolveReviewKeys(namespace, lenses);
 	const resolved: ResolvedReviewLens[] = lenses.map((lens, ordinal) => {
-		const model = resolveModel(namespace, lens, options);
+		const model = resolveLensModel("reviewFanOut", namespace, lens, options);
 		return Object.freeze({
 			lens,
 			ordinal,
 			key: keys[ordinal] as TaskKey,
-			...(model.model === undefined ? {} : { model: model.model }),
-			diverseStandIn: model.diverseStandIn,
+			...model,
 		});
 	});
 
@@ -390,7 +448,7 @@ export async function reviewFanOut(
 			}
 		}
 		return {
-			...request,
+			...withLensModel(request, entry),
 			...(subjectHandoff === undefined
 				? {}
 				: {
@@ -401,7 +459,6 @@ export async function reviewFanOut(
 							subjectHandoff,
 						),
 					}),
-			...(entry.model === undefined ? {} : { model: entry.model }),
 			outputSchema: ReviewReportSchema,
 			disposition: options.disposition ?? "optional",
 			inputs: { ...(request.inputs ?? {}), ...subjectInputs },
@@ -410,14 +467,6 @@ export async function reviewFanOut(
 			WorkspaceAuthoringRequest
 		>;
 	});
-
-	const standIns = resolved.filter((entry) => entry.diverseStandIn).length;
-	if (standIns > 0) {
-		ctx.log(
-			options.diversity?.note ??
-				`reviewFanOut("${namespace}"): ${standIns} lens(es) resolve a different model family through a configured stand-in; model routing is not installed yet.`,
-		);
-	}
 
 	const reviewers =
 		resolved.length === 0

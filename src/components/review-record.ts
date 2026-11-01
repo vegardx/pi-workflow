@@ -2,6 +2,11 @@ import { canonicalSha256, type ExactModelRequest } from "@vegardx/pi-subagent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
+import {
+	MAX_MODEL_EVIDENCE_LENGTH,
+	MODEL_ROLE_TIERS,
+	type ModelRoleTier,
+} from "../runtime/model-routing.js";
 import { MAX_CHECK_TAIL_LENGTH } from "./verify.js";
 
 /**
@@ -112,6 +117,21 @@ const ModelNameSchema = Type.String({
 	pattern: "^\\S+/\\S+$",
 	maxLength: 256,
 });
+const EvidenceTextSchema = Type.String({
+	minLength: 1,
+	maxLength: MAX_MODEL_EVIDENCE_LENGTH,
+});
+/**
+ * What the router said about a model it chose: the logical alias, the tier and
+ * the diversity family, each absent when the router did not say, or when the
+ * model was pinned rather than routed. Evidence only: `reviewerKey` hashes the
+ * exact model, never these.
+ */
+const ResolutionFields = {
+	alias: Type.Optional(EvidenceTextSchema),
+	tier: Type.Optional(stringEnum(MODEL_ROLE_TIERS)),
+	family: Type.Optional(EvidenceTextSchema),
+};
 const LensIdSchema = Type.String({ minLength: 1, maxLength: 128 });
 const AttemptIdSchema = Type.String({ minLength: 1, maxLength: 128 });
 
@@ -122,6 +142,7 @@ export const ReviewerEntrySchema = Type.Object(
 		lens: LensIdSchema,
 		model: ModelNameSchema,
 		thinking: Type.Optional(ThinkingSchema),
+		...ResolutionFields,
 		/** The pi-subagent attempt; absent only for a lens that never ran one. */
 		attemptId: Type.Optional(AttemptIdSchema),
 		status: stringEnum(["reported", "failed"] as const),
@@ -154,6 +175,7 @@ export const ReviewClusterSchema = Type.Object(
 					lens: LensIdSchema,
 					model: ModelNameSchema,
 					thinking: Type.Optional(ThinkingSchema),
+					...ResolutionFields,
 					attemptId: AttemptIdSchema,
 					findingIndex: Type.Integer({ minimum: 0 }),
 				},
@@ -192,6 +214,7 @@ export const NormalizerSchema = Type.Object(
 	{
 		mode: stringEnum(NORMALIZER_MODES),
 		model: Type.Optional(ModelNameSchema),
+		...ResolutionFields,
 		promptDigest: Type.Optional(Sha256),
 	},
 	{ additionalProperties: false },
@@ -320,12 +343,36 @@ export type ResumeReport = Omit<
 	"dispositions"
 > & { readonly dispositions: readonly ResumeDisposition[] };
 
+/**
+ * An exact model as the record stamps it, and what the router said about it
+ * when one chose it. `ctx.settled` hands exactly this shape back
+ * (`SettledTaskModel`), read from the journal.
+ */
+export type ReviewerModel = ExactModelRequest & {
+	readonly alias?: string;
+	readonly tier?: ModelRoleTier;
+	readonly family?: string;
+};
+
+/** The resolution evidence of a model, as the record's optional fields. */
+export function resolutionFields(model: ReviewerModel): {
+	readonly alias?: string;
+	readonly tier?: ModelRoleTier;
+	readonly family?: string;
+} {
+	return {
+		...(model.alias === undefined ? {} : { alias: model.alias }),
+		...(model.tier === undefined ? {} : { tier: model.tier }),
+		...(model.family === undefined ? {} : { family: model.family }),
+	};
+}
+
 /** One lens as the harness declared it, and what came back. */
 export interface ReviewerInput {
 	/** The lens key the fan-out declared. */
 	readonly lens: string;
-	/** The exact model the lens was launched at. */
-	readonly model: ExactModelRequest;
+	/** The exact model the lens was launched at, read from the journal. */
+	readonly model: ReviewerModel;
 	/** sha256 of the lens's delegated task: goal, context and instructions. */
 	readonly promptSha256: string;
 	/** The pi-subagent attempt that produced the report, when one ran. */
@@ -334,7 +381,7 @@ export interface ReviewerInput {
 	readonly report?: LensReport;
 }
 
-function modelName(model: ExactModelRequest): string {
+export function modelName(model: ExactModelRequest): string {
 	return `${model.provider}/${model.id}`;
 }
 
@@ -444,6 +491,7 @@ function buildCluster(
 				lens: reviewer.lens,
 				model: modelName(reviewer.model),
 				thinking: reviewer.model.thinking,
+				...resolutionFields(reviewer.model),
 				attemptId: attemptOf(reviewer),
 				findingIndex: member.findingIndex,
 			};
@@ -731,6 +779,7 @@ export function reviewerEntries(
 			lens: reviewer.lens,
 			model: modelName(reviewer.model),
 			thinking: reviewer.model.thinking,
+			...resolutionFields(reviewer.model),
 			...(reviewer.attemptId === undefined
 				? {}
 				: { attemptId: reviewer.attemptId }),

@@ -515,7 +515,9 @@ Implementations are supplied as `createWorkflowService({ supportTasks })`
 registrations produced by `helper.registration(execute, { exportName? })`,
 after the package's own `BUILTIN_SUPPORT_TASKS`, which every service registers
 first. There is one builtin, `pi-workflow/reviews-record` (`reviewsRecordTask`,
-revision 1, no `exportName`): its parameters are a `ReviewsRecordSchema`
+revision 2, no `exportName`; revision 2 is the record whose reviewers,
+`reportedBy` entries and normalizer carry the router's optional `alias`, `tier`
+and `family`): its parameters are a `ReviewsRecordSchema`
 record and it returns them unchanged, so a value a definition computed on its
 deterministic rail becomes an artifact a gate, a task and a receipt can read.
 A host registration that takes a builtin's name is a duplicate. The service

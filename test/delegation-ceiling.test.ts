@@ -20,6 +20,7 @@ import {
 import { WorkflowRunRecordSchema } from "../src/run-record.js";
 import { acquireWorkflowService } from "../src/service-provider.js";
 import { attemptProvider } from "./fixtures/attempt-provider.js";
+import { testModelRouting } from "./fixtures/routing.js";
 
 // The host's mode bounds every delegation a run makes. Every expectation below
 // is the owner's rule, not the implementation's: a definition declares what it
@@ -111,10 +112,11 @@ async function fixture(
 		// `plan-to-ship` inherits the session model, so a fixture that starts it
 		// needs one; the ceiling is the axis under test here, not the model.
 		sessionModel: () => ({
-			provider: "github-copilot",
-			id: "gpt-5.6-sol",
+			provider: "placeholder",
+			id: "same-family",
 			thinking: "high",
 		}),
+		modelRouting: testModelRouting,
 	});
 	services.push(service);
 	const preflight = delegated.ownerClient.preflight as unknown as {
@@ -150,28 +152,34 @@ describe("what a definition needs", () => {
 		);
 		// The three the package ships: the pipeline that writes needs a worktree;
 		// the two reviewers do not.
-		// `plan-to-ship` also inherits the host session's model, and says so.
+		// `plan-to-ship` also inherits the host session's model, and says so;
+		// all three route their reviewers through the host's router.
 		expect(byName.get("plan-to-ship")).toEqual({
 			workspace: "worktree",
 			sessionModel: true,
-			modelRouting: false,
+			modelRouting: true,
 			declared: true,
 		});
 		expect(byName.get("deep-review")).toEqual({
 			workspace: "read-only",
 			sessionModel: false,
-			modelRouting: false,
+			modelRouting: true,
 			declared: true,
 		});
 		expect(byName.get("deep-research")).toEqual({
 			workspace: "read-only",
 			sessionModel: false,
-			modelRouting: false,
+			modelRouting: true,
 			declared: true,
 		});
 		await expect(service.validate("plan-to-ship")).resolves.toMatchObject({
 			workflow: {
-				needs: { workspace: "worktree", sessionModel: true, declared: true },
+				needs: {
+					workspace: "worktree",
+					sessionModel: true,
+					modelRouting: true,
+					declared: true,
+				},
 			},
 		});
 	});

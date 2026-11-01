@@ -839,9 +839,9 @@ component that cannot express your graph is never a reason to bend the graph
 
 ```ts
 import {
-	clusterFindings, DIVERSE_MODEL_ID, envelope, forEach, gate, GATE_TIMEOUT_MS,
-	implementerView, mergeReviewReports, MODEL_PROVIDER, reviewFanOut,
-	reviewLenses, tierModel, verifyHandoff, workflowBudgetFor,
+	clusterFindings, envelope, forEach, gate, GATE_TIMEOUT_MS,
+	implementerView, mergeReviewReports, reviewFanOut, reviewLenses,
+	reviewTierRefusal, verifyHandoff, workflowBudgetFor,
 } from "@vegardx/pi-workflow/components";
 ```
 
@@ -913,13 +913,13 @@ const decision = await ctx.result(approve);
 | Replay laws | Law 3, in pure form: `envelope` takes no `ctx` and cannot read one, so a re-execution declares identical requests. |
 | Refuses | an unknown stage. |
 | Budget | `meta.budget` is static, so declare it at module scope as the worst case the input schema admits — the table over the largest fan-out — and let each task reserve its own row. |
-| Hand-write when | never for limits. For a MODEL, say so per role: pin an exact one, write `"inherit"`, or take a review's tier through `tierModel(tier, diverse?)`. |
+| Hand-write when | never for limits. For a MODEL, say so per role: pin an exact one, write `"inherit"`, or ask the host's router with `modelRole: { persona, tier, family? }`. There is no tier-to-thinking table: the router picks the thinking level. |
 
 ```ts
 // Hand-written: a literal per task
 const reviewer = ctx.agent("review", {
 	agent: "reviewer", contextMode: "fresh",
-	model: { provider: "github-copilot", id: "gpt-5.6-sol", thinking: "high" },
+	model: { provider: "example", id: "example-model", thinking: "high" },
 	limits: {
 		cumulativeRuntimeMs: 900_000, attemptTimeoutMs: 900_000,
 		totalTokens: 1_000_000, cost: 3, outputBytes: 65_536,
@@ -932,7 +932,7 @@ const reviewer = ctx.agent("review", {
 const shape = envelope("review");
 const reviewer = ctx.agent("review", {
 	agent: "reviewer", contextMode: "fresh",
-	model: tierModel("heavy"),      // a review runs at its TIER
+	modelRole: { persona: "code-review", tier: "normal" }, // routed at a TIER
 	limits: shape.limits,
 	/* task, tools, preloadSkills, contextScopes, workspace, outputSchema */
 });
@@ -949,10 +949,11 @@ const BUDGET = workflowBudgetFor([envelope("review").budgetShare]);
 A definition that writes `"inherit"` anywhere declares
 `meta.needs.sessionModel: true` — see `model` under
 [Agent requests](#agent-requests) for what the run then records and what it
-refuses. `MODEL_PROVIDER`, `MODEL_ID`, `DIVERSE_MODEL_ID` and `tierModel` are a
-stand-in for host routing and carry a `DELETE WHEN ROUTING LANDS` marker. When
-`modelRole` is installed, `tierModel` becomes a role; the table's shape — one row
-per stage — does not change.
+refuses. A definition that writes `modelRole` anywhere declares
+`meta.needs.modelRouting: true`, so a host with no router is refused at start
+with `<name> resolves models through routing, and this host has none.` The
+table names no model at all: `envelope(stage).thinking` is only the thinking
+level an exact pin with none of its own takes.
 
 ### Fan-out over a stable id
 
@@ -988,8 +989,8 @@ const work = forEach(ctx, "implement", ctx.input.plan.deliverables, {
 | Intent | Several read-only reviewers over one subject at once, merged on a deterministic rail, with an honest coverage row per lens. |
 | Lowers to | `ctx.fanOut(ns, lenses, …)` with `disposition: "optional"`, one `await ctx.settled(reviewers)`, and one `ctx.fanIn` into `<ns>-synthesis`, declared only when a synthesis is asked for **and** at least one lens reported. |
 | Keying | `key = lens.id`. A repeated id takes `-2`, `-3`, … **by declaration ordinal**, never by a counter over runtime data, so reordering distinct lenses moves tasks without renaming any. A suffix that collides with an id the caller also declared is refused, not resolved. |
-| Replay laws | Law 1 by ordinal; law 2 — the lens list comes from `ctx.input`; law 3 — the reviewer's tier is carried to the caller's `tierModel` lookup, and the component never picks a model from a tier itself. |
-| Refuses | more than 16 lenses; an invalid or colliding lens id; a lens that is not `workspace: { mode: "read-only", cwd }`; a lens input the subject already provides; a `diverse` lens with neither a pinned `model` nor a configured `diversity` seam (it never reviews with the same model twice and calls that diverse); `synthesis: "required"` with no reporting lens; a synthesis that declares its own `inputs`. |
+| Replay laws | Law 1 by ordinal; law 2 — the lens list comes from `ctx.input`; law 3 — the reviewer's tier becomes its `modelRole.tier`, resolved by the host's router before hashing and persisted, and the component never picks a model from a tier itself. |
+| Refuses | more than 16 lenses; an invalid or colliding lens id; a lens that is not `workspace: { mode: "read-only", cwd }`; a lens input the subject already provides; both `model` and `modelRole` as defaults; a `diverse` or tiered lens with neither a pinned `model` nor a `modelRole` to narrow (it never reviews with the same model twice and calls that diverse); `synthesis: "required"` with no reporting lens; a synthesis that declares its own `inputs`. |
 | Budget | the caller's, through `envelope("review")` per lens plus `envelope("synthesis")`. Size `meta.budget` for the largest lens list the input schema admits. |
 | Hand-write when | the lenses are not peers — a two-stage review where the second reads the first — or a lens must be `required`. |
 
@@ -1019,7 +1020,8 @@ const merged = mergeReviewReports(/* … */);
 const review = await reviewFanOut(ctx, "review", ctx.input.lenses, {
 	subject: { title, inputs: { patch: implement.handoff } },
 	review: (lens) => reviewRequest(lens, envelope("review")),
-	diversity: { model: { provider: MODEL_PROVIDER, id: DIVERSE_MODEL_ID, thinking: "medium" } },
+	// A lens's tier replaces the role's; a diverse lens asks for family "other".
+	modelRole: { persona: "code-review", tier: "normal" },
 	synthesis: "optional",
 	synthesize: (brief) => synthesisRequest(brief),
 });

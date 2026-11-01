@@ -707,9 +707,9 @@ model a run inherits](#the-session-model-a-run-inherits)).
 | `refine` (`planner`) | `inherit` |
 | `implement`, `check`, `recheck` (`implementer`) | `inherit` |
 | `resume` | the implementer's own: pi-subagent reruns its launch plan |
-| `review-<d>/<lens>` (`reviewer`) | the lens's tier — `light`/`normal` — or the exact `reviews[].model` the plan pinned, at that tier's thinking level |
-| `normalize-<d>` (`reviewer`) | pinned (`envelope("normalize")`); it returns cluster ids, never prose |
-| the `receipt` finalizer (`planner`) | pinned; recording what the run committed is not a thinking task |
+| `review-<d>/<lens>` (`reviewer`) | routed: `{ persona: "code-review", tier, family: "other" when diverse }` — or the exact `reviews[].model` the plan pinned, at the review stage's thinking level |
+| `normalize-<d>` (`reviewer`) | routed: `{ persona: "codebase-research", tier: "light" }`; it returns cluster ids, never prose |
+| the `receipt` finalizer (`planner`) | routed: `{ persona: "codebase-research", tier: "light" }`; recording what the run committed is not a thinking task |
 
 The work inherits because the person who chose a model for the conversation that
 produced the plan chose it for the work the plan describes. A review does not,
@@ -754,10 +754,12 @@ failed.
 
 The builtin `pi-workflow/reviews-record` support task commits the harness's
 record as `reviews-<d>`: the reviewers (`reviewerKey`, lens, model, thinking,
-attempt, status, count), the clusters (claim, location, highest severity,
-`reportedBy` with attribution stamped from the launch and the journal,
-`agreement: {count, of}`, suggestions, raw indices, and the disposition), and
-the normalizer (`deterministic` or `model`, with its model and prompt digest).
+the router's optional alias, tier and family, attempt, status, count), the
+clusters (claim, location, highest severity, `reportedBy` with attribution
+stamped from the journal, `agreement: {count, of}`, suggestions, raw indices,
+and the disposition), and the normalizer (`deterministic` or `model`, with its
+model, the router's evidence, and prompt digest). The router's evidence never
+enters `reviewerKey`, which hashes the exact model.
 **A decline never holds the run**: the gate shows the counts — reviewers that
 reported, clusters, clusters two or more reviewers raised, dispositions by
 kind, and the last check — and the record carries the reasoning.
@@ -836,29 +838,33 @@ pi-maestro's audited Bash, authorized by the `ship` decision — takes it from
 there with `git cherry-pick <handoffCommit>`.
 
 A lens's `tier`/`diverse` resolve through `policy.reviewDefault` when the lens
-says nothing. The model ids behind a tier are a marked stand-in until routing
-lands; `reviews[].model` pins an exact route.
+says nothing. The host's router picks the model behind a tier
+(`needs.modelRouting`; a host with none is refused at start);
+`reviews[].model` pins an exact route.
 
 **The three agents.** The definition names `planner`, `implementer`, and
-`reviewer`, and the package ships all three under `workflows/agents/`. They
-need no installation: the run carries that directory to pi-subagent as the
-request's `agentRoots`, so the definitions resolve in any project. A host that
-wants its own instead defines that name in `<agentDir>/agents/*.md` or, for one
-trusted project, `.pi/agents/*.md`; either wins over the packaged template.
-
-```sh
-# Only to override a template, never to make a builtin run:
-cp node_modules/@vegardx/pi-workflow/workflows/agents/implementer.md .pi/agents/
-```
+`reviewer`, and the package ships all three under `workflows/agents/`. The run
+carries that directory to pi-subagent as the request's `agentRoots`, and under
+pi-subagent's `agentRootsFirst` a definition shipped there WINS over a
+`<agentDir>/agents/*.md` or trusted-project `.pi/agents/*.md` of the same name.
 
 Each template is an authority **ceiling** a task may narrow but never widen:
 the implementer is the only one with `edit`/`write`/`bash`, the only one
 allowed `workspaceModes: [worktree]`, and carries a 2 GiB
-`workspaceWriteBytes` ceiling so a real install and build fit. A model outside a
-template's `allowedModels` fails preflight with `model exceeds ceiling`; add the
-route in a copy that overrides the template. That applies to the model an
-inheriting role resolved as well — see [The session model a run
-inherits](#the-session-model-a-run-inherits).
+`workspaceWriteBytes` ceiling so a real install and build fit.
+
+**Known limitation: the shipped model fences are placeholders.** pi-subagent's
+fence is exact — a request admits only a listed `provider/id:thinking` route,
+or `inherit` for a direct delegation that asks to inherit — it requires a
+default `model`, and it has no wildcard. pi-workflow always sends the RESOLVED
+exact model (the router's answer for a `modelRole`, the session model for
+`inherit`), so a routed or inherited task passes preflight only when the
+template lists that exact route. The shipped templates list
+`placeholder/same-family` and `placeholder/other-family` routes, which admit no
+real model, and because the shipped templates win over any copy, a builtin
+workflow cannot launch a task against a real model until pi-subagent can fence
+a routed model or the package ships real routes. A task outside the fence fails
+preflight with `model exceeds ceiling: <model>`.
 
 ### `deep-review`
 
@@ -904,19 +910,18 @@ gate and no worktree**: nothing here writes, decides, or parks, which is why it
 is safe to run while planning.
 
 One agent template, `lens-reviewer`, covers both the lens reviewers and the
-reducer; copy it alongside the others. Its ceiling covers the component
-library's `review` and `synthesis` rows at every review tier, and its
-`allowedModels` covers both model families, so a `diverse` lens has somewhere
-to route.
+reducer. Its ceiling covers the component library's `review` and `synthesis`
+rows at every review tier, and its `allowedModels` must cover both model
+families, so a `diverse` lens has somewhere to route (the shipped routes are
+placeholders; see the limitation under `plan-to-ship`).
 
 **Nothing here inherits the session model,** and that is a decision rather than
-an omission. A lens runs at its tier, the reducer at the normal reviewer tier.
-A review's value is a fixed point of view a reader can reason about, and the
-runtime sends the *resolved* exact model, so an inherited model outside
-`lens-reviewer`'s `allowedModels` would fail preflight on a host whose session
-happened to be on another family. `deep-review` therefore runs on any host,
-including one with no session model at all — which is what keeps it safe to run
-while planning.
+an omission. Every lens asks the host's router for a `code-review` model at its
+tier (`normal` when it names none; `frontier` and `fast` are refused by name),
+and the reducer at `normal`. A review's value is a fixed point of view a reader
+can reason about. `deep-review` therefore runs on a host with no session model
+at all — which is what keeps it safe to run while planning — and declares
+`needs.modelRouting`, so a host with no router is refused at start.
 
 A dead lens costs one thing today, stated rather than hidden: a materialization
 barrier's control edge covers every task the barrier closed over, so the
@@ -939,9 +944,10 @@ workflow_run { ref: "deep-research", input: { question, sources? } }
 fixed angles — `evidence`, `counterpoint`, `context` — which is what the `depth`
 dial's `standard` column selected before the dial was removed. A caller who does
 name `sources` gets one thread per source instead, up to 16 of
-`{ id, kind: "path" | "url" | "note", ref | text, title? }`. Every role runs at
-the normal reviewer tier, the cross-check on the other family; nothing here
-inherits the session model either.
+`{ id, kind: "path" | "url" | "note", ref | text, title? }`. Every role asks the
+host's router for a `normal` `codebase-research` model, the cross-check for
+another family (`family: "other"`); nothing here inherits the session model
+either.
 
 The stages, in order:
 
@@ -1055,19 +1061,25 @@ name rather than rerouting it.
 
 The router itself is a **port**, never a dependency. The host implements
 `ModelRoutingPort` (`resolve`, an optional `authorized`, and an optional `id`)
-and passes it as `WorkflowServiceOptions.modelRouting`; nothing in this package
-imports a router, so the tier tables a router owns can change without touching
-the runtime. A port with an `id` is recorded in the run record as
-`modelRouting.router`, so a run says which router answered for it.
+and hands it over Pi's event bus with `registerModelRoutingProvider(pi.events,
+port)`; the shipped extension reads it per run with `resolveModelRouting`
+(channel `@vegardx/pi-workflow/model-routing-provider/request/v1`). An embedder
+passes a provider, `WorkflowServiceOptions.modelRouting: () => port`. Nothing
+in this package imports a router, so the tier tables a router owns can change
+without touching the runtime. A port with an `id` is recorded in the run record
+as `modelRouting.router`, and a routed task's alias, tier and family are
+persisted beside it and stamped into review records.
 
-**No port installed is not a default.** With no `modelRouting`, a `modelRole`
-declaration fails materialization with "No model routing is installed; declare
-an exact model." — the runtime never guesses a model. `staticModelRouting(table)`
-from `@vegardx/pi-workflow/runtime` is the constant-table stand-in a test or an
-embedder installs when it wants routing without a router; every resolution it
-returns reports `source: "static"` and says so in `fallbackReason`, because a
-table that answers every tier with one model must not be mistaken for a tier
-walk.
+**No port installed is not a default.** A definition that routes declares
+`needs.modelRouting: true`, and a host with no router is refused at start with
+`<name> resolves models through routing, and this host has none.` A
+`modelRole` in a definition that did not declare it fails materialization with
+"No model routing is installed; declare an exact model." — the runtime never
+guesses a model. `staticModelRouting(table)` from `@vegardx/pi-workflow/runtime`
+is the constant-table test double a test or an embedder installs when it wants
+routing without a router; every resolution it returns reports `source:
+"static"` and says so in `fallbackReason`, because a table that answers every
+tier with one model must not be mistaken for a tier walk.
 
 ## Support tasks
 

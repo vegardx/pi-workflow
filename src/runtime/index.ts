@@ -230,6 +230,7 @@ export {
 	MODEL_ROUTING_MISSING_MESSAGE,
 	ModelRoutingError,
 	type StaticModelRoutingTable,
+	type StaticModelRow,
 	staticModelRouting,
 } from "../runtime/model-routing.js";
 export {
