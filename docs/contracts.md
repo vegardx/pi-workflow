@@ -2386,6 +2386,21 @@ ModelRoutingPort | undefined) }`, emitted and collected synchronously.
   message as failure evidence and a foreign error may carry paths or
   credentials.
 
+A definition that declares `modelRole` anywhere declares
+`meta.needs.modelRouting: true`. `WorkflowServiceOptions.modelRouting` is a
+PROVIDER, `() => ModelRoutingPort | undefined` (the shipped extension installs
+`() => resolveModelRouting(pi.events)`), read at every run start and again
+whenever a run's runtime is composed - a port is live code and cannot be frozen
+on the record the way a session model is. At start, a definition that declares
+the need on a host whose provider answers nothing is refused BEFORE the run
+exists with `<name> resolves models through routing, and this host has none.`
+[validation], next to the session-model refusal. The answering port's `id`, when
+present, is recorded once as `WorkflowRunRecord.modelRouting.router`. A replay
+re-uses every persisted resolution and only re-authorizes it, so a resumed run on
+a host that lost its router still replays; only a NEW routed declaration needs a
+port. `workflow_list` and `workflow_validate` report the resolved
+`needs.modelRouting`.
+
 ### Narration
 
 Every projected task view carries

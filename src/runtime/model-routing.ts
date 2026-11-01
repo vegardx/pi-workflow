@@ -129,6 +129,15 @@ export class ModelRoutingError extends Error {
 export const MODEL_ROUTING_MISSING_MESSAGE =
 	"No model routing is installed; declare an exact model.";
 
+/**
+ * The refusal a start raises when the definition declares `needs.modelRouting`
+ * and the host has no router. It names the definition, as the session-model
+ * refusal does, because the person reading it chose that workflow.
+ */
+export function modelRoutingRefusalMessage(name: string): string {
+	return `${name} resolves models through routing, and this host has none.`;
+}
+
 /** The materialization refusal when `model` and `modelRole` are both present. */
 export const MODEL_ROLE_EXCLUSIVE_MESSAGE =
 	"agent task declares both model and modelRole; they are mutually exclusive";

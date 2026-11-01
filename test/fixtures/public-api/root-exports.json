@@ -198,6 +198,7 @@
 	"isTerminalWorkflowRunStatus",
 	"isWorkflowDefinition",
 	"isWorkflowRuntimeContract",
+	"modelRoutingRefusalMessage",
 	"narrationSummary",
 	"needsFitCeiling",
 	"registerModelRoutingProvider",

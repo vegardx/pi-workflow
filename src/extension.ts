@@ -9,6 +9,7 @@ import { resolveDelegationCeiling } from "@vegardx/pi-subagent/ceiling-provider"
 import { resolveSessionModel } from "@vegardx/pi-subagent/session-model-provider";
 import type { WorkflowRunId, WorkflowTaskId } from "./contracts.js";
 import type { DynamicSourceApprover } from "./dynamic/contracts.js";
+import { resolveModelRouting } from "./model-routing-provider.js";
 import { workflowStateRoot } from "./persistence/state-root.js";
 import type { WorkflowRoot } from "./registry.js";
 import { createWorkflowService, type WorkflowService } from "./service.js";
@@ -259,6 +260,12 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 			// literal. A host that registered no provider cannot run an
 			// inheriting definition, and the start says so by name.
 			sessionModel: () => resolveSessionModel(pi.events),
+			// The host's model router, read at every run start and every drive.
+			// pi-workflow owns this bus protocol (`model-routing-provider.ts`); a
+			// router package registers against it and nothing here names one. A
+			// host that registered none cannot run a definition that declares
+			// `needs.modelRouting`, and the start says so by name.
+			modelRouting: () => resolveModelRouting(pi.events),
 		});
 		return service;
 	}
