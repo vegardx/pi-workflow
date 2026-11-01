@@ -134,6 +134,7 @@ function roleProvider() {
 						}),
 			// Revision 9: where the launch's model came from.
 			modelSource: request.model === undefined ? "template" : "request",
+			modelAdmission: "exact" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],

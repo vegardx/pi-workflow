@@ -149,6 +149,7 @@ function launchPlan(
 					({ provider: "test", id: "model", thinking: "low" } as const)),
 		// Revision 9: where the launch's model came from.
 		modelSource: requestValue.model === undefined ? "template" : "request",
+		modelAdmission: "exact" as const,
 		cwd: "/workspace" as const,
 		tools: [...requestValue.tools],
 		preloadSkills: [...requestValue.preloadSkills],
@@ -3629,7 +3630,7 @@ describe("worktree handoff settlement", () => {
 	): WorktreeRecord {
 		return {
 			schema: "pi-subagent-worktree",
-			contractRevision: 12,
+			contractRevision: 13,
 			runId: "run_scheduler",
 			attemptId,
 			repositoryRoot: "/private/repo",

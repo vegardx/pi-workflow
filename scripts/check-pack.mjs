@@ -285,6 +285,7 @@ const extension = await import("@vegardx/pi-workflow/extension");
 const subagent = await import("@vegardx/pi-subagent");
 const provider = await import("@vegardx/pi-subagent/service-provider");
 const ceilingProvider = await import("@vegardx/pi-subagent/ceiling-provider");
+const admissionProvider = await import("@vegardx/pi-subagent/model-admission-provider");
 const { readFile } = await import("node:fs/promises");
 // D4: the manifest is an exported entry, read through the exports map.
 const manifest = (await import("@vegardx/pi-workflow/package.json", { with: { type: "json" } })).default;
@@ -409,7 +410,12 @@ if (
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.handoffExport !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.vmMemoryCeiling !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceBudgetRefusal !== true ||
-	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 12 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.contractRevision !== 13 ||
+	subagent.SUBAGENT_RUNTIME_CONTRACT.features.hostModelAdmission !== true ||
+	workflow.WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.hostModelAdmission !== true ||
+	typeof admissionProvider.registerModelAdmissionProvider !== "function" ||
+	typeof admissionProvider.resolveModelAdmission !== "function" ||
+	subagent.HOST_MODEL !== "host" ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.workspaceStartAt !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.resumeAtHandoff !== true ||
 	subagent.SUBAGENT_RUNTIME_CONTRACT.features.delegationCeiling !== true ||
@@ -494,7 +500,8 @@ if (
 	compatibility.piSubagent.peerRange !== manifest.peerDependencies?.["@vegardx/pi-subagent"] ||
 	compatibility.piSubagent.peerRange !== subagentManifest.version ||
 	compatibility.piSubagent.requiredFeatures?.vmMemoryCeiling !== true ||
-	compatibility.piSubagent.requiredFeatures?.workspaceBudgetRefusal !== true
+	compatibility.piSubagent.requiredFeatures?.workspaceBudgetRefusal !== true ||
+	compatibility.piSubagent.requiredFeatures?.hostModelAdmission !== true
 ) throw new Error("packed compatibility matrix disagrees with the packed contracts");
 // F1 smoke: the packed extension registers the package's own workflows/ as a
 // builtin root, so workflow_list and workflow_validate reach the shipped

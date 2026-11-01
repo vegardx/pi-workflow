@@ -813,10 +813,13 @@ describe("workflow contracts", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.features.worktrees).toBe(true);
 	});
 
-	it("requires pi-subagent revision 12 with the capacity wait, the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
+	it("requires pi-subagent revision 13 with host model admission, the capacity wait, the hand-off start, session-model inherit, the delegation ceiling, handoff export, the memory ceiling, and budget refusal", () => {
 		expect(WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.contractRevision).toBe(
-			12,
+			13,
 		);
+		expect(
+			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.hostModelAdmission,
+		).toBe(true);
 		expect(
 			WORKFLOW_RUNTIME_CONTRACT.requiredSubagent.features.capacityWait,
 		).toBe(true);
@@ -860,6 +863,14 @@ describe("workflow contracts", () => {
 				contractRevision: 11,
 			}),
 		).toBe(false);
+		// Revision 12's fence admitted exact routes only, so no shipped template
+		// could hand its model to the host.
+		expect(
+			isCompatibleSubagentContract({
+				...SUBAGENT_RUNTIME_CONTRACT,
+				contractRevision: 12,
+			}),
+		).toBe(false);
 		// Any configured slot count is compatible: it is a host fact.
 		for (const maxSlots of [1, 4, 32]) {
 			expect(
@@ -877,6 +888,7 @@ describe("workflow contracts", () => {
 			"workspaceStartAt",
 			"resumeAtHandoff",
 			"capacityWait",
+			"hostModelAdmission",
 		] as const) {
 			expect(
 				isCompatibleSubagentContract({

@@ -106,6 +106,7 @@ function launchPlan(
 					({ provider: "test", id: "model", thinking: "low" } as const)),
 		// Revision 9: where the launch's model came from.
 		modelSource: request.model === undefined ? "template" : "request",
+		modelAdmission: "exact" as const,
 		cwd: "/workspace" as const,
 		tools: [...request.tools].sort(),
 		preloadSkills: [...request.preloadSkills].sort(),

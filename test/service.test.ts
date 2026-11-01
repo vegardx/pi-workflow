@@ -160,6 +160,7 @@ function taskProvider() {
 			model: { provider: "test", id: "model", thinking: "low" as const },
 			// Revision 9: where the launch's model came from.
 			modelSource: "request" as const,
+			modelAdmission: "exact" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -1627,7 +1628,7 @@ function handoffPatch(commit = HANDOFF_COMMIT): Buffer {
 function worktreeRecord(handoffCommit?: string): WorktreeRecord {
 	return {
 		schema: "pi-subagent-worktree",
-		contractRevision: 12,
+		contractRevision: 13,
 		runId: "run_servicechild",
 		attemptId: "attempt_servicechild",
 		repositoryRoot: "/private/repo",
