@@ -11,6 +11,7 @@ import {
 	requiredTaskFailureReason,
 	sanitizedTaskFailureCause,
 } from "../src/sanitized-cause.js";
+import { WorkflowNarratedTaskKindSchema } from "../src/service-views.js";
 
 // What a host needs to narrate a run, as a pure derivation over a task key.
 // Every expectation is the documented key convention of
@@ -26,6 +27,8 @@ describe("taskNarration", () => {
 		["recheck-d0", [], "check", "d0"],
 		["normalize-d0", [], "normalize", "d0"],
 		["resume-d0", [], "resume", "d0"],
+		["adjudicate-d0", [], "adjudicate", "d0"],
+		["adjudicate-my-thing", [], "adjudicate", "my-thing"],
 		["synthesis", [], "synthesis", undefined],
 		["refine", [], "refine", undefined],
 		["resume-my-thing", [], "resume", "my-thing"],
@@ -93,13 +96,24 @@ describe("taskNarration", () => {
 		});
 	});
 
-	it("names the nine kinds a narrator branches on", () => {
+	it("is the vocabulary the view schema admits, kind for kind", () => {
+		// The kinds live in two places - the derivation and the view schema -
+		// and this is what fails when they disagree.
+		expect(
+			WorkflowNarratedTaskKindSchema.anyOf.map(
+				(member: { const: string }) => member.const,
+			),
+		).toEqual([...NARRATED_TASK_KINDS]);
+	});
+
+	it("names the ten kinds a narrator branches on", () => {
 		expect([...NARRATED_TASK_KINDS]).toEqual([
 			"implement",
 			"check",
 			"review",
 			"normalize",
 			"resume",
+			"adjudicate",
 			"synthesis",
 			"gate",
 			"refine",

@@ -41,6 +41,29 @@ export const DISPOSITION_KINDS = Object.freeze([
 	"out-of-scope",
 ] as const);
 export type DispositionKind = (typeof DISPOSITION_KINDS)[number];
+/**
+ * What the adjudicator may say about a contested cluster: the reviewer's claim
+ * stands against the implementer's answer (`upheld`), the implementer's answer
+ * stands (`overruled`), or the evidence cannot decide it (`undecidable`).
+ */
+export const ADJUDICATION_VERDICTS = Object.freeze([
+	"upheld",
+	"overruled",
+	"undecidable",
+] as const);
+export type AdjudicationVerdict = (typeof ADJUDICATION_VERDICTS)[number];
+/** The dispositions that contest a finding rather than accept it. */
+export const CONTESTED_DISPOSITION_KINDS = Object.freeze([
+	"declined",
+	"out-of-scope",
+] as const satisfies readonly DispositionKind[]);
+/**
+ * At or above this share of a deliverable's clusters contested — and at least
+ * two of them — the gate says the deliverable's spec is the likely problem:
+ * reviewers and implementer read different specs, and that is not something
+ * either one can fix alone.
+ */
+export const CONTESTED_SPEC_RATIO = 0.5;
 export const NORMALIZER_MODES = Object.freeze([
 	"deterministic",
 	"model",
@@ -161,6 +184,19 @@ export const DispositionSchema = Type.Object(
 );
 export type Disposition = Static<typeof DispositionSchema>;
 
+/** The adjudicator's word on one contested cluster, stamped from the journal. */
+export const AdjudicationSchema = Type.Object(
+	{
+		verdict: stringEnum(ADJUDICATION_VERDICTS),
+		reasoning: Type.String({ minLength: 1, maxLength: MAX_REASONING_LENGTH }),
+		model: ModelNameSchema,
+		thinking: ThinkingSchema,
+		...ResolutionFields,
+	},
+	{ additionalProperties: false },
+);
+export type Adjudication = Static<typeof AdjudicationSchema>;
+
 export const ReviewClusterSchema = Type.Object(
 	{
 		id: Type.String({ pattern: "^c[1-9][0-9]{0,3}$" }),
@@ -205,6 +241,8 @@ export const ReviewClusterSchema = Type.Object(
 			{ minItems: 1 },
 		),
 		disposition: Type.Optional(DispositionSchema),
+		/** Present only on a contested cluster the adjudicator answered. */
+		adjudication: Type.Optional(AdjudicationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -221,6 +259,18 @@ export const NormalizerSchema = Type.Object(
 );
 export type Normalizer = Static<typeof NormalizerSchema>;
 
+/** Who adjudicated, and over which prompt; present only when it answered. */
+export const AdjudicatorSchema = Type.Object(
+	{
+		model: ModelNameSchema,
+		thinking: ThinkingSchema,
+		...ResolutionFields,
+		promptDigest: Sha256,
+	},
+	{ additionalProperties: false },
+);
+export type Adjudicator = Static<typeof AdjudicatorSchema>;
+
 /**
  * `reviews-<deliverable>`: the harness's record of one deliverable's review.
  * It is a task artifact, a gate input and part of the receipt; a model wrote
@@ -235,6 +285,7 @@ export const ReviewsRecordSchema = Type.Object(
 			maxItems: MAX_REVIEW_CLUSTERS,
 		}),
 		normalizer: NormalizerSchema,
+		adjudicator: Type.Optional(AdjudicatorSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -769,6 +820,172 @@ export function checkResumeReport(
 	return checkDispositions(view, (report as ResumeReport).dispositions);
 }
 
+/**
+ * The clusters an adjudicator rules on: every cluster the implementer
+ * contested (`declined` or `out-of-scope`), except a LEAD — a cluster whose
+ * every reporter is a `fast`-tier lens, which is a standing sweep's hint
+ * rather than a claim worth a frontier model's time.
+ */
+export function contestedClusters(
+	clusters: readonly ReviewCluster[],
+): readonly ReviewCluster[] {
+	return clusters.filter(
+		(cluster) =>
+			cluster.disposition !== undefined &&
+			(CONTESTED_DISPOSITION_KINDS as readonly string[]).includes(
+				cluster.disposition.kind,
+			) &&
+			!cluster.reportedBy.every((reporter) => reporter.tier === "fast"),
+	);
+}
+
+/**
+ * The ONLY thing about the review the adjudicator receives, per contested
+ * cluster: its id, the claim, the location and the first reporter's evidence,
+ * then the implementer's disposition and reasoning. Severity, lens, models and
+ * agreement are withheld, as from the implementer, so the ruling is on the
+ * finding and the answer rather than on who made either.
+ */
+export const AdjudicatorViewSchema = Type.Object(
+	{
+		items: Type.Array(
+			Type.Object(
+				{
+					id: Type.String({ pattern: "^c[1-9][0-9]{0,3}$" }),
+					claim: Type.String({ minLength: 1, maxLength: MAX_CLAIM_LENGTH }),
+					location: LensLocationSchema,
+					evidence: Type.String({
+						minLength: 1,
+						maxLength: MAX_EVIDENCE_LENGTH,
+					}),
+					disposition: DispositionSchema,
+				},
+				{ additionalProperties: false },
+			),
+			{ maxItems: MAX_REVIEW_CLUSTERS },
+		),
+	},
+	{ additionalProperties: false },
+);
+export type AdjudicatorView = Static<typeof AdjudicatorViewSchema>;
+
+/** The adjudicator's view of the contested clusters, in the implementer's order. */
+export function adjudicatorView(
+	clusters: readonly ReviewCluster[],
+	reviewers: readonly ReviewerInput[],
+): AdjudicatorView {
+	const contested = contestedClusters(clusters);
+	const dispositions = new Map(
+		contested.map((cluster) => [cluster.id, cluster.disposition]),
+	);
+	return {
+		items: implementerView(contested, reviewers).items.map((item) => {
+			const disposition = dispositions.get(item.id) as Disposition;
+			return {
+				...item,
+				disposition: {
+					kind: disposition.kind,
+					reasoning: disposition.reasoning,
+				},
+			};
+		}),
+	};
+}
+
+/**
+ * What the adjudicator may answer, over the contested ids it was shown: every
+ * id exactly once (`minItems = maxItems = ids.length`, each id from the closed
+ * set). The schema cannot say "each id once"; `checkVerdicts` does.
+ */
+export function adjudicationSchema(ids: readonly string[]) {
+	const id =
+		ids.length === 0 ? Type.String({ pattern: "^$" }) : stringEnum([...ids]);
+	return Type.Object(
+		{
+			verdicts: Type.Array(
+				Type.Object(
+					{
+						id,
+						verdict: stringEnum(ADJUDICATION_VERDICTS),
+						reasoning: Type.String({
+							minLength: 1,
+							maxLength: MAX_REASONING_LENGTH,
+						}),
+					},
+					{ additionalProperties: false },
+				),
+				{ minItems: ids.length, maxItems: ids.length },
+			),
+		},
+		{ additionalProperties: false },
+	);
+}
+export type AdjudicationVerdictEntry = {
+	readonly id: string;
+	readonly verdict: AdjudicationVerdict;
+	readonly reasoning: string;
+};
+export type AdjudicationReport = {
+	readonly verdicts: readonly AdjudicationVerdictEntry[];
+};
+
+/**
+ * Why an adjudicator's answer does not rule on the view it was shown, or
+ * `undefined` when it is an `adjudicationSchema` answer over exactly the shown
+ * ids, each once — the same contract `checkResumeReport` enforces on the
+ * implementer.
+ */
+export function checkVerdicts(
+	view: AdjudicatorView,
+	report: unknown,
+): string | undefined {
+	const ids = view.items.map((item) => item.id);
+	const answered = (report as { verdicts?: unknown })?.verdicts;
+	const named = Array.isArray(answered)
+		? answered.filter(
+				(entry): entry is { id: string } => typeof entry?.id === "string",
+			)
+		: undefined;
+	const problem =
+		named === undefined ? undefined : checkDispositions(view, named);
+	if (problem !== undefined) return problem;
+	if (!Value.Check(adjudicationSchema(ids), report)) {
+		return "its answer is not a list of verdicts over the items it was shown";
+	}
+	return undefined;
+}
+
+/** The record with each contested cluster's ruling and who made it. */
+export function withAdjudications(
+	record: ReviewsRecord,
+	report: AdjudicationReport,
+	adjudicator: { readonly model: ReviewerModel; readonly promptDigest: string },
+): ReviewsRecord {
+	const byId = new Map(report.verdicts.map((entry) => [entry.id, entry]));
+	const stamp = {
+		model: modelName(adjudicator.model),
+		thinking: adjudicator.model.thinking,
+		...resolutionFields(adjudicator.model),
+	};
+	return {
+		...record,
+		clusters: record.clusters.map((cluster) => {
+			const entry = byId.get(cluster.id);
+			return entry
+				? {
+						...cluster,
+						adjudication: {
+							verdict: entry.verdict,
+							reasoning: entry.reasoning,
+							...stamp,
+						},
+					}
+				: cluster;
+		}),
+		adjudicator: { ...stamp, promptDigest: adjudicator.promptDigest },
+	};
+}
+
 /** The reviewers' rows of the record, stamped from the declared launch. */
 export function reviewerEntries(
 	reviewers: readonly ReviewerInput[],
@@ -824,12 +1041,21 @@ export interface ReviewCounts {
 	readonly outOfScope: number;
 	/** Clusters with no disposition: no resume ran, or none was asked for. */
 	readonly unanswered: number;
+	/** Clusters the implementer contested that an adjudicator rules on. */
+	readonly contested: number;
+	readonly upheld: number;
+	readonly overruled: number;
+	readonly undecidable: number;
 }
 
 export function reviewCounts(record: ReviewsRecord): ReviewCounts {
 	const count = (kind: DispositionKind) =>
 		record.clusters.filter((cluster) => cluster.disposition?.kind === kind)
 			.length;
+	const ruled = (verdict: AdjudicationVerdict) =>
+		record.clusters.filter(
+			(cluster) => cluster.adjudication?.verdict === verdict,
+		).length;
 	return Object.freeze({
 		reviewers: record.reviewers.length,
 		reported: record.reviewers.filter((entry) => entry.status === "reported")
@@ -843,5 +1069,21 @@ export function reviewCounts(record: ReviewsRecord): ReviewCounts {
 		unanswered: record.clusters.filter(
 			(cluster) => cluster.disposition === undefined,
 		).length,
+		contested: contestedClusters(record.clusters).length,
+		upheld: ruled("upheld"),
+		overruled: ruled("overruled"),
+		undecidable: ruled("undecidable"),
 	});
+}
+
+/**
+ * Whether so much of a deliverable's review was contested that its spec, not
+ * its implementation, is the likely problem: at least two contested clusters,
+ * and at least {@link CONTESTED_SPEC_RATIO} of all of them.
+ */
+export function specLikelyAtFault(counts: ReviewCounts): boolean {
+	return (
+		counts.contested >= 2 &&
+		counts.contested >= CONTESTED_SPEC_RATIO * counts.clusters
+	);
 }

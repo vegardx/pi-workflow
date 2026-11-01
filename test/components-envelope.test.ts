@@ -75,6 +75,7 @@ describe("the stage table", () => {
 			"verify",
 			"review",
 			"normalize",
+			"adjudicate",
 			"synthesis",
 			"record",
 		]);
@@ -122,6 +123,7 @@ describe("the stage table", () => {
 			verify: "low",
 			review: "medium",
 			normalize: "low",
+			adjudicate: "high",
 			synthesis: "medium",
 			record: "low",
 		});
@@ -168,7 +170,7 @@ describe("the stage table", () => {
 
 	it("refuses a stage the table does not cover", () => {
 		expect(() => envelope("publish" as StageName)).toThrow(
-			'unknown envelope stage "publish"; the table covers refine, implement, verify, review, normalize, synthesis, record.',
+			'unknown envelope stage "publish"; the table covers refine, implement, verify, review, normalize, adjudicate, synthesis, record.',
 		);
 		let caught: unknown;
 		try {

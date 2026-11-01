@@ -52,6 +52,7 @@ export const ENVELOPE_STAGES = Object.freeze([
 	"verify",
 	"review",
 	"normalize",
+	"adjudicate",
 	"synthesis",
 	"record",
 ] as const);
@@ -167,12 +168,14 @@ function worktree(
  * THE TABLE. One row per stage, and these are the numbers the effort dial's
  * `standard` column measured:
  *
- * | refine | implement | verify | review | normalize | synthesis | record |
- * | ------ | --------- | ------ | ------ | --------- | --------- | ------ |
- * | medium | medium    | low    | medium | low       | medium    | low    |
+ * | refine | implement | verify | review | normalize | adjudicate | synthesis | record |
+ * | ------ | --------- | ------ | ------ | --------- | ---------- | --------- | ------ |
+ * | medium | medium    | low    | medium | low       | high       | medium    | low    |
  *
  * `normalize` is the merge-only model call over a review's clusters: it
- * returns ids, never prose, so it gets the record's small row.
+ * returns ids, never prose, so it gets the record's small row. `adjudicate`
+ * reads the tree and rules on every contested cluster of a deliverable at
+ * once, so it gets a review's row; its model is a `frontier` route.
  *
  * The thinking level applies only to an exact pin with none of its own; a
  * stage that inherits takes the session's level, and a routed stage takes the
@@ -187,6 +190,7 @@ const STAGE_TABLE: Readonly<Record<StageName, StageShape>> = {
 	verify: readOnly("low", 900_000, 600_000, 2),
 	review: readOnly("medium", 900_000, 1_000_000, 3),
 	normalize: readOnly("low", 300_000, 200_000, 1),
+	adjudicate: readOnly("high", 900_000, 1_000_000, 3),
 	synthesis: readOnly("medium", 600_000, 600_000, 2),
 	record: readOnly("low", 300_000, 200_000, 1),
 };

@@ -328,6 +328,7 @@ export const WorkflowNarratedTaskKindSchema = Type.Union([
 	Type.Literal("review"),
 	Type.Literal("normalize"),
 	Type.Literal("resume"),
+	Type.Literal("adjudicate"),
 	Type.Literal("synthesis"),
 	Type.Literal("gate"),
 	Type.Literal("refine"),
