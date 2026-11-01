@@ -1,12 +1,8 @@
 ---
 name: implementer
-model: { provider: placeholder, id: same-family, thinking: medium }
 allowedModels:
   - inherit
-  - placeholder/same-family:minimal
-  - placeholder/same-family:low
-  - placeholder/same-family:medium
-  - placeholder/same-family:high
+  - host
 tools: [read, grep, find, ls, edit, write, bash]
 preloadSkills: []
 contextScopes: [project]
@@ -50,17 +46,21 @@ things follow, and the second one is the one that bites. The entry itself admits
 a DIRECT delegation that asks to inherit (`modelSource: "inherited"`, fenced at
 the host rather than here). A pi-workflow run does not use it: the runtime
 resolves `inherit` once at run start and sends the RESOLVED exact model in every
-request, so preflight checks that model against the exact entries above.
+request, so preflight admits that model through the `host` entry like a routed
+one: the host's admission must cover its own session model too.
 
-The `placeholder/...` routes in `model` and `allowedModels` admit no real
-model, on purpose. pi-subagent's model fence is EXACT: a request admits only a
-listed `provider/id:thinking` route (or `inherit`, for a direct delegation
-that asks to inherit), it requires a default `model`, and it has no wildcard.
+`allowedModels` lists `host`, which hands the model fence to the host.
 pi-workflow always sends the RESOLVED exact model — what the host's router
-answered for a `modelRole`, or the session model for `inherit` — so a copy of
-this template must list the routes your router and your sessions actually
-resolve to, at the thinking levels they answer with, or the task fails
-preflight with "model exceeds ceiling: <model>".
+answered for a `modelRole`, or the session model for `inherit` — and
+pi-subagent's preflight asks the host's model-admission provider whether it
+stands behind that model at that thinking level. A host that registers no
+provider (`registerModelAdmissionProvider` from
+`@vegardx/pi-subagent/model-admission-provider`) fails every task here at
+preflight with "model exceeds ceiling: <model> (template admits host, no host
+model admission provider answered)"; a host that declines the model fails it
+with "model exceeds ceiling: <model> (template admits host, host does not admit
+it)". There is no default `model`: every request names one, and pi-subagent
+refuses a request that does not.
 
 How to work:
 

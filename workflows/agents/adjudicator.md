@@ -1,17 +1,7 @@
 ---
 name: adjudicator
-model: { provider: placeholder, id: other-family, thinking: high }
 allowedModels:
-  - placeholder/same-family:minimal
-  - placeholder/same-family:low
-  - placeholder/same-family:medium
-  - placeholder/same-family:high
-  - placeholder/same-family:xhigh
-  - placeholder/other-family:minimal
-  - placeholder/other-family:low
-  - placeholder/other-family:medium
-  - placeholder/other-family:high
-  - placeholder/other-family:xhigh
+  - host
 tools: [read, grep, find, ls]
 preloadSkills: []
 contextScopes: [project]
@@ -36,18 +26,21 @@ pi-workflow README, "Builtin workflows". The frontmatter above is an authority
 component library's `adjudicate` row. The task asks the host's router for a
 `frontier` `adjudication` model from a family OTHER than the seat's — the
 implementer runs on the seat's model, and a judge from its own family would be
-marking its own homework — so `allowedModels` must cover every family the
-router may answer with. It does NOT list `inherit`: a judge is never the
-session's model.
+marking its own homework — so the host must admit every family its router
+may answer with. It does NOT list `inherit`: a judge is never the session's
+model.
 
-The `placeholder/...` routes in `model` and `allowedModels` admit no real
-model, on purpose. pi-subagent's model fence is EXACT: a request admits only a
-listed `provider/id:thinking` route (or `inherit`, for a direct delegation
-that asks to inherit), it requires a default `model`, and it has no wildcard.
-pi-workflow always sends the RESOLVED exact model the host's router answered,
-so the routes listed here must be the ones your router resolves to, at the
-thinking levels it answers with, or the task fails preflight with "model
-exceeds ceiling: <model>".
+`allowedModels` lists `host`, which hands the model fence to the host.
+pi-workflow always sends the RESOLVED exact model the host's router answered
+for the task's `modelRole`, and pi-subagent's preflight asks the host's
+model-admission provider whether it stands behind that model at that thinking
+level. A host that registers no provider (`registerModelAdmissionProvider` from
+`@vegardx/pi-subagent/model-admission-provider`) fails every task here at
+preflight with "model exceeds ceiling: <model> (template admits host, no host
+model admission provider answered)"; a host that declines the model fails it
+with "model exceeds ceiling: <model> (template admits host, host does not admit
+it)". There is no default `model`: every request names one, and pi-subagent
+refuses a request that does not.
 
 `plan-to-ship` declares one task against this definition per deliverable,
 after the implementer was resumed with the review and answered it. You are

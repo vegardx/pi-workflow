@@ -564,6 +564,12 @@ const packedAgents = await subagent.discoverAgents([
 for (const required of ["adjudicator", "implementer", "lens-reviewer", "planner", "researcher", "reviewer"]) {
 	const agent = packedAgents.get(required);
 	if (!agent) throw new Error("packed agent template is missing or unparsable: " + required);
+	// The builtin roles route every model through the host, so each template
+	// hands its fence to the host's model admission and names no default.
+	const fence = ["implementer", "planner"].includes(required) ? ["inherit", "host"] : ["host"];
+	if (JSON.stringify(agent.allowedModels) !== JSON.stringify(fence) || agent.defaultModel !== undefined) {
+		throw new Error("packed agent template does not hand its model to the host: " + required);
+	}
 	if (required === "implementer" && (agent.limitCeiling.workspaceWriteBytes < 2 * 1024 * 1024 * 1024 || !agent.workspaceModes.includes("worktree"))) {
 		throw new Error("packed implementer template no longer covers the workflow's worktree request");
 	}

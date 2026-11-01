@@ -7,6 +7,8 @@ import {
 	canonicalSha256,
 	DEFAULT_MEMORY_BYTES,
 	discoverAgents,
+	type ExactModelRequest,
+	MODEL_DEFAULT_REFUSAL,
 	SUBAGENT_RUNTIME_CONTRACT,
 	type SubagentClient,
 	type SubagentRequest,
@@ -37,6 +39,7 @@ import {
 	compileStages,
 } from "../workflows/plan-to-ship.workflow.js";
 import {
+	admittedBy,
 	OTHER_FAMILY_ID,
 	routedModel,
 	testModelRouting,
@@ -79,9 +82,15 @@ const SESSION_MODEL = {
  * resolves the session model once at run start and lowers the exact answer.
  * Asserting that here means no test can accidentally accept the literal.
  */
-function exactModel(request: SubagentRequest) {
-	expect(request.model).not.toBe("inherit");
-	return request.model === "inherit" ? undefined : request.model;
+function exactModel(request: SubagentRequest): ExactModelRequest {
+	const model = request.model;
+	if (model === "inherit") {
+		throw new Error("a request names inherit; pi-workflow resolves it first");
+	}
+	// The shipped templates name no default model, so pi-subagent refuses a
+	// request against them that names none.
+	if (model === undefined) throw new Error(MODEL_DEFAULT_REFUSAL);
+	return model;
 }
 
 /** The compiler's own input types, so a fixture cannot drift from the schema. */
@@ -439,15 +448,12 @@ function scripted(
 			// pi-workflow resolves `inherit` itself and sends an exact model, so a
 			// launch plan never sees the literal; `exactModel` is where that is
 			// asserted for every request the scripted client records.
-			model: exactModel(request) ?? {
-				provider: "test",
-				id: "model",
-				thinking: "low" as const,
-			},
+			model: exactModel(request),
 			// Revision 9: where the launch's model came from. pi-workflow always
 			// states one, so a plan it produced is never `"inherited"`.
-			modelSource: request.model === undefined ? "template" : "request",
-			modelAdmission: "exact" as const,
+			modelSource: "request" as const,
+			// The templates admit `host` and list no exact route.
+			modelAdmission: "host" as const,
 			cwd: "/workspace" as const,
 			tools: [...request.tools],
 			preloadSkills: [...request.preloadSkills],
@@ -2989,6 +2995,31 @@ describe("plan-to-ship: the agent templates", () => {
 		expect(agents.get("reviewer")?.workspaceModes).toEqual(["read-only"]);
 	});
 
+	it("hands every shipped template's model to the host", async () => {
+		const agents = await discoverAgents([
+			{ scope: "package", directory: AGENT_TEMPLATES, trusted: true },
+		]);
+		const shipped = [...agents.keys()].sort();
+		expect(shipped).toEqual([
+			"adjudicator",
+			"implementer",
+			"lens-reviewer",
+			"planner",
+			"researcher",
+			"reviewer",
+		]);
+		// The roles that inherit the session model keep `inherit` for a direct
+		// delegation; every other template is the host's choice alone.
+		const inheriting = new Set(["implementer", "planner"]);
+		for (const name of shipped) {
+			const agent = agents.get(name);
+			expect(agent?.allowedModels).toEqual(
+				inheriting.has(name) ? ["inherit", "host"] : ["host"],
+			);
+			expect(agent?.defaultModel).toBeUndefined();
+		}
+	});
+
 	it("covers every request a run makes", async () => {
 		// The widest run: two lenses (so the normalize call runs), a failing
 		// check (so the resume runs), and a recheck.
@@ -3024,15 +3055,10 @@ describe("plan-to-ship: the agent templates", () => {
 				expect(agent.tools).toContain(tool);
 			}
 			expect(agent.workspaceModes).toContain(request.workspace.mode);
-			// pi-workflow sends the RESOLVED exact model, so preflight checks it
-			// against the template's exact entries as an ordinary request; the
+			// pi-workflow sends the RESOLVED exact model, routed or inherited,
+			// so preflight hands it to the host as an ordinary request; the
 			// template's `inherit` entry admits a direct delegation, not this.
-			const model = exactModel(request);
-			if (model) {
-				expect(agent.allowedModels).toContain(
-					`${model.provider}/${model.id}:${model.thinking}`,
-				);
-			}
+			expect(admittedBy(agent, exactModel(request))).toBe("host");
 			expect(request.limits.attemptTimeoutMs).toBeLessThanOrEqual(
 				request.limits.cumulativeRuntimeMs,
 			);
