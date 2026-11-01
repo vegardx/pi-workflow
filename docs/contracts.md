@@ -2318,8 +2318,9 @@ created and never changed.
 
 A definition sets a model per role: an exact `ExactModelRequest`, or the literal
 `model: "inherit"`. There is no effort dial behind either - `cheap | standard |
-deep` is gone, `envelope` is one fixed row per stage, and `light | standard |
-heavy` is the one dial a review still has. A definition that inherits declares
+deep` is gone, `envelope` is one fixed row per stage, and a tier — `fast | light | normal |
+frontier`, of which an authored review names `light` or `normal` — is the one
+dial a review still has. A definition that inherits declares
 `meta.needs.sessionModel: true`, and `WorkflowService.run` then reads
 `WorkflowServiceOptions.sessionModel` (the shipped extension installs
 `() => resolveSessionModel(pi.events)`) BEFORE the run exists. A host with no

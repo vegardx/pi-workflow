@@ -122,7 +122,10 @@ export {
 } from "./for-each.js";
 export { type GateContext, type GateRequest, gate } from "./gate.js";
 export {
+	AUTHORED_REVIEW_TIERS,
+	type AuthoredReviewTier,
 	MAX_REVIEW_LENSES,
+	REVIEW_TIER_REFUSALS,
 	type ResolvedReviewLens,
 	type ReviewDiversitySeam,
 	type ReviewFanOutOptions,
@@ -136,6 +139,7 @@ export {
 	type ReviewTier,
 	resolveReviewKeys,
 	reviewFanOut,
+	reviewTierRefusal,
 } from "./review-fan-out.js";
 export {
 	type LensTaskRequest,

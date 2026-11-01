@@ -493,10 +493,10 @@ export default defineWorkflow({
 					instructions: threadInstructions,
 				},
 				contextMode: "fresh",
-				// A researcher is a reviewer-shaped role: it keeps the standard
+				// A researcher is a reviewer-shaped role: it keeps the normal
 				// reviewer tier rather than the session's model, so a question asked
 				// from a light session still gets threads worth cross-checking.
-				model: tierModel("standard"),
+				model: tierModel("normal"),
 				outputSchema: ResearchReportSchema,
 				tools: ["read", "grep", "find", "ls"],
 				preloadSkills: [],
@@ -614,7 +614,7 @@ export default defineWorkflow({
 					// claimant agrees with it for free. DELETE WHEN ROUTING LANDS:
 					// this becomes `modelRole: { family: "other" }` and the exact id
 					// stops being written here.
-					model: tierModel("standard", true),
+					model: tierModel("normal", true),
 					outputSchema: CrossCheckReportSchema,
 					tools: ["read", "grep", "find", "ls"],
 					preloadSkills: [],
@@ -736,13 +736,13 @@ export default defineWorkflow({
 					],
 				},
 				contextMode: "fresh",
-				// The reducer keeps the standard reviewer tier, like the threads it
+				// The reducer keeps the normal reviewer tier, like the threads it
 				// reduces. NOTHING HERE INHERITS THE SESSION MODEL: pi-workflow sends
 				// the resolved exact model in every request, so an inherited model
 				// outside the `researcher` template's `allowedModels` would fail
 				// preflight with "model exceeds ceiling"; a question asked from any
 				// session gets the same threads, checked the same way.
-				model: tierModel("standard"),
+				model: tierModel("normal"),
 				outputSchema: SynthesisSchema,
 				// Optional, and for the reason in this file's header: a barrier's
 				// control edge covers EVERY task it closed over, so a dead thread

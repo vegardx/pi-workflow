@@ -43,11 +43,17 @@ export const MODEL_ROLE_THINKING_LEVELS = Object.freeze([
 export type ModelRoleThinkingLevel =
 	(typeof MODEL_ROLE_THINKING_LEVELS)[number];
 
-/** The three tiers with fixed meanings: sweeps, daily drivers, deep review. */
+/**
+ * The four tiers, cheapest first: `fast` for standing sweeps, `light` for
+ * merge-and-record calls and quick lenses, `normal` for the daily driver, and
+ * `frontier` for the one judgment worth the most capable model. Which models a
+ * tier names is the router's business; this list is the whole vocabulary.
+ */
 export const MODEL_ROLE_TIERS = Object.freeze([
+	"fast",
 	"light",
-	"standard",
-	"heavy",
+	"normal",
+	"frontier",
 ] as const);
 export type ModelRoleTier = (typeof MODEL_ROLE_TIERS)[number];
 
@@ -155,10 +161,32 @@ export function exactModelRequest(
 	};
 }
 
-/** Whether a value is shaped like a resolution a router may return. */
+const MODEL_RESOLUTION_SOURCES: readonly string[] = Object.freeze([
+	"inherit",
+	"tier",
+	"fallback",
+	"static",
+]);
+
+/** The bound every free-text field of a resolution's evidence keeps. */
+export const MAX_MODEL_EVIDENCE_LENGTH = 128;
+
+function isEvidenceText(value: unknown, max = MAX_MODEL_EVIDENCE_LENGTH) {
+	return (
+		value === undefined ||
+		(typeof value === "string" && value.length > 0 && value.length <= max)
+	);
+}
+
+/**
+ * Whether a value is shaped like a resolution a router may return. The
+ * evidence fields are checked too, because they travel into run records and
+ * review records whose schemas bound them; a router that answers outside those
+ * bounds is refused here, by name, rather than failing a record later.
+ */
 export function isModelResolution(value: unknown): value is ModelResolution {
 	if (typeof value !== "object" || value === null) return false;
-	const candidate = value as Partial<ModelResolution>;
+	const candidate = value as Partial<Record<keyof ModelResolution, unknown>>;
 	return (
 		typeof candidate.provider === "string" &&
 		candidate.provider.length > 0 &&
@@ -167,7 +195,16 @@ export function isModelResolution(value: unknown): value is ModelResolution {
 		typeof candidate.thinking === "string" &&
 		(MODEL_ROLE_THINKING_LEVELS as readonly string[]).includes(
 			candidate.thinking,
-		)
+		) &&
+		typeof candidate.source === "string" &&
+		MODEL_RESOLUTION_SOURCES.includes(candidate.source) &&
+		(candidate.tier === undefined ||
+			(typeof candidate.tier === "string" &&
+				(MODEL_ROLE_TIERS as readonly string[]).includes(candidate.tier))) &&
+		isEvidenceText(candidate.persona) &&
+		isEvidenceText(candidate.family) &&
+		isEvidenceText(candidate.alias) &&
+		isEvidenceText(candidate.fallbackReason, 1024)
 	);
 }
 

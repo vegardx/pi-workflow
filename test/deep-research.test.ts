@@ -917,14 +917,14 @@ describe("deep-research: models per role", () => {
 		const reduce = envelope("synthesis");
 		for (const request of delegated.researchRequests()) {
 			// A researcher is a reviewer-shaped role: the standard reviewer tier.
-			expect(exactModel(request)).toEqual(tierModel("standard"));
+			expect(exactModel(request)).toEqual(tierModel("normal"));
 			expect(request.limits).toEqual(research.limits);
 		}
 		for (const request of delegated.crossCheckRequests()) {
 			// The OTHER family, for the same reason the checker is another
 			// thread: a checker that shares everything with the claimant
 			// agrees with it for free.
-			expect(exactModel(request)).toEqual(tierModel("standard", true));
+			expect(exactModel(request)).toEqual(tierModel("normal", true));
 			expect(exactModel(request)?.id).toBe(DIVERSE_MODEL_ID);
 			expect(request.limits).toEqual(check.limits);
 		}
@@ -932,9 +932,7 @@ describe("deep-research: models per role", () => {
 		// model, so the same question asked from any session gets the same
 		// threads, checked the same way.
 		const reducer = delegated.synthesisRequest();
-		expect(exactModel(reducer as SubagentRequest)).toEqual(
-			tierModel("standard"),
-		);
+		expect(exactModel(reducer as SubagentRequest)).toEqual(tierModel("normal"));
 		expect(exactModel(reducer as SubagentRequest)?.id).toBe(MODEL_ID);
 		expect(reducer?.limits).toEqual(reduce.limits);
 		for (const request of delegated.requests) {

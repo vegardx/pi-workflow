@@ -45,7 +45,7 @@ const REVIEWER_AGENT = "lens-reviewer";
 
 interface Lens {
 	readonly id: string;
-	readonly tier?: "light" | "standard" | "heavy";
+	readonly tier?: "fast" | "light" | "normal" | "frontier";
 	readonly diverse?: boolean;
 	readonly skill?: string;
 	readonly model?: string;
@@ -779,6 +779,30 @@ describe("deep-review: a lens the host had no VM slot for", () => {
 });
 
 describe("deep-review: tiers and diversity", () => {
+	it.each(["frontier", "fast"] as const)(
+		"refuses a %s lens before any reviewer is delegated",
+		async (tier) => {
+			const { delegated, finished } = await runDeepReview({
+				lenses: [{ id: "correctness" }, { id: "risk", tier }],
+			});
+			expect(finished.status).toBe("failed");
+			expect(delegated.requests).toHaveLength(0);
+		},
+	);
+
+	it.each(["standard", "heavy"])(
+		"refuses the removed tier %s at validate",
+		async (tier) => {
+			const service = await serviceFor(scripted());
+			await expect(
+				service.validate("deep-review", {
+					...input(),
+					lenses: [{ id: "risk", tier }],
+				}),
+			).rejects.toThrow("Workflow input does not match its schema.");
+		},
+	);
+
 	it("selects a different model id for a diverse lens", async () => {
 		const { delegated, finished } = await runDeepReview({
 			lenses: [{ id: "correctness" }, { id: "risk", diverse: true }],
@@ -798,7 +822,7 @@ describe("deep-review: tiers and diversity", () => {
 		const { delegated } = await runDeepReview({
 			lenses: [
 				{ id: "correctness" },
-				{ id: "contracts", tier: "heavy" },
+				{ id: "contracts", tier: "light" },
 				{ id: "risk", model: "github-copilot/gpt-5.6-luna", tier: "light" },
 			],
 		});
@@ -807,9 +831,9 @@ describe("deep-review: tiers and diversity", () => {
 				.lensRequests()
 				.map((request) => [lensOf(request), exactModel(request)]),
 		);
-		// A lens that names no tier takes the standard reviewer tier.
-		expect(byLens.get("correctness")).toEqual(tierModel("standard"));
-		expect(byLens.get("contracts")?.thinking).toBe("high");
+		// A lens that names no tier takes the normal reviewer tier.
+		expect(byLens.get("correctness")).toEqual(tierModel("normal"));
+		expect(byLens.get("contracts")?.thinking).toBe("low");
 		expect(byLens.get("risk")).toEqual({
 			provider: "github-copilot",
 			id: "gpt-5.6-luna",
@@ -825,12 +849,12 @@ describe("deep-review: tiers and diversity", () => {
 		const review = envelope("review");
 		const synthesis = envelope("synthesis");
 		const [lens] = delegated.lensRequests();
-		expect(exactModel(lens as SubagentRequest)).toEqual(tierModel("standard"));
+		expect(exactModel(lens as SubagentRequest)).toEqual(tierModel("normal"));
 		expect(lens?.limits).toEqual(review.limits);
 		// The reducer is a reviewer too: the standard tier, never the session's
 		// model. `deep-review` declares no `needs.sessionModel` at all.
 		expect(exactModel(delegated.synthesisRequest() as SubagentRequest)).toEqual(
-			tierModel("standard"),
+			tierModel("normal"),
 		);
 		expect(delegated.synthesisRequest()?.limits).toEqual(synthesis.limits);
 		// Read-only throughout: nothing here may write.
@@ -954,7 +978,7 @@ describe("deep-review: the agent template", () => {
 		const { delegated, finished } = await runDeepReview({
 			lenses: [
 				{ id: "correctness" },
-				{ id: "contracts", tier: "heavy" },
+				{ id: "contracts", tier: "light" },
 				{ id: "cheapest", tier: "light" },
 				{ id: "risk", diverse: true },
 			],

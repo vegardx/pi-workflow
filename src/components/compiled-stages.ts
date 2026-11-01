@@ -1,4 +1,8 @@
 import { type Static, Type } from "typebox";
+import {
+	MODEL_ROLE_TIERS,
+	type ModelRoleTier,
+} from "../runtime/model-routing.js";
 
 /**
  * The compiled stage document: what `plan-to-ship` compiles a plan into, and
@@ -75,10 +79,10 @@ const CompiledStageIdSchema = Type.String({ pattern: COMPILED_ID_PATTERN });
  *
  * Every vocabulary NOT on that path (`use`, `gates`) stays a readable union.
  */
-export type CompiledReviewTier = "light" | "standard" | "heavy";
+export type CompiledReviewTier = ModelRoleTier;
 export const CompiledReviewTierSchema = Type.Unsafe<CompiledReviewTier>({
 	type: "string",
-	pattern: "^(light|standard|heavy)$",
+	pattern: `^(${MODEL_ROLE_TIERS.join("|")})$`,
 });
 
 /** The deliverable's own work: one worktree, one handoff. Exactly one. */

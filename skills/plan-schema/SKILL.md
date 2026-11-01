@@ -83,7 +83,7 @@ ordinal, which is what the fan-out keys become.
 | Field | Required | Values |
 | --- | --- | --- |
 | `lens` | **required** | the **lens id pattern** `^[a-z][a-z0-9-]{0,63}$` — never empty, never a leading digit or hyphen; it is the fan-out key |
-| `tier` | optional | `light` \| `standard` \| `heavy` — **the one to reach for**; the host resolves the reviewer |
+| `tier` | optional | `light` \| `normal` — **the one to reach for**; the host resolves the reviewer. `frontier` is refused by name (frontier is never a review lens), and so is `fast` (fast runs only as a standing sweep) |
 | `diverse` | optional | boolean: a reviewer from another model family |
 | `skill` | optional | an ambient skill name, id pattern |
 | `model` | optional | **only ever** a concrete `provider/model` — never a bare model name, a tier word, or a role. It is pinned at the lens's `tier`'s thinking level. **Prefer `tier` and omit `model`:** a plan that pins one runs only where that model exists |
@@ -99,7 +99,7 @@ fixed, so the only dials a plan still sets are these:
 | Field | Values | Default |
 | --- | --- | --- |
 | `gates` | `ship` \| `every-deliverable` \| `none` | `ship` |
-| `reviewDefault` | `{tier?, diverse?}` | `{tier: "standard", diverse: false}` |
+| `reviewDefault` | `{tier?, diverse?}` (`tier` is `light` \| `normal`) | `{tier: "normal", diverse: false}` |
 | `resumes` | 0 \| 1 | `1` |
 | `publish` | `{mode: none\|branch\|pr, base?}` | `{mode: "none"}` |
 

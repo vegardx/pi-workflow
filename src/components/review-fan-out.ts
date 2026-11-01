@@ -10,6 +10,7 @@ import type {
 	WorkspaceAuthoringRequest,
 } from "../definition.js";
 import { isHandoffHandle } from "../definition.js";
+import type { ModelRoleTier } from "../runtime/model-routing.js";
 import { WorkflowComponentError } from "./errors.js";
 import {
 	type Finding,
@@ -89,7 +90,38 @@ import { startAtHandoff } from "./workspace.js";
 export const MAX_REVIEW_LENSES = 16;
 const TASK_KEY_RE = /^[a-z][a-z0-9-]*$/;
 
-export type ReviewTier = "light" | "standard" | "heavy";
+export type ReviewTier = ModelRoleTier;
+
+/**
+ * The tiers an AUTHORED review may name in this release. The other two have a
+ * job of their own: `frontier` adjudicates what the implementer contested,
+ * so a lens at that tier would be the judge reviewing; `fast` is reserved for
+ * standing sweeps, whose findings are leads rather than claims.
+ */
+export const AUTHORED_REVIEW_TIERS = Object.freeze([
+	"light",
+	"normal",
+] as const);
+export type AuthoredReviewTier = (typeof AUTHORED_REVIEW_TIERS)[number];
+
+/** The reason a tier outside {@link AUTHORED_REVIEW_TIERS} is refused, by name. */
+export const REVIEW_TIER_REFUSALS: Readonly<
+	Record<Exclude<ReviewTier, AuthoredReviewTier>, string>
+> = Object.freeze({
+	frontier: "frontier is never a review lens",
+	fast: "fast runs only as a standing sweep",
+});
+
+/**
+ * Why an authored review may not run at `tier`, or `undefined` when it may.
+ * Both builtin review workflows refuse through this one function, so the rule
+ * and its wording live in one place.
+ */
+export function reviewTierRefusal(tier: ReviewTier): string | undefined {
+	return tier === "frontier" || tier === "fast"
+		? REVIEW_TIER_REFUSALS[tier]
+		: undefined;
+}
 
 export interface ReviewLens {
 	/** The lens's stable id; becomes its task key inside the namespace. */

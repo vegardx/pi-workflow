@@ -1,5 +1,6 @@
 import type { ExactModelRequest, RunLimits } from "@vegardx/pi-subagent";
 import type { WorkflowBudget } from "../contracts-core.js";
+import type { ModelRoleTier } from "../runtime/model-routing.js";
 import { WorkflowComponentError } from "./errors.js";
 
 /**
@@ -37,7 +38,7 @@ import { WorkflowComponentError } from "./errors.js";
  *
  * DELETE WHEN ROUTING LANDS. `MODEL_PROVIDER`/`MODEL_ID`/`DIVERSE_MODEL_ID`
  * are the stand-in for host routing: today a task names one exact
- * `{provider, id, thinking}`, so "a heavy reviewer from another family" has to
+ * `{provider, id, thinking}`, so "a frontier reviewer from another family" has to
  * be written as a second literal model. When `modelRole` and the routing port
  * land (spec 2.5), `Envelope.model` becomes a `modelRole` request, `tier`
  * replaces the thinking column, and `DIVERSE_MODEL_ID` becomes
@@ -64,15 +65,22 @@ export type StageName = (typeof ENVELOPE_STAGES)[number];
 
 export type ThinkingLevel = ExactModelRequest["thinking"];
 
-/** A review tier: the one dial a review still has, and reviews only. */
-export type EnvelopeTier = "light" | "standard" | "heavy";
+/** A tier: the routing vocabulary's own type. */
+export type EnvelopeTier = ModelRoleTier;
 
-/** The three tiers, in order, for a schema or a message that lists them. */
+/**
+ * The four tiers, in order, for a schema or a message that lists them. Written
+ * out rather than imported because this module's graph is pinned to itself and
+ * its error type (replay law 3); `satisfies` keeps every entry a routing tier,
+ * and `test/components-envelope.test.ts` pins the list equal to
+ * `MODEL_ROLE_TIERS`.
+ */
 export const ENVELOPE_TIERS = Object.freeze([
+	"fast",
 	"light",
-	"standard",
-	"heavy",
-] as const);
+	"normal",
+	"frontier",
+] as const satisfies readonly ModelRoleTier[]);
 
 /** DELETE WHEN ROUTING LANDS: the host's routing decides these three. */
 export const MODEL_PROVIDER = "github-copilot";
@@ -83,9 +91,10 @@ export const DIVERSE_MODEL_ID = "gpt-5.6-luna";
 /** What a review tier means as a thinking level; DELETE WHEN ROUTING LANDS. */
 export const THINKING_BY_TIER: Readonly<Record<EnvelopeTier, ThinkingLevel>> =
 	Object.freeze({
+		fast: "minimal",
 		light: "low",
-		standard: "medium",
-		heavy: "high",
+		normal: "medium",
+		frontier: "high",
 	});
 
 /**

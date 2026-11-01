@@ -35,11 +35,16 @@ const TABLE: StaticModelRoutingTable = {
 	provider: "github-copilot",
 	id: "gpt-5.6-sol",
 	otherFamily: { provider: "github-copilot", id: "gpt-5.6-luna" },
-	thinking: { light: "low", standard: "medium", heavy: "high" },
+	thinking: {
+		fast: "minimal",
+		light: "low",
+		normal: "medium",
+		frontier: "high",
+	},
 	defaultThinking: "medium",
 };
 
-/** What TABLE resolves `{ persona: "code-review", tier: "heavy" }` to. */
+/** What TABLE resolves `{ persona: "code-review", tier: "frontier" }` to. */
 const RESOLVED: ExactModelRequest = {
 	provider: "github-copilot",
 	id: "gpt-5.6-sol",
@@ -61,7 +66,7 @@ async function roleWorkflowFixture(guarded = false) {
       agent: "researcher",
       task: { goal: "Answer", context: [], instructions: ["Return structured output."] },
       contextMode: "fresh",
-      modelRole: { persona: "code-review", tier: "heavy" },
+      modelRole: { persona: "code-review", tier: "frontier" },
       tools: ["read"],
       preloadSkills: [],
       contextScopes: ["project"],
