@@ -2359,6 +2359,33 @@ escaped the bound would be a hole in it. The ceiling is NOT part of the persiste
 task spec and nothing about task identity changes: which mode the host was in is
 a property of the run.
 
+### The model routing provider
+
+pi-workflow owns a bus protocol a host uses to hand it a router, shaped exactly
+like pi-subagent's session-model provider. The request channel is
+`@vegardx/pi-workflow/model-routing-provider/request/v1`; the request is `{
+schema: "pi-workflow-model-routing-request-v1", respond(port:
+ModelRoutingPort | undefined) }`, emitted and collected synchronously.
+
+- `registerModelRoutingProvider(events, port)` registers the one router and
+  returns the unregistration handle. A second registration is refused with
+  `ModelRoutingProviderError` code `duplicate`: two routers would make which
+  model a run gets depend on listener order.
+- `resolveModelRouting(events)` returns `undefined` when nothing answers or the
+  provider answers `undefined`. More than one answer fails closed with code
+  `duplicate`; a port that is not a port fails closed with code `invalid`.
+  Because a port carries functions it is shape-checked rather than
+  schema-checked: `resolve` is a function, `authorized` is absent or a function,
+  and `id` is absent or 1..128 characters.
+- The resolved port is WRAPPED: every `resolve()` answer is checked with
+  `isModelResolution` (which also bounds `persona`, `family` and `alias` at 128
+  characters, `fallbackReason` at 1024, and requires `source`), and a bad answer
+  becomes a `ModelRoutingError` that names the persona. A router that throws
+  anything but a `ModelRoutingError` is reported with a message of
+  pi-workflow's own, never the thrown text, because the materializer records the
+  message as failure evidence and a foreign error may carry paths or
+  credentials.
+
 ### Narration
 
 Every projected task view carries

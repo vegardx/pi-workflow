@@ -245,6 +245,11 @@ export {
 } from "./events.js";
 export { deriveJsonValueSha256 } from "./execution.js";
 export {
+	ModelRoutingProviderError,
+	registerModelRoutingProvider,
+	resolveModelRouting,
+} from "./model-routing-provider.js";
+export {
 	MAX_NARRATION_SUMMARY_LENGTH,
 	NARRATED_TASK_KINDS,
 	type NarratedTaskKind,
