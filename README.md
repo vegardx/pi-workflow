@@ -396,7 +396,9 @@ A definition sets a model **per role**. A role either pins one exactly —
 means the model and thinking level the **host session** is using. There is no
 effort dial behind either: `cheap | standard | deep` is gone, and what is left of
 it is one fixed row per stage in `envelope` (limits and budget shares) plus the
-`light | standard | heavy` tier a review still has.
+`light | normal` tier a review still has (of the four routing tiers `fast | light |
+normal | frontier`, `frontier` is never a review lens and `fast` runs only as a
+standing sweep, so both are refused by name).
 
 A definition that inherits declares it, so a start can be refused before
 anything durable exists:
@@ -705,7 +707,7 @@ model a run inherits](#the-session-model-a-run-inherits)).
 | `refine` (`planner`) | `inherit` |
 | `implement`, `check`, `recheck` (`implementer`) | `inherit` |
 | `resume` | the implementer's own: pi-subagent reruns its launch plan |
-| `review-<d>/<lens>` (`reviewer`) | the lens's tier — `light`/`standard`/`heavy` — or the exact `reviews[].model` the plan pinned, at that tier's thinking level |
+| `review-<d>/<lens>` (`reviewer`) | the lens's tier — `light`/`normal` — or the exact `reviews[].model` the plan pinned, at that tier's thinking level |
 | `normalize-<d>` (`reviewer`) | pinned (`envelope("normalize")`); it returns cluster ids, never prose |
 | the `receipt` finalizer (`planner`) | pinned; recording what the run committed is not a thinking task |
 
@@ -908,7 +910,7 @@ library's `review` and `synthesis` rows at every review tier, and its
 to route.
 
 **Nothing here inherits the session model,** and that is a decision rather than
-an omission. A lens runs at its tier, the reducer at the standard reviewer tier.
+an omission. A lens runs at its tier, the reducer at the normal reviewer tier.
 A review's value is a fixed point of view a reader can reason about, and the
 runtime sends the *resolved* exact model, so an inherited model outside
 `lens-reviewer`'s `allowedModels` would fail preflight on a host whose session
@@ -938,7 +940,7 @@ fixed angles — `evidence`, `counterpoint`, `context` — which is what the `de
 dial's `standard` column selected before the dial was removed. A caller who does
 name `sources` gets one thread per source instead, up to 16 of
 `{ id, kind: "path" | "url" | "note", ref | text, title? }`. Every role runs at
-the standard reviewer tier, the cross-check on the other family; nothing here
+the normal reviewer tier, the cross-check on the other family; nothing here
 inherits the session model either.
 
 The stages, in order:
@@ -1031,12 +1033,12 @@ An agent task may name an exact `model`, or ask for one by role:
 ```ts
 ctx.agent("review", {
 	agent: "lens-reviewer",
-	modelRole: { persona: "code-review", tier: "heavy", family: "other" },
+	modelRole: { persona: "code-review", tier: "normal", family: "other" },
 	// …
 });
 ```
 
-`tier` is `light | standard | heavy`, `effort` is a THINKING LEVEL — the ladder
+`tier` is `fast | light | normal | frontier`, `effort` is a THINKING LEVEL — the ladder
 plus `max`, mapped to pi-subagent's `xhigh` — and not the removed
 `cheap | standard | deep` dial, and `family: "other"` is the diversity request a
 reviewer makes so it never marks its own homework. `model` and

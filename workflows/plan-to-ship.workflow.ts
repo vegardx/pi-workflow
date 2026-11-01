@@ -10,6 +10,8 @@ import {
 	type WorktreeTaskHandle,
 } from "@vegardx/pi-workflow";
 import {
+	AUTHORED_REVIEW_TIERS,
+	type AuthoredReviewTier,
 	applyModelMerges,
 	type CheckReport,
 	CheckReportSchema,
@@ -20,6 +22,7 @@ import {
 	continuationMessageFits,
 	DISPOSITION_KINDS,
 	DIVERSE_MODEL_ID,
+	ENVELOPE_TIERS,
 	envelope,
 	GATE_TIMEOUT_MS,
 	gate,
@@ -40,10 +43,10 @@ import {
 	type ReviewLens,
 	type ReviewsRecord,
 	ReviewsRecordSchema,
-	type ReviewTier,
 	reviewCounts,
 	reviewerEntries,
 	reviewLenses,
+	reviewTierRefusal,
 	type ThinkingLevel,
 	tierModel,
 	verifyHandoff,
@@ -243,7 +246,12 @@ function stringEnum<T extends string>(values: readonly T[]) {
 	return Type.Unsafe<T>({ type: "string", enum: [...values] });
 }
 
-const ReviewTierSchema = stringEnum(["light", "standard", "heavy"] as const);
+/**
+ * Every tier the routing vocabulary has, admitted so that `frontier` and `fast`
+ * reach `compilePlan` and are refused there BY NAME, with the reason; a tier
+ * outside the vocabulary is refused here like any unknown value.
+ */
+const ReviewTierSchema = stringEnum(ENVELOPE_TIERS);
 
 /**
  * One entry of a deliverable's `reviews` list: the point of view a reviewer
@@ -564,7 +572,7 @@ type Output = Static<typeof OutputSchema>;
 interface ResolvedPolicy {
 	readonly gates: "ship" | "every-deliverable" | "none";
 	readonly reviewDefault: {
-		readonly tier: ReviewTier;
+		readonly tier: AuthoredReviewTier;
 		readonly diverse: boolean;
 	};
 	readonly resumes: 0 | 1;
@@ -710,6 +718,14 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 			`\`policy.gates\` is "${policy.gates}", which was removed because the start of the run IS the approval — the plan-mode exit's yes, or a deliberate \`/plan run\` — so ask for "ship", one decision after all the work and before publication, or "every-deliverable", which adds one after each deliverable.`,
 		);
 	}
+	const defaultTier = policy?.reviewDefault?.tier;
+	const defaultRefusal =
+		defaultTier === undefined ? undefined : reviewTierRefusal(defaultTier);
+	if (defaultRefusal !== undefined) {
+		refuse(
+			`\`policy.reviewDefault.tier\` is "${defaultTier}": ${defaultRefusal}; author reviews at ${AUTHORED_REVIEW_TIERS.join(" or ")}.`,
+		);
+	}
 	return {
 		gates: pick(
 			policy?.gates,
@@ -717,10 +733,10 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 			"ship" as const,
 		),
 		reviewDefault: {
-			tier: pick<ReviewTier>(
-				policy?.reviewDefault?.tier,
-				["light", "standard", "heavy"],
-				"standard",
+			tier: pick<AuthoredReviewTier>(
+				defaultTier,
+				AUTHORED_REVIEW_TIERS,
+				"normal",
 			),
 			diverse: policy?.reviewDefault?.diverse === true,
 		},
@@ -737,10 +753,18 @@ function resolvePolicy(policy: PlanPolicy | undefined): ResolvedPolicy {
 function seedLenses(
 	deliverable: Deliverable,
 	policy: ResolvedPolicy,
+	where: string,
 ): LoweredLens[] {
 	const lenses: LoweredLens[] = [];
 	for (const review of deliverable.reviews ?? []) {
 		const entry: Review = review;
+		const refusal =
+			entry.tier === undefined ? undefined : reviewTierRefusal(entry.tier);
+		if (refusal !== undefined) {
+			refuse(
+				`${where} review "${entry.lens}" is at tier "${entry.tier}": ${refusal}; author it at ${AUTHORED_REVIEW_TIERS.join(" or ")}.`,
+			);
+		}
 		lenses.push({
 			id: entry.lens,
 			tier: entry.tier ?? policy.reviewDefault.tier,
@@ -804,7 +828,7 @@ function derivedStagesFor(
 		},
 	];
 
-	const lenses = seedLenses(deliverable, policy);
+	const lenses = seedLenses(deliverable, policy, where);
 	if (lenses.length > MAX_REVIEW_LENSES) {
 		refuse(
 			`${where} declares ${lenses.length} reviews; at most ${MAX_REVIEW_LENSES} fan out at once.`,

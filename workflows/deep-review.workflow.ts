@@ -3,6 +3,8 @@ import {
 	WorkflowHandoffDescriptorSchema,
 } from "@vegardx/pi-workflow";
 import {
+	AUTHORED_REVIEW_TIERS,
+	ENVELOPE_TIERS,
 	envelope,
 	FindingSchema,
 	MAX_FINDINGS,
@@ -10,8 +12,10 @@ import {
 	MAX_REVIEW_SYNTHESIS_LENGTH,
 	ReviewCoverageEntrySchema,
 	type ReviewLens,
+	type ReviewTier,
 	ReviewVerdictSchema,
 	reviewFanOut,
+	reviewTierRefusal,
 	type ThinkingLevel,
 	tierModel,
 	workflowBudgetFor,
@@ -29,9 +33,11 @@ import { type Static, Type } from "typebox";
  * graph. There is no hand-written `ctx.fanOut` here, and no stage this file
  * invents on the side.
  *
- * There is no effort dial. A lens runs at its TIER (light, standard, heavy —
- * `standard` when it names none), or at the exact model the caller pinned, and
- * the synthesis runs at the standard reviewer tier.
+ * There is no effort dial. A lens runs at its TIER (light or normal —
+ * `normal` when it names none), or at the exact model the caller pinned, and
+ * the synthesis runs at the normal reviewer tier. `frontier` and `fast` are
+ * refused by name: frontier is never a review lens, and fast runs only as a
+ * standing sweep.
  *
  * NOTHING HERE INHERITS THE SESSION MODEL, and that is a decision rather than an
  * omission. `plan-to-ship`'s implementation roles declare `model: "inherit"`
@@ -108,12 +114,12 @@ const CONTEXT_CHUNK = 5_000;
 const LensSchema = Type.Object(
 	{
 		id: Type.String({ pattern: LENS_ID, minLength: 1, maxLength: 128 }),
+		/**
+		 * Every tier the routing vocabulary has, admitted so that `frontier` and
+		 * `fast` are refused BY NAME, with the reason, when the run starts.
+		 */
 		tier: Type.Optional(
-			Type.Union([
-				Type.Literal("light"),
-				Type.Literal("standard"),
-				Type.Literal("heavy"),
-			]),
+			Type.Unsafe<ReviewTier>({ type: "string", enum: [...ENVELOPE_TIERS] }),
 		),
 		diverse: Type.Optional(Type.Boolean()),
 		skill: Type.Optional(Type.String({ pattern: IDENTIFIER })),
@@ -251,7 +257,7 @@ function pinnedModel(model: string, thinking: ThinkingLevel) {
 function componentLens(lens: Lens): ReviewLens {
 	const thinking = lens.tier
 		? tierModel(lens.tier).thinking
-		: tierModel("standard").thinking;
+		: tierModel("normal").thinking;
 	const pin = lens.model
 		? pinnedModel(lens.model, thinking)
 		: lens.tier
@@ -335,6 +341,15 @@ export default defineWorkflow({
 		const synthesisStage = envelope("synthesis");
 		const subject: Subject = ctx.input.subject;
 		const lenses: readonly Lens[] = ctx.input.lenses ?? DEFAULT_LENSES;
+		for (const lens of lenses) {
+			const refusal =
+				lens.tier === undefined ? undefined : reviewTierRefusal(lens.tier);
+			if (refusal !== undefined) {
+				throw new Error(
+					`deep-review: lens "${lens.id}" is at tier "${lens.tier}": ${refusal}; review at ${AUTHORED_REVIEW_TIERS.join(" or ")}.`,
+				);
+			}
+		}
 		const synthesis = ctx.input.synthesis ?? "required";
 		const context = subjectContext(subject);
 		const reading = readingInstruction(subject);
@@ -346,10 +361,10 @@ export default defineWorkflow({
 			lenses.map((lens) => componentLens(lens)),
 			{
 				subject: { title: subject.title },
-				// The lens that pins neither a model nor a tier takes the standard
+				// The lens that pins neither a model nor a tier takes the normal
 				// reviewer tier; a `diverse` one takes the stand-in below.
-				model: tierModel("standard"),
-				diversity: { model: tierModel("standard", true) },
+				model: tierModel("normal"),
+				diversity: { model: tierModel("normal", true) },
 				synthesis,
 				...(ctx.input.maxFindings === undefined
 					? {}
@@ -402,9 +417,9 @@ export default defineWorkflow({
 						],
 					},
 					contextMode: "fresh",
-					// The reducer is a reviewer too: standard tier, not the session's
+					// The reducer is a reviewer too: normal tier, not the session's
 					// model. See this file's header for why nothing here inherits.
-					model: tierModel("standard"),
+					model: tierModel("normal"),
 					// Optional, and for the reason in this file's header: a
 					// barrier's control edge covers EVERY task it closed over, so a
 					// dead lens blocks the reducer declared after it. Optional turns

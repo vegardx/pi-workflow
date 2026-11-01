@@ -96,7 +96,7 @@ interface PlanOptions {
 	readonly lensesPerDeliverable?: readonly string[];
 	readonly diverse?: boolean;
 	readonly pinnedModel?: string;
-	readonly tier?: "light" | "standard" | "heavy";
+	readonly tier?: "fast" | "light" | "normal" | "frontier";
 	readonly policy?: PolicyInput;
 	readonly after?: boolean;
 }
@@ -828,8 +828,8 @@ function examplePlan(): PlanInput {
 				reads: [],
 				tasks: [{ id: "impl", title: "Write src/components/*.ts" }],
 				reviews: [
-					{ lens: "contracts", tier: "heavy", diverse: true },
-					{ lens: "replay", tier: "standard" },
+					{ lens: "contracts", tier: "light", diverse: true },
+					{ lens: "replay", tier: "normal" },
 				],
 			},
 		],
@@ -837,7 +837,7 @@ function examplePlan(): PlanInput {
 }
 
 /** The exact model a lens with no tier and no pin runs at, as the record names it. */
-const MODEL_PROVIDER_ID = `${tierModel("standard").provider}/${tierModel("standard").id}`;
+const MODEL_PROVIDER_ID = `${tierModel("normal").provider}/${tierModel("normal").id}`;
 
 /** The run's journal, line by line. */
 async function journal(
@@ -862,7 +862,7 @@ const REVIEWED_STAGES = [
 	{
 		use: "review-fan-out",
 		id: "review",
-		lenses: [{ id: "correctness", tier: "standard", diverse: false }],
+		lenses: [{ id: "correctness", tier: "normal", diverse: false }],
 	},
 	{ use: "normalize", id: "normalize" },
 	{ use: "resume", id: "resume" },
@@ -898,8 +898,8 @@ describe("plan-to-ship: the compiled stage document", () => {
 				use: "review-fan-out",
 				id: "review",
 				lenses: [
-					{ id: "contracts", tier: "heavy", diverse: true },
-					{ id: "replay", tier: "standard", diverse: false },
+					{ id: "contracts", tier: "light", diverse: true },
+					{ id: "replay", tier: "normal", diverse: false },
 				],
 			},
 			{ use: "normalize", id: "normalize" },
@@ -985,7 +985,7 @@ describe("plan-to-ship: the compiler", () => {
 						use: "review-fan-out",
 						id: "review",
 						key: "review-d0",
-						lenses: [{ id: "correctness", tier: "standard", diverse: false }],
+						lenses: [{ id: "correctness", tier: "normal", diverse: false }],
 						tasks: ["review-d0/correctness"],
 					},
 					{
@@ -1079,22 +1079,89 @@ describe("plan-to-ship: the compiler", () => {
 
 	it("seeds review lenses from `deliverables[].reviews` and resolves tier and diversity from the policy", () => {
 		const document = compileStages(plan({ lensesPerDeliverable: ["a", "b"] }), {
-			reviewDefault: { tier: "heavy", diverse: true },
+			reviewDefault: { tier: "light", diverse: true },
 		});
 		expect(document.deliverables[0]?.stages[2]).toMatchObject({
 			lenses: [
-				{ id: "a", tier: "heavy", diverse: true },
-				{ id: "b", tier: "heavy", diverse: true },
+				{ id: "a", tier: "light", diverse: true },
+				{ id: "b", tier: "light", diverse: true },
 			],
 		});
 		const pinned = compileStages(
-			plan({ lensesPerDeliverable: ["a"], tier: "light", diverse: false }),
-			{ reviewDefault: { tier: "heavy", diverse: true } },
+			plan({ lensesPerDeliverable: ["a"], tier: "normal", diverse: false }),
+			{ reviewDefault: { tier: "light", diverse: true } },
 		);
 		expect(pinned.deliverables[0]?.stages[2]).toMatchObject({
-			lenses: [{ id: "a", tier: "light", diverse: false }],
+			lenses: [{ id: "a", tier: "normal", diverse: false }],
 		});
 	});
+
+	it("defaults an untiered lens to the normal tier", () => {
+		const document = compileStages(plan({ lensesPerDeliverable: ["a"] }));
+		expect(document.deliverables[0]?.stages[2]).toMatchObject({
+			lenses: [{ id: "a", tier: "normal", diverse: false }],
+		});
+	});
+
+	it.each([
+		[
+			"frontier",
+			'plan-to-ship: deliverable "d0" review "a" is at tier "frontier": frontier is never a review lens; author it at light or normal.',
+		],
+		[
+			"fast",
+			'plan-to-ship: deliverable "d0" review "a" is at tier "fast": fast runs only as a standing sweep; author it at light or normal.',
+		],
+	] as const)("refuses a %s review by name", (tier, message) => {
+		expect(() =>
+			compileStages(plan({ lensesPerDeliverable: ["a"], tier })),
+		).toThrow(message);
+		expect(() =>
+			compileStageDocument(plan({ lensesPerDeliverable: ["a"], tier })),
+		).toThrow(message);
+	});
+
+	it.each([
+		[
+			"frontier",
+			'plan-to-ship: `policy.reviewDefault.tier` is "frontier": frontier is never a review lens; author reviews at light or normal.',
+		],
+		[
+			"fast",
+			'plan-to-ship: `policy.reviewDefault.tier` is "fast": fast runs only as a standing sweep; author reviews at light or normal.',
+		],
+	] as const)("refuses a %s review default by name", (tier, message) => {
+		expect(() => compileStages(plan(), { reviewDefault: { tier } })).toThrow(
+			message,
+		);
+	});
+
+	it.each(["standard", "heavy"])(
+		"refuses the removed tier %s at validate, like any unknown value",
+		async (tier) => {
+			const service = await serviceFor(scripted());
+			const document = plan({ lensesPerDeliverable: ["a"] });
+			const value = {
+				...input(),
+				plan: {
+					...document,
+					deliverables: document.deliverables.map((deliverable) => ({
+						...deliverable,
+						reviews: [{ lens: "a", tier }],
+					})),
+				},
+			};
+			await expect(service.validate("plan-to-ship", value)).rejects.toThrow(
+				"Workflow input does not match its schema.",
+			);
+			await expect(
+				service.validate("plan-to-ship", {
+					...input(),
+					plan: { ...plan(), policy: { reviewDefault: { tier } } },
+				}),
+			).rejects.toThrow("Workflow input does not match its schema.");
+		},
+	);
 
 	it.each([
 		[
@@ -2347,7 +2414,7 @@ describe("plan-to-ship: models per role", () => {
 			"plan-to-ship",
 			input({
 				lensesPerDeliverable: ["security"],
-				tier: "heavy",
+				tier: "light",
 				pinnedModel: "github-copilot/gpt-5.6-luna",
 			}),
 		);
@@ -2356,10 +2423,10 @@ describe("plan-to-ship: models per role", () => {
 			provider: "github-copilot",
 			id: "gpt-5.6-luna",
 			// The lens's own tier decides the thinking level.
-			thinking: "high",
+			thinking: "low",
 		});
 		// A lens with no tier takes the standard reviewer tier.
-		expect(tierModel("standard").thinking).toBe("medium");
+		expect(tierModel("normal").thinking).toBe("medium");
 	});
 });
 
@@ -2376,7 +2443,7 @@ describe("plan-to-ship: the input contract", () => {
 			{ ...input(), plan: { ...plan(), body: "Why this plan exists." } },
 			input({
 				lensesPerDeliverable: ["contracts", "replay"],
-				tier: "heavy",
+				tier: "light",
 				diverse: true,
 				pinnedModel: "github-copilot/gpt-5.6-sol",
 			}),

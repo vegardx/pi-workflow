@@ -41,13 +41,21 @@ const TABLE: StaticModelRoutingTable = {
 	provider: "github-copilot",
 	id: "gpt-5.6-sol",
 	otherFamily: { provider: "github-copilot", id: "gpt-5.6-luna" },
-	thinking: { light: "low", standard: "medium", heavy: "high" },
+	thinking: {
+		fast: "minimal",
+		light: "low",
+		normal: "medium",
+		frontier: "high",
+	},
 	defaultThinking: "medium",
 };
 
-const HEAVY_ROLE: ModelRoleRequest = { persona: "code-review", tier: "heavy" };
-/** What the table resolves HEAVY_ROLE to, written by hand. */
-const HEAVY_MODEL = {
+const FRONTIER_ROLE: ModelRoleRequest = {
+	persona: "code-review",
+	tier: "frontier",
+};
+/** What the table resolves FRONTIER_ROLE to, written by hand. */
+const FRONTIER_MODEL = {
 	provider: "github-copilot",
 	id: "gpt-5.6-sol",
 	thinking: "high",
@@ -163,7 +171,7 @@ function project(
 /** A run whose first materialization routed the `work` task through the table. */
 function routedRun(): ReturnType<typeof reduceWorkflowEvents> {
 	return project(
-		commitOne(staticModelRouting(TABLE), request({ modelRole: HEAVY_ROLE })),
+		commitOne(staticModelRouting(TABLE), request({ modelRole: FRONTIER_ROLE })),
 	);
 }
 
@@ -201,7 +209,7 @@ describe('model: "inherit"', () => {
 			materializer({
 				sessionModel: SESSION,
 				modelRouting: staticModelRouting(TABLE),
-			}).agent("both", request({ model: "inherit", modelRole: HEAVY_ROLE })),
+			}).agent("both", request({ model: "inherit", modelRole: FRONTIER_ROLE })),
 		).toThrow(MODEL_ROLE_EXCLUSIVE_MESSAGE);
 	});
 
@@ -218,7 +226,7 @@ describe("mutual exclusion", () => {
 		expect(() =>
 			materializer({ modelRouting: staticModelRouting(TABLE) }).agent(
 				"both",
-				request({ model: HEAVY_MODEL, modelRole: HEAVY_ROLE }),
+				request({ model: FRONTIER_MODEL, modelRole: FRONTIER_ROLE }),
 			),
 		).toThrow(MODEL_ROLE_EXCLUSIVE_MESSAGE);
 	});
@@ -234,7 +242,7 @@ describe("mutual exclusion", () => {
 		expect(() =>
 			materializer({ modelRouting: unreachable }).agent(
 				"both",
-				request({ model: HEAVY_MODEL, modelRole: HEAVY_ROLE }),
+				request({ model: FRONTIER_MODEL, modelRole: FRONTIER_ROLE }),
 			),
 		).toThrow(MODEL_ROLE_EXCLUSIVE_MESSAGE);
 	});
@@ -243,7 +251,7 @@ describe("mutual exclusion", () => {
 		expect(() =>
 			materializer({ modelRouting: staticModelRouting(TABLE) }).agent(
 				"both",
-				request({ model: HEAVY_MODEL, modelRole: HEAVY_ROLE }),
+				request({ model: FRONTIER_MODEL, modelRole: FRONTIER_ROLE }),
 			),
 		).toThrow(WorkflowMaterializationError);
 	});
@@ -255,10 +263,13 @@ describe("resolution before hashing", () => {
 		// event. Two definitions that differ only in how they asked for a model,
 		// and that resolve alike, are the same task.
 		const routed = agentSpec(
-			commitOne(staticModelRouting(TABLE), request({ modelRole: HEAVY_ROLE })),
+			commitOne(
+				staticModelRouting(TABLE),
+				request({ modelRole: FRONTIER_ROLE }),
+			),
 		);
 		const exact = agentSpec(
-			commitOne(undefined, request({ model: HEAVY_MODEL })),
+			commitOne(undefined, request({ model: FRONTIER_MODEL })),
 		);
 		expect(routed).toEqual(exact);
 		expect(routed.identitySha256).toBe(exact.identitySha256);
@@ -269,17 +280,23 @@ describe("resolution before hashing", () => {
 		// `modelRole` would fail validation rather than ride along quietly — but
 		// the assertion is the contract, not the accident that enforces it.
 		const routed = agentSpec(
-			commitOne(staticModelRouting(TABLE), request({ modelRole: HEAVY_ROLE })),
+			commitOne(
+				staticModelRouting(TABLE),
+				request({ modelRole: FRONTIER_ROLE }),
+			),
 		);
 		expect(routed.request).not.toHaveProperty("modelRole");
-		expect(routed.request.model).toEqual(HEAVY_MODEL);
+		expect(routed.request.model).toEqual(FRONTIER_MODEL);
 	});
 
 	it("follows the resolved model, not the request that produced it", () => {
 		// Two tiers the table answers differently are two identities; a tier and
 		// an effort that land on the same model are one.
 		const heavy = agentSpec(
-			commitOne(staticModelRouting(TABLE), request({ modelRole: HEAVY_ROLE })),
+			commitOne(
+				staticModelRouting(TABLE),
+				request({ modelRole: FRONTIER_ROLE }),
+			),
 		);
 		const light = agentSpec(
 			commitOne(
@@ -303,13 +320,13 @@ describe("resolution before hashing", () => {
 describe("refusals", () => {
 	it("refuses a modelRole with no routing installed, naming the way out", () => {
 		expect(() =>
-			materializer().agent("work", request({ modelRole: HEAVY_ROLE })),
+			materializer().agent("work", request({ modelRole: FRONTIER_ROLE })),
 		).toThrow(MODEL_ROUTING_MISSING_MESSAGE);
 	});
 
 	it("still accepts an exact model with no routing installed", () => {
 		expect(() =>
-			materializer().agent("work", request({ model: HEAVY_MODEL })),
+			materializer().agent("work", request({ model: FRONTIER_MODEL })),
 		).not.toThrow();
 	});
 
@@ -336,7 +353,7 @@ describe("refusals", () => {
 		expect(() =>
 			materializer({ modelRouting: bogus }).agent(
 				"work",
-				request({ modelRole: HEAVY_ROLE }),
+				request({ modelRole: FRONTIER_ROLE }),
 			),
 		).toThrow(/did not resolve to a model; declare an exact model\./);
 	});
@@ -373,7 +390,7 @@ describe("replay", () => {
 			},
 		};
 		const runtime = materializer({ modelRouting: rerouting, previousState });
-		const handle = runtime.agent("work", request({ modelRole: HEAVY_ROLE }));
+		const handle = runtime.agent("work", request({ modelRole: FRONTIER_ROLE }));
 		expect(asked).toBe(0);
 		const persisted = Object.values(previousState.tasks)[0];
 		expect(handle.ref.taskId).toBe(persisted?.task.id);
@@ -386,7 +403,7 @@ describe("replay", () => {
 		expect(() =>
 			materializer({ previousState }).agent(
 				"work",
-				request({ modelRole: HEAVY_ROLE }),
+				request({ modelRole: FRONTIER_ROLE }),
 			),
 		).not.toThrow();
 	});
@@ -404,7 +421,7 @@ describe("replay", () => {
 		expect(() =>
 			materializer({ modelRouting: revoked, previousState }).agent(
 				"work",
-				request({ modelRole: HEAVY_ROLE }),
+				request({ modelRole: FRONTIER_ROLE }),
 			),
 		).toThrow(
 			/model github-copilot\/gpt-5\.6-sol stored for role "code-review" is no longer authorized/,
@@ -432,7 +449,7 @@ describe("thinking mapping", () => {
 			}),
 		};
 		expect(
-			agentSpec(commitOne(maxed, request({ modelRole: HEAVY_ROLE }))).request
+			agentSpec(commitOne(maxed, request({ modelRole: FRONTIER_ROLE }))).request
 				.model,
 		).toEqual({ provider: "p", id: "m", thinking: "xhigh" });
 	});
@@ -447,7 +464,7 @@ describe("thinking mapping", () => {
 				thinking: "max",
 				source: "fallback",
 				persona: "code-review",
-				tier: "heavy",
+				tier: "frontier",
 				family: "OpenAI",
 				alias: "Sol",
 				fallbackReason: "every heavy alias was unavailable",
@@ -498,7 +515,7 @@ describe("the static table port", () => {
 	});
 
 	it("is pure: the same role always resolves to the same model", () => {
-		expect(port.resolve(HEAVY_ROLE)).toEqual(port.resolve(HEAVY_ROLE));
+		expect(port.resolve(FRONTIER_ROLE)).toEqual(port.resolve(FRONTIER_ROLE));
 	});
 
 	it("bounds itself to the personas it was given", () => {

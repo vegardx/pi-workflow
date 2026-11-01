@@ -32,7 +32,7 @@ before running the `deep-review` workflow; see the pi-workflow README,
 "Builtin workflows". The frontmatter above is an authority **ceiling**: a
 workflow task may ask for less, never for more. It covers the review and
 synthesis rows of the component library's stage table at every review tier —
-`light`, `standard`, and `heavy` — so no tier has to be trimmed to fit.
+`light` and `normal` — so no tier has to be trimmed to fit.
 `allowedModels` lists both model families on purpose: a lens may ask for a
 reviewer from a family other than the default one, and a model outside this
 list fails preflight with "model exceeds ceiling". It does NOT list `inherit`:

@@ -82,7 +82,7 @@ The `thinking` column applies to a role that names no model of its own. A model
 is set PER ROLE instead: an exact `{provider, id, thinking}`, or `"inherit"` —
 the host session's own model and thinking level, which pi-workflow resolves once
 at run start and records on the run. `tierModel(tier, diverse?)` is a review's
-own dial (`light`→low, `standard`→medium, `heavy`→high); an exact
+own dial (`fast`→minimal, `light`→low, `normal`→medium, `frontier`→high); an exact
 `provider/model` pin outranks it. `GATE_TIMEOUT_MS` is one number, 24 hours, and
 `WORKTREE_MEMORY_BYTES` is 2 GiB for every worktree stage.
 `workflowBudgetFor(shares)` is the `meta.budget` a graph of those shares needs;

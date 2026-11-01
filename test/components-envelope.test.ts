@@ -25,6 +25,7 @@ import {
 import { WorkflowComponentError } from "../src/components/errors.js";
 import type { WorkflowEventInput } from "../src/events.js";
 import { WorkflowTaskMaterializer } from "../src/materializer.js";
+import { MODEL_ROLE_TIERS } from "../src/runtime/model-routing.js";
 
 const definitionIdentitySha256 = "a".repeat(64);
 const inputSha256 = "b".repeat(64);
@@ -153,11 +154,19 @@ describe("the stage table", () => {
 			thinking: "medium",
 		});
 		expect(DIVERSE_MODEL_ID).not.toBe(MODEL_ID);
-		expect([...ENVELOPE_TIERS]).toEqual(["light", "standard", "heavy"]);
+		expect([...ENVELOPE_TIERS]).toEqual([
+			"fast",
+			"light",
+			"normal",
+			"frontier",
+		]);
+		// The envelope writes the list out; this is what fails if it drifts.
+		expect([...ENVELOPE_TIERS]).toEqual([...MODEL_ROLE_TIERS]);
 		expect(THINKING_BY_TIER).toEqual({
+			fast: "minimal",
 			light: "low",
-			standard: "medium",
-			heavy: "high",
+			normal: "medium",
+			frontier: "high",
 		});
 		for (const tier of ENVELOPE_TIERS) {
 			expect(tierModel(tier)).toEqual({
