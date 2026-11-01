@@ -306,7 +306,8 @@ workflows.observe(({ runId, status, sequence, task }) => {
 	if (!task) return;                       // most appends settle no task
 	const { stage, taskKind, deliverable, cause } = task.narration;
 	// stage      "recheck-d0" — `${namespace}/${key}`, as one string
-	// taskKind   implement | check | review | normalize | resume | synthesis | gate | refine | other
+	// taskKind   implement | check | review | normalize | resume | adjudicate
+	//            | synthesis | gate | refine | other
 	// deliverable "d0" — when the stage key names one
 	// cause      a sanitized sentence, for a task that did not complete —
 	//            composed from the journalled codes, never the child's prose
@@ -332,7 +333,7 @@ outcome, and (for the summary) the committed result artifact. No definition
 authors it, nothing about it is persisted, and it moves no contract revision.
 The kind vocabulary is the stage-key convention `plan-to-ship` documents: a
 leading `implement`, `check`, `recheck` (a `check`), `review`, `normalize`,
-`resume`, `synthesis` or `refine` segment names the kind and the rest of that
+`resume`, `adjudicate`, `synthesis` or `refine` segment names the kind and the rest of that
 segment names the deliverable — nothing follows the deliverable id — a checkpoint
 is `gate` whatever it is called, and anything else is `other` — which is the
 honest answer for a project definition that names its tasks its own way, not a
@@ -709,6 +710,7 @@ model a run inherits](#the-session-model-a-run-inherits)).
 | `resume` | the implementer's own: pi-subagent reruns its launch plan |
 | `review-<d>/<lens>` (`reviewer`) | routed: `{ persona: "code-review", tier, family: "other" when diverse }` — or the exact `reviews[].model` the plan pinned, at the review stage's thinking level |
 | `normalize-<d>` (`reviewer`) | routed: `{ persona: "codebase-research", tier: "light" }`; it returns cluster ids, never prose |
+| `adjudicate-<d>` (`adjudicator`) | routed: `{ persona: "adjudication", tier: "frontier", family: "other" }` — the implementer inherits the seat, so its judge comes from another family |
 | the `receipt` finalizer (`planner`) | routed: `{ persona: "codebase-research", tier: "light" }`; recording what the run committed is not a thinking task |
 
 The work inherits because the person who chose a model for the conversation that
@@ -728,11 +730,12 @@ compiler derives them, the same list for every deliverable:
 | `normalize` | `clusterFindings`, then a merge-only call when more than one lens reported | `normalize-<d>`, then the record `reviews-<d>` |
 | `resume` | the implementer continued in its own session (`continueFrom`) | `resume-<d>` (hand-off H2, or H1 unchanged) |
 | `check` (`recheck`) | `verifyHandoff` at H2, only when H2 is new | `recheck-<d>` |
+| `adjudicate` | one read-only judge at the resumed hand-off, over what the implementer contested | `adjudicate-<d>` |
 | `gate` | `gate` | `approve-<d>`, `ship` |
 
 `review-fan-out` and `normalize` are compiled only when the deliverable's
 `reviews` list is non-empty; `resume` and `recheck` only under
-`policy.resumes: 1` (the default; `0` sends the findings to the gate
+`policy.resumes: 1`; `adjudicate` only with both (the default; `0` sends the findings to the gate
 unanswered). A check verifies and never fixes; `checkRan: false` is unverified,
 not broken, and is not by itself a reason to resume.
 
@@ -752,6 +755,25 @@ refused, which leaves H1 standing. What it changed is rechecked. The resume runs
 only when there is something to answer: a cluster, or a check that ran and
 failed.
 
+**Adjudication.** What the implementer CONTESTED — every cluster it declined or
+called out of scope — goes to one judge, `adjudicate-<d>`, a `frontier` model
+of a family other than the seat's, read-only at the resumed hand-off. It is
+shown the change first, then each contested cluster's id, claim, location and
+evidence beside the implementer's disposition and reasoning (severity, lens and
+models withheld), and answers `{verdicts: [{id, verdict: upheld | overruled |
+undecidable, reasoning}]}`, every contested id exactly once; any other answer
+is refused and logged, not retried. Nothing goes back to the implementer, and
+**no ruling holds the run**: a refused or failed adjudication leaves the
+clusters unadjudicated. With nothing contested the stage is skipped with a log
+line; a cluster every reporter of which ran at the `fast` tier is a lead and is
+not adjudicated. The record carries each ruling on its cluster
+(`adjudication: {verdict, reasoning, model, thinking, alias?, tier?, family?}`)
+and the judge on `adjudicator`, and every gate, the receipt note and
+`shipSummary` count contested, upheld, overruled and undecidable. When at least
+two clusters, and at least half of them (`CONTESTED_SPEC_RATIO`), were
+contested, the gate adds one sentence: the deliverable's spec is the likely
+problem, not its implementation.
+
 The builtin `pi-workflow/reviews-record` support task commits the harness's
 record as `reviews-<d>`: the reviewers (`reviewerKey`, lens, model, thinking,
 the router's optional alias, tier and family, attempt, status, count), the
@@ -762,7 +784,7 @@ model, the router's evidence, and prompt digest). The router's evidence never
 enters `reviewerKey`, which hashes the exact model.
 **A decline never holds the run**: the gate shows the counts — reviewers that
 reported, clusters, clusters two or more reviewers raised, dispositions by
-kind, and the last check — and the record carries the reasoning.
+kind, rulings, and the last check — and the record carries the reasoning.
 
 **What the plan schema deleted is refused by name.** There is no migration, so
 each deleted key parses — a TypeBox "unexpected property" is not something a
@@ -842,8 +864,9 @@ says nothing. The host's router picks the model behind a tier
 (`needs.modelRouting`; a host with none is refused at start);
 `reviews[].model` pins an exact route.
 
-**The three agents.** The definition names `planner`, `implementer`, and
-`reviewer`, and the package ships all three under `workflows/agents/`. The run
+**The four agents.** The definition names `planner`, `implementer`,
+`reviewer` and `adjudicator`, and the package ships all four under
+`workflows/agents/`. The run
 carries that directory to pi-subagent as the request's `agentRoots`, and under
 pi-subagent's `agentRootsFirst` a definition shipped there WINS over a
 `<agentDir>/agents/*.md` or trusted-project `.pi/agents/*.md` of the same name.

@@ -380,7 +380,10 @@ agent) -> per deliverable, in plan order, `implement` (one worktree agent
 `normalize` (deterministic clustering, then a merge-only `normalize-<d>` call
 when more than one lens reported), `resume` (the implementer continued in its
 own session through `continueFrom`, answering each finding), `recheck` (only
-when the resume changed the hand-off), the `reviews-<d>` record (the builtin
+when the resume changed the hand-off), `adjudicate` (one read-only judge of
+another family over what the implementer contested, only with reviews under
+`policy.resumes: 1`, optional, and skipped when nothing was contested), the
+`reviews-<d>` record (the builtin
 `pi-workflow/reviews-record` support task) and the gate `policy.gates` bought
 -> `ship` (checkpoint, `headless: "block"`, declared
 unless `policy.gates` is `none`) -> `receipt` (required finalizer). There is no
@@ -2425,12 +2428,13 @@ therefore additive without a contract revision.
 | `summary` | the task's committed `result` artifact | `inspect` with `include` carrying both `"tasks"` and `"output"` |
 
 `taskKind` is
-`implement | check | review | normalize | resume | synthesis | gate | refine | other`.
+`implement | check | review | normalize | resume | adjudicate | synthesis | gate | refine | other`.
 The convention is the stage-key convention `workflows/plan-to-ship.workflow.ts`
 documents: a stage key is `<stage id>-<deliverable id>`, and a fan-out member is
 `<stage id>-<deliverable id>/<member>` whose kind is its namespace's. A leading
 segment that is one of the known stage ids (`implement`, `check`, `recheck`,
-`review`, `normalize`, `resume`, `synthesis`, `refine`) names the kind and the
+`review`, `normalize`, `resume`, `adjudicate`, `synthesis`, `refine`) names the
+kind and the
 rest of that segment names the deliverable; `recheck`, the check after a
 resume, narrates as `check`. Nothing follows the deliverable id in such a key,
 so `deliverable` is always the plan's id. Anything else is `other`, with its

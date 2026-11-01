@@ -137,9 +137,11 @@ deliverable, in order, and what the compiled stage document shows:
 5. `{use: "resume", id: "resume"}` — the implementer answering the check and
    the review
 6. `{use: "check", id: "recheck"}` — the check of what the resume changed
+7. `{use: "adjudicate", id: "adjudicate"}` — a judge of another family ruling
+   on what the implementer declined or called out of scope
 
 Stages 3 and 4 are **omitted when `reviews` is empty**; stages 5 and 6 under
-`policy.resumes: 0`.
+`policy.resumes: 0`; stage 7 under either.
 
 Gates are *not* stages: a per-deliverable gate and `ship` come from
 `policy.gates`, applied by the compiler, and a compiled deliverable never
